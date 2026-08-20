@@ -8,7 +8,7 @@ const testEnv: Env = {
 };
 
 describe('Phase 4: Transactional Outbox Dispatcher', () => {
-  it('dispatches PENDING outbox event to Queue and transitions status to SENT', async () => {
+  it('dispatches PENDING JOB_READY outbox event to Queue and transitions status to SENT with minimal payload { job_id }', async () => {
     const queueSentMessages: unknown[] = [];
     const mockQueue = {
       send: async (msg: unknown) => {
@@ -20,22 +20,30 @@ describe('Phase 4: Transactional Outbox Dispatcher', () => {
     const outboxService = new OutboxService(env.DB, mockQueue);
 
     const eventId = `outbox_${crypto.randomUUID()}`;
-    const jobId = `job_${crypto.randomUUID()}`;
+    const jobId = `job_${crypto.randomUUID().replace(/-/g, '')}`;
     const now = Date.now();
 
-    // Insert pending outbox event
+    // Insert pending outbox event with extra sensitive data
     await env.DB.prepare(
       `INSERT INTO outbox_events (id, event_type, aggregate_type, aggregate_id, payload, status, created_at)
        VALUES (?, 'JOB_READY', 'ORDER', 'ord_test_1', ?, 'PENDING', ?)`
     )
-      .bind(eventId, JSON.stringify({ job_id: jobId }), now)
+      .bind(
+        eventId,
+        JSON.stringify({
+          job_id: jobId,
+          sensitive_payment_info: 'secret',
+          customer_email: 'user@example.com',
+        }),
+        now
+      )
       .run();
 
     const result = await outboxService.dispatchPendingEvents({ batchSize: 10 });
     expect(result.dispatchedCount).toBe(1);
     expect(result.failureCount).toBe(0);
 
-    // Verify queue received exactly {"job_id": jobId}
+    // Verify queue received strictly and exactly {"job_id": jobId} without extra fields (BLOCK 2)
     expect(queueSentMessages.length).toBe(1);
     expect(queueSentMessages[0]).toEqual({ job_id: jobId });
 
@@ -47,6 +55,70 @@ describe('Phase 4: Transactional Outbox Dispatcher', () => {
     expect(row?.status).toBe('SENT');
     expect(row?.dispatched_at).toBeGreaterThan(0);
     expect(row?.dispatch_lease_token).toBeNull();
+  });
+
+  it('ignores non-JOB_READY pending outbox rows (BLOCK 2)', async () => {
+    const queueSentMessages: unknown[] = [];
+    const mockQueue = {
+      send: async (msg: unknown) => {
+        queueSentMessages.push(msg);
+      },
+      sendBatch: async () => {},
+    } as unknown as Queue<unknown>;
+
+    const outboxService = new OutboxService(env.DB, mockQueue);
+    const eventId = `outbox_other_${crypto.randomUUID()}`;
+    const now = Date.now();
+
+    // Insert pending outbox event of different type
+    await env.DB.prepare(
+      `INSERT INTO outbox_events (id, event_type, aggregate_type, aggregate_id, payload, status, created_at)
+       VALUES (?, 'ORDER_COMPLETED', 'ORDER', 'ord_test_other', '{"order_id":"1"}', 'PENDING', ?)`
+    )
+      .bind(eventId, now)
+      .run();
+
+    const result = await outboxService.dispatchPendingEvents({ batchSize: 10 });
+    expect(result.dispatchedCount).toBe(0);
+    expect(queueSentMessages.length).toBe(0);
+
+    const row = await env.DB.prepare('SELECT status FROM outbox_events WHERE id = ?')
+      .bind(eventId)
+      .first<{ status: string }>();
+    expect(row?.status).toBe('PENDING');
+  });
+
+  it('rejects malformed outbox payload without publishing to Queue, leaving it recoverable (BLOCK 2)', async () => {
+    const queueSentMessages: unknown[] = [];
+    const mockQueue = {
+      send: async (msg: unknown) => {
+        queueSentMessages.push(msg);
+      },
+      sendBatch: async () => {},
+    } as unknown as Queue<unknown>;
+
+    const outboxService = new OutboxService(env.DB, mockQueue);
+    const eventId = `outbox_malformed_${crypto.randomUUID()}`;
+    const now = Date.now();
+
+    // Insert pending outbox event with malformed payload (missing job_id)
+    await env.DB.prepare(
+      `INSERT INTO outbox_events (id, event_type, aggregate_type, aggregate_id, payload, status, created_at)
+       VALUES (?, 'JOB_READY', 'ORDER', 'ord_test_bad', '{"no_job_id":"true"}', 'PENDING', ?)`
+    )
+      .bind(eventId, now)
+      .run();
+
+    const result = await outboxService.dispatchPendingEvents({ batchSize: 10 });
+    expect(result.dispatchedCount).toBe(0);
+    expect(result.failureCount).toBe(1);
+    expect(queueSentMessages.length).toBe(0);
+
+    const row = await env.DB.prepare('SELECT * FROM outbox_events WHERE id = ?')
+      .bind(eventId)
+      .first<{ status: string; last_dispatch_error: string }>();
+    expect(row?.status).toBe('PENDING');
+    expect(row?.last_dispatch_error).toBe('INVALID_JOB_ID_PAYLOAD');
   });
 
   it('prevents concurrent dispatchers from double-sending via D1 CAS lease acquisition', async () => {
@@ -62,7 +134,7 @@ describe('Phase 4: Transactional Outbox Dispatcher', () => {
     const outboxService2 = new OutboxService(env.DB, mockQueue);
 
     const eventId = `outbox_${crypto.randomUUID()}`;
-    const jobId = `job_${crypto.randomUUID()}`;
+    const jobId = `job_${crypto.randomUUID().replace(/-/g, '')}`;
     const now = Date.now();
 
     await env.DB.prepare(
@@ -82,7 +154,7 @@ describe('Phase 4: Transactional Outbox Dispatcher', () => {
     expect(queueSentMessages.length).toBe(1);
   });
 
-  it('preserves durable PENDING work with backoff when Queue send throws', async () => {
+  it('preserves durable PENDING work with backoff and sanitized error reason when Queue send throws (BLOCK 2)', async () => {
     const failingQueue = {
       send: async () => {
         throw new Error('Simulated Queue Service Unavailable');
@@ -93,7 +165,7 @@ describe('Phase 4: Transactional Outbox Dispatcher', () => {
     const outboxService = new OutboxService(env.DB, failingQueue);
 
     const eventId = `outbox_${crypto.randomUUID()}`;
-    const jobId = `job_${crypto.randomUUID()}`;
+    const jobId = `job_${crypto.randomUUID().replace(/-/g, '')}`;
     const now = Date.now();
 
     await env.DB.prepare(
@@ -107,7 +179,7 @@ describe('Phase 4: Transactional Outbox Dispatcher', () => {
     expect(result.dispatchedCount).toBe(0);
     expect(result.failureCount).toBe(1);
 
-    // Verify row remains PENDING with next_dispatch_at scheduled in the future and lease cleared
+    // Verify row remains PENDING with sanitized error reason
     const row = await env.DB.prepare('SELECT * FROM outbox_events WHERE id = ?')
       .bind(eventId)
       .first<{
@@ -121,7 +193,7 @@ describe('Phase 4: Transactional Outbox Dispatcher', () => {
     expect(row?.status).toBe('PENDING');
     expect(row?.dispatch_attempts).toBe(1);
     expect(row?.next_dispatch_at).toBeGreaterThan(now);
-    expect(row?.last_dispatch_error).toContain('Simulated Queue Service Unavailable');
+    expect(row?.last_dispatch_error).toBe('QUEUE_SEND_FAILED');
     expect(row?.dispatch_lease_token).toBeNull();
   });
 
@@ -144,7 +216,7 @@ describe('Phase 4: Transactional Outbox Dispatcher', () => {
     const outboxService = new OutboxService(env.DB, mockQueue);
 
     const eventId = `outbox_${crypto.randomUUID()}`;
-    const jobId = `job_${crypto.randomUUID()}`;
+    const jobId = `job_${crypto.randomUUID().replace(/-/g, '')}`;
     const now = Date.now();
 
     await env.DB.prepare(

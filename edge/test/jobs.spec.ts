@@ -11,7 +11,12 @@ const testEnv: Env = {
   A23_JOB_LEASE_SECONDS: '300',
 };
 
-async function setupTestJob(status = 'PENDING', customOrderId?: string) {
+async function setupTestJob(
+  status = 'PENDING',
+  customOrderId?: string,
+  orderStatus = 'PAID',
+  attemptCount = 0
+) {
   const orderId = customOrderId || `ord_${crypto.randomUUID().replace(/-/g, '')}`;
   const jobId = `job_${crypto.randomUUID().replace(/-/g, '')}`;
   const paymentCode = `TF${crypto.randomUUID().replace(/[^a-zA-Z0-9]/g, '').slice(0, 6).toUpperCase()}`;
@@ -27,9 +32,9 @@ async function setupTestJob(status = 'PENDING', customOrderId?: string) {
   // 1. Insert order
   await env.DB.prepare(
     `INSERT INTO orders (id, user_id, status, total_amount, currency, metadata, payment_code, created_at, updated_at)
-     VALUES (?, 12345, 'PAID', 100000, 'VND', ?, ?, ?, ?)`
+     VALUES (?, 12345, ?, 100000, 'VND', ?, ?, ?, ?)`
   )
-    .bind(orderId, metadata, paymentCode, now, now)
+    .bind(orderId, orderStatus, metadata, paymentCode, now, now)
     .run();
 
   // 2. Insert order items
@@ -50,12 +55,12 @@ async function setupTestJob(status = 'PENDING', customOrderId?: string) {
   // 3. Insert fulfillment job
   await env.DB.prepare(
     `INSERT INTO fulfillment_jobs (id, order_id, status, attempt_count, max_attempts, created_at, updated_at)
-     VALUES (?, ?, ?, 0, 3, ?, ?)`
+     VALUES (?, ?, ?, ?, 3, ?, ?)`
   )
-    .bind(jobId, orderId, status, now, now)
+    .bind(jobId, orderId, status, attemptCount, now, now)
     .run();
 
-  return { orderId, jobId };
+  return { orderId, jobId, paymentCode };
 }
 
 describe('Phase 4: A23 Internal Node Job Claim, Lease Fencing & Protocols', () => {
@@ -127,7 +132,94 @@ describe('Phase 4: A23 Internal Node Job Claim, Lease Fencing & Protocols', () =
     });
   });
 
-  describe('Job Claiming & Fenced Lease Protocol', () => {
+  describe('Internal Request Boundary Validation (BLOCK 6)', () => {
+    it('rejects invalid worker_id characters or empty worker_id with 400', async () => {
+      const reqInvalidChars = new Request('http://example.com/internal/jobs/job_1/claim', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${NODE_SECRET}`,
+        },
+        body: JSON.stringify({ worker_id: 'worker!#$invalid' }),
+      });
+
+      const ctx1 = createExecutionContext();
+      const res1 = await worker.fetch(reqInvalidChars, testEnv, ctx1);
+      await waitOnExecutionContext(ctx1);
+      expect(res1.status).toBe(400);
+
+      const reqEmpty = new Request('http://example.com/internal/jobs/job_1/claim', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${NODE_SECRET}`,
+        },
+        body: JSON.stringify({ worker_id: '' }),
+      });
+
+      const ctx2 = createExecutionContext();
+      const res2 = await worker.fetch(reqEmpty, testEnv, ctx2);
+      await waitOnExecutionContext(ctx2);
+      expect(res2.status).toBe(400);
+    });
+
+    it('rejects out-of-bounds lease_seconds or extend_seconds with 400', async () => {
+      const reqTooLarge = new Request('http://example.com/internal/jobs/job_1/claim', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${NODE_SECRET}`,
+        },
+        body: JSON.stringify({ worker_id: 'worker-1', lease_seconds: 99999 }),
+      });
+
+      const ctx = createExecutionContext();
+      const res = await worker.fetch(reqTooLarge, testEnv, ctx);
+      await waitOnExecutionContext(ctx);
+      expect(res.status).toBe(400);
+    });
+
+    it('rejects non-boolean retryable or invalid reason_code with 400', async () => {
+      const reqBadRetryable = new Request('http://example.com/internal/jobs/job_1/fail', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${NODE_SECRET}`,
+        },
+        body: JSON.stringify({
+          worker_id: 'worker-1',
+          lease_token: '12345678-1234-1234-1234-123456789abc',
+          retryable: 'yes', // not boolean
+        }),
+      });
+
+      const ctx1 = createExecutionContext();
+      const res1 = await worker.fetch(reqBadRetryable, testEnv, ctx1);
+      await waitOnExecutionContext(ctx1);
+      expect(res1.status).toBe(400);
+
+      const reqBadReason = new Request('http://example.com/internal/jobs/job_1/fail', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${NODE_SECRET}`,
+        },
+        body: JSON.stringify({
+          worker_id: 'worker-1',
+          lease_token: '12345678-1234-1234-1234-123456789abc',
+          retryable: false,
+          reason_code: 'error with spaces and lowercase!',
+        }),
+      });
+
+      const ctx2 = createExecutionContext();
+      const res2 = await worker.fetch(reqBadReason, testEnv, ctx2);
+      await waitOnExecutionContext(ctx2);
+      expect(res2.status).toBe(400);
+    });
+  });
+
+  describe('Job Claiming & Fenced Lease Protocol (BLOCK 3)', () => {
     it('claims PENDING job -> transitions job to PROCESSING, order PAID -> PROCESSING atomically, and returns compute payload', async () => {
       const { jobId, orderId } = await setupTestJob('PENDING');
 
@@ -185,6 +277,25 @@ describe('Phase 4: A23 Internal Node Job Claim, Lease Fencing & Protocols', () =
         .bind(orderId)
         .first<{ status: string }>();
       expect(orderRow?.status).toBe('PROCESSING');
+    });
+
+    it('lost claim CAS results in zero order mutation (BLOCK 3)', async () => {
+      const { jobId, orderId } = await setupTestJob('PENDING');
+
+      // First worker successfully claims job
+      const jobService = new JobService(env.DB);
+      const winClaim = await jobService.claimJob(jobId, 'worker-1', 300);
+      expect(winClaim.status).toBe('CLAIMED');
+
+      // Now order is in PROCESSING. Attempting to claim again while active results in CONFLICT / LEASED
+      const lostClaim = await jobService.claimJob(jobId, 'worker-2', 300);
+      expect(lostClaim.status).toBe('LEASED');
+
+      // Order must still be PROCESSING (no mutation)
+      const order = await env.DB.prepare('SELECT status FROM orders WHERE id = ?')
+        .bind(orderId)
+        .first<{ status: string }>();
+      expect(order?.status).toBe('PROCESSING');
     });
 
     it('concurrent claim attempts for the same job result in exactly one active winner lease', async () => {
@@ -245,7 +356,7 @@ describe('Phase 4: A23 Internal Node Job Claim, Lease Fencing & Protocols', () =
       expect(staleHeartbeat.status).toBe('EXPIRED_OR_FENCED');
       expect(staleHeartbeat.queue_action).toBe('ack');
 
-      // Stale worker tries to fail -> rejected/fenced
+      // Stale worker tries to fail -> rejected/fenced (BLOCK 4)
       const staleFail = await jobService.failJob({
         jobId,
         workerId: 'worker-1',
@@ -256,8 +367,8 @@ describe('Phase 4: A23 Internal Node Job Claim, Lease Fencing & Protocols', () =
       expect(staleFail.queue_action).toBe('ack');
     });
 
-    it('rejects claim on RETRY job before next_retry_at is due; allows claim once due', async () => {
-      const { jobId } = await setupTestJob('RETRY');
+    it('rejects claim on RETRY job before next_retry_at is due; allows claim once due (with order in PROCESSING)', async () => {
+      const { jobId } = await setupTestJob('RETRY', undefined, 'PROCESSING', 1);
       const futureTime = Date.now() + 60000; // 60s in future
 
       await env.DB.prepare('UPDATE fulfillment_jobs SET next_retry_at = ? WHERE id = ?')
@@ -279,6 +390,37 @@ describe('Phase 4: A23 Internal Node Job Claim, Lease Fencing & Protocols', () =
       // Due retry succeeds
       const dueClaim = await jobService.claimJob(jobId, 'worker-1');
       expect(dueClaim.status).toBe('CLAIMED');
+    });
+
+    it('final-attempt crash with expired lease transitions job and order atomically to FAILED on next claim/redelivery (BLOCK 5)', async () => {
+      const { jobId, orderId } = await setupTestJob('PROCESSING', undefined, 'PROCESSING', 3);
+
+      // Set attempt count to 3 of 3 (max_attempts = 3), and expired lease
+      const pastTime = Date.now() - 10000;
+      await env.DB.prepare(
+        'UPDATE fulfillment_jobs SET lease_expires_at = ?, lease_token = "prev_token", lease_owner = "crashed_worker" WHERE id = ?'
+      )
+        .bind(pastTime, jobId)
+        .run();
+
+      const jobService = new JobService(env.DB);
+      const claimRes = await jobService.claimJob(jobId, 'worker-new');
+
+      expect(claimRes.status).toBe('TERMINAL');
+      expect(claimRes.queue_action).toBe('ack');
+      expect(claimRes.reason).toBe('max_attempts_exhausted');
+
+      // Assert job and order were transitioned to FAILED atomically (no stranded PROCESSING)
+      const job = await env.DB.prepare('SELECT status, last_error FROM fulfillment_jobs WHERE id = ?')
+        .bind(jobId)
+        .first<{ status: string; last_error: string }>();
+      expect(job?.status).toBe('FAILED');
+      expect(job?.last_error).toBe('max_attempts_exhausted');
+
+      const order = await env.DB.prepare('SELECT status FROM orders WHERE id = ?')
+        .bind(orderId)
+        .first<{ status: string }>();
+      expect(order?.status).toBe('FAILED');
     });
   });
 
@@ -325,7 +467,7 @@ describe('Phase 4: A23 Internal Node Job Claim, Lease Fencing & Protocols', () =
         },
         body: JSON.stringify({
           worker_id: 'worker-1',
-          lease_token: 'fake_non_existent_token',
+          lease_token: '12345678-1234-1234-1234-123456789abc',
         }),
       });
 
@@ -339,7 +481,7 @@ describe('Phase 4: A23 Internal Node Job Claim, Lease Fencing & Protocols', () =
     });
   });
 
-  describe('Failure & Retry Protocol', () => {
+  describe('Failure & Retry Protocol (BLOCK 4)', () => {
     it('transitions to RETRY with bounded delay when retryable is true and attempts remain', async () => {
       const { jobId, orderId } = await setupTestJob('PENDING');
       const jobService = new JobService(env.DB);
@@ -385,6 +527,45 @@ describe('Phase 4: A23 Internal Node Job Claim, Lease Fencing & Protocols', () =
         .bind(orderId)
         .first<{ status: string }>();
       expect(orderRow?.status).toBe('PROCESSING');
+    });
+
+    it('expired-but-not-yet-reclaimed lease cannot call /fail (BLOCK 4)', async () => {
+      const { jobId, orderId } = await setupTestJob('PENDING');
+      const jobService = new JobService(env.DB);
+
+      const claim = await jobService.claimJob(jobId, 'worker-1', 10);
+      const token = claim.payload!.lease_token;
+
+      // Expire lease
+      await env.DB.prepare('UPDATE fulfillment_jobs SET lease_expires_at = ? WHERE id = ?')
+        .bind(Date.now() - 5000, jobId)
+        .run();
+
+      const req = new Request(`http://example.com/internal/jobs/${jobId}/fail`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${NODE_SECRET}`,
+        },
+        body: JSON.stringify({
+          worker_id: 'worker-1',
+          lease_token: token,
+          retryable: false,
+          reason_code: 'UNRECOVERABLE_ERROR',
+        }),
+      });
+
+      const ctx = createExecutionContext();
+      const res = await worker.fetch(req, testEnv, ctx);
+      await waitOnExecutionContext(ctx);
+
+      expect(res.status).toBe(409);
+
+      // Order must remain in PROCESSING, not modified to FAILED (BLOCK 4)
+      const order = await env.DB.prepare('SELECT status FROM orders WHERE id = ?')
+        .bind(orderId)
+        .first<{ status: string }>();
+      expect(order?.status).toBe('PROCESSING');
     });
 
     it('transitions job and order atomically to FAILED when retryable is false', async () => {
@@ -482,8 +663,8 @@ describe('Phase 4: A23 Internal Node Job Claim, Lease Fencing & Protocols', () =
     });
   });
 
-  describe('Defensive Metadata & Malformed Canonical State', () => {
-    it('fails safely and returns recoverable error when persisted order metadata is corrupted JSON', async () => {
+  describe('Defensive Metadata & Malformed Canonical State (BLOCK 6)', () => {
+    it('fails safely and returns recoverable error when persisted order metadata is corrupted JSON or invalid schema', async () => {
       const { jobId, orderId } = await setupTestJob('PENDING');
 
       // Corrupt order metadata in DB
@@ -507,6 +688,21 @@ describe('Phase 4: A23 Internal Node Job Claim, Lease Fencing & Protocols', () =
       expect(res.status).toBe(500);
       const data = (await res.json()) as any;
       expect(data.queue_action).toBe('retry');
+    });
+
+    it('fails safely when persisted metadata has invalid source_url or no formats', async () => {
+      const { jobId, orderId } = await setupTestJob('PENDING');
+
+      await env.DB.prepare(
+        'UPDATE orders SET metadata = ? WHERE id = ?'
+      )
+        .bind(JSON.stringify({ source_url: 'ftp://not-http', selected_formats: ['INVALID'] }), orderId)
+        .run();
+
+      const jobService = new JobService(env.DB);
+      const res = await jobService.claimJob(jobId, 'worker-1');
+      expect(res.status).toBe('MALFORMED_METADATA');
+      expect(res.queue_action).toBe('retry');
     });
   });
 });

@@ -47,6 +47,8 @@ export interface FailJobResult {
   reason?: string;
 }
 
+const ALLOWED_FORMATS = new Set(['TTF', 'OTF', 'WOFF', 'WOFF2']);
+
 export class JobService {
   constructor(private readonly db: D1Database) {}
 
@@ -62,10 +64,13 @@ export class JobService {
     workerId: string,
     leaseDurationSeconds = 300
   ): Promise<ClaimJobResult> {
+    // 1. Enforce bounded safe identifier for worker_id (BLOCK 6)
     const cleanWorkerId = workerId.trim();
-    if (!cleanWorkerId || cleanWorkerId.length > 128) {
+    if (!/^[a-zA-Z0-9_-]{1,64}$/.test(cleanWorkerId)) {
       return { status: 'CONFLICT', queue_action: 'retry', reason: 'invalid_worker_id' };
     }
+
+    const boundedLeaseSeconds = Math.max(10, Math.min(leaseDurationSeconds, 1800));
 
     const job = await this.getJobById(jobId);
     if (!job) {
@@ -74,17 +79,57 @@ export class JobService {
 
     const now = Date.now();
 
-    // Check if terminal or max attempts exhausted
-    if (
-      job.status === 'COMPLETED' ||
-      job.status === 'FAILED' ||
-      job.attempt_count >= job.max_attempts
-    ) {
+    // Check if terminal
+    if (job.status === 'COMPLETED' || job.status === 'FAILED') {
       return {
         status: 'TERMINAL',
         queue_action: 'ack',
-        reason:
-          job.attempt_count >= job.max_attempts ? 'max_attempts_exhausted' : `job_${job.status.toLowerCase()}`,
+        reason: `job_${job.status.toLowerCase()}`,
+      };
+    }
+
+    // Check if attempt count exhausted (BLOCK 5)
+    if (job.attempt_count >= job.max_attempts) {
+      // If previous worker crashed on final attempt, terminalize atomically before returning ACK
+      if (
+        job.status === 'PROCESSING' &&
+        (job.lease_expires_at === null || job.lease_expires_at <= now)
+      ) {
+        await this.db.batch([
+          this.db
+            .prepare(
+              `UPDATE fulfillment_jobs
+               SET status = 'FAILED',
+                   lease_owner = NULL,
+                   lease_token = NULL,
+                   leased_at = NULL,
+                   lease_expires_at = NULL,
+                   last_error = 'max_attempts_exhausted',
+                   updated_at = ?
+               WHERE id = ?
+                 AND status = 'PROCESSING'
+                 AND (lease_expires_at IS NULL OR lease_expires_at <= ?)
+                 AND attempt_count >= max_attempts`
+            )
+            .bind(now, jobId, now),
+          this.db
+            .prepare(
+              `UPDATE orders
+               SET status = 'FAILED', updated_at = ?
+               WHERE id = (
+                 SELECT order_id FROM fulfillment_jobs
+                 WHERE id = ? AND status = 'FAILED' AND last_error = 'max_attempts_exhausted' AND updated_at = ?
+               )
+               AND status = 'PROCESSING'`
+            )
+            .bind(now, jobId, now),
+        ]);
+      }
+
+      return {
+        status: 'TERMINAL',
+        queue_action: 'ack',
+        reason: 'max_attempts_exhausted',
       };
     }
 
@@ -106,12 +151,12 @@ export class JobService {
       };
     }
 
-    // CAS transition to PROCESSING with fresh lease token
+    // CAS transition to PROCESSING with fresh lease token & atomic order binding (BLOCK 3)
     const newLeaseToken = crypto.randomUUID();
-    const leaseExpiresAt = now + leaseDurationSeconds * 1000;
+    const leaseExpiresAt = now + boundedLeaseSeconds * 1000;
 
     const statements: D1PreparedStatement[] = [
-      // 1. Update job with optimistic fencing
+      // 1. Update job with optimistic fencing AND order precondition check
       this.db
         .prepare(
           `UPDATE fulfillment_jobs
@@ -126,22 +171,29 @@ export class JobService {
                updated_at = ?
            WHERE id = ?
              AND (
-               (status = 'PENDING') OR
-               (status = 'RETRY' AND (next_retry_at IS NULL OR next_retry_at <= ?)) OR
-               (status = 'PROCESSING' AND (lease_expires_at IS NOT NULL AND lease_expires_at <= ?))
+               (status = 'PENDING' AND EXISTS (SELECT 1 FROM orders WHERE id = fulfillment_jobs.order_id AND status = 'PAID')) OR
+               (status = 'RETRY' AND (next_retry_at IS NULL OR next_retry_at <= ?) AND EXISTS (SELECT 1 FROM orders WHERE id = fulfillment_jobs.order_id AND status = 'PROCESSING')) OR
+               (status = 'PROCESSING' AND (lease_expires_at IS NOT NULL AND lease_expires_at <= ?) AND EXISTS (SELECT 1 FROM orders WHERE id = fulfillment_jobs.order_id AND status = 'PROCESSING'))
              )
              AND attempt_count < max_attempts`
         )
         .bind(cleanWorkerId, newLeaseToken, now, leaseExpiresAt, now, jobId, now, now),
 
-      // 2. Transition order PAID -> PROCESSING atomically on first claim
+      // 2. Transition order PAID -> PROCESSING atomically bound to successful job lease
       this.db
         .prepare(
           `UPDATE orders
            SET status = 'PROCESSING', updated_at = ?
-           WHERE id = ? AND status = 'PAID'`
+           WHERE id = (
+             SELECT order_id FROM fulfillment_jobs
+             WHERE id = ?
+               AND status = 'PROCESSING'
+               AND lease_token = ?
+               AND lease_owner = ?
+           )
+           AND status = 'PAID'`
         )
-        .bind(now, job.order_id),
+        .bind(now, jobId, newLeaseToken, cleanWorkerId),
     ];
 
     try {
@@ -163,7 +215,7 @@ export class JobService {
       };
     }
 
-    // Fetch compute payload from order and order_items
+    // Fetch and defensively validate compute payload (BLOCK 6)
     const order = await this.db
       .prepare('SELECT id, metadata FROM orders WHERE id = ?')
       .bind(job.order_id)
@@ -179,13 +231,37 @@ export class JobService {
     let formats: string[] = ['TTF'];
 
     try {
-      const parsedMeta = JSON.parse(order.metadata || '{}');
-      sourceUrl = parsedMeta.source_url || '';
-      familyName = parsedMeta.family_name;
-      foundry = parsedMeta.foundry;
-      formats = Array.isArray(parsedMeta.selected_formats)
-        ? parsedMeta.selected_formats
-        : ['TTF'];
+      const parsedMeta = JSON.parse(order.metadata || '{}') as Record<string, unknown>;
+      if (!parsedMeta || typeof parsedMeta !== 'object' || Array.isArray(parsedMeta)) {
+        throw new Error('invalid_metadata_type');
+      }
+
+      if (
+        typeof parsedMeta.source_url !== 'string' ||
+        !/^https?:\/\/.+/.test(parsedMeta.source_url.trim())
+      ) {
+        throw new Error('invalid_source_url');
+      }
+      sourceUrl = parsedMeta.source_url.trim();
+
+      if (typeof parsedMeta.family_name === 'string' && parsedMeta.family_name.trim()) {
+        familyName = parsedMeta.family_name.trim().slice(0, 128);
+      }
+      if (typeof parsedMeta.foundry === 'string' && parsedMeta.foundry.trim()) {
+        foundry = parsedMeta.foundry.trim().slice(0, 128);
+      }
+
+      if (Array.isArray(parsedMeta.selected_formats) && parsedMeta.selected_formats.length > 0) {
+        const validatedFormats = parsedMeta.selected_formats
+          .filter((f): f is string => typeof f === 'string')
+          .map((f) => f.trim().toUpperCase())
+          .filter((f) => ALLOWED_FORMATS.has(f));
+
+        if (validatedFormats.length === 0) {
+          throw new Error('no_valid_formats');
+        }
+        formats = Array.from(new Set(validatedFormats));
+      }
     } catch {
       return {
         status: 'MALFORMED_METADATA',
@@ -199,10 +275,20 @@ export class JobService {
       .bind(job.order_id)
       .all<{ font_id: string; font_name: string | null }>();
 
-    const styles = items.results.map((i) => ({
-      id: i.font_id,
-      display_name: i.font_name || i.font_id,
-    }));
+    if (!items.results || items.results.length === 0) {
+      return {
+        status: 'MALFORMED_METADATA',
+        queue_action: 'retry',
+        reason: 'no_order_items',
+      };
+    }
+
+    const styles = items.results
+      .filter((i) => typeof i.font_id === 'string' && i.font_id.trim())
+      .map((i) => ({
+        id: i.font_id.trim(),
+        display_name: (i.font_name && i.font_name.trim()) || i.font_id.trim(),
+      }));
 
     return {
       status: 'CLAIMED',
@@ -228,8 +314,17 @@ export class JobService {
   ): Promise<HeartbeatResult> {
     const cleanWorkerId = workerId.trim();
     const cleanToken = leaseToken.trim();
+
+    if (
+      !/^[a-zA-Z0-9_-]{1,64}$/.test(cleanWorkerId) ||
+      !/^[0-9a-fA-F-]{36}$/.test(cleanToken)
+    ) {
+      return { status: 'EXPIRED_OR_FENCED', queue_action: 'ack' };
+    }
+
+    const boundedExtend = Math.max(10, Math.min(extendSeconds, 1800));
     const now = Date.now();
-    const newExpiresAt = now + extendSeconds * 1000;
+    const newExpiresAt = now + boundedExtend * 1000;
 
     const result = await this.db
       .prepare(
@@ -261,24 +356,38 @@ export class JobService {
     const { jobId, workerId, leaseToken, retryable, reasonCode } = params;
     const cleanWorkerId = workerId.trim();
     const cleanToken = leaseToken.trim();
-    const cleanReason = (reasonCode || 'unspecified_failure').slice(0, 64);
-    const now = Date.now();
 
-    const job = await this.getJobById(jobId);
-    if (!job) {
-      return { status: 'NOT_FOUND', queue_action: 'ack', reason: 'job_not_found' };
+    if (
+      !/^[a-zA-Z0-9_-]{1,64}$/.test(cleanWorkerId) ||
+      !/^[0-9a-fA-F-]{36}$/.test(cleanToken)
+    ) {
+      return { status: 'EXPIRED_OR_FENCED', queue_action: 'ack', reason: 'invalid_credentials' };
     }
 
-    // Verify active lease ownership (fencing check)
-    if (
-      job.status !== 'PROCESSING' ||
-      job.lease_owner !== cleanWorkerId ||
-      job.lease_token !== cleanToken
-    ) {
+    const cleanReason = (reasonCode && /^[A-Z0-9_]{1,64}$/.test(reasonCode.trim()))
+      ? reasonCode.trim()
+      : 'UNSPECIFIED_FAILURE';
+
+    const now = Date.now();
+
+    // 1. Authoritative D1 check: must be active non-expired lease (BLOCK 4)
+    const job = await this.db
+      .prepare(
+        `SELECT * FROM fulfillment_jobs
+         WHERE id = ?
+           AND status = 'PROCESSING'
+           AND lease_owner = ?
+           AND lease_token = ?
+           AND lease_expires_at > ?`
+      )
+      .bind(jobId, cleanWorkerId, cleanToken, now)
+      .first<FulfillmentJobRecord>();
+
+    if (!job) {
       return { status: 'EXPIRED_OR_FENCED', queue_action: 'ack', reason: 'lease_superseded_or_expired' };
     }
 
-    // Retryable failure with attempts remaining
+    // 2. Retryable failure with attempts remaining
     if (retryable && job.attempt_count < job.max_attempts) {
       const backoffSeconds = Math.min(300, 10 * Math.pow(2, job.attempt_count - 1));
       const nextRetryAt = now + backoffSeconds * 1000;
@@ -294,9 +403,13 @@ export class JobService {
                next_retry_at = ?,
                last_error = ?,
                updated_at = ?
-           WHERE id = ? AND lease_token = ?`
+           WHERE id = ?
+             AND status = 'PROCESSING'
+             AND lease_owner = ?
+             AND lease_token = ?
+             AND lease_expires_at > ?`
         )
-        .bind(nextRetryAt, cleanReason, now, jobId, cleanToken)
+        .bind(nextRetryAt, cleanReason, now, jobId, cleanWorkerId, cleanToken, now)
         .run();
 
       if (result.meta.changes && result.meta.changes > 0) {
@@ -312,11 +425,12 @@ export class JobService {
       return { status: 'EXPIRED_OR_FENCED', queue_action: 'ack' };
     }
 
-    // Terminal failure or exhausted attempts
+    // 3. Terminal failure or exhausted attempts: atomic job + order FAILED transition (BLOCK 4)
     const terminalReason =
       job.attempt_count >= job.max_attempts ? 'max_attempts_exhausted' : cleanReason;
 
     const statements: D1PreparedStatement[] = [
+      // Update job conditional on active lease
       this.db
         .prepare(
           `UPDATE fulfillment_jobs
@@ -327,17 +441,29 @@ export class JobService {
                lease_expires_at = NULL,
                last_error = ?,
                updated_at = ?
-           WHERE id = ? AND lease_token = ?`
+           WHERE id = ?
+             AND status = 'PROCESSING'
+             AND lease_owner = ?
+             AND lease_token = ?
+             AND lease_expires_at > ?`
         )
-        .bind(terminalReason, now, jobId, cleanToken),
+        .bind(terminalReason, now, jobId, cleanWorkerId, cleanToken, now),
 
+      // Update order conditional on job FAILED transition above
       this.db
         .prepare(
           `UPDATE orders
            SET status = 'FAILED', updated_at = ?
-           WHERE id = ? AND status = 'PROCESSING'`
+           WHERE id = (
+             SELECT order_id FROM fulfillment_jobs
+             WHERE id = ?
+               AND status = 'FAILED'
+               AND last_error = ?
+               AND updated_at = ?
+           )
+           AND status = 'PROCESSING'`
         )
-        .bind(now, job.order_id),
+        .bind(now, jobId, terminalReason, now),
     ];
 
     const results = await this.db.batch(statements);
