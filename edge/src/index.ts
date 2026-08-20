@@ -1,5 +1,8 @@
 import type { Env } from './env';
 
+const REQUIRED_TABLES_COUNT = 6;
+const SCHEMA_CHECK_QUERY = `SELECT count(*) as count FROM sqlite_master WHERE type='table' AND name IN ('orders', 'order_items', 'payments', 'fulfillment_jobs', 'outbox_events', 'artifacts')`;
+
 export default {
   async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
@@ -14,33 +17,26 @@ export default {
     if (request.method === 'GET' && url.pathname === '/ready') {
       try {
         if (!env.DB) {
-          return new Response(
-            JSON.stringify({ status: 'error', reason: 'D1 binding DB is not configured' }),
-            {
-              status: 503,
-              headers: { 'Content-Type': 'application/json' },
-            }
-          );
+          return new Response(JSON.stringify({ status: 'unavailable' }), {
+            status: 503,
+            headers: { 'Content-Type': 'application/json' },
+          });
         }
 
-        const result = await env.DB.prepare('SELECT 1 as healthy').first<{ healthy: number }>();
-        if (result && result.healthy === 1) {
+        const result = await env.DB.prepare(SCHEMA_CHECK_QUERY).first<{ count: number }>();
+        if (result && result.count === REQUIRED_TABLES_COUNT) {
           return new Response(JSON.stringify({ status: 'ready', database: 'connected' }), {
             status: 200,
             headers: { 'Content-Type': 'application/json' },
           });
         }
 
-        return new Response(
-          JSON.stringify({ status: 'error', reason: 'Unexpected database response' }),
-          {
-            status: 503,
-            headers: { 'Content-Type': 'application/json' },
-          }
-        );
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : 'Unknown database error';
-        return new Response(JSON.stringify({ status: 'error', reason: message }), {
+        return new Response(JSON.stringify({ status: 'unavailable' }), {
+          status: 503,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      } catch {
+        return new Response(JSON.stringify({ status: 'unavailable' }), {
           status: 503,
           headers: { 'Content-Type': 'application/json' },
         });

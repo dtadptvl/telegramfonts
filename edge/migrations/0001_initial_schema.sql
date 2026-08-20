@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS order_items (
 
 CREATE INDEX IF NOT EXISTS idx_order_items_order_id ON order_items(order_id);
 
--- Payments table
+-- Payments table (data-minimized: normalized audit & idempotency fields only)
 CREATE TABLE IF NOT EXISTS payments (
     id TEXT PRIMARY KEY,
     order_id TEXT NOT NULL REFERENCES orders(id) ON DELETE RESTRICT,
@@ -38,7 +38,6 @@ CREATE TABLE IF NOT EXISTS payments (
     amount INTEGER NOT NULL,
     currency TEXT NOT NULL DEFAULT 'VND',
     status TEXT NOT NULL,
-    raw_payload TEXT,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 );
@@ -46,21 +45,23 @@ CREATE TABLE IF NOT EXISTS payments (
 CREATE INDEX IF NOT EXISTS idx_payments_order_id ON payments(order_id);
 CREATE INDEX IF NOT EXISTS idx_payments_transaction_id ON payments(transaction_id);
 
--- Fulfillment jobs table
+-- Fulfillment jobs table (enforces 1:1 durable job per order + lease & retry tracking)
 CREATE TABLE IF NOT EXISTS fulfillment_jobs (
     id TEXT PRIMARY KEY,
-    order_id TEXT NOT NULL REFERENCES orders(id) ON DELETE RESTRICT,
+    order_id TEXT NOT NULL UNIQUE REFERENCES orders(id) ON DELETE RESTRICT,
     status TEXT NOT NULL CHECK (status IN ('PENDING', 'PROCESSING', 'RETRY', 'COMPLETED', 'FAILED')),
     leased_at INTEGER,
+    lease_expires_at INTEGER,
     lease_owner TEXT,
     attempt_count INTEGER NOT NULL DEFAULT 0,
     max_attempts INTEGER NOT NULL DEFAULT 3,
+    next_retry_at INTEGER,
     last_error TEXT,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_fulfillment_jobs_poll_lease ON fulfillment_jobs(status, leased_at);
+CREATE INDEX IF NOT EXISTS idx_fulfillment_jobs_claim ON fulfillment_jobs(status, next_retry_at, lease_expires_at);
 CREATE INDEX IF NOT EXISTS idx_fulfillment_jobs_order_id ON fulfillment_jobs(order_id);
 
 -- Outbox events table

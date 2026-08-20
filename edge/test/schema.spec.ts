@@ -100,8 +100,8 @@ describe('D1 Database Schema & Constraints', () => {
     });
   });
 
-  describe('Payments Table & Idempotency', () => {
-    it('enforces unique transaction_id for payment idempotency', async () => {
+  describe('Payments Table & Idempotency (Data Minimized)', () => {
+    it('enforces unique transaction_id for payment idempotency without raw payload', async () => {
       const now = Date.now();
       const orderId = 'ord_payment_test';
       await env.DB.prepare(
@@ -113,64 +113,119 @@ describe('D1 Database Schema & Constraints', () => {
 
       const txnId = 'sepay_txn_12345678';
       await env.DB.prepare(
-        `INSERT INTO payments (id, order_id, provider, transaction_id, amount, currency, status, raw_payload, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO payments (id, order_id, provider, transaction_id, amount, currency, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
-        .bind('pay_1', orderId, 'SEPAY', txnId, 75000, 'VND', 'SUCCESS', JSON.stringify({ ref: txnId }), now, now)
+        .bind('pay_1', orderId, 'SEPAY', txnId, 75000, 'VND', 'SUCCESS', now, now)
         .run();
+
+      const payment = await env.DB.prepare('SELECT * FROM payments WHERE transaction_id = ?')
+        .bind(txnId)
+        .first<{ id: string; provider: string; transaction_id: string; amount: number }>();
+
+      expect(payment).not.toBeNull();
+      expect(payment?.provider).toBe('SEPAY');
+      expect(payment?.amount).toBe(75000);
 
       // Attempt duplicate transaction_id
       await expect(
         env.DB.prepare(
-          `INSERT INTO payments (id, order_id, provider, transaction_id, amount, currency, status, raw_payload, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          `INSERT INTO payments (id, order_id, provider, transaction_id, amount, currency, status, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
-          .bind('pay_2', orderId, 'SEPAY', txnId, 75000, 'VND', 'SUCCESS', JSON.stringify({ ref: txnId }), now, now)
+          .bind('pay_2', orderId, 'SEPAY', txnId, 75000, 'VND', 'SUCCESS', now, now)
           .run()
       ).rejects.toThrow();
     });
   });
 
-  describe('Fulfillment Jobs Table & Lease Querying', () => {
-    it('allows valid job states and queries pending leases', async () => {
+  describe('Fulfillment Jobs Table, Lease/Retry & Uniqueness', () => {
+    it('allows valid job states across distinct orders and queries claim/retry eligibility', async () => {
       const now = Date.now();
-      const orderId = 'ord_job_test';
+      const validJobStates = ['PENDING', 'PROCESSING', 'RETRY', 'COMPLETED', 'FAILED'];
+
+      for (const [idx, state] of validJobStates.entries()) {
+        const orderId = `ord_job_state_${idx}`;
+        await env.DB.prepare(
+          `INSERT INTO orders (id, user_id, status, total_amount, currency, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
+        )
+          .bind(orderId, `tg_user_job_${idx}`, 'PAID', 50000, 'VND', now, now)
+          .run();
+
+        const jobId = `job_${idx}_${state.toLowerCase()}`;
+        const leasedAt = state === 'PROCESSING' ? now - 1000 : null;
+        const leaseExpiresAt = state === 'PROCESSING' ? now + 60000 : null;
+        const nextRetryAt = state === 'RETRY' ? now - 1000 : null;
+
+        await env.DB.prepare(
+          `INSERT INTO fulfillment_jobs (id, order_id, status, leased_at, lease_expires_at, next_retry_at, attempt_count, max_attempts, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+          .bind(jobId, orderId, state, leasedAt, leaseExpiresAt, nextRetryAt, 0, 3, now, now)
+          .run();
+      }
+
+      // Query jobs available for claim or retry:
+      // 1. PENDING jobs
+      // 2. RETRY jobs where next_retry_at <= now
+      // 3. PROCESSING jobs where lease_expires_at < now (expired lease recovery)
+      const claimableJobs = await env.DB.prepare(
+        `SELECT * FROM fulfillment_jobs
+         WHERE status = 'PENDING'
+            OR (status = 'RETRY' AND next_retry_at <= ?)
+            OR (status = 'PROCESSING' AND lease_expires_at < ?)`
+      )
+        .bind(now, now)
+        .all();
+
+      expect(claimableJobs.results.length).toBeGreaterThanOrEqual(2); // PENDING + RETRY
+    });
+
+    it('rejects duplicate fulfillment job for the same order (1:1 constraint)', async () => {
+      const now = Date.now();
+      const orderId = 'ord_single_job_test';
       await env.DB.prepare(
         `INSERT INTO orders (id, user_id, status, total_amount, currency, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)`
       )
-        .bind(orderId, 'tg_user_job', 'PAID', 50000, 'VND', now, now)
+        .bind(orderId, 'tg_user_single', 'PAID', 50000, 'VND', now, now)
         .run();
 
-      const validJobStates = ['PENDING', 'PROCESSING', 'RETRY', 'COMPLETED', 'FAILED'];
-      for (const [idx, state] of validJobStates.entries()) {
-        const jobId = `job_${idx}_${state.toLowerCase()}`;
-        await env.DB.prepare(
-          `INSERT INTO fulfillment_jobs (id, order_id, status, attempt_count, max_attempts, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`
-        )
-          .bind(jobId, orderId, state, 0, 3, now, now)
-          .run();
-      }
-
-      // Query jobs available for polling/lease (PENDING status)
-      const pendingJobs = await env.DB.prepare(
-        `SELECT * FROM fulfillment_jobs WHERE status = 'PENDING' AND (leased_at IS NULL OR leased_at < ?)`
+      await env.DB.prepare(
+        `INSERT INTO fulfillment_jobs (id, order_id, status, attempt_count, max_attempts, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
       )
-        .bind(now)
-        .all();
+        .bind('job_first', orderId, 'PENDING', 0, 3, now, now)
+        .run();
 
-      expect(pendingJobs.results.length).toBeGreaterThanOrEqual(1);
-    });
-
-    it('rejects invalid job status', async () => {
-      const now = Date.now();
+      // Second job for same order must fail with UNIQUE constraint error
       await expect(
         env.DB.prepare(
           `INSERT INTO fulfillment_jobs (id, order_id, status, attempt_count, max_attempts, created_at, updated_at)
            VALUES (?, ?, ?, ?, ?, ?, ?)`
         )
-          .bind('job_invalid', 'ord_job_test', 'INVALID_JOB_STATE', 0, 3, now, now)
+          .bind('job_second', orderId, 'PENDING', 0, 3, now, now)
+          .run()
+      ).rejects.toThrow();
+    });
+
+    it('rejects invalid job status', async () => {
+      const now = Date.now();
+      const orderId = 'ord_bad_status';
+      await env.DB.prepare(
+        `INSERT INTO orders (id, user_id, status, total_amount, currency, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      )
+        .bind(orderId, 'tg_user_bad_job', 'PAID', 50000, 'VND', now, now)
+        .run();
+
+      await expect(
+        env.DB.prepare(
+          `INSERT INTO fulfillment_jobs (id, order_id, status, attempt_count, max_attempts, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
+        )
+          .bind('job_invalid', orderId, 'INVALID_JOB_STATE', 0, 3, now, now)
           .run()
       ).rejects.toThrow();
     });

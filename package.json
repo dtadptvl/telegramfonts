@@ -8,8 +8,5 @@
   "scripts": {
     "typecheck": "npm run --workspace=edge typecheck",
     "test": "npm run --workspace=edge test"
-  },
-  "overrides": {
-    "vitest": "3.0.5"
   }
 }
