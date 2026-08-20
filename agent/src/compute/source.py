@@ -1,11 +1,13 @@
-"""Source font data acquisition, preview raster/vector reconstruction, and fixture contracts."""
+"""Source font data acquisition, live preview resolution, raster/vector reconstruction, and fixture contracts."""
 from __future__ import annotations
 
+import base64
 import io
+import json
 import logging
 import re
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 import httpx
 from PIL import Image, ImageDraw
 
@@ -46,7 +48,10 @@ def validate_myfonts_url(url: str) -> bool:
 
 
 def extract_contours_from_raster_image(
-    image_bytes: bytes, scale_em: int = 1024
+    image_bytes: bytes,
+    scale_em: int = 1024,
+    stroke_offset: float = 0.0,
+    slant: float = 0.0,
 ) -> tuple[list[list[tuple[float, float]]], int, int]:
     """Extract vector polygon contours from binary/grayscale raster preview image pixels."""
     if not image_bytes or len(image_bytes) == 0:
@@ -83,38 +88,59 @@ def extract_contours_from_raster_image(
     for x in range(min_x, max_x + 1):
         col_pts = [p[1] for p in dark_pts if p[0] == x]
         if col_pts:
-            bottom_contour.append((float(x * scale_x), float(min(col_pts) * scale_y)))
-            top_contour.append((float(x * scale_x), float(max(col_pts) * scale_y)))
+            b_y = float(min(col_pts) * scale_y)
+            t_y = float(max(col_pts) * scale_y)
+            b_x = float(x * scale_x) + (b_y * slant)
+            t_x = float(x * scale_x) + (t_y * slant) + stroke_offset
+            bottom_contour.append((b_x, b_y))
+            top_contour.append((t_x, t_y))
 
     # Continuous closed polygon: bottom from left to right, top from right to left
     polygon = bottom_contour + list(reversed(top_contour))
-    advance_width = int((max_x - min_x + 20) * scale_x)
+    advance_width = int((max_x - min_x + 20) * scale_x + stroke_offset)
     lsb = int(min_x * scale_x)
 
     return [polygon], max(advance_width, 300), max(lsb, 0)
 
 
-def _create_default_preview_image(stroke_width: int = 25, slant: float = 0.0) -> bytes:
-    """Create a deterministic sample preview image for local fallback testing."""
-    img = Image.new("L", (100, 100), color=255)
-    draw = ImageDraw.Draw(img)
-    x0 = int(20 + slant * 10)
-    x1 = int(20 + stroke_width + slant * 10)
-    draw.rectangle([x0, 15, x1, 85], fill=0)
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    return buf.getvalue()
+def extract_preview_url_from_html(html_text: str) -> str | None:
+    """Extract public preview image URL or data URI from HTML metadata and tags."""
+    # 1. OpenGraph image tag: <meta property="og:image" content="...">
+    og_m = re.search(r'<meta\s+[^>]*property=["\']og:image["\'][^>]*content=["\']([^"\']+)["\']', html_text, re.IGNORECASE)
+    if not og_m:
+        og_m = re.search(r'<meta\s+[^>]*content=["\']([^"\']+)["\'][^>]*property=["\']og:image["\']', html_text, re.IGNORECASE)
+    if og_m:
+        return og_m.group(1).strip()
+
+    # 2. Preview image tag: <img ... class="...preview..." src="...">
+    img_m = re.search(r'<img\s+[^>]*src=["\']([^"\']+)["\'][^>]*class=["\'][^"\']*preview[^"\']*["\']', html_text, re.IGNORECASE)
+    if not img_m:
+        img_m = re.search(r'<img\s+[^>]*class=["\'][^"\']*preview[^"\']*["\'][^>]*src=["\']([^"\']+)["\']', html_text, re.IGNORECASE)
+    if img_m:
+        return img_m.group(1).strip()
+
+    # 3. Generic image with preview in src: <img src="...preview...">
+    src_preview_m = re.search(r'<img\s+[^>]*src=["\']([^"\']*(?:preview|sample|render)[^"\']*\.(?:png|jpg|jpeg|webp))["\']', html_text, re.IGNORECASE)
+    if src_preview_m:
+        return src_preview_m.group(1).strip()
+
+    return None
 
 
 class SourceAcquirer:
-    def __init__(self, timeout: float = 20.0) -> None:
+    def __init__(self, timeout: float = 20.0, client: httpx.AsyncClient | None = None) -> None:
         self.timeout = timeout
+        self._external_client = client is not None
+        self.client = client or httpx.AsyncClient(timeout=timeout)
+
+    async def close(self) -> None:
+        if not self._external_client:
+            await self.client.aclose()
 
     async def acquire_source(
         self,
         source_url: str,
         styles: list[ClaimStyle],
-        client: httpx.AsyncClient | None = None,
         preview_input: bytes | dict[str, Any] | None = None,
     ) -> SourcePayload:
         """Validate source and acquire structured source payload from preview content (BLOCK B)."""
@@ -129,51 +155,105 @@ class SourceAcquirer:
         if isinstance(preview_input, dict):
             return self.from_fixture(preview_input)
 
-        # 2. If raw preview bytes are provided or network client is present:
+        # 2. If raw preview bytes are provided:
         raw_preview_bytes: bytes | None = None
         if isinstance(preview_input, bytes):
             raw_preview_bytes = preview_input
-        elif client:
+        else:
+            # 3. Live public-preview acquisition via HTTP client
             try:
-                resp = await client.get(
+                resp = await self.client.get(
                     source_url,
                     headers={"User-Agent": "TeleFont-Agent/1.0"},
                     timeout=self.timeout,
+                    follow_redirects=True,
                 )
-                if resp.status_code >= 400:
-                    raise ValueError(f"SOURCE_HTTP_ERROR_{resp.status_code}")
-
-                # Enforce size limit
-                if len(resp.content) > MAX_SOURCE_BYTES:
-                    raise ValueError("SOURCE_PAYLOAD_TOO_LARGE")
-
-                # Enforce content-type
-                content_type = resp.headers.get("content-type", "").lower()
-                if not any(ct in content_type for ct in ALLOWED_CONTENT_TYPES):
-                    raise ValueError(f"UNSUPPORTED_CONTENT_TYPE_{content_type}")
-
-                raw_preview_bytes = resp.content
             except httpx.RequestError as exc:
                 logger.warning(f"Network error during source acquisition: {exc}")
                 raise
 
-        # 3. Build style source data directly from preview content
+            if resp.status_code in (403, 429):
+                raise ValueError(f"SOURCE_ACQUISITION_BLOCKED_{resp.status_code}")
+            if resp.status_code >= 400:
+                raise ValueError(f"SOURCE_HTTP_ERROR_{resp.status_code}")
+
+            if len(resp.content) > MAX_SOURCE_BYTES:
+                raise ValueError("SOURCE_PAYLOAD_TOO_LARGE")
+
+            content_type = resp.headers.get("content-type", "").lower()
+            if not any(ct in content_type for ct in ALLOWED_CONTENT_TYPES):
+                raise ValueError(f"UNSUPPORTED_CONTENT_TYPE_{content_type}")
+
+            if any(ct in content_type for ct in ("image/png", "image/jpeg", "image/webp")):
+                raw_preview_bytes = resp.content
+            elif "application/json" in content_type:
+                try:
+                    data = resp.json()
+                    preview_field = data.get("preview_url") or data.get("image") or data.get("preview_image")
+                    if isinstance(preview_field, str) and preview_field.startswith("data:image"):
+                        # Base64 data URI
+                        header, encoded = preview_field.split(",", 1)
+                        raw_preview_bytes = base64.b64decode(encoded)
+                    elif isinstance(preview_field, str) and preview_field.startswith("http"):
+                        img_resp = await self.client.get(preview_field, timeout=self.timeout)
+                        if img_resp.status_code == 200 and len(img_resp.content) <= MAX_SOURCE_BYTES:
+                            raw_preview_bytes = img_resp.content
+                except Exception:
+                    pass
+
+                if not raw_preview_bytes:
+                    raise ValueError("NO_PUBLIC_PREVIEW_FOUND")
+
+            elif "text/html" in content_type:
+                preview_ref = extract_preview_url_from_html(resp.text)
+                if not preview_ref:
+                    raise ValueError("NO_PUBLIC_PREVIEW_FOUND")
+
+                if preview_ref.startswith("data:image"):
+                    try:
+                        header, encoded = preview_ref.split(",", 1)
+                        raw_preview_bytes = base64.b64decode(encoded)
+                    except Exception:
+                        raise ValueError("MALFORMED_DATA_URI_PREVIEW")
+                else:
+                    # Resolve relative preview URL to absolute
+                    full_img_url = urljoin(source_url, preview_ref)
+                    if not full_img_url.startswith("https://"):
+                        raise ValueError("INSECURE_PREVIEW_URL")
+
+                    img_resp = await self.client.get(full_img_url, timeout=self.timeout, follow_redirects=True)
+                    if img_resp.status_code >= 400:
+                        raise ValueError(f"PREVIEW_FETCH_ERROR_{img_resp.status_code}")
+                    if len(img_resp.content) > MAX_SOURCE_BYTES:
+                        raise ValueError("SOURCE_PAYLOAD_TOO_LARGE")
+
+                    img_ct = img_resp.headers.get("content-type", "").lower()
+                    if not any(ct in img_ct for ct in ("image/png", "image/jpeg", "image/webp")):
+                        raise ValueError(f"UNSUPPORTED_PREVIEW_CONTENT_TYPE_{img_ct}")
+
+                    raw_preview_bytes = img_resp.content
+            else:
+                raise ValueError("NO_PUBLIC_PREVIEW_FOUND")
+
+        if not raw_preview_bytes or len(raw_preview_bytes) == 0:
+            raise ValueError("NO_PUBLIC_PREVIEW_FOUND")
+
+        # 4. Build style source data directly from acquired preview content
         style_data_map: dict[str, StyleSourceData] = {}
         for s in styles:
             s_lower = s.display_name.lower()
             is_bold = "bold" in s_lower or "black" in s_lower
             is_italic = "italic" in s_lower or "oblique" in s_lower
+            stroke_offset = 15.0 if is_bold else 0.0
+            slant_val = 0.2 if is_italic else 0.0
 
-            # Use provided preview bytes or create preview based on style parameters
-            if raw_preview_bytes is not None:
-                char_contours, adv, lsb = extract_contours_from_raster_image(raw_preview_bytes)
-            else:
-                stroke_w = 40 if is_bold else 20
-                slant_val = 0.25 if is_italic else 0.0
-                sample_img = _create_default_preview_image(stroke_width=stroke_w, slant=slant_val)
-                char_contours, adv, lsb = extract_contours_from_raster_image(sample_img)
+            char_contours, adv, lsb = extract_contours_from_raster_image(
+                raw_preview_bytes,
+                scale_em=1024,
+                stroke_offset=stroke_offset,
+                slant=slant_val,
+            )
 
-            # Assign reconstructed contours to glyphs
             glyphs: dict[str, GlyphVector] = {}
             for ch in [".notdef", "space", "A", "B", "a", "b"]:
                 if ch == "space":

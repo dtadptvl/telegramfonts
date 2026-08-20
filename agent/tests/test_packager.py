@@ -1,13 +1,24 @@
 """Tests for packager, manifest generation, style_id preservation, and path security."""
+import io
 import json
 import zipfile
 from pathlib import Path
 import pytest
+from PIL import Image, ImageDraw
 
 from compute.font_builder import FontBuilderService
+from compute.models import ClaimStyle
 from compute.packager import PackagerService
 from compute.source import SourceAcquirer
-from worker_client import ClaimStyle
+
+
+def _make_test_image_bytes(stroke_x0: int = 20, stroke_x1: int = 50) -> bytes:
+    img = Image.new("L", (100, 100), color=255)
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([stroke_x0, 10, stroke_x1, 90], fill=0)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
 
 
 @pytest.mark.asyncio
@@ -16,8 +27,11 @@ async def test_package_job_output_deterministic(tmp_path: Path):
     builder = FontBuilderService()
     packager = PackagerService()
 
+    preview_bytes = _make_test_image_bytes(20, 60)
     styles = [ClaimStyle(id="rf_regular_id", display_name="Regular")]
-    payload = await source_acquirer.acquire_source("https://www.myfonts.com/collections/roboto-flex", styles)
+    payload = await source_acquirer.acquire_source(
+        "https://www.myfonts.com/collections/roboto-flex", styles, preview_input=preview_bytes
+    )
 
     file_ttf = builder.build_font(payload.styles["rf_regular_id"], "Roboto Flex", "TTF", tmp_path)
     file_woff2 = builder.build_font(payload.styles["rf_regular_id"], "Roboto Flex", "WOFF2", tmp_path)
@@ -69,8 +83,11 @@ async def test_package_sanitizes_pathlike_order_id(tmp_path: Path):
     builder = FontBuilderService()
     packager = PackagerService()
 
+    preview_bytes = _make_test_image_bytes(20, 50)
     styles = [ClaimStyle(id="rf_regular", display_name="Regular")]
-    payload = await source_acquirer.acquire_source("https://www.myfonts.com/collections/roboto-flex", styles)
+    payload = await source_acquirer.acquire_source(
+        "https://www.myfonts.com/collections/roboto-flex", styles, preview_input=preview_bytes
+    )
     file_ttf = builder.build_font(payload.styles["rf_regular"], "Roboto Flex", "TTF", tmp_path)
 
     out_dir = tmp_path / "safe_dir"
