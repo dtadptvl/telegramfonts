@@ -34,9 +34,6 @@
     ]
   },
   "vars": {
-    "BASE_URL": "https://telegramfonts-edge.dienluanphien98.workers.dev",
-    "BANK_ID": "970422",
-    "BANK_ACCOUNT_NUMBER": "0123456789",
-    "BANK_ACCOUNT_NAME": "TELEGRAMFONTS"
+    "BASE_URL": "https://telegramfonts-edge.dienluanphien98.workers.dev"
   }
 }
