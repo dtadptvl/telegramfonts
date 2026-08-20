@@ -5,9 +5,21 @@ import type {
 } from '../types/telegram';
 
 export class TelegramApiError extends Error {
-  constructor(public readonly statusCode: number, message: string) {
+  constructor(
+    public readonly statusCode: number,
+    message: string,
+    public readonly description?: string
+  ) {
     super(message);
     this.name = 'TelegramApiError';
+  }
+
+  get isMessageNotModified(): boolean {
+    return (
+      this.statusCode === 400 &&
+      typeof this.description === 'string' &&
+      this.description.toLowerCase().includes('message is not modified')
+    );
   }
 }
 
@@ -31,9 +43,18 @@ export class TelegramClient {
     });
 
     if (!res.ok) {
+      let description: string | undefined;
+      try {
+        const errorBody = (await res.json()) as { description?: string };
+        description = errorBody?.description;
+      } catch {
+        // Ignore JSON parse errors on non-2xx
+      }
+
       throw new TelegramApiError(
         res.status,
-        `Telegram sendMessage failed with HTTP status ${res.status}`
+        `Telegram sendMessage failed with HTTP status ${res.status}`,
+        description
       );
     }
 
@@ -54,9 +75,27 @@ export class TelegramClient {
     });
 
     if (!res.ok) {
+      let description: string | undefined;
+      try {
+        const errorBody = (await res.json()) as { description?: string };
+        description = errorBody?.description;
+      } catch {
+        // Ignore JSON parse errors on non-2xx
+      }
+
+      // Treat Telegram confirmed no-op edit as success
+      if (
+        res.status === 400 &&
+        description &&
+        description.toLowerCase().includes('message is not modified')
+      ) {
+        return {};
+      }
+
       throw new TelegramApiError(
         res.status,
-        `Telegram editMessageText failed with HTTP status ${res.status}`
+        `Telegram editMessageText failed with HTTP status ${res.status}`,
+        description
       );
     }
 
@@ -72,9 +111,18 @@ export class TelegramClient {
     });
 
     if (!res.ok) {
+      let description: string | undefined;
+      try {
+        const errorBody = (await res.json()) as { description?: string };
+        description = errorBody?.description;
+      } catch {
+        // Ignore JSON parse errors on non-2xx
+      }
+
       throw new TelegramApiError(
         res.status,
-        `Telegram answerCallbackQuery failed with HTTP status ${res.status}`
+        `Telegram answerCallbackQuery failed with HTTP status ${res.status}`,
+        description
       );
     }
 

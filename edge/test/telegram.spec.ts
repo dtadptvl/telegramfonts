@@ -451,6 +451,129 @@ describe('Telegram Webhook & UX Flow', () => {
 
       expect(lastEditPayload.text).toContain('Order cancelled');
     });
+
+    it('handles no-op edit and expired callback ack on APPLIED retry: response 200, ledger COMPLETED, state/version unchanged', async () => {
+      const catalogService = new CatalogService(env.DB);
+      const catalogId = await catalogService.persistCatalogResult(sampleCatalog);
+      const sessionService = new SessionService(env.DB);
+
+      await sessionService.upsertTelegramUser({ id: 88886, is_bot: false, first_name: 'NoOpRetryUser' });
+      await sessionService.getOrCreateSession('88886', '88886');
+      await sessionService.updateSessionCatalog('88886', catalogId, 'SELECTING_STYLES');
+
+      const sess0 = await sessionService.getSessionByUserId('88886');
+      await sessionService.setAllStyles('88886', sess0!.workflow_token, ['hn_regular'], sess0!.version);
+
+      const session = await sessionService.getSessionByUserId('88886');
+      const token = session!.workflow_token;
+
+      // Attempt 1: DB transition + editMessageText succeed, but answerCallbackQuery fails with 500
+      let editCount = 0;
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const urlStr = typeof input === 'string' ? input : input.toString();
+        if (urlStr.includes('editMessageText')) {
+          editCount++;
+          return new Response(JSON.stringify({ ok: true, result: { message_id: 103 } }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        if (urlStr.includes('answerCallbackQuery')) {
+          return new Response(JSON.stringify({ ok: false, error_code: 500, description: 'Ack Gateway Timeout' }), {
+            status: 500,
+          });
+        }
+        return new Response('Not found', { status: 404 });
+      };
+
+      const transUpdate: TelegramUpdate = {
+        update_id: 9992,
+        callback_query: {
+          id: 'cb_noop_retry',
+          from: { id: 88886, is_bot: false, first_name: 'NoOpRetryUser' },
+          data: `st:nxt:${token}`,
+        },
+      };
+
+      const req1 = new Request('http://example.com/webhooks/telegram', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Telegram-Bot-Api-Secret-Token': WEBHOOK_SECRET,
+        },
+        body: JSON.stringify(transUpdate),
+      });
+
+      const ctx1 = createExecutionContext();
+      const res1 = await worker.fetch(req1, testEnv, ctx1);
+      await waitOnExecutionContext(ctx1);
+      expect(res1.status).toBe(500);
+
+      const sessAfterAttempt1 = await sessionService.getSessionByUserId('88886');
+      expect(sessAfterAttempt1?.status).toBe('SELECTING_FORMATS');
+      const versionAfterAttempt1 = sessAfterAttempt1!.version;
+
+      // Attempt 2: Telegram retries with SAME update_id.
+      // Telegram editMessageText now returns 400 Bad Request: message is not modified.
+      // answerCallbackQuery returns 400 Bad Request: query is too old / invalid.
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const urlStr = typeof input === 'string' ? input : input.toString();
+        if (urlStr.includes('editMessageText')) {
+          return new Response(
+            JSON.stringify({
+              ok: false,
+              error_code: 400,
+              description: 'Bad Request: message is not modified: specified new message content and reply markup are exactly the same',
+            }),
+            {
+              status: 400,
+              headers: { 'Content-Type': 'application/json' },
+            }
+          );
+        }
+        if (urlStr.includes('answerCallbackQuery')) {
+          return new Response(
+            JSON.stringify({
+              ok: false,
+              error_code: 400,
+              description: 'Bad Request: query is too old and response timeout expired or query ID is invalid',
+            }),
+            {
+              status: 400,
+              headers: { 'Content-Type': 'application/json' },
+            }
+          );
+        }
+        return new Response('Not found', { status: 404 });
+      };
+
+      const req2 = new Request('http://example.com/webhooks/telegram', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Telegram-Bot-Api-Secret-Token': WEBHOOK_SECRET,
+        },
+        body: JSON.stringify(transUpdate),
+      });
+
+      const ctx2 = createExecutionContext();
+      const res2 = await worker.fetch(req2, testEnv, ctx2);
+      await waitOnExecutionContext(ctx2);
+
+      // Handler treats no-op edit as success and callback ack as best-effort -> returns 200
+      expect(res2.status).toBe(200);
+
+      // Ledger is now marked COMPLETED
+      const updateRow = await env.DB.prepare('SELECT * FROM telegram_updates WHERE update_id = ?')
+        .bind(9992)
+        .first<{ status: string }>();
+      expect(updateRow?.status).toBe('COMPLETED');
+
+      // State and version remain unchanged
+      const sessAfterAttempt2 = await sessionService.getSessionByUserId('88886');
+      expect(sessAfterAttempt2?.status).toBe('SELECTING_FORMATS');
+      expect(sessAfterAttempt2?.version).toBe(versionAfterAttempt1);
+    });
   });
 
   describe('User Onboarding & URL Ingestion', () => {
