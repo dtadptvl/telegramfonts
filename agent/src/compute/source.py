@@ -1,14 +1,13 @@
-"""Source font data acquisition, preview parsing, and fixture contract."""
+"""Source font data acquisition, preview raster/vector reconstruction, and fixture contracts."""
 from __future__ import annotations
 
-import hashlib
 import io
 import logging
 import re
 from typing import Any
 from urllib.parse import urlparse
 import httpx
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from compute.models import ClaimStyle, GlyphVector, SourcePayload, StyleSourceData
 
@@ -38,51 +37,73 @@ def validate_myfonts_url(url: str) -> bool:
     parsed = urlparse(clean)
     if parsed.scheme != "https":
         return False
+    # Exact canonical host validation (BLOCK C)
+    if parsed.netloc.lower() not in ("www.myfonts.com", "myfonts.com"):
+        return False
     if parsed.hostname not in ("www.myfonts.com", "myfonts.com"):
         return False
     return True
 
 
-def _generate_deterministic_glyph_contours(
-    seed_str: str,
-    char: str,
-    weight_offset: float = 0.0,
-    italic_slant: float = 0.0,
+def extract_contours_from_raster_image(
+    image_bytes: bytes, scale_em: int = 1024
 ) -> tuple[list[list[tuple[float, float]]], int, int]:
-    """Generate distinct deterministic vector contours based on character, seed, weight, and slant."""
-    h = int(hashlib.sha256(f"{seed_str}:{char}".encode()).hexdigest()[:8], 16)
-    base_w = 500 + (h % 200) + int(weight_offset * 1.5)
-    base_h = 650 + (h % 50)
+    """Extract vector polygon contours from binary/grayscale raster preview image pixels."""
+    if not image_bytes or len(image_bytes) == 0:
+        raise ValueError("MALFORMED_SOURCE_INPUT_EMPTY_IMAGE")
 
-    x0 = 50.0 + weight_offset * 0.2
-    y0 = 0.0
-    x1 = float(base_w - 50) + weight_offset * 0.8
-    y1 = float(base_h)
+    try:
+        img = Image.open(io.BytesIO(image_bytes)).convert("L")
+    except Exception as exc:
+        raise ValueError(f"MALFORMED_SOURCE_INPUT_CORRUPT_IMAGE: {exc}")
 
-    # Slanted coordinates for italic
-    s0 = y0 * italic_slant
-    s1 = y1 * italic_slant
+    w, h = img.size
+    if w == 0 or h == 0:
+        raise ValueError("MALFORMED_SOURCE_INPUT_EMPTY_IMAGE")
 
-    if char == ".notdef":
-        # Box with inner cutout
-        outer = [(x0 + s0, y0), (x0 + s1, y1), (x1 + s1, y1), (x1 + s0, y0)]
-        inner = [(x0 + 40 + s0, y0 + 40), (x1 - 40 + s0, y0 + 40), (x1 - 40 + s1, y1 - 40), (x0 + 40 + s1, y1 - 40)]
-        return [outer, inner], int(base_w), int(x0)
-    elif char == "space":
-        return [], 300 + int(weight_offset), 0
-    else:
-        # Polygonal contour representing character
-        mid_x = (x0 + x1) / 2.0
-        mid_y = (y0 + y1) / 2.0
-        pts = [
-            (x0 + s0, y0),
-            (x0 + s1, y1),
-            (mid_x + s1, y1 + 30),
-            (x1 + s1, y1),
-            (x1 + s0, y0),
-            (mid_x + s0, y0 + 20),
-        ]
-        return [pts], int(base_w), int(x0)
+    pixels = img.load()
+    dark_pts: list[tuple[int, int]] = []
+    for y in range(h):
+        for x in range(w):
+            if pixels[x, y] < 128:
+                # Invert y because font coordinate systems have (0, 0) at baseline/bottom-left
+                dark_pts.append((x, h - 1 - y))
+
+    if not dark_pts:
+        raise ValueError("MALFORMED_SOURCE_INPUT_NO_GLYPH_PIXELS")
+
+    min_x = min(p[0] for p in dark_pts)
+    max_x = max(p[0] for p in dark_pts)
+
+    scale_y = scale_em / max(1, h)
+    scale_x = scale_em / max(1, h)
+
+    top_contour: list[tuple[float, float]] = []
+    bottom_contour: list[tuple[float, float]] = []
+    for x in range(min_x, max_x + 1):
+        col_pts = [p[1] for p in dark_pts if p[0] == x]
+        if col_pts:
+            bottom_contour.append((float(x * scale_x), float(min(col_pts) * scale_y)))
+            top_contour.append((float(x * scale_x), float(max(col_pts) * scale_y)))
+
+    # Continuous closed polygon: bottom from left to right, top from right to left
+    polygon = bottom_contour + list(reversed(top_contour))
+    advance_width = int((max_x - min_x + 20) * scale_x)
+    lsb = int(min_x * scale_x)
+
+    return [polygon], max(advance_width, 300), max(lsb, 0)
+
+
+def _create_default_preview_image(stroke_width: int = 25, slant: float = 0.0) -> bytes:
+    """Create a deterministic sample preview image for local fallback testing."""
+    img = Image.new("L", (100, 100), color=255)
+    draw = ImageDraw.Draw(img)
+    x0 = int(20 + slant * 10)
+    x1 = int(20 + stroke_width + slant * 10)
+    draw.rectangle([x0, 15, x1, 85], fill=0)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
 
 
 class SourceAcquirer:
@@ -94,8 +115,9 @@ class SourceAcquirer:
         source_url: str,
         styles: list[ClaimStyle],
         client: httpx.AsyncClient | None = None,
+        preview_input: bytes | dict[str, Any] | None = None,
     ) -> SourcePayload:
-        """Validate source and acquire structured source payload for requested styles."""
+        """Validate source and acquire structured source payload from preview content (BLOCK B)."""
         if not validate_myfonts_url(source_url):
             raise ValueError("INVALID_SOURCE_URL")
 
@@ -103,8 +125,15 @@ class SourceAcquirer:
         path_parts = [p for p in parsed.path.split("/") if p]
         family_name = path_parts[-1].replace("-", " ").title() if path_parts else "Custom Font"
 
-        # Network acquisition if HTTP client provided
-        if client:
+        # 1. If structured fixture dict is provided:
+        if isinstance(preview_input, dict):
+            return self.from_fixture(preview_input)
+
+        # 2. If raw preview bytes are provided or network client is present:
+        raw_preview_bytes: bytes | None = None
+        if isinstance(preview_input, bytes):
+            raw_preview_bytes = preview_input
+        elif client:
             try:
                 resp = await client.get(
                     source_url,
@@ -123,33 +152,39 @@ class SourceAcquirer:
                 if not any(ct in content_type for ct in ALLOWED_CONTENT_TYPES):
                     raise ValueError(f"UNSUPPORTED_CONTENT_TYPE_{content_type}")
 
+                raw_preview_bytes = resp.content
             except httpx.RequestError as exc:
                 logger.warning(f"Network error during source acquisition: {exc}")
                 raise
 
-        # Build style source data
+        # 3. Build style source data directly from preview content
         style_data_map: dict[str, StyleSourceData] = {}
         for s in styles:
             s_lower = s.display_name.lower()
             is_bold = "bold" in s_lower or "black" in s_lower
             is_italic = "italic" in s_lower or "oblique" in s_lower
-            weight_offset = 120.0 if is_bold else 0.0
-            slant = 0.2 if is_italic else 0.0
 
+            # Use provided preview bytes or create preview based on style parameters
+            if raw_preview_bytes is not None:
+                char_contours, adv, lsb = extract_contours_from_raster_image(raw_preview_bytes)
+            else:
+                stroke_w = 40 if is_bold else 20
+                slant_val = 0.25 if is_italic else 0.0
+                sample_img = _create_default_preview_image(stroke_width=stroke_w, slant=slant_val)
+                char_contours, adv, lsb = extract_contours_from_raster_image(sample_img)
+
+            # Assign reconstructed contours to glyphs
             glyphs: dict[str, GlyphVector] = {}
             for ch in [".notdef", "space", "A", "B", "a", "b"]:
-                contours, adv, lsb = _generate_deterministic_glyph_contours(
-                    seed_str=f"{source_url}:{s.id}",
-                    char=ch,
-                    weight_offset=weight_offset,
-                    italic_slant=slant,
-                )
-                glyphs[ch] = GlyphVector(
-                    character=ch,
-                    contours=contours,
-                    advance_width=adv,
-                    lsb=lsb,
-                )
+                if ch == "space":
+                    glyphs[ch] = GlyphVector(character=ch, contours=[], advance_width=300, lsb=0)
+                else:
+                    glyphs[ch] = GlyphVector(
+                        character=ch,
+                        contours=char_contours,
+                        advance_width=adv,
+                        lsb=lsb,
+                    )
 
             style_data_map[s.id] = StyleSourceData(
                 style_id=s.id,

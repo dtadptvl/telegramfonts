@@ -1,9 +1,24 @@
-"""Tests for source acquisition, URL validation, and preview parsing."""
+"""Tests for source acquisition, preview raster/vector reconstruction, and URL validation."""
+import io
 import httpx
 import pytest
+from PIL import Image, ImageDraw
 
-from compute.source import SourceAcquirer, validate_myfonts_url
-from worker_client import ClaimStyle
+from compute.models import ClaimStyle
+from compute.source import (
+    SourceAcquirer,
+    extract_contours_from_raster_image,
+    validate_myfonts_url,
+)
+
+
+def _make_test_image_bytes(stroke_x0: int, stroke_x1: int) -> bytes:
+    img = Image.new("L", (100, 100), color=255)
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([stroke_x0, 10, stroke_x1, 90], fill=0)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
 
 
 def test_validate_myfonts_url():
@@ -21,47 +36,41 @@ def test_validate_myfonts_url():
 
 
 @pytest.mark.asyncio
-async def test_source_acquirer_distinct_fixture_inputs():
+async def test_distinct_preview_contents_produce_distinct_glyphs_with_same_url():
     acquirer = SourceAcquirer()
+    styles = [ClaimStyle(id="reg", display_name="Regular")]
+    url = "https://www.myfonts.com/collections/roboto-flex"
 
-    fixture_1 = {
-        "source_url": "https://www.myfonts.com/collections/roboto-flex",
-        "family_name": "Roboto Flex",
-        "styles": [
-            {
-                "style_id": "reg",
-                "style_name": "Regular",
-                "glyphs": {
-                    ".notdef": {"contours": [[(50, 0), (50, 500), (250, 500), (250, 0)]], "advance_width": 300, "lsb": 50},
-                    "A": {"contours": [[(100, 0), (100, 700), (500, 700), (500, 0)]], "advance_width": 600, "lsb": 100},
-                },
-            }
-        ],
-    }
+    preview_img_1 = _make_test_image_bytes(10, 30)  # Thin stroke
+    preview_img_2 = _make_test_image_bytes(10, 80)  # Wide stroke
 
-    fixture_2 = {
-        "source_url": "https://www.myfonts.com/collections/roboto-flex",
-        "family_name": "Roboto Flex",
-        "styles": [
-            {
-                "style_id": "reg",
-                "style_name": "Regular",
-                "glyphs": {
-                    ".notdef": {"contours": [[(50, 0), (50, 600), (350, 600), (350, 0)]], "advance_width": 400, "lsb": 50},
-                    "A": {"contours": [[(50, 0), (50, 800), (700, 800), (700, 0)]], "advance_width": 800, "lsb": 50},
-                },
-            }
-        ],
-    }
+    # Same URL/style with two distinct preview contents (BLOCK B)
+    p1 = await acquirer.acquire_source(url, styles, preview_input=preview_img_1)
+    p2 = await acquirer.acquire_source(url, styles, preview_input=preview_img_2)
 
-    p1 = acquirer.from_fixture(fixture_1)
-    p2 = acquirer.from_fixture(fixture_2)
-
-    # Two distinct fixture contents for the same URL/style produce distinct source glyph data (BLOCK B)
     g1 = p1.styles["reg"].glyphs["A"]
     g2 = p2.styles["reg"].glyphs["A"]
     assert g1.advance_width != g2.advance_width
     assert g1.contours != g2.contours
+
+
+@pytest.mark.asyncio
+async def test_changing_only_url_with_identical_content_produces_identical_glyphs():
+    acquirer = SourceAcquirer()
+    styles = [ClaimStyle(id="reg", display_name="Regular")]
+    preview_img = _make_test_image_bytes(20, 50)
+
+    url_1 = "https://www.myfonts.com/collections/roboto-flex"
+    url_2 = "https://www.myfonts.com/collections/helvetica-now"
+
+    p1 = await acquirer.acquire_source(url_1, styles, preview_input=preview_img)
+    p2 = await acquirer.acquire_source(url_2, styles, preview_input=preview_img)
+
+    # Identical content yields identical reconstructed glyph contours (no URL hashing)
+    g1 = p1.styles["reg"].glyphs["A"]
+    g2 = p2.styles["reg"].glyphs["A"]
+    assert g1.advance_width == g2.advance_width
+    assert g1.contours == g2.contours
 
 
 @pytest.mark.asyncio
@@ -96,6 +105,9 @@ def test_raster_preview_and_fixture_fail_closed():
     # Corrupt image bytes fails closed
     with pytest.raises(ValueError, match="MALFORMED_SOURCE_INPUT"):
         acquirer.parse_raster_preview(b"GARBAGE_NON_IMAGE_BYTES")
+
+    with pytest.raises(ValueError, match="MALFORMED_SOURCE_INPUT"):
+        extract_contours_from_raster_image(b"CORRUPT_BYTES")
 
     # Malformed fixture fails closed
     with pytest.raises(ValueError, match="MALFORMED_SOURCE_INPUT"):
