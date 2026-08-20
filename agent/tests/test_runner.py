@@ -1,4 +1,4 @@
-"""Tests for A23 Runner lifecycle, state machine, consumer loop, and lease deadlines."""
+"""Tests for A23 Runner lifecycle, state machine, consumer loop, off-thread compute, and lease safety."""
 import asyncio
 import json
 import time
@@ -6,6 +6,7 @@ import httpx
 import pytest
 from pathlib import Path
 
+from compute.font_builder import FontBuilderService
 from compute.packager import PackagerService
 from config import Settings
 from queue_client import CloudflareQueueClient, QueueMessage
@@ -132,6 +133,149 @@ async def test_runner_successful_compute_hold_for_completion_and_no_recompute(te
 
 
 @pytest.mark.asyncio
+async def test_runner_heartbeat_runs_concurrently_during_slow_build(test_settings: Settings):
+    heartbeat_calls = 0
+
+    def queue_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"success": True})
+
+    def worker_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal heartbeat_calls
+        if "claim" in request.url.path:
+            return httpx.Response(
+                200,
+                json={
+                    "job_id": "job_slow_build",
+                    "order_id": "ord_slow_build",
+                    "lease_token": "12345678-1234-1234-1234-123456789abc",
+                    "lease_expires_at": int(time.time() * 1000) + 120000,
+                    "source_url": "https://www.myfonts.com/collections/roboto-flex",
+                    "family_name": "Roboto Flex",
+                    "styles": [{"id": "reg", "display_name": "Regular"}],
+                    "formats": ["TTF"],
+                },
+            )
+        if "heartbeat" in request.url.path:
+            heartbeat_calls += 1
+            return httpx.Response(200, json={"success": True, "lease_expires_at": int(time.time() * 1000) + 120000})
+        return httpx.Response(404)
+
+    class SlowBuilder(FontBuilderService):
+        def build_font(self, *args, **kwargs):
+            time.sleep(1.2)  # Simulates slow CPU font build
+            return super().build_font(*args, **kwargs)
+
+    # Use 1s heartbeat interval
+    fast_hb_settings = test_settings.model_copy(update={"HEARTBEAT_INTERVAL_SECONDS": 1, "LEASE_DURATION_SECONDS": 60})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(queue_handler)) as q_http, \
+               httpx.AsyncClient(transport=httpx.MockTransport(worker_handler)) as w_http:
+        q_client = CloudflareQueueClient(fast_hb_settings, client=q_http)
+        w_client = WorkerJobClient(fast_hb_settings, client=w_http)
+        runner = A23Runner(fast_hb_settings, q_client, w_client, font_builder=SlowBuilder())
+
+        msg = QueueMessage(id="m1", lease_id="l_hb", body_raw='{"job_id":"job_slow_build"}', attempts=1, job_id="job_slow_build")
+        res = await runner.process_message(msg)
+
+        # Heartbeat loop ran concurrently during the CPU build
+        assert heartbeat_calls >= 1
+        assert res.action == RunnerAction.HOLD_FOR_COMPLETION
+
+
+@pytest.mark.asyncio
+async def test_runner_fenced_heartbeat_during_build_aborts_without_hold(test_settings: Settings):
+    def queue_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"success": True})
+
+    def worker_handler(request: httpx.Request) -> httpx.Response:
+        if "claim" in request.url.path:
+            return httpx.Response(
+                200,
+                json={
+                    "job_id": "job_fenced_build",
+                    "order_id": "ord_fenced_build",
+                    "lease_token": "12345678-1234-1234-1234-123456789abc",
+                    "lease_expires_at": int(time.time() * 1000) + 120000,
+                    "source_url": "https://www.myfonts.com/collections/roboto-flex",
+                    "family_name": "Roboto Flex",
+                    "styles": [{"id": "reg", "display_name": "Regular"}],
+                    "formats": ["TTF"],
+                },
+            )
+        if "heartbeat" in request.url.path:
+            # Heartbeat returns 409 fenced
+            return httpx.Response(409, json={"status": "FENCED"})
+        if "fail" in request.url.path:
+            return httpx.Response(200, json={"success": True, "status": "FAILED", "queue_action": "ack"})
+        return httpx.Response(404)
+
+    class SlowBuilder(FontBuilderService):
+        def build_font(self, *args, **kwargs):
+            time.sleep(1.2)
+            return super().build_font(*args, **kwargs)
+
+    fast_hb_settings = test_settings.model_copy(update={"HEARTBEAT_INTERVAL_SECONDS": 1, "LEASE_DURATION_SECONDS": 60})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(queue_handler)) as q_http, \
+               httpx.AsyncClient(transport=httpx.MockTransport(worker_handler)) as w_http:
+        q_client = CloudflareQueueClient(fast_hb_settings, client=q_http)
+        w_client = WorkerJobClient(fast_hb_settings, client=w_http)
+        runner = A23Runner(fast_hb_settings, q_client, w_client, font_builder=SlowBuilder())
+
+        msg = QueueMessage(id="m1", lease_id="l_fn", body_raw='{"job_id":"job_fenced_build"}', attempts=1, job_id="job_fenced_build")
+        res = await runner.process_message(msg)
+
+        # Fenced heartbeat immediately aborts with FENCED_ABORT; no HOLD result
+        assert res.action == RunnerAction.FENCED_ABORT
+
+
+@pytest.mark.asyncio
+async def test_runner_slow_packaging_crossing_expiry_aborts_without_hold(test_settings: Settings):
+    def queue_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"success": True})
+
+    def worker_handler(request: httpx.Request) -> httpx.Response:
+        if "claim" in request.url.path:
+            # 15.5s left on lease at start (< 15s safety margin after 1s delay)
+            return httpx.Response(
+                200,
+                json={
+                    "job_id": "job_slow_pkg",
+                    "order_id": "ord_slow_pkg",
+                    "lease_token": "12345678-1234-1234-1234-123456789abc",
+                    "lease_expires_at": int(time.time() * 1000) + 15500,
+                    "source_url": "https://www.myfonts.com/collections/roboto-flex",
+                    "family_name": "Roboto Flex",
+                    "styles": [{"id": "reg", "display_name": "Regular"}],
+                    "formats": ["TTF"],
+                },
+            )
+        if "heartbeat" in request.url.path:
+            return httpx.Response(500)
+        if "fail" in request.url.path:
+            return httpx.Response(200, json={"success": True, "status": "FAILED", "queue_action": "ack"})
+        return httpx.Response(404)
+
+    class SlowPackager(PackagerService):
+        def package_job_output(self, *args, **kwargs):
+            res = super().package_job_output(*args, **kwargs)
+            time.sleep(1.0)
+            return res
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(queue_handler)) as q_http, \
+               httpx.AsyncClient(transport=httpx.MockTransport(worker_handler)) as w_http:
+        q_client = CloudflareQueueClient(test_settings, client=q_http)
+        w_client = WorkerJobClient(test_settings, client=w_http)
+        runner = A23Runner(test_settings, q_client, w_client, packager=SlowPackager())
+
+        msg = QueueMessage(id="m1", lease_id="l_slow", body_raw='{"job_id":"job_slow_pkg"}', attempts=1, job_id="job_slow_pkg")
+        res = await runner.process_message(msg)
+
+        # Lease deadline crossing during slow packaging results in abort, not HOLD
+        assert res.action != RunnerAction.HOLD_FOR_COMPLETION
+
+
+@pytest.mark.asyncio
 async def test_runner_run_once_and_run_loop(test_settings: Settings):
     pull_count = 0
 
@@ -169,52 +313,3 @@ async def test_runner_run_once_and_run_loop(test_settings: Settings):
         # 2. run_loop with bounded max_iterations
         await runner.run_loop(max_iterations=2)
         assert pull_count >= 2
-
-
-@pytest.mark.asyncio
-async def test_runner_slow_packaging_crossing_expiry_aborts_without_hold(test_settings: Settings):
-    def queue_handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"success": True})
-
-    def worker_handler(request: httpx.Request) -> httpx.Response:
-        if "claim" in request.url.path:
-            # 15.5s left on lease at start (< 15s safety margin after 1s delay)
-            return httpx.Response(
-                200,
-                json={
-                    "job_id": "job_slow_pkg",
-                    "order_id": "ord_slow_pkg",
-                    "lease_token": "12345678-1234-1234-1234-123456789abc",
-                    "lease_expires_at": int(time.time() * 1000) + 15500,
-                    "source_url": "https://www.myfonts.com/collections/roboto-flex",
-                    "family_name": "Roboto Flex",
-                    "styles": [{"id": "reg", "display_name": "Regular"}],
-                    "formats": ["TTF"],
-                },
-            )
-        if "heartbeat" in request.url.path:
-            return httpx.Response(500)
-        if "fail" in request.url.path:
-            return httpx.Response(200, json={"success": True, "status": "FAILED", "queue_action": "ack"})
-        return httpx.Response(404)
-
-    class SlowPackager(PackagerService):
-        def package_job_output(self, *args, **kwargs):
-            res = super().package_job_output(*args, **kwargs)
-            # Simulate packaging delay that crosses the 15s safety margin deadline
-            import time
-            time.sleep(1.0)
-            # Advance time by manipulating system clock or sleeping
-            return res
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(queue_handler)) as q_http, \
-               httpx.AsyncClient(transport=httpx.MockTransport(worker_handler)) as w_http:
-        q_client = CloudflareQueueClient(test_settings, client=q_http)
-        w_client = WorkerJobClient(test_settings, client=w_http)
-        runner = A23Runner(test_settings, q_client, w_client, packager=SlowPackager())
-
-        msg = QueueMessage(id="m1", lease_id="l_slow", body_raw='{"job_id":"job_slow_pkg"}', attempts=1, job_id="job_slow_pkg")
-        res = await runner.process_message(msg)
-
-        # Lease deadline crossing during slow packaging results in abort, not HOLD (BLOCK D)
-        assert res.action != RunnerAction.HOLD_FOR_COMPLETION

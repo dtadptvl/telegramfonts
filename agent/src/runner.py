@@ -12,8 +12,10 @@ from typing import Any
 from config import Settings
 from compute import (
     FontBuilderService,
+    GeneratedFontFile,
     PackagerService,
     SourceAcquirer,
+    SourcePayload,
     StagedManifest,
     validate_font_file,
 )
@@ -110,7 +112,75 @@ class A23Runner:
                     fenced_event.set()
                     break
 
-    async def process_message(self, msg: QueueMessage) -> ProcessResult:
+    def _sync_build_validate_and_package(
+        self,
+        source_payload: SourcePayload,
+        job: ClaimedJob,
+        job_dir: Path,
+        fenced_event: asyncio.Event,
+        expiry_holder: list[int],
+    ) -> StagedManifest:
+        """Synchronous CPU/file compute pipeline executed off the event loop."""
+        family_name = job.family_name or source_payload.family_name or "TeleFont"
+        generated_files: list[GeneratedFontFile] = []
+
+        for style in job.styles:
+            style_source = source_payload.styles.get(style.id)
+            if not style_source:
+                raise ValueError(f"MISSING_STYLE_SOURCE_DATA_{style.id}")
+
+            for fmt in job.formats:
+                # Check lease safety deadline during compute iteration
+                now_ms = int(time.time() * 1000)
+                if fenced_event.is_set() or (now_ms + LEASE_SAFETY_MARGIN_MS >= expiry_holder[0]):
+                    raise RuntimeError("LEASE_FENCED_OR_EXPIRED")
+
+                if fmt not in ("TTF", "OTF", "WOFF2"):
+                    raise ValueError(f"UNSUPPORTED_FORMAT_{fmt}")
+
+                font_file = self.font_builder.build_font(
+                    style_source=style_source,
+                    family_name=family_name,
+                    format_type=fmt,
+                    output_dir=job_dir,
+                )
+
+                # Validate generated font binary (BLOCK G)
+                if not validate_font_file(font_file.file_path, fmt):
+                    raise ValueError(f"GENERATED_FONT_INVALID_{fmt}")
+
+                generated_files.append(font_file)
+
+        if not generated_files:
+            raise ValueError("NO_FILES_GENERATED")
+
+        # Lease safety check before packaging
+        now_ms_pre_pkg = int(time.time() * 1000)
+        if fenced_event.is_set() or (now_ms_pre_pkg + LEASE_SAFETY_MARGIN_MS >= expiry_holder[0]):
+            raise RuntimeError("LEASE_FENCED_OR_EXPIRED")
+
+        # Package outputs into deterministic ZIP and manifest (BLOCK E & BLOCK C)
+        manifest = self.packager.package_job_output(
+            job_id=job.job_id,
+            order_id=job.order_id,
+            family_name=family_name,
+            files=generated_files,
+            output_dir=job_dir,
+        )
+
+        # Final authoritative lease check after packaging and before accepting HOLD (BLOCK D)
+        now_ms_post_pkg = int(time.time() * 1000)
+        if fenced_event.is_set() or (now_ms_post_pkg + LEASE_SAFETY_MARGIN_MS >= expiry_holder[0]):
+            self.scratch_manager.cleanup_job_dir(job_dir)
+            raise RuntimeError("LEASE_FENCED_OR_EXPIRED")
+
+        return manifest
+
+    async def process_message(
+        self,
+        msg: QueueMessage,
+        preview_input: bytes | dict[str, Any] | None = None,
+    ) -> ProcessResult:
         logger.info(f"Processing message {msg.id} (attempts: {msg.attempts})")
 
         # 1. Validate payload contains job_id
@@ -156,58 +226,22 @@ class A23Runner:
         )
 
         try:
-            # Step A: Validate and acquire source payload (BLOCK B)
-            source_payload = await self.source_acquirer.acquire_source(job.source_url, job.styles)
-
-            # Step B: Generate requested styles and formats from source data
-            generated_files = []
-            family_name = job.family_name or source_payload.family_name or "TeleFont"
-
-            for style in job.styles:
-                style_source = source_payload.styles.get(style.id)
-                if not style_source:
-                    raise ValueError(f"MISSING_STYLE_SOURCE_DATA_{style.id}")
-
-                for fmt in job.formats:
-                    # Check lease safety deadline (BLOCK D)
-                    now_ms = int(time.time() * 1000)
-                    if fenced_event.is_set() or (now_ms + LEASE_SAFETY_MARGIN_MS >= expiry_holder[0]):
-                        raise RuntimeError("LEASE_FENCED_OR_EXPIRED")
-
-                    if fmt not in ("TTF", "OTF", "WOFF2"):
-                        raise ValueError(f"UNSUPPORTED_FORMAT_{fmt}")
-
-                    font_file = self.font_builder.build_font(
-                        style_source=style_source,
-                        family_name=family_name,
-                        format_type=fmt,
-                        output_dir=job_dir,
-                    )
-
-                    # Validate generated font binary
-                    if not validate_font_file(font_file.file_path, fmt):
-                        raise ValueError(f"GENERATED_FONT_INVALID_{fmt}")
-
-                    generated_files.append(font_file)
-
-            if not generated_files:
-                raise ValueError("NO_FILES_GENERATED")
-
-            # Step C: Package outputs into deterministic ZIP and manifest (BLOCK E & BLOCK C)
-            manifest = self.packager.package_job_output(
-                job_id=job.job_id,
-                order_id=job.order_id,
-                family_name=family_name,
-                files=generated_files,
-                output_dir=job_dir,
+            # Step A: Validate and acquire source payload from real preview content (BLOCK B)
+            source_payload = await self.source_acquirer.acquire_source(
+                source_url=job.source_url,
+                styles=job.styles,
+                preview_input=preview_input,
             )
 
-            # Final authoritative lease check after packaging and before accepting HOLD (BLOCK D)
-            now_ms_post_pkg = int(time.time() * 1000)
-            if fenced_event.is_set() or (now_ms_post_pkg + LEASE_SAFETY_MARGIN_MS >= expiry_holder[0]):
-                # Cleanup staged files so nothing publishable remains
-                self.scratch_manager.cleanup_job_dir(job_dir)
-                raise RuntimeError("LEASE_FENCED_OR_EXPIRED")
+            # Step B & C: Build fonts, validate, and package in a worker thread off the event loop
+            manifest = await asyncio.to_thread(
+                self._sync_build_validate_and_package,
+                source_payload,
+                job,
+                job_dir,
+                fenced_event,
+                expiry_holder,
+            )
 
             self.held_job_ids.add(job.job_id)
             logger.info(
@@ -296,7 +330,6 @@ class A23Runner:
             try:
                 messages = await self.queue_client.pull_messages()
                 if not messages:
-                    # Idle backoff
                     await asyncio.sleep(self.settings.IDLE_BACKOFF_SECONDS)
                     continue
 
