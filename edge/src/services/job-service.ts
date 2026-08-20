@@ -228,7 +228,7 @@ export class JobService {
     let sourceUrl = '';
     let familyName: string | undefined;
     let foundry: string | undefined;
-    let formats: string[] = ['TTF'];
+    let formats: string[] = [];
 
     try {
       const parsedMeta = JSON.parse(order.metadata || '{}') as Record<string, unknown>;
@@ -236,9 +236,10 @@ export class JobService {
         throw new Error('invalid_metadata_type');
       }
 
+      // Must be canonical MyFonts HTTPS URL (BLOCK B)
       if (
         typeof parsedMeta.source_url !== 'string' ||
-        !/^https?:\/\/.+/.test(parsedMeta.source_url.trim())
+        !/^https:\/\/(www\.)?myfonts\.com\/[a-zA-Z0-9_\-\/]+$/.test(parsedMeta.source_url.trim())
       ) {
         throw new Error('invalid_source_url');
       }
@@ -251,17 +252,29 @@ export class JobService {
         foundry = parsedMeta.foundry.trim().slice(0, 128);
       }
 
-      if (Array.isArray(parsedMeta.selected_formats) && parsedMeta.selected_formats.length > 0) {
-        const validatedFormats = parsedMeta.selected_formats
-          .filter((f): f is string => typeof f === 'string')
-          .map((f) => f.trim().toUpperCase())
-          .filter((f) => ALLOWED_FORMATS.has(f));
-
-        if (validatedFormats.length === 0) {
-          throw new Error('no_valid_formats');
-        }
-        formats = Array.from(new Set(validatedFormats));
+      // Formats must be non-empty array with only supported values (no fallback default!) (BLOCK B)
+      if (!Array.isArray(parsedMeta.selected_formats) || parsedMeta.selected_formats.length === 0) {
+        throw new Error('missing_or_empty_formats');
       }
+
+      const validatedFormats: string[] = [];
+      for (const f of parsedMeta.selected_formats) {
+        if (typeof f !== 'string') {
+          throw new Error('non_string_format');
+        }
+        const upper = f.trim().toUpperCase();
+        if (!ALLOWED_FORMATS.has(upper)) {
+          throw new Error(`unsupported_format_${upper}`);
+        }
+        if (!validatedFormats.includes(upper)) {
+          validatedFormats.push(upper);
+        }
+      }
+
+      if (validatedFormats.length === 0) {
+        throw new Error('no_valid_formats');
+      }
+      formats = validatedFormats;
     } catch {
       return {
         status: 'MALFORMED_METADATA',
@@ -283,12 +296,20 @@ export class JobService {
       };
     }
 
-    const styles = items.results
-      .filter((i) => typeof i.font_id === 'string' && i.font_id.trim())
-      .map((i) => ({
+    const styles: Array<{ id: string; display_name: string }> = [];
+    for (const i of items.results) {
+      if (typeof i.font_id !== 'string' || !i.font_id.trim()) {
+        return {
+          status: 'MALFORMED_METADATA',
+          queue_action: 'retry',
+          reason: 'invalid_font_id_in_order_items',
+        };
+      }
+      styles.push({
         id: i.font_id.trim(),
         display_name: (i.font_name && i.font_name.trim()) || i.font_id.trim(),
-      }));
+      });
+    }
 
     return {
       status: 'CLAIMED',

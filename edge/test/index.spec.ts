@@ -48,7 +48,36 @@ describe('Worker Routes', () => {
     const mockDb: Partial<D1Database> = {
       prepare: () => ({
         bind: () => ({} as D1PreparedStatement),
-        first: async () => ({ count: 2 }), // Incomplete table count
+        first: async () => ({ table_count: 2, has_outbox_lease: 0, has_job_lease: 0, has_payment_code: 0 }),
+        all: async () => ({ results: [], success: true, meta: {} as D1Meta }),
+        run: async () => ({ success: true, meta: {} as D1Meta }),
+        raw: async () => [],
+      } as unknown as D1PreparedStatement),
+    };
+    const mockEnv: Env = {
+      ...(env as unknown as Env),
+      DB: mockDb as D1Database,
+    };
+    const response = await worker.fetch(request, mockEnv, ctx);
+    await waitOnExecutionContext(ctx);
+
+    expect(response.status).toBe(503);
+    const body = await response.json();
+    expect(body).toEqual({ status: 'unavailable' });
+  });
+
+  it('GET /ready returns 503 when tables exist but migration 0004 columns are missing (pre-0004 schema) (BLOCK A)', async () => {
+    const request = new Request('http://example.com/ready', { method: 'GET' });
+    const ctx = createExecutionContext();
+    const mockDb: Partial<D1Database> = {
+      prepare: () => ({
+        bind: () => ({} as D1PreparedStatement),
+        first: async () => ({
+          table_count: 12, // all 12 tables exist
+          has_outbox_lease: 0, // missing migration 0004 column
+          has_job_lease: 1,
+          has_payment_code: 1,
+        }),
         all: async () => ({ results: [], success: true, meta: {} as D1Meta }),
         run: async () => ({ success: true, meta: {} as D1Meta }),
         raw: async () => [],

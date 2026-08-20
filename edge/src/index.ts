@@ -5,10 +5,16 @@ import { handleInternalJobs } from './handlers/internal-jobs';
 import { OutboxService } from './services/outbox-service';
 
 const REQUIRED_TABLES_COUNT = 12;
-const SCHEMA_CHECK_QUERY = `SELECT count(*) as count FROM sqlite_master WHERE type='table' AND name IN (
-  'orders', 'order_items', 'payments', 'fulfillment_jobs', 'outbox_events', 'artifacts',
-  'telegram_users', 'telegram_updates', 'catalogs', 'catalog_styles', 'catalog_requests', 'telegram_sessions'
-)`;
+const SCHEMA_CHECK_QUERY = `
+  SELECT
+    (SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN (
+      'orders', 'order_items', 'payments', 'fulfillment_jobs', 'outbox_events', 'artifacts',
+      'telegram_users', 'telegram_updates', 'catalogs', 'catalog_styles', 'catalog_requests', 'telegram_sessions'
+    )) as table_count,
+    (SELECT count(*) FROM pragma_table_info('outbox_events') WHERE name = 'dispatch_lease_token') as has_outbox_lease,
+    (SELECT count(*) FROM pragma_table_info('fulfillment_jobs') WHERE name = 'lease_token') as has_job_lease,
+    (SELECT count(*) FROM pragma_table_info('orders') WHERE name = 'payment_code') as has_payment_code
+`;
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -30,8 +36,20 @@ export default {
           });
         }
 
-        const result = await env.DB.prepare(SCHEMA_CHECK_QUERY).first<{ count: number }>();
-        if (result && result.count === REQUIRED_TABLES_COUNT) {
+        const result = await env.DB.prepare(SCHEMA_CHECK_QUERY).first<{
+          table_count: number;
+          has_outbox_lease: number;
+          has_job_lease: number;
+          has_payment_code: number;
+        }>();
+
+        if (
+          result &&
+          result.table_count === REQUIRED_TABLES_COUNT &&
+          result.has_outbox_lease === 1 &&
+          result.has_job_lease === 1 &&
+          result.has_payment_code === 1
+        ) {
           return new Response(JSON.stringify({ status: 'ready', database: 'connected' }), {
             status: 200,
             headers: { 'Content-Type': 'application/json' },
