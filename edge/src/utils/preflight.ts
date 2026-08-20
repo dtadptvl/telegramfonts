@@ -50,6 +50,9 @@ export interface WranglerConfig {
   };
   r2_buckets?: WranglerR2BucketConfig[];
   services?: unknown[];
+  triggers?: {
+    crons?: string[];
+  };
 }
 
 export function validateWranglerConfig(
