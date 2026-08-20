@@ -1,7 +1,7 @@
 {
-  "git_sha": "625ee07fb43e32bc1f171994a38aa9f43ee36a9a",
+  "git_sha": "eb186d5c7b169f74e664046263a6d0d220c1504b",
   "git_is_dirty": true,
-  "timestamp": "2026-08-20T16:43:13Z",
+  "timestamp": "2026-08-20T16:55:23Z",
   "is_production_proof": false,
   "is_valid": true,
   "device_identity": {
@@ -26,32 +26,32 @@
   "samples_count": 5,
   "success_count": 5,
   "failure_count": 0,
-  "p50_total_ms": 1450.51,
-  "p95_total_ms": 1482.93,
-  "min_total_ms": 1381.76,
-  "max_total_ms": 1484.81,
-  "mean_total_ms": 1437.32,
+  "p50_total_ms": 1610.84,
+  "p95_total_ms": 1733.92,
+  "min_total_ms": 1339.23,
+  "max_total_ms": 1763.15,
+  "mean_total_ms": 1581.21,
   "p95_stage_ms": {
-    "acquire_ms": 1361.53,
-    "build_ms": 127.37,
-    "validate_ms": 3.04,
-    "package_ms": 2.53
+    "acquire_ms": 1582.91,
+    "build_ms": 146.61,
+    "validate_ms": 2.87,
+    "package_ms": 2.6
   },
-  "avg_artifact_size_bytes": 4904,
+  "avg_artifact_size_bytes": 4913,
   "peak_rss_mb": 0.0,
   "capacity_model": {
     "status": "VALID",
     "target_1000_jobs_day": {
       "arrival_rate_sec": 86.4,
       "required_consumers": 1,
-      "steady_state_utilization_at_1_worker": 1.72
+      "steady_state_utilization_at_1_worker": 2.01
     },
     "target_500_jobs_day": {
       "arrival_rate_sec": 172.8,
       "required_consumers": 1,
-      "steady_state_utilization_at_1_worker": 0.86
+      "steady_state_utilization_at_1_worker": 1.0
     },
-    "daily_capacity_per_consumer_at_60pct_utilization": 34957
+    "daily_capacity_per_consumer_at_60pct_utilization": 29897
   },
   "error_summary": null,
   "disclaimer": "NOTE: This benchmark is a development/CI environment execution. Per Issue #16 policy, production capacity proof requires execution on a physical A23 Android/ARM64 device."
