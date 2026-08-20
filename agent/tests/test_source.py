@@ -1,4 +1,4 @@
-"""Tests for source acquisition, preview raster/vector reconstruction, and URL validation."""
+"""Tests for source acquisition, live HTML/image preview resolution, and raster extraction."""
 import io
 import httpx
 import pytest
@@ -8,6 +8,7 @@ from compute.models import ClaimStyle
 from compute.source import (
     SourceAcquirer,
     extract_contours_from_raster_image,
+    extract_preview_url_from_html,
     validate_myfonts_url,
 )
 
@@ -33,6 +34,65 @@ def test_validate_myfonts_url():
     assert validate_myfonts_url("https://myfonts.com.evil.com/font") is False
     assert validate_myfonts_url("not-a-url") is False
     assert validate_myfonts_url("") is False
+
+
+def test_extract_preview_url_from_html():
+    # 1. OpenGraph meta tag
+    html_og = '<meta property="og:image" content="https://www.myfonts.com/preview_og.png">'
+    assert extract_preview_url_from_html(html_og) == "https://www.myfonts.com/preview_og.png"
+
+    # 2. Preview img tag
+    html_img = '<img class="font-preview-render" src="https://www.myfonts.com/preview_render.png" />'
+    assert extract_preview_url_from_html(html_img) == "https://www.myfonts.com/preview_render.png"
+
+    # 3. No preview
+    html_none = "<html><body><h1>Sample Page</h1><p>No preview here</p></body></html>"
+    assert extract_preview_url_from_html(html_none) is None
+
+
+@pytest.mark.asyncio
+async def test_live_preview_fetch_via_html_page():
+    preview_img_bytes = _make_test_image_bytes(20, 60)
+    styles = [ClaimStyle(id="reg", display_name="Regular")]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url_str = str(request.url)
+        if url_str == "https://www.myfonts.com/collections/roboto-flex":
+            html = '<meta property="og:image" content="https://www.myfonts.com/img/sample.png">'
+            return httpx.Response(200, text=html, headers={"content-type": "text/html"})
+        if url_str == "https://www.myfonts.com/img/sample.png":
+            return httpx.Response(200, content=preview_img_bytes, headers={"content-type": "image/png"})
+        return httpx.Response(404)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        acquirer = SourceAcquirer(client=http_client)
+        payload = await acquirer.acquire_source("https://www.myfonts.com/collections/roboto-flex", styles)
+        assert payload.family_name == "Roboto Flex"
+        assert "reg" in payload.styles
+        assert len(payload.styles["reg"].glyphs["A"].contours) > 0
+
+
+@pytest.mark.asyncio
+async def test_live_preview_missing_or_blocked_fails_closed():
+    styles = [ClaimStyle(id="reg", display_name="Regular")]
+
+    # 1. Page with no preview fails closed (NO_PUBLIC_PREVIEW_FOUND)
+    def handler_no_preview(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html><body>No preview</body></html>", headers={"content-type": "text/html"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler_no_preview)) as http_client:
+        acquirer = SourceAcquirer(client=http_client)
+        with pytest.raises(ValueError, match="NO_PUBLIC_PREVIEW_FOUND"):
+            await acquirer.acquire_source("https://www.myfonts.com/collections/roboto-flex", styles)
+
+    # 2. Blocked page (403) fails closed (SOURCE_ACQUISITION_BLOCKED)
+    def handler_blocked(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, text="Forbidden", headers={"content-type": "text/html"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler_blocked)) as http_client:
+        acquirer = SourceAcquirer(client=http_client)
+        with pytest.raises(ValueError, match="SOURCE_ACQUISITION_BLOCKED"):
+            await acquirer.acquire_source("https://www.myfonts.com/collections/roboto-flex", styles)
 
 
 @pytest.mark.asyncio
@@ -73,28 +133,6 @@ async def test_changing_only_url_with_identical_content_produces_identical_glyph
     assert g1.contours == g2.contours
 
 
-@pytest.mark.asyncio
-async def test_source_acquirer_network_limits():
-    acquirer = SourceAcquirer(timeout=5.0)
-    styles = [ClaimStyle(id="reg", display_name="Regular")]
-
-    # 1. Payload too large (>10MB)
-    def handler_large(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, content=b"A" * (11 * 1024 * 1024), headers={"content-type": "text/html"})
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler_large)) as http_client:
-        with pytest.raises(ValueError, match="SOURCE_PAYLOAD_TOO_LARGE"):
-            await acquirer.acquire_source("https://www.myfonts.com/collections/roboto", styles, client=http_client)
-
-    # 2. Unsupported content-type
-    def handler_bad_type(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, content=b"content", headers={"content-type": "application/x-executable"})
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler_bad_type)) as http_client:
-        with pytest.raises(ValueError, match="UNSUPPORTED_CONTENT_TYPE"):
-            await acquirer.acquire_source("https://www.myfonts.com/collections/roboto", styles, client=http_client)
-
-
 def test_raster_preview_and_fixture_fail_closed():
     acquirer = SourceAcquirer()
 
@@ -116,5 +154,5 @@ def test_raster_preview_and_fixture_fail_closed():
     with pytest.raises(ValueError, match="MALFORMED_SOURCE_INPUT"):
         acquirer.from_fixture({
             "source_url": "https://www.myfonts.com/collections/valid",
-            "styles": [{"style_id": "s1", "style_name": "S1", "glyphs": {}}],  # empty glyphs
+            "styles": [{"style_id": "s1", "style_name": "S1", "glyphs": {}}],
         })

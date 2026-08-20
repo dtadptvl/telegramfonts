@@ -1,10 +1,21 @@
 """Tests for FontBuilder service, format outputs, and source-driven glyph data."""
+import io
 from pathlib import Path
 import pytest
+from PIL import Image, ImageDraw
 
 from compute.font_builder import FontBuilderService
+from compute.models import ClaimStyle
 from compute.source import SourceAcquirer
-from worker_client import ClaimStyle
+
+
+def _make_test_image_bytes(stroke_x0: int = 20, stroke_x1: int = 50) -> bytes:
+    img = Image.new("L", (100, 100), color=255)
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([stroke_x0, 10, stroke_x1, 90], fill=0)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
 
 
 @pytest.mark.asyncio
@@ -12,8 +23,11 @@ async def test_build_font_ttf_otf_woff2(tmp_path: Path):
     source_acquirer = SourceAcquirer()
     builder = FontBuilderService()
 
+    preview_bytes = _make_test_image_bytes(20, 60)
     styles = [ClaimStyle(id="regular", display_name="Regular"), ClaimStyle(id="bold", display_name="Bold")]
-    payload = await source_acquirer.acquire_source("https://www.myfonts.com/collections/roboto-flex", styles)
+    payload = await source_acquirer.acquire_source(
+        "https://www.myfonts.com/collections/roboto-flex", styles, preview_input=preview_bytes
+    )
 
     # 1. TTF
     file_ttf = builder.build_font(payload.styles["regular"], "Roboto Flex", "TTF", tmp_path)
@@ -90,8 +104,11 @@ async def test_distinct_fixture_inputs_produce_distinct_font_bytes(tmp_path: Pat
 async def test_unsupported_format(tmp_path: Path):
     source_acquirer = SourceAcquirer()
     builder = FontBuilderService()
+    preview_bytes = _make_test_image_bytes(20, 50)
     styles = [ClaimStyle(id="regular", display_name="Regular")]
-    payload = await source_acquirer.acquire_source("https://www.myfonts.com/collections/roboto", styles)
+    payload = await source_acquirer.acquire_source(
+        "https://www.myfonts.com/collections/roboto", styles, preview_input=preview_bytes
+    )
 
     with pytest.raises(ValueError, match="UNSUPPORTED_FORMAT"):
         builder.build_font(payload.styles["regular"], "Roboto", "EXE", tmp_path)

@@ -67,6 +67,7 @@ class A23Runner:
     async def close(self) -> None:
         await self.queue_client.close()
         await self.worker_client.close()
+        await self.source_acquirer.close()
 
     async def _heartbeat_loop(
         self,
@@ -277,6 +278,10 @@ class A23Runner:
                     "NO_FILES_GENERATED",
                     "MISSING_STYLE_SOURCE_DATA",
                     "MALFORMED_SOURCE_INPUT",
+                    "NO_PUBLIC_PREVIEW_FOUND",
+                    "SOURCE_ACQUISITION_BLOCKED",
+                    "SOURCE_HTTP_ERROR",
+                    "UNSUPPORTED_CONTENT_TYPE",
                 )
             ):
                 retryable = False
