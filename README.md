@@ -32,12 +32,13 @@ Hybrid cloud architecture for automated Vietnamese font processing and fulfillme
 ├── edge/                        # Cloudflare Worker control-plane
 │   ├── migrations/              # D1 database migrations
 │   │   ├── 0001_initial_schema.sql
-│   │   └── 0002_telegram_sessions_and_catalog.sql
+│   │   ├── 0002_telegram_sessions_and_catalog.sql
+│   │   └── 0003_payment_code_and_sepay.sql
 │   ├── src/                     # Worker TypeScript source
-│   │   ├── handlers/            # Webhook and route handlers
-│   │   ├── services/            # Telegram client, catalog, session, order services
+│   │   ├── handlers/            # Telegram and SePay webhook handlers
+│   │   ├── services/            # Telegram client, catalog, session, order, and payment services
 │   │   ├── types/               # Telegram, catalog, and session domain types
-│   │   ├── utils/               # URL normalization and HTML escaping
+│   │   ├── utils/               # URL normalization, HTML escaping, and VietQR generation
 │   │   ├── env.ts               # Typed environment & bindings
 │   │   └── index.ts             # Entrypoint & routing
 │   ├── test/                    # Automated tests (Vitest + Cloudflare Workers Pool)
@@ -47,6 +48,7 @@ Hybrid cloud architecture for automated Vietnamese font processing and fulfillme
 │   │   ├── index.spec.ts
 │   │   ├── myfonts.spec.ts
 │   │   ├── schema.spec.ts
+│   │   ├── sepay.spec.ts
 │   │   └── telegram.spec.ts
 │   ├── package.json
 │   ├── tsconfig.json
@@ -96,6 +98,7 @@ npm ci
 - `GET /health` -> Liveness check returning `200 {"status": "ok"}`.
 - `GET /ready` -> Readiness check querying D1 database returning `200 {"status": "ready", "database": "connected"}` or `503` if unavailable.
 - `POST /webhooks/telegram` -> Telegram Bot webhook endpoint (requires `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, and `X-Telegram-Bot-Api-Secret-Token` header).
+- `POST /webhooks/sepay` -> SePay payment webhook endpoint (requires `SEPAY_WEBHOOK_SECRET`, HMAC-SHA256 signature verification, and timestamp within 300s window).
 - All other routes return `404 Not Found`.
 
 ## Canonical States
