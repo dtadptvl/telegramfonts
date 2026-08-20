@@ -420,4 +420,261 @@ describe('Phase 7: Fresh-Catalog E2E Resolution & Scheduled Cron Delivery', () =
       .first<{ status: string }>();
     expect(requestRecord?.status).toBe('PENDING');
   });
+
+  it('two users request the same unseen catalog concurrently: one catalog resolution completes both applicable requests/sessions with the same catalog; neither is stranded', async () => {
+    const user1 = 'concurrent_user_1';
+    const chat1 = 100001;
+    const user2 = 'concurrent_user_2';
+    const chat2 = 100002;
+    const now = Date.now();
+    const canonicalKey = 'myfonts:collections/shared-popular-font';
+    const sourceUrl = 'https://www.myfonts.com/collections/shared-popular-font';
+
+    // 1. Create two user accounts
+    await env.DB.prepare(
+      `INSERT INTO telegram_users (id, first_name, username, created_at, updated_at)
+       VALUES (?, 'User1', 'u1', ?, ?), (?, 'User2', 'u2', ?, ?)`
+    )
+      .bind(user1, now, now, user2, now, now)
+      .run();
+
+    // 2. Both users send the same unseen URL -> both sessions are in AWAITING_CATALOG
+    await env.DB.prepare(
+      `INSERT INTO telegram_sessions (user_id, chat_id, status, workflow_token, checkout_token, version, created_at, updated_at)
+       VALUES (?, ?, 'AWAITING_CATALOG', 'tok_u1', 'chk_u1', 1, ?, ?),
+              (?, ?, 'AWAITING_CATALOG', 'tok_u2', 'chk_u2', 1, ?, ?)`
+    )
+      .bind(user1, chat1, now, now, user2, chat2, now, now)
+      .run();
+
+    // 3. Both users have pending catalog_requests for the SAME canonical_key
+    const req1Id = 'req_shared_user1';
+    const req2Id = 'req_shared_user2';
+    await env.DB.prepare(
+      `INSERT INTO catalog_requests (id, user_id, canonical_key, source_url, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'PENDING', ?, ?),
+              (?, ?, ?, ?, 'PENDING', ?, ?)`
+    )
+      .bind(req1Id, user1, canonicalKey, sourceUrl, now, now, req2Id, user2, canonicalKey, sourceUrl, now + 1, now + 1)
+      .run();
+
+    const deliveredChats: number[] = [];
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (info, init) => {
+      const urlStr = typeof info === 'string' ? info : info instanceof Request ? info.url : info.toString();
+      if (urlStr.includes('/sendMessage')) {
+        const bodyObj = JSON.parse(String(init?.body || '{}')) as { chat_id: number };
+        deliveredChats.push(Number(bodyObj.chat_id));
+        return new Response(JSON.stringify({ ok: true, result: { message_id: 7777 } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    try {
+      // 4. A23 resolves and completes Request 1
+      const completeReq = new Request(
+        `https://worker.local/internal/catalog-requests/${req1Id}/complete`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${nodeSecret}`,
+          },
+          body: JSON.stringify({
+            canonical_key: canonicalKey,
+            source_url: sourceUrl,
+            family_name: 'Shared Popular Font',
+            foundry: 'Top Foundry',
+            styles: [{ id: 'regular', display_name: 'Regular', price: 50000 }],
+          }),
+        }
+      );
+      const resp = await worker.fetch(completeReq, env, {} as ExecutionContext);
+      expect(resp.status).toBe(200);
+
+      // 5. Verify BOTH User 1 and User 2 transitioned out of AWAITING_CATALOG to SELECTING_STYLES
+      const sess1 = await env.DB
+        .prepare('SELECT status, catalog_id FROM telegram_sessions WHERE user_id = ?')
+        .bind(user1)
+        .first<{ status: string; catalog_id: string }>();
+      const sess2 = await env.DB
+        .prepare('SELECT status, catalog_id FROM telegram_sessions WHERE user_id = ?')
+        .bind(user2)
+        .first<{ status: string; catalog_id: string }>();
+
+      expect(sess1?.status).toBe('SELECTING_STYLES');
+      expect(sess2?.status).toBe('SELECTING_STYLES');
+      expect(sess1?.catalog_id).toBe(sess2?.catalog_id);
+
+      // Verify BOTH requests are marked COMPLETED
+      const req1 = await env.DB.prepare('SELECT status, catalog_id FROM catalog_requests WHERE id = ?').bind(req1Id).first<{ status: string; catalog_id: string }>();
+      const req2 = await env.DB.prepare('SELECT status, catalog_id FROM catalog_requests WHERE id = ?').bind(req2Id).first<{ status: string; catalog_id: string }>();
+      expect(req1?.status).toBe('COMPLETED');
+      expect(req2?.status).toBe('COMPLETED');
+      expect(req1?.catalog_id).toBe(req2?.catalog_id);
+
+      // Verify BOTH users received interactive Telegram style keyboards
+      expect(deliveredChats).toContain(chat1);
+      expect(deliveredChats).toContain(chat2);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('a stale older request for a user does not override a newer different pending request', async () => {
+    const userId = 'user_multi_req_99';
+    const chatId = 999901;
+    const now = Date.now();
+
+    const oldKey = 'myfonts:collections/old-abandoned-font';
+    const oldUrl = 'https://www.myfonts.com/collections/old-abandoned-font';
+    const newKey = 'myfonts:collections/new-wanted-font';
+    const newUrl = 'https://www.myfonts.com/collections/new-wanted-font';
+
+    // 1. Create user and session
+    await env.DB.prepare(
+      `INSERT INTO telegram_users (id, first_name, username, created_at, updated_at)
+       VALUES (?, 'MultiUser', 'multi', ?, ?)`
+    )
+      .bind(userId, now, now)
+      .run();
+
+    await env.DB.prepare(
+      `INSERT INTO telegram_sessions (user_id, chat_id, status, workflow_token, checkout_token, version, created_at, updated_at)
+       VALUES (?, ?, 'AWAITING_CATALOG', 'tok_new', 'chk_new', 2, ?, ?)`
+    )
+      .bind(userId, chatId, now, now)
+      .run();
+
+    // 2. Insert older request (created at now - 1000) and newer request (created at now)
+    const oldReqId = 'req_old_abandoned';
+    const newReqId = 'req_new_wanted';
+
+    await env.DB.prepare(
+      `INSERT INTO catalog_requests (id, user_id, canonical_key, source_url, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'PENDING', ?, ?),
+              (?, ?, ?, ?, 'PENDING', ?, ?)`
+    )
+      .bind(oldReqId, userId, oldKey, oldUrl, now - 1000, now - 1000, newReqId, userId, newKey, newUrl, now, now)
+      .run();
+
+    const deliveredChats: number[] = [];
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (info, init) => {
+      const urlStr = typeof info === 'string' ? info : info instanceof Request ? info.url : info.toString();
+      if (urlStr.includes('/sendMessage')) {
+        const bodyObj = JSON.parse(String(init?.body || '{}')) as { chat_id: number };
+        deliveredChats.push(Number(bodyObj.chat_id));
+        return new Response(JSON.stringify({ ok: true, result: { message_id: 5555 } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    try {
+      // 3. Late arriving completion for the OLD request arrives
+      const completeOldReq = new Request(
+        `https://worker.local/internal/catalog-requests/${oldReqId}/complete`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${nodeSecret}`,
+          },
+          body: JSON.stringify({
+            canonical_key: oldKey,
+            source_url: oldUrl,
+            family_name: 'Old Abandoned Font',
+            styles: [{ id: 'regular', display_name: 'Regular', price: 50000 }],
+          }),
+        }
+      );
+      const oldResp = await worker.fetch(completeOldReq, env, {} as ExecutionContext);
+      expect(oldResp.status).toBe(200);
+
+      // Verify session did NOT switch to the old catalog (remains AWAITING_CATALOG for the newer request)
+      const currentSession = await env.DB
+        .prepare('SELECT status, catalog_id FROM telegram_sessions WHERE user_id = ?')
+        .bind(userId)
+        .first<{ status: string; catalog_id: string | null }>();
+
+      expect(currentSession?.status).toBe('AWAITING_CATALOG');
+      expect(currentSession?.catalog_id).toBeNull();
+      expect(deliveredChats.length).toBe(0);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('external JSON-LD price such as 45 does not create a 45 VND order; order pricing remains the app-defined VND amount', async () => {
+    const userId = 'user_pricing_test';
+    const chatId = 665544;
+    const now = Date.now();
+    const reqId = 'req_pricing_45';
+    const canonicalKey = 'myfonts:collections/external-usd-priced-font';
+    const sourceUrl = 'https://www.myfonts.com/collections/external-usd-priced-font';
+
+    await env.DB.prepare(
+      `INSERT INTO telegram_users (id, first_name, username, created_at, updated_at)
+       VALUES (?, 'PriceUser', 'priceuser', ?, ?)`
+    )
+      .bind(userId, now, now)
+      .run();
+
+    await env.DB.prepare(
+      `INSERT INTO telegram_sessions (user_id, chat_id, status, workflow_token, checkout_token, version, created_at, updated_at)
+       VALUES (?, ?, 'AWAITING_CATALOG', 'tok_p', 'chk_p', 1, ?, ?)`
+    )
+      .bind(userId, chatId, now, now)
+      .run();
+
+    await env.DB.prepare(
+      `INSERT INTO catalog_requests (id, user_id, canonical_key, source_url, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'PENDING', ?, ?)`
+    )
+      .bind(reqId, userId, canonicalKey, sourceUrl, now, now)
+      .run();
+
+    // 1. Post completion where provider styles contain a raw dollar price (e.g. 45 or 0)
+    const completeReq = new Request(
+      `https://worker.local/internal/catalog-requests/${reqId}/complete`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${nodeSecret}`,
+        },
+        body: JSON.stringify({
+          canonical_key: canonicalKey,
+          source_url: sourceUrl,
+          family_name: 'External USD Priced Font',
+          styles: [
+            { id: 'regular', display_name: 'Regular', price: 45 },
+            { id: 'bold', display_name: 'Bold', price: 0 },
+          ],
+        }),
+      }
+    );
+    const resp = await worker.fetch(completeReq, env, {} as ExecutionContext);
+    expect(resp.status).toBe(200);
+
+    // 2. Verify styles stored in D1 are normalized to authoritative VND pricing (50,000 VND)
+    const savedStyles = await env.DB
+      .prepare(
+        `SELECT style_id, display_name, price
+         FROM catalog_styles
+         WHERE catalog_id = (SELECT id FROM catalogs WHERE canonical_key = ?)`
+      )
+      .bind(canonicalKey)
+      .all<{ style_id: string; display_name: string; price: number }>();
+
+    expect(savedStyles.results?.length).toBe(2);
+    for (const st of savedStyles.results || []) {
+      // Must be 50,000 VND, NEVER 45 VND or 0 VND
+      expect(st.price).toBe(50000);
+    }
+  });
 });

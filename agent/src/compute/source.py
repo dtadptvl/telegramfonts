@@ -191,13 +191,10 @@ def extract_catalog_metadata_from_html(html_text: str, source_url: str) -> dict[
                                 s_id = re.sub(r'[^a-zA-Z0-9_-]+', '_', s_name_clean.lower()).strip('_')
                                 if s_id and s_id not in seen_style_ids:
                                     seen_style_ids.add(s_id)
-                                    price = 50000
-                                    if "price" in v and isinstance(v["price"], (int, float)):
-                                        price = int(v["price"])
                                     styles_list.append({
                                         "id": s_id,
                                         "display_name": s_name_clean,
-                                        "price": price,
+                                        "price": 50000,
                                     })
         except Exception:
             pass
