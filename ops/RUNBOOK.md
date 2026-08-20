@@ -172,14 +172,16 @@ Set runtime variables in `edge/wrangler.jsonc` `[vars]` or deploy secrets:
    HEARTBEAT_INTERVAL_SECONDS=60
    LEASE_DURATION_SECONDS=300
    ```
-4. Execute Authoritative Physical A23 Capacity Benchmark:
+4. Load environment & Execute Authoritative Physical A23 Capacity Benchmark:
    ```bash
+   set -a && source ~/.telefont.env && set +a
    python agent/src/benchmark.py --samples 20 --json-out ops/a23_device_benchmark.json
    ```
    *Verify*: Benchmark passes with 0 failures and records on-device ARM64 hardware identity.
 
 5. Start the A23 Worker Daemon:
    ```bash
+   set -a && source ~/.telefont.env && set +a
    python agent/src/main.py
    ```
 

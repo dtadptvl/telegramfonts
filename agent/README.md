@@ -13,7 +13,7 @@ Private compute worker for TelegramFonts that consumes fulfillment jobs via Clou
 ## Configuration
 All configuration is loaded from environment variables (or `.env`):
 - `CF_ACCOUNT_ID`: Cloudflare account ID
-- `CF_QUEUE_ID`: Cloudflare Queue ID/name (e.g. `telegramfonts-fulfillment`)
+- `CF_QUEUE_ID`: Cloudflare Queue Resource UUID (retrieved via `wrangler queues list`; required by REST API path)
 - `CF_QUEUES_TOKEN`: Scoped API token with `Queues:Read` and `Queues:Write` permissions
 - `EDGE_BASE_URL`: Base URL of Cloudflare Worker Edge (e.g. `https://telefont.example.com`)
 - `A23_NODE_SECRET`: Internal node bearer authentication secret

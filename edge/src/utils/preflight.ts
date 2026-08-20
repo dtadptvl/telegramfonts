@@ -156,6 +156,25 @@ export function validateWranglerConfig(
     });
   }
 
+  // 6. Cron Triggers Check (for Outbox Dispatcher)
+  const crons = config.triggers?.crons;
+  const hasCrons = Array.isArray(crons) && crons.length > 0;
+  if (!hasCrons) {
+    results.push({
+      category: 'Wrangler Triggers',
+      name: 'Cron Trigger (Scheduled Dispatcher)',
+      passed: !options?.requireProdD1,
+      message: hasCrons ? `Configured crons: ${crons.join(', ')}` : 'Missing triggers.crons (required for scheduled outbox dispatcher)',
+    });
+  } else {
+    results.push({
+      category: 'Wrangler Triggers',
+      name: 'Cron Trigger (Scheduled Dispatcher)',
+      passed: true,
+      message: `Configured crons: ${crons.join(', ')}`,
+    });
+  }
+
   return results;
 }
 
@@ -164,6 +183,7 @@ export function validateEdgeEnvVars(
   mode: 'test' | 'development' | 'production' = 'production'
 ): PreflightCheckResult[] {
   const results: PreflightCheckResult[] = [];
+  const isTest = mode === 'test';
 
   const requiredSecrets = [
     'TELEGRAM_BOT_TOKEN',
@@ -178,8 +198,12 @@ export function validateEdgeEnvVars(
     results.push({
       category: 'Edge Secrets',
       name: `Secret [${secretKey}]`,
-      passed: isPresent,
-      message: isPresent ? 'Configured (redacted)' : 'Missing required secret',
+      passed: isTest || isPresent,
+      message: isPresent
+        ? 'Configured (redacted)'
+        : isTest
+        ? 'Registered in contract (safe fixture mode)'
+        : 'Missing required secret',
     });
   }
 
@@ -190,8 +214,12 @@ export function validateEdgeEnvVars(
   results.push({
     category: 'Edge Payment Vars',
     name: 'VietQR Bank Configuration (BANK_ID & BANK_ACCOUNT_NUMBER)',
-    passed: bankPresent,
-    message: bankPresent ? `Bank [${bankId}] Account configured (redacted)` : 'Missing BANK_ID or BANK_ACCOUNT_NUMBER',
+    passed: isTest || bankPresent,
+    message: bankPresent
+      ? `Bank [${bankId}] Account configured (redacted)`
+      : isTest
+      ? 'Registered in contract (safe fixture mode)'
+      : 'Missing BANK_ID or BANK_ACCOUNT_NUMBER',
   });
 
   // Base URL validation
@@ -200,8 +228,8 @@ export function validateEdgeEnvVars(
     results.push({
       category: 'Edge Runtime Vars',
       name: 'BASE_URL',
-      passed: false,
-      message: 'BASE_URL is missing',
+      passed: isTest,
+      message: isTest ? 'Registered in contract (safe fixture mode)' : 'BASE_URL is missing',
     });
   } else {
     try {
@@ -287,7 +315,10 @@ export interface AgentConfigInput {
   LEASE_DURATION_SECONDS?: number | string;
 }
 
-export function validateAgentConfig(config: AgentConfigInput): PreflightCheckResult[] {
+export function validateAgentConfig(
+  config: AgentConfigInput,
+  options?: { isTest?: boolean; requireProdHttps?: boolean }
+): PreflightCheckResult[] {
   const results: PreflightCheckResult[] = [];
 
   const requiredKeys: Array<keyof AgentConfigInput> = [
@@ -299,15 +330,50 @@ export function validateAgentConfig(config: AgentConfigInput): PreflightCheckRes
     'A23_WORKER_ID',
   ];
 
+  const isTest = Boolean(options?.isTest);
+
   for (const key of requiredKeys) {
     const val = config[key];
     const isPresent = Boolean(val && String(val).trim().length > 0);
     results.push({
       category: 'Agent Config',
       name: `Param [${key}]`,
-      passed: isPresent,
-      message: isPresent ? 'Configured (redacted)' : 'Missing required agent parameter',
+      passed: isTest || isPresent,
+      message: isPresent
+        ? 'Configured (redacted)'
+        : isTest
+        ? 'Registered in contract (safe fixture mode)'
+        : 'Missing required agent parameter',
     });
+  }
+
+  // Validate EDGE_BASE_URL HTTPS in production
+  if (config.EDGE_BASE_URL) {
+    try {
+      const parsed = new URL(config.EDGE_BASE_URL);
+      if (options?.requireProdHttps && parsed.protocol !== 'https:') {
+        results.push({
+          category: 'Agent Config',
+          name: 'EDGE_BASE_URL HTTPS',
+          passed: false,
+          message: `EDGE_BASE_URL protocol is "${parsed.protocol}"; must be "https:" in production`,
+        });
+      } else {
+        results.push({
+          category: 'Agent Config',
+          name: 'EDGE_BASE_URL Protocol',
+          passed: true,
+          message: `Valid ${parsed.protocol}//${parsed.host}`,
+        });
+      }
+    } catch {
+      results.push({
+        category: 'Agent Config',
+        name: 'EDGE_BASE_URL Protocol',
+        passed: false,
+        message: 'Invalid EDGE_BASE_URL format',
+      });
+    }
   }
 
   // Queue pull batch size (agent max is 10)
@@ -343,16 +409,16 @@ export function validateAgentConfig(config: AgentConfigInput): PreflightCheckRes
       : `Visibility (${visMs}ms) is shorter than Lease (${leaseSec * 1000}ms); risk of premature redelivery`,
   });
 
-  // Heartbeat must be strictly less than lease duration with at least 15s safety margin
+  // Heartbeat must be strictly less than lease duration with strictly > 15s safety margin
   const hbMargin = leaseSec - hbSec;
-  const hbSafe = hbSec > 0 && hbMargin >= 15;
+  const hbSafe = hbSec > 0 && hbMargin > 15;
   results.push({
     category: 'Agent Lease Boundaries',
-    name: 'Heartbeat Safety Margin (>= 15s)',
+    name: 'Heartbeat Safety Margin (> 15s)',
     passed: hbSafe,
     message: hbSafe
       ? `Heartbeat (${hbSec}s) provides ${hbMargin}s safety margin before lease expiry (${leaseSec}s)`
-      : `Heartbeat (${hbSec}s) leaves insufficient safety margin (${hbMargin}s < 15s) for lease (${leaseSec}s)`,
+      : `Heartbeat (${hbSec}s) leaves insufficient safety margin (${hbMargin}s <= 15s) for lease (${leaseSec}s)`,
   });
 
   return results;
@@ -366,10 +432,11 @@ export function runFullPreflight(inputs: {
   requireProdD1?: boolean;
 }): PreflightReport {
   const mode = inputs.mode || 'development';
+  const isProd = mode === 'production';
   const checks: PreflightCheckResult[] = [
-    ...validateWranglerConfig(inputs.wranglerConfig, { requireProdD1: inputs.requireProdD1 }),
+    ...validateWranglerConfig(inputs.wranglerConfig, { requireProdD1: inputs.requireProdD1 ?? isProd }),
     ...validateEdgeEnvVars(inputs.edgeEnv, mode),
-    ...validateAgentConfig(inputs.agentConfig),
+    ...validateAgentConfig(inputs.agentConfig, { isTest: mode === 'test', requireProdHttps: isProd }),
   ];
 
   const totalChecks = checks.length;
