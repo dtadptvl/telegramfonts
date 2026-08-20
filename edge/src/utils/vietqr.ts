@@ -9,8 +9,21 @@ export interface VietQrParams {
 
 const ALPHANUMERIC_CHARS = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
 
+export function validatePaymentCodePrefix(prefix: string): string {
+  if (prefix === undefined || prefix === null || prefix === '') {
+    return 'TF';
+  }
+  const normalized = String(prefix).trim().toUpperCase();
+  if (!/^[A-Z0-9]{2,5}$/.test(normalized)) {
+    throw new Error(
+      `Invalid payment code prefix "${prefix}": must be 2-5 uppercase alphanumeric characters`
+    );
+  }
+  return normalized;
+}
+
 export function generatePaymentCode(prefix = 'TF'): string {
-  const cleanPrefix = (prefix || 'TF').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 5);
+  const validatedPrefix = validatePaymentCodePrefix(prefix);
   const randomBytes = new Uint8Array(6);
   crypto.getRandomValues(randomBytes);
 
@@ -19,7 +32,7 @@ export function generatePaymentCode(prefix = 'TF'): string {
     suffix += ALPHANUMERIC_CHARS[randomBytes[i] % ALPHANUMERIC_CHARS.length];
   }
 
-  return `${cleanPrefix}${suffix}`;
+  return `${validatedPrefix}${suffix}`;
 }
 
 export function generateVietQrUrl(params: VietQrParams): string {
