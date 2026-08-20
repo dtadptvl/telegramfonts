@@ -827,7 +827,7 @@ async function replayAppliedCallbackUI(
   await safeAnswer();
 }
 
-function renderStyleSelection(
+export function renderStyleSelection(
   catalog: FontCatalog,
   selectedStyleIds: string[],
   workflowToken: string

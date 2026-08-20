@@ -503,3 +503,142 @@ async def test_runner_entrypoint_lifecycle_start_stop_close(test_settings: Setti
         # Proves runner.close() executes cleanly and closes owned clients without raising
         await runner.close()
 
+
+@pytest.mark.asyncio
+async def test_multi_consumer_queue_duplicate_and_ack_loss_redelivery_proves_singular_compute(test_settings: Settings):
+    """Proves >=2 concurrent consumers handling Queue message duplicate / ACK loss produce singular compute and upload."""
+    preview_bytes = _make_test_image_bytes(20, 60)
+    uploaded_artifacts = []
+    completed_jobs = []
+    acked_queue_leases = []
+    job_completed_in_d1 = False
+
+    # Simulate Queue state
+    queue_messages_worker_1 = [
+        {"id": "msg_queue_01", "body": {"job_id": "job_multi_dup"}, "lease_id": "lease_q_worker_1"}
+    ]
+    # Simulated redelivered message for worker 2
+    queue_messages_worker_2 = [
+        {"id": "msg_queue_01_redelivery", "body": {"job_id": "job_multi_dup"}, "lease_id": "lease_q_worker_2"}
+    ]
+
+    def queue_handler_1(request: httpx.Request) -> httpx.Response:
+        data = json.loads(request.content)
+        if "pull" in request.url.path:
+            return httpx.Response(200, json={"success": True, "messages": queue_messages_worker_1})
+        if "ack" in request.url.path:
+            if "acks" in data:
+                acked_queue_leases.extend([a["lease_id"] for a in data["acks"]])
+            return httpx.Response(200, json={"success": True})
+        return httpx.Response(200, json={"success": True})
+
+    def queue_handler_2(request: httpx.Request) -> httpx.Response:
+        data = json.loads(request.content)
+        if "pull" in request.url.path:
+            return httpx.Response(200, json={"success": True, "messages": queue_messages_worker_2})
+        if "ack" in request.url.path:
+            if "acks" in data:
+                acked_queue_leases.extend([a["lease_id"] for a in data["acks"]])
+            return httpx.Response(200, json={"success": True})
+        return httpx.Response(200, json={"success": True})
+
+    def worker_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal job_completed_in_d1
+        if "claim" in request.url.path:
+            if job_completed_in_d1:
+                # After completion, D1 responds 409 TERMINAL + queue_action: ack
+                return httpx.Response(
+                    409,
+                    json={
+                        "status": "TERMINAL",
+                        "queue_action": "ack",
+                        "reason": "job_already_terminal",
+                    },
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "job_id": "job_multi_dup",
+                    "order_id": "ord_multi_dup",
+                    "lease_token": "a1b2c3d4-e5f6-4a5b-8c9d-0e1f2a3b4c5d",
+                    "lease_expires_at": int(time.time() * 1000) + 300000,
+                    "source_url": "https://www.myfonts.com/fonts/foundry/multi-dup",
+                    "family_name": "Multi Dup Sans",
+                    "styles": [{"id": "s1", "display_name": "Regular"}],
+                    "formats": ["TTF"],
+                },
+            )
+        if "artifact" in request.url.path:
+            uploaded_artifacts.append(request.headers.get("X-Artifact-SHA256"))
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "artifact_key": f"artifacts/ord_multi_dup/job_multi_dup/{request.headers.get('X-Artifact-SHA256')}.zip",
+                    "size": 1234,
+                },
+            )
+        if "complete" in request.url.path:
+            job_completed_in_d1 = True
+            completed_jobs.append("job_multi_dup")
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "status": "COMPLETED",
+                    "queue_action": "ack",
+                    "receipt": {"job_id": "job_multi_dup"},
+                },
+            )
+        return httpx.Response(200, json={"success": True})
+
+    def source_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=preview_bytes, headers={"Content-Type": "image/png"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(queue_handler_1)) as q_http_1, \
+               httpx.AsyncClient(transport=httpx.MockTransport(queue_handler_2)) as q_http_2, \
+               httpx.AsyncClient(transport=httpx.MockTransport(worker_handler)) as w_http, \
+               httpx.AsyncClient(transport=httpx.MockTransport(source_handler)) as s_http:
+
+        # 1. Consumer 1 pulls and processes job
+        q_client_1 = CloudflareQueueClient(test_settings, client=q_http_1)
+        w_client_1 = WorkerJobClient(test_settings, client=w_http)
+        s_acquirer_1 = SourceAcquirer(client=s_http)
+        runner_1 = A23Runner(
+            test_settings,
+            queue_client=q_client_1,
+            worker_client=w_client_1,
+            source_acquirer=s_acquirer_1,
+        )
+
+        res_1 = await runner_1.run_once()
+        assert len(res_1) == 1
+        assert res_1[0].action == RunnerAction.ACKED
+
+        assert len(uploaded_artifacts) == 1
+        assert len(completed_jobs) == 1
+        assert "lease_q_worker_1" in acked_queue_leases
+
+        # 2. Simulated Queue ACK loss & redelivery: Consumer 2 receives duplicate message
+        q_client_2 = CloudflareQueueClient(test_settings, client=q_http_2)
+        w_client_2 = WorkerJobClient(test_settings, client=w_http)
+        s_acquirer_2 = SourceAcquirer(client=s_http)
+        runner_2 = A23Runner(
+            test_settings,
+            queue_client=q_client_2,
+            worker_client=w_client_2,
+            source_acquirer=s_acquirer_2,
+        )
+
+        res_2 = await runner_2.run_once()
+        assert len(res_2) == 1
+        assert res_2[0].action == RunnerAction.ACKED
+        assert "lease_q_worker_2" in acked_queue_leases
+
+        # 3. Verify singular canonical outcome: zero additional uploads, zero duplicate completions
+        assert len(uploaded_artifacts) == 1
+        assert len(completed_jobs) == 1
+
+        await runner_1.close()
+        await runner_2.close()
+

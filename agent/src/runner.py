@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from compute.font_builder import FontBuilderService
 from compute.models import GeneratedFontFile, JobPackageManifest, SourcePayload
@@ -319,6 +320,30 @@ class JobRunner:
             stop_event.set()
             await heartbeat_task
 
+    async def process_pending_catalogs(self) -> int:
+        """Resolve any pending catalog requests awaiting authentic font metadata."""
+        try:
+            reqs = await self.worker_client.get_pending_catalog_requests()
+        except Exception as exc:
+            logger.warning(f"Error checking pending catalog requests: {exc}")
+            return 0
+
+        processed = 0
+        for req in reqs:
+            try:
+                # Acquire authentic metadata from source layer; fails closed if no styles found
+                metadata = await self.source_acquirer.acquire_catalog_metadata(req.source_url)
+                metadata["canonical_key"] = req.canonical_key
+                metadata["source_url"] = req.source_url
+
+                success = await self.worker_client.complete_catalog_request(req.id, metadata)
+                if success:
+                    processed += 1
+                    logger.info(f"Catalog request {req.id} resolved with authentic styles for {metadata.get('family_name')}")
+            except Exception as exc:
+                logger.warning(f"Failed to process catalog request {req.id}: {exc}")
+        return processed
+
     async def close(self) -> None:
         """Close client connections and release resources."""
         await self.queue_client.close()
@@ -327,7 +352,9 @@ class JobRunner:
             await self.source_acquirer.close()
 
     async def run_once(self) -> list[ProcessResult]:
-        """Pull a batch of messages from Queue and process each."""
+        """Pull a batch of messages from Queue and process each, and check pending catalog requests."""
+        await self.process_pending_catalogs()
+
         messages = await self.queue_client.pull_messages(
             batch_size=self.settings.PULL_BATCH_SIZE,
             visibility_timeout_ms=self.settings.VISIBILITY_TIMEOUT_MS,

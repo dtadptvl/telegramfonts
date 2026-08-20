@@ -1,5 +1,6 @@
 import type { Env } from '../env';
 import { JobService, buildArtifactStorageKey } from '../services/job-service';
+import { emitStructuredLog } from '../utils/logger';
 
 export function verifyInternalAuth(request: Request, secret: string | undefined): boolean {
   if (!secret || !secret.trim()) return false;
@@ -393,6 +394,14 @@ export async function handleInternalJobs(
     });
 
     if (completeResult.status === 'COMPLETED' || completeResult.status === 'ALREADY_COMPLETED') {
+      emitStructuredLog({
+        event: 'job_completed',
+        job_id: jobId,
+        order_id: job.order_id,
+        artifact_key: completeResult.artifact_key || artifactKey,
+        size_bytes: size,
+      });
+
       return new Response(
         JSON.stringify({
           success: true,
@@ -496,7 +505,14 @@ export async function handleInternalJobs(
 
     const result = await jobService.claimJob(jobId, workerId, leaseDuration);
 
-    if (result.status === 'CLAIMED') {
+    if (result.status === 'CLAIMED' && result.payload) {
+      emitStructuredLog({
+        event: 'job_claimed',
+        job_id: jobId,
+        worker_id: workerId,
+        lease_duration_sec: leaseDuration,
+      });
+
       return new Response(JSON.stringify(result.payload), {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
@@ -590,6 +606,13 @@ export async function handleInternalJobs(
     const result = await jobService.heartbeat(jobId, workerId, leaseToken, extendSeconds);
 
     if (result.status === 'EXTENDED') {
+      emitStructuredLog({
+        event: 'job_heartbeat',
+        job_id: jobId,
+        worker_id: workerId,
+        lease_expires_at: result.lease_expires_at || 0,
+      });
+
       return new Response(
         JSON.stringify({ success: true, lease_expires_at: result.lease_expires_at }),
         {

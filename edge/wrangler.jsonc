@@ -27,5 +27,10 @@
       "binding": "ARTIFACTS_BUCKET",
       "bucket_name": "telegramfonts-artifacts"
     }
-  ]
+  ],
+  "triggers": {
+    "crons": [
+      "* * * * *"
+    ]
+  }
 }

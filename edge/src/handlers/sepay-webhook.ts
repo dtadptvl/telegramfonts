@@ -1,6 +1,7 @@
 import type { Env } from '../env';
 import { PaymentService } from '../services/payment-service';
 import { OrderService } from '../services/order-service';
+import { emitStructuredLog } from '../utils/logger';
 
 export interface SePayWebhookPayload {
   id?: unknown;
@@ -266,6 +267,16 @@ export async function handleSePayWebhook(
     });
 
     if (result.status === 'PROCESSED') {
+      emitStructuredLog({
+        event: 'payment_accepted',
+        order_id: order.id,
+        user_id: order.user_id,
+        amount: order.total_amount,
+        currency: order.currency || 'VND',
+        payment_code: order.payment_code || paymentCode,
+        provider: 'SEPAY',
+      });
+
       return new Response(
         JSON.stringify({ success: true, status: 'processed', order_id: order.id }),
         {
