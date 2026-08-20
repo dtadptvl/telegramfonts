@@ -173,9 +173,9 @@ def test_extract_catalog_metadata_from_json_ld_and_html():
           "@type": "Product",
           "name": "Helvetica Now",
           "hasVariant": [
-            {"@type": "ProductModel", "name": "Helvetica Now Light", "price": 45000},
-            {"@type": "ProductModel", "name": "Helvetica Now Regular", "price": 50000},
-            {"@type": "ProductModel", "name": "Helvetica Now Bold", "price": 50000}
+            {"@type": "ProductModel", "name": "Helvetica Now Light", "price": 45},
+            {"@type": "ProductModel", "name": "Helvetica Now Regular", "price": 50},
+            {"@type": "ProductModel", "name": "Helvetica Now Bold", "price": 50}
           ]
         }
         </script>
@@ -189,7 +189,8 @@ def test_extract_catalog_metadata_from_json_ld_and_html():
     assert res["foundry"] == "Monotype"
     assert len(res["styles"]) == 3
     assert res["styles"][0]["display_name"] == "Helvetica Now Light"
-    assert res["styles"][0]["price"] == 45000
+    # External JSON-LD price of 45 does NOT become 45 VND; app-defined VND price of 50000 is authoritative
+    assert res["styles"][0]["price"] == 50000
     assert res["styles"][1]["id"] == "helvetica_now_regular"
 
     # 2. HTML data attributes parsing

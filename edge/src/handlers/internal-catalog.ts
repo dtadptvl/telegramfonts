@@ -150,11 +150,12 @@ export async function handleInternalCatalog(
       );
     }
 
+    const DEFAULT_STYLE_PRICE_VND = 50000;
     const styles = rawStyles
       .map((s: Record<string, unknown>) => ({
         id: String(s.id || '').trim(),
         displayName: String(s.display_name || s.displayName || s.id || '').trim(),
-        price: typeof s.price === 'number' ? s.price : 50000,
+        price: typeof s.price === 'number' && s.price >= 1000 ? s.price : DEFAULT_STYLE_PRICE_VND,
       }))
       .filter((s) => s.id.length > 0);
 
@@ -173,55 +174,94 @@ export async function handleInternalCatalog(
       styles,
     };
 
-    // 2. Persist catalog to D1 (atomically updates catalogs, catalog_styles, and marks catalog_requests as COMPLETED)
+    // 2. Identify all users waiting on this exact canonical key before persisting
+    const pendingMatchingRequests = await env.DB
+      .prepare(
+        `SELECT id, user_id
+         FROM catalog_requests
+         WHERE canonical_key = ? AND status = 'PENDING'`
+      )
+      .bind(canonicalKey)
+      .all<{ id: string; user_id: string }>();
+
+    const targetUserIds = new Set<string>();
+    targetUserIds.add(reqRow.user_id);
+    for (const pendingItem of pendingMatchingRequests.results || []) {
+      targetUserIds.add(pendingItem.user_id);
+    }
+
+    // 3. Persist catalog to D1 (atomically updates catalogs, catalog_styles, and marks catalog_requests as COMPLETED)
     const catalogId = await catalogService.persistCatalogResult(catalog);
 
-    // 3. Advance ONLY the matching user session for this specific request
-    const userSession = await env.DB
-      .prepare(
-        `SELECT user_id, chat_id, last_message_id, workflow_token, version, status
-         FROM telegram_sessions
-         WHERE user_id = ? AND status = 'AWAITING_CATALOG'`
-      )
-      .bind(reqRow.user_id)
-      .first<{
-        user_id: string;
-        chat_id: number;
-        last_message_id: number | null;
-        workflow_token: string;
-        version: number;
-        status: string;
-      }>();
-
-    if (userSession && env.TELEGRAM_BOT_TOKEN) {
+    // 4. Advance every still-relevant waiting session whose request is satisfied by this catalog
+    if (env.TELEGRAM_BOT_TOKEN) {
       const tg = new TelegramClient(env.TELEGRAM_BOT_TOKEN);
 
-      // Update session to SELECTING_STYLES
-      await sessionService.updateSessionCatalog(
-        userSession.user_id,
-        catalogId,
-        'SELECTING_STYLES'
-      );
+      for (const targetUserId of targetUserIds) {
+        const userSession = await env.DB
+          .prepare(
+            `SELECT user_id, chat_id, last_message_id, workflow_token, version, status
+             FROM telegram_sessions
+             WHERE user_id = ? AND status = 'AWAITING_CATALOG'`
+          )
+          .bind(targetUserId)
+          .first<{
+            user_id: string;
+            chat_id: number;
+            last_message_id: number | null;
+            workflow_token: string;
+            version: number;
+            status: string;
+          }>();
 
-      // Render and send the interactive style selection message to user
-      const { text: msgText, replyMarkup } = renderStyleSelection(
-        catalog,
-        [],
-        userSession.workflow_token
-      );
-
-      try {
-        const sent = await tg.sendMessage({
-          chat_id: userSession.chat_id,
-          text: msgText,
-          reply_markup: replyMarkup,
-        });
-
-        if (sent.message_id) {
-          await sessionService.setStatusUnconditional(userSession.user_id, 'SELECTING_STYLES', sent.message_id);
+        if (!userSession) {
+          continue;
         }
-      } catch {
-        // Log or tolerate telegram transport hiccups
+
+        // Verify the user is still waiting on this catalog (and did not start a newer different pending request)
+        const latestReqForUser = await env.DB
+          .prepare(
+            `SELECT canonical_key
+             FROM catalog_requests
+             WHERE user_id = ?
+             ORDER BY created_at DESC
+             LIMIT 1`
+          )
+          .bind(targetUserId)
+          .first<{ canonical_key: string }>();
+
+        if (latestReqForUser && latestReqForUser.canonical_key !== canonicalKey) {
+          // User started a newer request for a different font; do not override with stale resolution!
+          continue;
+        }
+
+        // Update session to SELECTING_STYLES
+        await sessionService.updateSessionCatalog(
+          userSession.user_id,
+          catalogId,
+          'SELECTING_STYLES'
+        );
+
+        // Render and send the interactive style selection message to user
+        const { text: msgText, replyMarkup } = renderStyleSelection(
+          catalog,
+          [],
+          userSession.workflow_token
+        );
+
+        try {
+          const sent = await tg.sendMessage({
+            chat_id: userSession.chat_id,
+            text: msgText,
+            reply_markup: replyMarkup,
+          });
+
+          if (sent.message_id) {
+            await sessionService.setStatusUnconditional(userSession.user_id, 'SELECTING_STYLES', sent.message_id);
+          }
+        } catch {
+          // Log or tolerate telegram transport hiccups
+        }
       }
     }
 
