@@ -1,5 +1,6 @@
 import type { FontCatalog, Style } from '../types/catalog';
 import type { TelegramSessionRecord, FontFormat } from '../types/session';
+import { generatePaymentCode } from '../utils/vietqr';
 import { SessionConflictError } from './session-service';
 
 export interface CreateOrderResult {
@@ -8,15 +9,45 @@ export interface CreateOrderResult {
   totalAmount: number;
   currency: string;
   itemsCount: number;
+  paymentCode?: string;
+}
+
+export interface OrderRecord {
+  id: string;
+  user_id: string;
+  status: string;
+  total_amount: number;
+  currency: string;
+  metadata: string | null;
+  checkout_token: string | null;
+  payment_code: string | null;
+  created_at: number;
+  updated_at: number;
 }
 
 export class OrderService {
   constructor(private readonly db: D1Database) {}
 
+  async getOrderById(orderId: string): Promise<OrderRecord | null> {
+    return this.db
+      .prepare('SELECT * FROM orders WHERE id = ?')
+      .bind(orderId)
+      .first<OrderRecord>();
+  }
+
+  async getOrderByPaymentCode(paymentCode: string): Promise<OrderRecord | null> {
+    const cleanCode = paymentCode.trim().toUpperCase();
+    return this.db
+      .prepare('SELECT * FROM orders WHERE payment_code = ?')
+      .bind(cleanCode)
+      .first<OrderRecord>();
+  }
+
   async createOrderFromSession(
     session: TelegramSessionRecord,
     catalog: FontCatalog,
-    updateId?: number
+    updateId?: number,
+    paymentCodePrefix = 'TF'
   ): Promise<CreateOrderResult> {
     const checkoutToken = session.checkout_token;
 
@@ -24,7 +55,7 @@ export class OrderService {
     const existingOrderByToken = await this.db
       .prepare('SELECT * FROM orders WHERE checkout_token = ?')
       .bind(checkoutToken)
-      .first<{ id: string; total_amount: number; currency: string }>();
+      .first<{ id: string; total_amount: number; currency: string; payment_code: string | null }>();
 
     if (existingOrderByToken) {
       const items = await this.db
@@ -38,6 +69,7 @@ export class OrderService {
         totalAmount: existingOrderByToken.total_amount,
         currency: existingOrderByToken.currency,
         itemsCount: items?.count || 0,
+        paymentCode: existingOrderByToken.payment_code || undefined,
       };
     }
 
@@ -76,6 +108,7 @@ export class OrderService {
 
     const now = Date.now();
     const orderId = `ord_${crypto.randomUUID().replace(/-/g, '')}`;
+    const paymentCode = generatePaymentCode(paymentCodePrefix);
 
     const totalAmount = selectedStyles.reduce(
       (sum, s) => sum + (s.price !== undefined ? s.price : 50000),
@@ -99,8 +132,8 @@ export class OrderService {
     statements.push(
       this.db
         .prepare(
-          `INSERT INTO orders (id, user_id, status, total_amount, currency, metadata, checkout_token, created_at, updated_at)
-           SELECT ?, ?, 'AWAITING_PAYMENT', ?, 'VND', ?, ?, ?, ?
+          `INSERT INTO orders (id, user_id, status, total_amount, currency, metadata, checkout_token, payment_code, created_at, updated_at)
+           SELECT ?, ?, 'AWAITING_PAYMENT', ?, 'VND', ?, ?, ?, ?, ?
            WHERE EXISTS (
              SELECT 1 FROM telegram_sessions
              WHERE id = ? AND workflow_token = ? AND checkout_token = ? AND status = 'CONFIRMING' AND version = ?
@@ -112,6 +145,7 @@ export class OrderService {
           totalAmount,
           metadata,
           checkoutToken,
+          paymentCode,
           now,
           now,
           session.id,
@@ -179,7 +213,7 @@ export class OrderService {
         const existingOrder = await this.db
           .prepare('SELECT * FROM orders WHERE checkout_token = ?')
           .bind(checkoutToken)
-          .first<{ id: string; total_amount: number; currency: string }>();
+          .first<{ id: string; total_amount: number; currency: string; payment_code: string | null }>();
 
         if (existingOrder) {
           return {
@@ -188,6 +222,7 @@ export class OrderService {
             totalAmount: existingOrder.total_amount,
             currency: existingOrder.currency,
             itemsCount: selectedStyles.length,
+            paymentCode: existingOrder.payment_code || undefined,
           };
         }
         throw new SessionConflictError('Session state conflict during order creation');
@@ -197,7 +232,7 @@ export class OrderService {
       const existingAfterCatch = await this.db
         .prepare('SELECT * FROM orders WHERE checkout_token = ?')
         .bind(checkoutToken)
-        .first<{ id: string; total_amount: number; currency: string }>();
+        .first<{ id: string; total_amount: number; currency: string; payment_code: string | null }>();
 
       if (existingAfterCatch) {
         return {
@@ -206,6 +241,7 @@ export class OrderService {
           totalAmount: existingAfterCatch.total_amount,
           currency: existingAfterCatch.currency,
           itemsCount: selectedStyles.length,
+          paymentCode: existingAfterCatch.payment_code || undefined,
         };
       }
       throw err;
@@ -217,6 +253,7 @@ export class OrderService {
       totalAmount,
       currency: 'VND',
       itemsCount: selectedStyles.length,
+      paymentCode,
     };
   }
 }

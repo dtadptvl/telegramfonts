@@ -1,5 +1,6 @@
 import type { Env } from './env';
 import { handleTelegramWebhook } from './handlers/telegram-webhook';
+import { handleSePayWebhook } from './handlers/sepay-webhook';
 
 const REQUIRED_TABLES_COUNT = 12;
 const SCHEMA_CHECK_QUERY = `SELECT count(*) as count FROM sqlite_master WHERE type='table' AND name IN (
@@ -49,6 +50,10 @@ export default {
 
     if (request.method === 'POST' && url.pathname === '/webhooks/telegram') {
       return handleTelegramWebhook(request, env, ctx);
+    }
+
+    if (request.method === 'POST' && url.pathname === '/webhooks/sepay') {
+      return handleSePayWebhook(request, env, ctx);
     }
 
     return new Response(JSON.stringify({ error: 'Not Found' }), {

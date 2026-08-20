@@ -10,10 +10,11 @@ import type { TelegramSessionRecord, FontFormat } from '../types/session';
 import { SUPPORTED_FORMATS } from '../types/session';
 import { escapeHtml } from '../utils/html';
 import { normalizeMyFontsUrl } from '../utils/myfonts';
+import { generateVietQrUrl } from '../utils/vietqr';
 import { TelegramClient } from '../services/telegram-client';
 import { CatalogService } from '../services/catalog-service';
 import { SessionService, SessionConflictError } from '../services/session-service';
-import { OrderService } from '../services/order-service';
+import { OrderService, type OrderRecord } from '../services/order-service';
 
 export async function handleTelegramWebhook(
   request: Request,
@@ -108,7 +109,7 @@ export async function handleTelegramWebhook(
       await handleCallbackQuery(
         update.callback_query,
         tg,
-        env.DB,
+        env,
         sessionService,
         catalogService,
         orderService,
@@ -237,7 +238,7 @@ async function handleMessage(
 async function handleCallbackQuery(
   query: TelegramCallbackQuery,
   tg: TelegramClient,
-  db: D1Database,
+  env: Env,
   sessionService: SessionService,
   catalogService: CatalogService,
   orderService: OrderService,
@@ -260,7 +261,48 @@ async function handleCallbackQuery(
 
   // On APPLIED retry: skip pre-mutation guards and directly replay the outbound UI from durable post-state
   if (alreadyApplied) {
-    await replayAppliedCallbackUI(query, session, tg, db, catalogService);
+    await replayAppliedCallbackUI(query, session, tg, env, catalogService, orderService);
+    return;
+  }
+
+  // Parse callback action and parameters
+  const parts = data.split(':');
+  const [prefix, action, tokenOrParam, param] = parts;
+
+  // Handle Check Payment Status (does not require catalog or workflow_token)
+  if (prefix === 'ord' && action === 'chk') {
+    const orderId = tokenOrParam;
+    if (!orderId) {
+      await tg.answerCallbackQuery({
+        callback_query_id: query.id,
+        text: 'Invalid order reference.',
+        show_alert: true,
+      });
+      return;
+    }
+
+    const order = await orderService.getOrderById(orderId);
+    if (!order || order.user_id !== userId) {
+      await tg.answerCallbackQuery({
+        callback_query_id: query.id,
+        text: 'Order not found or unauthorized.',
+        show_alert: true,
+      });
+      return;
+    }
+
+    const { text: msgText, replyMarkup } = renderOrderCreatedMessage(order, env);
+    await tg.editMessageText({
+      chat_id: session.chat_id,
+      message_id: query.message?.message_id || session.last_message_id || undefined,
+      text: msgText,
+      reply_markup: replyMarkup,
+    });
+
+    await tg.answerCallbackQuery({
+      callback_query_id: query.id,
+      text: `Current status: ${order.status}`,
+    });
     return;
   }
 
@@ -284,9 +326,7 @@ async function handleCallbackQuery(
     return;
   }
 
-  // Parse callback action and token
-  const parts = data.split(':');
-  const [prefix, action, token, param] = parts;
+  const token = tokenOrParam;
 
   // Verify workflow token match (stale button protection)
   if (!token || token !== session.workflow_token) {
@@ -600,15 +640,23 @@ async function handleCallbackQuery(
         }
 
         try {
-          const result = await orderService.createOrderFromSession(session, catalog, updateId);
+          const result = await orderService.createOrderFromSession(
+            session,
+            catalog,
+            updateId,
+            env.PAYMENT_CODE_PREFIX || 'TF'
+          );
 
-          const messageText = `🎉 <b>Order Created!</b>\n\n• <b>Order ID:</b> <code>${result.orderId}</code>\n• <b>Status:</b> <code>AWAITING_PAYMENT</code>\n• <b>Amount Due:</b> <b>${result.totalAmount.toLocaleString('vi-VN')} VND</b>\n• <b>Styles Count:</b> ${result.itemsCount}\n\n⏳ <i>Payment instructions and QR code will be provided in the next phase.</i>`;
-
-          await tg.editMessageText({
-            chat_id: session.chat_id,
-            message_id: query.message?.message_id || session.last_message_id || undefined,
-            text: messageText,
-          });
+          const order = await orderService.getOrderById(result.orderId);
+          if (order) {
+            const { text: msgText, replyMarkup } = renderOrderCreatedMessage(order, env);
+            await tg.editMessageText({
+              chat_id: session.chat_id,
+              message_id: query.message?.message_id || session.last_message_id || undefined,
+              text: msgText,
+              reply_markup: replyMarkup,
+            });
+          }
 
           await tg.answerCallbackQuery({
             callback_query_id: query.id,
@@ -645,8 +693,9 @@ async function replayAppliedCallbackUI(
   query: TelegramCallbackQuery,
   session: TelegramSessionRecord,
   tg: TelegramClient,
-  db: D1Database,
-  catalogService: CatalogService
+  env: Env,
+  catalogService: CatalogService,
+  orderService: OrderService
 ): Promise<void> {
   const messageId = query.message?.message_id || session.last_message_id || undefined;
 
@@ -672,36 +721,19 @@ async function replayAppliedCallbackUI(
   }
 
   if (session.status === 'ORDER_CREATED') {
-    let orderId = session.active_order_id || 'unknown';
-    let totalAmount = 0;
-
     if (session.active_order_id) {
-      const order = await db
-        .prepare('SELECT id, total_amount FROM orders WHERE id = ?')
-        .bind(session.active_order_id)
-        .first<{ id: string; total_amount: number }>();
+      const order = await orderService.getOrderById(session.active_order_id);
       if (order) {
-        orderId = order.id;
-        totalAmount = order.total_amount;
+        const { text: msgText, replyMarkup } = renderOrderCreatedMessage(order, env);
+        await tg.editMessageText({
+          chat_id: session.chat_id,
+          message_id: messageId,
+          text: msgText,
+          reply_markup: replyMarkup,
+        });
       }
     }
 
-    let itemsCount = 0;
-    try {
-      itemsCount = JSON.parse(session.selected_styles).length;
-    } catch {
-      itemsCount = 0;
-    }
-
-    const messageText = `🎉 <b>Order Created!</b>\n\n• <b>Order ID:</b> <code>${orderId}</code>\n• <b>Status:</b> <code>AWAITING_PAYMENT</code>\n• <b>Amount Due:</b> <b>${totalAmount.toLocaleString(
-      'vi-VN'
-    )} VND</b>\n• <b>Styles Count:</b> ${itemsCount}\n\n⏳ <i>Payment instructions and QR code will be provided in the next phase.</i>`;
-
-    await tg.editMessageText({
-      chat_id: session.chat_id,
-      message_id: messageId,
-      text: messageText,
-    });
     await safeAnswer('Order created successfully!');
     return;
   }
@@ -888,6 +920,65 @@ function renderOrderConfirmation(
     [
       { text: '❌ Cancel', callback_data: `ord:ccl:${workflowToken}` },
       { text: '💳 Confirm Order', callback_data: `ord:cnf:${workflowToken}` },
+    ],
+  ];
+
+  return { text, replyMarkup: { inline_keyboard: keyboard } };
+}
+
+export function renderOrderCreatedMessage(
+  order: OrderRecord,
+  env: Env
+): { text: string; replyMarkup: InlineKeyboardMarkup } {
+  const hasBankInfo = Boolean(env.BANK_ID && env.BANK_ACCOUNT_NUMBER);
+  const paymentCode = order.payment_code || 'N/A';
+
+  let bankSection = '';
+  let qrSection = '';
+
+  if (hasBankInfo && order.payment_code) {
+    bankSection = `\n💳 <b>Bank Transfer Info:</b>\n• <b>Bank:</b> <code>${escapeHtml(
+      env.BANK_ID!
+    )}</code>\n• <b>Account No:</b> <code>${escapeHtml(
+      env.BANK_ACCOUNT_NUMBER!
+    )}</code>\n${
+      env.BANK_ACCOUNT_NAME
+        ? `• <b>Account Name:</b> <code>${escapeHtml(env.BANK_ACCOUNT_NAME)}</code>\n`
+        : ''
+    }• <b>Transfer Content / Code:</b> <code>${escapeHtml(paymentCode)}</code>\n`;
+
+    const vietQrUrl = generateVietQrUrl({
+      bankId: env.BANK_ID!,
+      accountNumber: env.BANK_ACCOUNT_NUMBER!,
+      amount: order.total_amount,
+      paymentCode: order.payment_code,
+      accountName: env.BANK_ACCOUNT_NAME,
+      template: env.VIETQR_TEMPLATE,
+    });
+
+    qrSection = `\n📲 <a href="${escapeHtml(vietQrUrl)}"><b>Click here to open VietQR Code</b></a>\n`;
+  }
+
+  let statusBadge = `<code>${order.status}</code>`;
+  let statusNote = '';
+  if (order.status === 'PAID') {
+    statusBadge = `<b>PAID ✅</b>`;
+    statusNote = `\n🎉 <i>Payment confirmed! Your order is being processed.</i>\n`;
+  } else if (order.status === 'AWAITING_PAYMENT') {
+    statusBadge = `<b>AWAITING_PAYMENT ⏳</b>`;
+    statusNote = `\n⏳ <i>Please transfer the exact amount with the transfer content above. Payment is confirmed automatically within 1-2 minutes.</i>\n`;
+  }
+
+  const text = `🎉 <b>Order Created!</b>\n\n• <b>Order ID:</b> <code>${order.id}</code>\n• <b>Status:</b> ${statusBadge}\n• <b>Payment Code:</b> <code>${escapeHtml(
+    paymentCode
+  )}</code>\n• <b>Amount Due:</b> <b>${order.total_amount.toLocaleString('vi-VN')} VND</b>\n${bankSection}${qrSection}${statusNote}`;
+
+  const keyboard: InlineKeyboardMarkup['inline_keyboard'] = [
+    [
+      {
+        text: '🔄 Check Payment Status',
+        callback_data: `ord:chk:${order.id}`,
+      },
     ],
   ];
 
