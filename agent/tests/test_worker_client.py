@@ -195,3 +195,60 @@ async def test_worker_upload_artifact_and_complete(tmp_path, test_settings: Sett
         assert complete_res.status == "COMPLETED"
         assert complete_res.queue_action == "ack"
 
+
+@pytest.mark.asyncio
+async def test_worker_upload_artifact_streams_without_read_bytes(tmp_path, test_settings: Settings, monkeypatch):
+    dummy_zip = tmp_path / "streamed_test.zip"
+    payload_content = b"PK\x03\x04" + b"X" * 150000  # > 64KB to ensure multiple chunks
+    dummy_zip.write_bytes(payload_content)
+    sha256_hex = "b" * 64
+
+    # Disallow calling read_bytes on Path
+    def fail_read_bytes(self, *args, **kwargs):
+        raise AssertionError("Path.read_bytes() must not be called during streamed upload (BLOCK 4)")
+
+    monkeypatch.setattr("pathlib.Path.read_bytes", fail_read_bytes)
+
+    received_chunks = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["Content-Type"] == "application/zip"
+        assert request.headers["Content-Length"] == str(len(payload_content))
+        received_chunks.append(request.content)
+        return httpx.Response(200, json={
+            "success": True,
+            "artifact_key": f"artifacts/ord_stream/job_stream/{sha256_hex}.zip",
+            "sha256": sha256_hex,
+            "size": len(payload_content),
+        })
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http_client:
+        client = WorkerJobClient(test_settings, client=http_client)
+        upload_res = await client.upload_artifact("job_stream", "tok_stream", dummy_zip, sha256_hex)
+
+        assert upload_res.success is True
+        assert upload_res.size == len(payload_content)
+        assert len(received_chunks) == 1
+        assert received_chunks[0] == payload_content
+
+
+@pytest.mark.asyncio
+async def test_worker_complete_409_preserves_status_and_queue_action(test_settings: Settings):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(409, json={
+            "status": "EXPIRED_OR_FENCED",
+            "queue_action": "retry",
+            "reason": "lease_superseded_or_expired",
+        })
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http_client:
+        client = WorkerJobClient(test_settings, client=http_client)
+        res = await client.complete("job_1", "tok_1", "artifacts/k.zip", "a"*64, 100)
+        assert res.success is False
+        assert res.status == "EXPIRED_OR_FENCED"
+        assert res.queue_action == "retry"
+        assert res.reason == "lease_superseded_or_expired"
+
+

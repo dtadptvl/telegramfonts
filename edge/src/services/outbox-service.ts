@@ -290,6 +290,7 @@ export class OutboxService {
           const signed = await generateSignedDownloadUrl(order.id, signingSecret, {
             baseUrl: this.env?.BASE_URL,
             ttlSeconds,
+            requireHttps: true,
           });
 
           const tg = new TelegramClient(botToken);

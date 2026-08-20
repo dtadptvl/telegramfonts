@@ -29,6 +29,22 @@ export function formatTtlDescription(ttlSeconds: number): string {
   return `${ttlSeconds} seconds`;
 }
 
+export function validateHttpsBaseUrl(baseUrl?: string): string {
+  if (!baseUrl || !baseUrl.trim()) {
+    throw new Error('MISSING_BASE_URL');
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(baseUrl.trim());
+  } catch {
+    throw new Error('INVALID_BASE_URL');
+  }
+  if (parsed.protocol !== 'https:') {
+    throw new Error('INSECURE_BASE_URL_HTTPS_REQUIRED');
+  }
+  return parsed.origin;
+}
+
 export function buildCanonicalSignatureString(orderId: string, expires: number): string {
   return `v1:${orderId}:${expires}`;
 }
@@ -65,6 +81,7 @@ export async function generateSignedDownloadUrl(
     ttlSeconds?: number;
     expiresTimestamp?: number;
     baseUrl?: string;
+    requireHttps?: boolean;
   }
 ): Promise<{ url: string; expires: number; signature: string }> {
   if (!orderId || !/^[a-zA-Z0-9_-]{1,64}$/.test(orderId)) {
@@ -86,12 +103,23 @@ export async function generateSignedDownloadUrl(
 
   let fullUrl: string;
   if (options?.baseUrl && options.baseUrl.trim()) {
-    const rawBase = options.baseUrl.trim().replace(/\/+$/, '');
-    if (!/^https?:\/\//i.test(rawBase)) {
-      throw new Error('INVALID_BASE_URL');
+    const rawBase = options.baseUrl.trim();
+    if (options.requireHttps !== false) {
+      const validatedOrigin = validateHttpsBaseUrl(rawBase);
+      fullUrl = `${validatedOrigin}${basePath}${query}`;
+    } else {
+      let parsed: URL;
+      try {
+        parsed = new URL(rawBase);
+      } catch {
+        throw new Error('INVALID_BASE_URL');
+      }
+      fullUrl = `${parsed.origin}${basePath}${query}`;
     }
-    fullUrl = `${rawBase}${basePath}${query}`;
   } else {
+    if (options?.requireHttps) {
+      throw new Error('MISSING_BASE_URL');
+    }
     fullUrl = `${basePath}${query}`;
   }
 

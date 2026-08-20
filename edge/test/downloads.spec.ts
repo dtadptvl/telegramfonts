@@ -79,6 +79,21 @@ describe('Phase 6: HMAC Signed Download URL Verification & R2 Streaming', () => 
     expect(signed.url).toContain('&sig=');
   });
 
+  it('rejects baseUrl when insecure HTTP or missing when requireHttps is true', async () => {
+    await expect(
+      generateSignedDownloadUrl('ord_123', SIGNING_SECRET, {
+        baseUrl: 'http://insecure.example.com',
+        requireHttps: true,
+      })
+    ).rejects.toThrow('INSECURE_BASE_URL_HTTPS_REQUIRED');
+
+    await expect(
+      generateSignedDownloadUrl('ord_123', SIGNING_SECRET, {
+        requireHttps: true,
+      })
+    ).rejects.toThrow('MISSING_BASE_URL');
+  });
+
   it('streams private R2 artifact when HMAC signature is valid and unexpired', async () => {
     const { orderId, dummyZip } = await setupCompletedOrderWithArtifact();
 

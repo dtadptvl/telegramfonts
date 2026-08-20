@@ -293,16 +293,17 @@ async function handleCallbackQuery(
     }
 
     let signedDownloadUrl: string | undefined;
-    if (order.status === 'COMPLETED' && env.DOWNLOAD_SIGNING_SECRET) {
+    if (order.status === 'COMPLETED' && env.DOWNLOAD_SIGNING_SECRET && env.BASE_URL) {
       try {
         const ttlSeconds = getDownloadTtlSeconds(env.DOWNLOAD_URL_TTL_SECONDS);
         const signed = await generateSignedDownloadUrl(order.id, env.DOWNLOAD_SIGNING_SECRET, {
           baseUrl: env.BASE_URL,
           ttlSeconds,
+          requireHttps: true,
         });
         signedDownloadUrl = signed.url;
       } catch {
-        // Fallback without signed link if signing fails
+        // Fallback without signed link if signing or baseUrl validation fails
       }
     }
 
