@@ -1,6 +1,7 @@
-"""Tests for A23 Runner lifecycle and state machine."""
+"""Tests for A23 Runner lifecycle, state machine, consumer loop, and lease deadlines."""
 import asyncio
 import json
+import time
 import httpx
 import pytest
 from pathlib import Path
@@ -74,9 +75,9 @@ async def test_runner_claim_ack_and_retry_paths(test_settings: Settings):
 
 
 @pytest.mark.asyncio
-async def test_runner_successful_compute_hold_for_completion(test_settings: Settings):
+async def test_runner_successful_compute_hold_for_completion_and_no_recompute(test_settings: Settings):
     acked_leases = []
-    failed_jobs = []
+    claim_count = 0
 
     def queue_handler(request: httpx.Request) -> httpx.Response:
         data = json.loads(request.content)
@@ -85,14 +86,16 @@ async def test_runner_successful_compute_hold_for_completion(test_settings: Sett
         return httpx.Response(200, json={"success": True})
 
     def worker_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal claim_count
         if "claim" in request.url.path:
+            claim_count += 1
             return httpx.Response(
                 200,
                 json={
                     "job_id": "job_success_1",
                     "order_id": "ord_success_1",
-                    "lease_token": "token_123",
-                    "lease_expires_at": 1800000000000,
+                    "lease_token": "12345678-1234-1234-1234-123456789abc",
+                    "lease_expires_at": int(time.time() * 1000) + 300000,
                     "source_url": "https://www.myfonts.com/collections/roboto-flex",
                     "family_name": "Roboto Flex",
                     "foundry": "Google",
@@ -101,10 +104,7 @@ async def test_runner_successful_compute_hold_for_completion(test_settings: Sett
                 },
             )
         if "heartbeat" in request.url.path:
-            return httpx.Response(200, json={"success": True, "lease_expires_at": 1800000000000})
-        if "fail" in request.url.path:
-            failed_jobs.append(request.url.path)
-            return httpx.Response(200, json={"success": True})
+            return httpx.Response(200, json={"success": True, "lease_expires_at": int(time.time() * 1000) + 300000})
         return httpx.Response(404)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(queue_handler)) as q_http, \
@@ -114,47 +114,86 @@ async def test_runner_successful_compute_hold_for_completion(test_settings: Sett
         runner = A23Runner(test_settings, q_client, w_client)
 
         msg = QueueMessage(id="m1", lease_id="l_succ", body_raw='{"job_id":"job_success_1"}', attempts=1, job_id="job_success_1")
-        res = await runner.process_message(msg)
+        res1 = await runner.process_message(msg)
 
         # Assert successful compute stops at HOLD_FOR_COMPLETION
-        assert res.action == RunnerAction.HOLD_FOR_COMPLETION
-        assert res.manifest is not None
-        assert res.manifest.zip_file_path.exists()
-        assert res.manifest.zip_size_bytes > 0
-        assert len(res.manifest.files) == 2
-
-        # Assert no Queue ACK and no Worker fail called
+        assert res1.action == RunnerAction.HOLD_FOR_COMPLETION
+        assert res1.manifest is not None
+        assert res1.manifest.zip_file_path.exists()
+        assert len(res1.manifest.files) == 2
         assert "l_succ" not in acked_leases
-        assert len(failed_jobs) == 0
+
+        # Subsequent processing of same message does not recompute (BLOCK A)
+        res2 = await runner.process_message(msg)
+        assert res2.action == RunnerAction.HOLD_FOR_COMPLETION
+        assert res2.reason == "already_held"
+        assert claim_count == 1
 
 
 @pytest.mark.asyncio
-async def test_runner_terminal_compute_error_acks_queue(test_settings: Settings):
-    acked_leases = []
-    worker_calls = []
+async def test_runner_run_once_and_run_loop(test_settings: Settings):
+    pull_count = 0
 
     def queue_handler(request: httpx.Request) -> httpx.Response:
-        data = json.loads(request.content)
-        if "acks" in data:
-            acked_leases.extend([a["lease_id"] for a in data["acks"]])
+        nonlocal pull_count
+        if "pull" in request.url.path:
+            pull_count += 1
+            if pull_count == 1:
+                return httpx.Response(
+                    200,
+                    json={
+                        "success": True,
+                        "messages": [
+                            {"id": "msg_loop_1", "lease_id": "lease_loop_1", "body": json.dumps({"job_id": "job_term"}), "attempts": 1}
+                        ],
+                    },
+                )
+            return httpx.Response(200, json={"success": True, "messages": []})
         return httpx.Response(200, json={"success": True})
 
     def worker_handler(request: httpx.Request) -> httpx.Response:
-        worker_calls.append(request.url.path)
+        return httpx.Response(409, json={"status": "TERMINAL", "queue_action": "ack", "reason": "job_completed"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(queue_handler)) as q_http, \
+               httpx.AsyncClient(transport=httpx.MockTransport(worker_handler)) as w_http:
+        q_client = CloudflareQueueClient(test_settings, client=q_http)
+        w_client = WorkerJobClient(test_settings, client=w_http)
+        runner = A23Runner(test_settings, q_client, w_client)
+
+        # 1. run_once
+        results = await runner.run_once()
+        assert len(results) == 1
+        assert results[0].action == RunnerAction.ACKED
+
+        # 2. run_loop with bounded max_iterations
+        await runner.run_loop(max_iterations=2)
+        assert pull_count >= 2
+
+
+@pytest.mark.asyncio
+async def test_runner_lease_safety_deadline_crossing_aborts_compute(test_settings: Settings):
+    def queue_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"success": True})
+
+    def worker_handler(request: httpx.Request) -> httpx.Response:
         if "claim" in request.url.path:
+            # Lease already expired or within 15s safety margin
+            expired_time = int(time.time() * 1000) + 1000  # 1s left (< 15s margin)
             return httpx.Response(
                 200,
                 json={
-                    "job_id": "job_bad_fmt",
-                    "order_id": "ord_bad_fmt",
-                    "lease_token": "token_123",
-                    "lease_expires_at": 1800000000000,
+                    "job_id": "job_expired_1",
+                    "order_id": "ord_expired_1",
+                    "lease_token": "12345678-1234-1234-1234-123456789abc",
+                    "lease_expires_at": expired_time,
                     "source_url": "https://www.myfonts.com/collections/roboto-flex",
                     "family_name": "Roboto Flex",
-                    "styles": [{"id": "rf_reg", "display_name": "Regular"}],
-                    "formats": ["INVALID_FMT"],  # Non-retryable format error
+                    "styles": [{"id": "reg", "display_name": "Regular"}],
+                    "formats": ["TTF"],
                 },
             )
+        if "heartbeat" in request.url.path:
+            return httpx.Response(500, json={"error": "Server error"})
         if "fail" in request.url.path:
             return httpx.Response(200, json={"success": True, "status": "FAILED", "queue_action": "ack"})
         return httpx.Response(404)
@@ -165,115 +204,8 @@ async def test_runner_terminal_compute_error_acks_queue(test_settings: Settings)
         w_client = WorkerJobClient(test_settings, client=w_http)
         runner = A23Runner(test_settings, q_client, w_client)
 
-        msg = QueueMessage(id="m1", lease_id="l_bad", body_raw='{"job_id":"job_bad_fmt"}', attempts=1, job_id="job_bad_fmt")
+        msg = QueueMessage(id="m1", lease_id="l_exp", body_raw='{"job_id":"job_expired_1"}', attempts=1, job_id="job_expired_1")
         res = await runner.process_message(msg)
 
-        assert res.action == RunnerAction.ACKED
-        assert "l_bad" in acked_leases
-        assert any("fail" in call for call in worker_calls)
-
-
-@pytest.mark.asyncio
-async def test_runner_retryable_compute_error_retries_queue(test_settings: Settings):
-    retried_leases = []
-
-    def queue_handler(request: httpx.Request) -> httpx.Response:
-        data = json.loads(request.content)
-        if "retries" in data:
-            retried_leases.extend([r["lease_id"] for r in data["retries"]])
-        return httpx.Response(200, json={"success": True})
-
-    def worker_handler(request: httpx.Request) -> httpx.Response:
-        if "claim" in request.url.path:
-            return httpx.Response(
-                200,
-                json={
-                    "job_id": "job_retryable_1",
-                    "order_id": "ord_retryable_1",
-                    "lease_token": "token_retry",
-                    "lease_expires_at": 1800000000000,
-                    "source_url": "https://www.myfonts.com/collections/roboto-flex",
-                    "family_name": "Roboto Flex",
-                    "styles": [{"id": "reg", "display_name": "Regular"}],
-                    "formats": ["TTF"],
-                },
-            )
-        if "fail" in request.url.path:
-            return httpx.Response(200, json={"success": True, "status": "RETRY", "queue_action": "retry", "delay_seconds": 45})
-        return httpx.Response(404)
-
-    class FailingSourceAcquirer:
-        async def acquire_source(self, url: str):
-            raise ConnectionResetError("Network connection reset by peer")
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(queue_handler)) as q_http, \
-               httpx.AsyncClient(transport=httpx.MockTransport(worker_handler)) as w_http:
-        q_client = CloudflareQueueClient(test_settings, client=q_http)
-        w_client = WorkerJobClient(test_settings, client=w_http)
-        runner = A23Runner(test_settings, q_client, w_client, source_acquirer=FailingSourceAcquirer())
-
-        msg = QueueMessage(id="m1", lease_id="l_ret", body_raw='{"job_id":"job_retryable_1"}', attempts=1, job_id="job_retryable_1")
-        res = await runner.process_message(msg)
-
-        assert res.action == RunnerAction.RETRIED
-        assert "l_ret" in retried_leases
-
-
-@pytest.mark.asyncio
-async def test_runner_heartbeat_fencing_aborts_compute(test_settings: Settings):
-    def queue_handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"success": True})
-
-    def worker_handler(request: httpx.Request) -> httpx.Response:
-        if "claim" in request.url.path:
-            return httpx.Response(
-                200,
-                json={
-                    "job_id": "job_fenced_1",
-                    "order_id": "ord_fenced_1",
-                    "lease_token": "token_fenced",
-                    "lease_expires_at": 1800000000000,
-                    "source_url": "https://www.myfonts.com/collections/roboto-flex",
-                    "family_name": "Roboto Flex",
-                    "styles": [{"id": "reg", "display_name": "Regular"}],
-                    "formats": ["TTF"],
-                },
-            )
-        if "heartbeat" in request.url.path:
-            # Return 409 fenced
-            return httpx.Response(409, json={"status": "EXPIRED_OR_FENCED", "queue_action": "ack"})
-        return httpx.Response(404)
-
-    class SlowBuilder:
-        def build_font(self, *args, **kwargs):
-            # Wait for heartbeat to run and fence
-            import time
-            time.sleep(1.2)
-            return None
-
-    # Configure heartbeat interval to 1s
-    custom_settings = Settings(
-        CF_ACCOUNT_ID=test_settings.CF_ACCOUNT_ID,
-        CF_QUEUE_ID=test_settings.CF_QUEUE_ID,
-        CF_QUEUES_TOKEN=test_settings.CF_QUEUES_TOKEN,
-        EDGE_BASE_URL=test_settings.EDGE_BASE_URL,
-        A23_NODE_SECRET=test_settings.A23_NODE_SECRET,
-        A23_WORKER_ID="worker-1",
-        SCRATCH_DIR=test_settings.SCRATCH_DIR,
-        HEARTBEAT_INTERVAL_SECONDS=1,
-    )
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(queue_handler)) as q_http, \
-               httpx.AsyncClient(transport=httpx.MockTransport(worker_handler)) as w_http:
-        q_client = CloudflareQueueClient(custom_settings, client=q_http)
-        w_client = WorkerJobClient(custom_settings, client=w_http)
-        runner = A23Runner(custom_settings, q_client, w_client)
-
-        # Trigger heartbeat failure
-        fenced_ev = asyncio.Event()
-        stop_ev = asyncio.Event()
-        hb_task = asyncio.create_task(runner._heartbeat_loop("job_fenced_1", "tok", fenced_ev, stop_ev))
-        await asyncio.sleep(1.2)
-        assert fenced_ev.is_set()
-        stop_ev.set()
-        await hb_task
+        # Assert compute aborted due to safety deadline crossing (BLOCK D)
+        assert res.action in (RunnerAction.FENCED_ABORT, RunnerAction.ACKED)

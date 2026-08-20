@@ -1,7 +1,9 @@
-"""Tests for source acquisition and URL validation."""
+"""Tests for source acquisition, URL validation, and preview parsing."""
+import httpx
 import pytest
 
 from compute.source import SourceAcquirer, validate_myfonts_url
+from worker_client import ClaimStyle
 
 
 def test_validate_myfonts_url():
@@ -11,7 +13,7 @@ def test_validate_myfonts_url():
     assert validate_myfonts_url("https://www.myfonts.com/fonts/foundry/family-name") is True
 
     # Invalid / off-domain / insecure URLs
-    assert validate_myfonts_url("http://www.myfonts.com/collections/roboto") is False  # Insecure HTTP
+    assert validate_myfonts_url("http://www.myfonts.com/collections/roboto") is False
     assert validate_myfonts_url("https://evil.com/collections/roboto") is False
     assert validate_myfonts_url("https://myfonts.com.evil.com/font") is False
     assert validate_myfonts_url("not-a-url") is False
@@ -19,13 +21,61 @@ def test_validate_myfonts_url():
 
 
 @pytest.mark.asyncio
-async def test_source_acquirer():
+async def test_source_acquirer_distinct_outputs():
+    acquirer = SourceAcquirer()
+    styles = [ClaimStyle(id="reg", display_name="Regular"), ClaimStyle(id="bold", display_name="Bold")]
+
+    # Source 1
+    p1 = await acquirer.acquire_source("https://www.myfonts.com/collections/roboto-flex", styles)
+    # Source 2
+    p2 = await acquirer.acquire_source("https://www.myfonts.com/collections/helvetica-now", styles)
+
+    assert p1.family_name != p2.family_name
+    # Assert two distinct inputs generate distinct glyph metrics / contours (BLOCK B)
+    g1 = p1.styles["reg"].glyphs["A"]
+    g2 = p2.styles["reg"].glyphs["A"]
+    assert g1.advance_width != g2.advance_width or g1.contours != g2.contours
+
+
+@pytest.mark.asyncio
+async def test_source_acquirer_network_limits():
+    acquirer = SourceAcquirer(timeout=5.0)
+    styles = [ClaimStyle(id="reg", display_name="Regular")]
+
+    # 1. Payload too large (>10MB)
+    def handler_large(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"A" * (11 * 1024 * 1024), headers={"content-type": "text/html"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler_large)) as http_client:
+        with pytest.raises(ValueError, match="SOURCE_PAYLOAD_TOO_LARGE"):
+            await acquirer.acquire_source("https://www.myfonts.com/collections/roboto", styles, client=http_client)
+
+    # 2. Unsupported content-type
+    def handler_bad_type(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"content", headers={"content-type": "application/x-executable"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler_bad_type)) as http_client:
+        with pytest.raises(ValueError, match="UNSUPPORTED_CONTENT_TYPE"):
+            await acquirer.acquire_source("https://www.myfonts.com/collections/roboto", styles, client=http_client)
+
+
+def test_raster_preview_and_fixture_fail_closed():
     acquirer = SourceAcquirer()
 
-    # Valid URL
-    res = await acquirer.acquire_source("https://www.myfonts.com/collections/roboto-flex")
-    assert res["family_slug"] == "roboto-flex"
+    # Empty bytes fails closed
+    with pytest.raises(ValueError, match="MALFORMED_SOURCE_INPUT"):
+        acquirer.parse_raster_preview(b"")
 
-    # Invalid URL raises ValueError
-    with pytest.raises(ValueError, match="INVALID_SOURCE_URL"):
-        await acquirer.acquire_source("https://attacker.com/malicious")
+    # Corrupt image bytes fails closed
+    with pytest.raises(ValueError, match="MALFORMED_SOURCE_INPUT"):
+        acquirer.parse_raster_preview(b"GARBAGE_NON_IMAGE_BYTES")
+
+    # Malformed fixture fails closed
+    with pytest.raises(ValueError, match="MALFORMED_SOURCE_INPUT"):
+        acquirer.from_fixture({"source_url": "https://invalid-site.com"})
+
+    with pytest.raises(ValueError, match="MALFORMED_SOURCE_INPUT"):
+        acquirer.from_fixture({
+            "source_url": "https://www.myfonts.com/collections/valid",
+            "styles": [{"style_id": "s1", "style_name": "S1", "glyphs": {}}],  # empty glyphs
+        })

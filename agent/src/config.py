@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import socket
 from pathlib import Path
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -48,6 +48,18 @@ class Settings(BaseSettings):
         le=1800,
         description="Requested lease duration in seconds",
     )
+    IDLE_BACKOFF_SECONDS: float = Field(
+        default=3.0,
+        ge=0.5,
+        le=60.0,
+        description="Idle sleep seconds when no queue messages are returned",
+    )
+    ERROR_BACKOFF_SECONDS: float = Field(
+        default=5.0,
+        ge=1.0,
+        le=60.0,
+        description="Backoff sleep seconds on transient queue pull errors",
+    )
     SCRATCH_DIR: Path = Field(
         default=Path("./scratch"),
         description="Directory root for local computation and staging",
@@ -71,3 +83,12 @@ class Settings(BaseSettings):
         if not clean:
             clean = "a23-worker"
         return clean[:64]
+
+    @model_validator(mode="after")
+    def validate_heartbeat_lease_safety(self) -> Settings:
+        if self.HEARTBEAT_INTERVAL_SECONDS >= self.LEASE_DURATION_SECONDS:
+            raise ValueError(
+                f"Unsafe configuration: HEARTBEAT_INTERVAL_SECONDS ({self.HEARTBEAT_INTERVAL_SECONDS}) "
+                f"must be less than LEASE_DURATION_SECONDS ({self.LEASE_DURATION_SECONDS})"
+            )
+        return self

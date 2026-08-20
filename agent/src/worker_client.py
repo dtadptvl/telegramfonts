@@ -31,31 +31,71 @@ class ClaimedJob:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ClaimedJob:
-        raw_styles = data.get("styles", [])
-        styles = [
-            ClaimStyle(
-                id=str(s.get("id", "")),
-                display_name=str(s.get("display_name", s.get("id", ""))),
-            )
-            for s in raw_styles
-            if isinstance(s, dict) and s.get("id")
-        ]
+        # 1. Scalar identifier validation
+        job_id = str(data.get("job_id", "")).strip()
+        if not job_id or not all(c.isalnum() or c in ("-", "_") for c in job_id) or len(job_id) > 64:
+            raise ValueError("MALFORMED_JOB_ID")
 
-        raw_formats = data.get("formats", [])
-        formats = [
-            str(f).upper()
-            for f in raw_formats
-            if isinstance(f, str) and str(f).upper() in ("TTF", "OTF", "WOFF", "WOFF2")
-        ]
+        order_id = str(data.get("order_id", "")).strip()
+        if not order_id or not all(c.isalnum() or c in ("-", "_") for c in order_id) or len(order_id) > 64:
+            raise ValueError("MALFORMED_ORDER_ID")
+
+        lease_token = str(data.get("lease_token", "")).strip()
+        if not lease_token or len(lease_token) != 36:
+            raise ValueError("MALFORMED_LEASE_TOKEN")
+
+        try:
+            lease_expires_at = int(data.get("lease_expires_at", 0))
+            if lease_expires_at <= 0:
+                raise ValueError("MALFORMED_LEASE_EXPIRY")
+        except (ValueError, TypeError):
+            raise ValueError("MALFORMED_LEASE_EXPIRY")
+
+        source_url = str(data.get("source_url", "")).strip()
+        if not source_url.startswith("https://") or ("myfonts.com" not in source_url):
+            raise ValueError("MALFORMED_SOURCE_URL")
+
+        # 2. Atomic styles validation (no silent dropping)
+        raw_styles = data.get("styles")
+        if not isinstance(raw_styles, list) or len(raw_styles) == 0:
+            raise ValueError("MISSING_OR_EMPTY_STYLES")
+
+        styles: list[ClaimStyle] = []
+        for s in raw_styles:
+            if not isinstance(s, dict):
+                raise ValueError("INVALID_STYLE_ENTRY")
+            s_id = str(s.get("id", "")).strip()
+            s_name = str(s.get("display_name", s_id)).strip()
+            if not s_id or not all(c.isalnum() or c in ("-", "_") for c in s_id) or len(s_id) > 64:
+                raise ValueError(f"INVALID_STYLE_ID: {s_id}")
+            if not s_name or len(s_name) > 128:
+                raise ValueError(f"INVALID_STYLE_NAME: {s_name}")
+            styles.append(ClaimStyle(id=s_id, display_name=s_name))
+
+        # 3. Atomic formats validation (no silent dropping)
+        raw_formats = data.get("formats")
+        if not isinstance(raw_formats, list) or len(raw_formats) == 0:
+            raise ValueError("MISSING_OR_EMPTY_FORMATS")
+
+        allowed_formats = {"TTF", "OTF", "WOFF2"}
+        formats: list[str] = []
+        for f in raw_formats:
+            if not isinstance(f, str):
+                raise ValueError(f"NON_STRING_FORMAT: {f}")
+            clean_f = f.strip().upper()
+            if clean_f not in allowed_formats:
+                raise ValueError(f"UNSUPPORTED_FORMAT: {clean_f}")
+            if clean_f not in formats:
+                formats.append(clean_f)
 
         return cls(
-            job_id=str(data["job_id"]),
-            order_id=str(data["order_id"]),
-            lease_token=str(data["lease_token"]),
-            lease_expires_at=int(data["lease_expires_at"]),
-            source_url=str(data["source_url"]),
-            family_name=data.get("family_name"),
-            foundry=data.get("foundry"),
+            job_id=job_id,
+            order_id=order_id,
+            lease_token=lease_token,
+            lease_expires_at=lease_expires_at,
+            source_url=source_url,
+            family_name=str(data["family_name"]).strip() if data.get("family_name") else None,
+            foundry=str(data["foundry"]).strip() if data.get("foundry") else None,
             styles=styles,
             formats=formats,
         )
@@ -113,8 +153,16 @@ class WorkerJobClient:
             data = resp.json() if resp.content else {}
 
             if resp.status_code == 200:
-                job = ClaimedJob.from_dict(data)
-                return ClaimResult(status="CLAIMED", queue_action="claimed", job=job)
+                try:
+                    job = ClaimedJob.from_dict(data)
+                    return ClaimResult(status="CLAIMED", queue_action="claimed", job=job)
+                except ValueError as val_err:
+                    logger.warning(f"Malformed claim payload for job {job_id}: {val_err}")
+                    return ClaimResult(
+                        status="MALFORMED_PAYLOAD",
+                        queue_action="retry",
+                        reason=f"malformed_claim_payload_{val_err}",
+                    )
 
             if resp.status_code == 404:
                 return ClaimResult(

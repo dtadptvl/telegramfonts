@@ -1,4 +1,4 @@
-"""Deterministic font binary builder using FontTools."""
+"""Deterministic font binary builder using FontTools consuming source-driven glyph data."""
 from __future__ import annotations
 
 import hashlib
@@ -8,69 +8,24 @@ from pathlib import Path
 from fontTools.fontBuilder import FontBuilder
 from fontTools.pens.ttGlyphPen import TTGlyphPen
 
-from compute.models import GeneratedFontFile
+from compute.models import GeneratedFontFile, StyleSourceData
 
 logger = logging.getLogger("telegramfonts.agent.font_builder")
 
-
-def _build_base_glyphs() -> tuple[dict[str, object], dict[str, tuple[int, int]], dict[int, str]]:
-    """Generate minimal valid TrueType glyph set and unicode mappings."""
-    # .notdef glyph
-    pen_notdef = TTGlyphPen(None)
-    pen_notdef.moveTo((50, 0))
-    pen_notdef.lineTo((50, 600))
-    pen_notdef.lineTo((300, 600))
-    pen_notdef.lineTo((300, 0))
-    pen_notdef.closePath()
-    glyph_notdef = pen_notdef.glyph()
-
-    # space glyph (empty outline)
-    pen_space = TTGlyphPen(None)
-    glyph_space = pen_space.glyph()
-
-    # standard letter glyph
-    pen_char = TTGlyphPen(None)
-    pen_char.moveTo((100, 0))
-    pen_char.lineTo((100, 700))
-    pen_char.lineTo((500, 700))
-    pen_char.lineTo((500, 0))
-    pen_char.closePath()
-    glyph_char = pen_char.glyph()
-
-    glyphs = {
-        ".notdef": glyph_notdef,
-        "space": glyph_space,
-        "A": glyph_char,
-        "B": glyph_char,
-        "a": glyph_char,
-        "b": glyph_char,
-    }
-
-    metrics = {
-        ".notdef": (350, 50),
-        "space": (300, 0),
-        "A": (600, 100),
-        "B": (600, 100),
-        "a": (500, 100),
-        "b": (500, 100),
-    }
-
-    cmap = {
-        0x20: "space",
-        0x41: "A",
-        0x42: "B",
-        0x61: "a",
-        0x62: "b",
-    }
-
-    return glyphs, metrics, cmap
+UNICODE_MAP = {
+    "space": 0x20,
+    "A": 0x41,
+    "B": 0x42,
+    "a": 0x61,
+    "b": 0x62,
+}
 
 
 class FontBuilderService:
     def build_font(
         self,
+        style_source: StyleSourceData,
         family_name: str,
-        style_name: str,
         format_type: str,
         output_dir: Path,
     ) -> GeneratedFontFile:
@@ -82,21 +37,55 @@ class FontBuilderService:
         ext = ext_map[clean_format]
 
         sanitized_family = "".join(c for c in family_name if c.isalnum() or c in (" ", "-", "_")).strip()
-        sanitized_style = "".join(c for c in style_name if c.isalnum() or c in (" ", "-", "_")).strip()
+        sanitized_style = "".join(c for c in style_source.style_name if c.isalnum() or c in (" ", "-", "_")).strip()
         ps_family = sanitized_family.replace(" ", "")
         ps_style = sanitized_style.replace(" ", "")
         ps_name = f"{ps_family}-{ps_style}"
 
         filename = f"{ps_name}.{ext}"
-        output_path = output_dir / filename
+        output_path = (output_dir / filename).resolve()
 
+        # Path traversal guard
+        try:
+            output_path.relative_to(output_dir.resolve())
+        except ValueError:
+            raise ValueError(f"Output path traversal detected: {filename}")
+
+        # Build font from style_source.glyphs
         fb = FontBuilder(unitsPerEm=1024, isTTF=True)
-        glyphs, metrics, cmap = _build_base_glyphs()
 
-        fb.setupGlyphOrder(list(glyphs.keys()))
+        glyph_order = list(style_source.glyphs.keys())
+        if ".notdef" not in glyph_order:
+            glyph_order.insert(0, ".notdef")
+
+        cmap: dict[int, str] = {}
+        for g_name in glyph_order:
+            if g_name in UNICODE_MAP:
+                cmap[UNICODE_MAP[g_name]] = g_name
+
+        glyphs_dict: dict[str, object] = {}
+        metrics_dict: dict[str, tuple[int, int]] = {}
+
+        for g_name in glyph_order:
+            g_vec = style_source.glyphs.get(g_name)
+            pen = TTGlyphPen(None)
+            if g_vec and g_vec.contours:
+                for contour in g_vec.contours:
+                    if len(contour) > 0:
+                        pen.moveTo(contour[0])
+                        for pt in contour[1:]:
+                            pen.lineTo(pt)
+                        pen.closePath()
+            glyph_obj = pen.glyph()
+            glyphs_dict[g_name] = glyph_obj
+            adv = g_vec.advance_width if g_vec else 600
+            lsb = g_vec.lsb if g_vec else 50
+            metrics_dict[g_name] = (adv, lsb)
+
+        fb.setupGlyphOrder(glyph_order)
         fb.setupCharacterMap(cmap)
-        fb.setupGlyf(glyphs)
-        fb.setupHorizontalMetrics(metrics)
+        fb.setupGlyf(glyphs_dict)
+        fb.setupHorizontalMetrics(metrics_dict)
         fb.setupHorizontalHeader(ascent=800, descent=-200)
 
         name_strings = {
@@ -105,7 +94,7 @@ class FontBuilderService:
             "psName": ps_name or "TeleFont-Regular",
         }
         fb.setupNameTable(name_strings)
-        fb.setupOS2()
+        fb.setupOS2(usWeightClass=style_source.weight_class)
         fb.setupPost()
 
         if clean_format == "WOFF2":
@@ -119,7 +108,7 @@ class FontBuilderService:
         sha256_hex = hashlib.sha256(raw_bytes).hexdigest()
 
         return GeneratedFontFile(
-            style_id=style_name.lower().replace(" ", "_"),
+            style_id=style_source.style_id,
             style_name=sanitized_style,
             format=clean_format,
             filename=filename,
