@@ -24,7 +24,6 @@ export interface FulfillmentReceiptRecord {
   artifact_key: string;
   artifact_sha256: string;
   artifact_size_bytes: number;
-  worker_id: string;
   completed_at: number;
   created_at: number;
 }
@@ -543,18 +542,45 @@ export class JobService {
     const outboxPayload = JSON.stringify({ order_id: orderId });
     const artifactId = crypto.randomUUID();
 
-    // 3. Atomic D1 transactional batch (BLOCK 4)
+    // 3. Atomic D1 transactional batch (BLOCK 2: Fully gated mutations)
     const statements: D1PreparedStatement[] = [
-      // 1. Insert completion receipt
+      // Statement 1: Insert completion receipt conditionally on current unexpired lease + processing order
       this.db
         .prepare(
           `INSERT INTO fulfillment_receipts (
-             job_id, order_id, artifact_key, artifact_sha256, artifact_size_bytes, worker_id, completed_at, created_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+             job_id, order_id, artifact_key, artifact_sha256, artifact_size_bytes, completed_at, created_at
+           )
+           SELECT ?, ?, ?, ?, ?, ?, ?
+           WHERE EXISTS (
+             SELECT 1 FROM fulfillment_jobs
+             WHERE id = ?
+               AND status = 'PROCESSING'
+               AND lease_owner = ?
+               AND lease_token = ?
+               AND lease_expires_at > ?
+           )
+           AND EXISTS (
+             SELECT 1 FROM orders
+             WHERE id = ?
+               AND status = 'PROCESSING'
+           )`
         )
-        .bind(jobId, orderId, artifactKey, cleanSha, artifactSizeBytes, cleanWorkerId, now, now),
+        .bind(
+          jobId,
+          orderId,
+          artifactKey,
+          cleanSha,
+          artifactSizeBytes,
+          now,
+          now,
+          jobId,
+          cleanWorkerId,
+          cleanToken,
+          now,
+          orderId
+        ),
 
-      // 2. Transition fulfillment_job to COMPLETED
+      // Statement 2: Transition fulfillment_job to COMPLETED only if gated receipt exists
       this.db
         .prepare(
           `UPDATE fulfillment_jobs
@@ -572,11 +598,28 @@ export class JobService {
              AND status = 'PROCESSING'
              AND lease_owner = ?
              AND lease_token = ?
-             AND lease_expires_at > ?`
+             AND lease_expires_at > ?
+             AND EXISTS (
+               SELECT 1 FROM fulfillment_receipts
+               WHERE job_id = ? AND artifact_key = ? AND artifact_sha256 = ?
+             )`
         )
-        .bind(artifactKey, cleanSha, artifactSizeBytes, now, now, jobId, cleanWorkerId, cleanToken, now),
+        .bind(
+          artifactKey,
+          cleanSha,
+          artifactSizeBytes,
+          now,
+          now,
+          jobId,
+          cleanWorkerId,
+          cleanToken,
+          now,
+          jobId,
+          artifactKey,
+          cleanSha
+        ),
 
-      // 3. Transition order to COMPLETED
+      // Statement 3: Transition order to COMPLETED only if gated receipt exists
       this.db
         .prepare(
           `UPDATE orders
@@ -584,39 +627,54 @@ export class JobService {
                completed_at = ?,
                updated_at = ?
            WHERE id = ?
-             AND status = 'PROCESSING'`
+             AND status = 'PROCESSING'
+             AND EXISTS (
+               SELECT 1 FROM fulfillment_receipts
+               WHERE job_id = ? AND order_id = ? AND artifact_key = ? AND artifact_sha256 = ?
+             )`
         )
-        .bind(now, now, orderId),
+        .bind(now, now, orderId, jobId, orderId, artifactKey, cleanSha),
 
-      // 4. Insert exactly one PENDING DELIVERY_READY outbox event
+      // Statement 4: Insert exactly one PENDING DELIVERY_READY outbox event only if gated receipt exists
       this.db
         .prepare(
           `INSERT INTO outbox_events (
              id, event_type, aggregate_type, aggregate_id, payload, status, created_at
-           ) VALUES (?, 'DELIVERY_READY', 'order', ?, ?, 'PENDING', ?)`
+           )
+           SELECT ?, 'DELIVERY_READY', 'order', ?, ?, 'PENDING', ?
+           WHERE EXISTS (
+             SELECT 1 FROM fulfillment_receipts
+             WHERE job_id = ? AND order_id = ? AND artifact_key = ? AND artifact_sha256 = ?
+           )`
         )
-        .bind(outboxId, orderId, outboxPayload, now),
+        .bind(outboxId, orderId, outboxPayload, now, jobId, orderId, artifactKey, cleanSha),
 
-      // 5. Insert artifact record
+      // Statement 5: Insert artifact record only if gated receipt exists
       this.db
         .prepare(
           `INSERT OR IGNORE INTO artifacts (
              id, order_id, job_id, storage_key, file_name, file_size, mime_type, created_at
-           ) VALUES (?, ?, ?, ?, ?, ?, 'application/zip', ?)`
+           )
+           SELECT ?, ?, ?, ?, ?, ?, 'application/zip', ?
+           WHERE EXISTS (
+             SELECT 1 FROM fulfillment_receipts
+             WHERE job_id = ? AND order_id = ? AND artifact_key = ? AND artifact_sha256 = ?
+           )`
         )
-        .bind(artifactId, orderId, jobId, artifactKey, `${orderId}.zip`, artifactSizeBytes, now),
+        .bind(artifactId, orderId, jobId, artifactKey, `${orderId}.zip`, artifactSizeBytes, now, jobId, orderId, artifactKey, cleanSha),
     ];
 
     try {
       const results = await this.db.batch(statements);
       const receiptChanges = results[0].meta.changes;
       const jobChanges = results[1].meta.changes;
+      const orderChanges = results[2].meta.changes;
 
-      if (!receiptChanges || receiptChanges === 0 || !jobChanges || jobChanges === 0) {
+      if (!receiptChanges || receiptChanges === 0 || !jobChanges || jobChanges === 0 || !orderChanges || orderChanges === 0) {
         return {
           status: 'EXPIRED_OR_FENCED',
           queue_action: 'retry',
-          reason: 'completion_cas_lost',
+          reason: 'completion_gated_predicates_failed',
         };
       }
 

@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { env, createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import worker, { type Env } from '../src/index';
-import { generateSignedDownloadUrl } from '../src/utils/download-signer';
+import { generateSignedDownloadUrl, formatTtlDescription, getDownloadTtlSeconds } from '../src/utils/download-signer';
 
 const SIGNING_SECRET = 'test_download_signing_secret_1234567890';
 
@@ -9,6 +9,7 @@ const testEnv: Env = {
   ...(env as unknown as Env),
   DOWNLOAD_SIGNING_SECRET: SIGNING_SECRET,
   DOWNLOAD_URL_TTL_SECONDS: '3600',
+  BASE_URL: 'https://telefont.example.com',
 };
 
 async function setupCompletedOrderWithArtifact() {
@@ -47,8 +48,8 @@ async function setupCompletedOrderWithArtifact() {
 
   // Insert fulfillment receipt
   await env.DB.prepare(
-    `INSERT INTO fulfillment_receipts (job_id, order_id, artifact_key, artifact_sha256, artifact_size_bytes, worker_id, completed_at, created_at)
-     VALUES (?, ?, ?, ?, ?, 'worker-1', ?, ?)`
+    `INSERT INTO fulfillment_receipts (job_id, order_id, artifact_key, artifact_sha256, artifact_size_bytes, completed_at, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
   )
     .bind(jobId, orderId, artifactKey, sha256Hex, dummyZip.byteLength, now, now)
     .run();
@@ -57,6 +58,27 @@ async function setupCompletedOrderWithArtifact() {
 }
 
 describe('Phase 6: HMAC Signed Download URL Verification & R2 Streaming', () => {
+  it('formats TTL descriptions correctly and honors configurable TTL', () => {
+    expect(formatTtlDescription(86400)).toBe('1 day');
+    expect(formatTtlDescription(172800)).toBe('2 days');
+    expect(formatTtlDescription(3600)).toBe('1 hour');
+    expect(formatTtlDescription(7200)).toBe('2 hours');
+    expect(formatTtlDescription(300)).toBe('5 minutes');
+
+    expect(getDownloadTtlSeconds('7200')).toBe(7200);
+    expect(getDownloadTtlSeconds(undefined)).toBe(86400);
+    expect(getDownloadTtlSeconds('invalid')).toBe(86400);
+  });
+
+  it('generates absolute download URL with validated HTTPS baseUrl', async () => {
+    const signed = await generateSignedDownloadUrl('ord_123', SIGNING_SECRET, {
+      baseUrl: 'https://telefont.example.com',
+      ttlSeconds: 3600,
+    });
+    expect(signed.url).toContain('https://telefont.example.com/downloads/ord_123?expires=');
+    expect(signed.url).toContain('&sig=');
+  });
+
   it('streams private R2 artifact when HMAC signature is valid and unexpired', async () => {
     const { orderId, dummyZip } = await setupCompletedOrderWithArtifact();
 
@@ -100,7 +122,6 @@ describe('Phase 6: HMAC Signed Download URL Verification & R2 Streaming', () => 
     const { orderId } = await setupCompletedOrderWithArtifact();
 
     // Expired timestamp in the past
-    const expiredTimestamp = Math.floor(Date.now() / 1000) - 300;
     const signed = await generateSignedDownloadUrl(orderId, SIGNING_SECRET, { ttlSeconds: -300 });
 
     const req = new Request(`http://example.com${signed.url}`, {

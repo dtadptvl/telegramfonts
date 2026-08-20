@@ -269,8 +269,13 @@ class JobRunner:
                 await self.queue_client.retry_messages([(msg.lease_id, 30)])
                 return ProcessResult(action=RunnerAction.RETRIED, job_id=job.job_id, reason="ambiguous_completion_network_error")
 
-            await self.queue_client.retry_messages([(msg.lease_id, 30)])
-            return ProcessResult(action=RunnerAction.RETRIED, job_id=job.job_id, reason=complete_res.reason)
+            self.scratch_manager.cleanup_job_dir(job_dir)
+            if complete_res.queue_action == "ack":
+                await self.queue_client.acknowledge_messages([msg.lease_id])
+                return ProcessResult(action=RunnerAction.ACKED, job_id=job.job_id, reason=complete_res.reason)
+            else:
+                await self.queue_client.retry_messages([(msg.lease_id, 30)])
+                return ProcessResult(action=RunnerAction.RETRIED, job_id=job.job_id, reason=complete_res.reason)
 
         except (ValueError, RuntimeError) as exc:
             err_code = str(exc)

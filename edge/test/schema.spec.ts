@@ -365,8 +365,8 @@ describe('D1 Database Schema & Constraints', () => {
 
       const sha = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
       await env.DB.prepare(
-        `INSERT INTO fulfillment_receipts (job_id, order_id, artifact_key, artifact_sha256, artifact_size_bytes, worker_id, completed_at, created_at)
-         VALUES (?, ?, ?, ?, 1024, 'worker-1', ?, ?)`
+        `INSERT INTO fulfillment_receipts (job_id, order_id, artifact_key, artifact_sha256, artifact_size_bytes, completed_at, created_at)
+         VALUES (?, ?, ?, ?, 1024, ?, ?)`
       )
         .bind('job_rcpt_1', orderId, `artifacts/${orderId}/job_rcpt_1/${sha}.zip`, sha, now, now)
         .run();
@@ -374,8 +374,8 @@ describe('D1 Database Schema & Constraints', () => {
       // Duplicate insert with different job_id but same order_id must fail unique constraint
       await expect(
         env.DB.prepare(
-          `INSERT INTO fulfillment_receipts (job_id, order_id, artifact_key, artifact_sha256, artifact_size_bytes, worker_id, completed_at, created_at)
-           VALUES (?, ?, ?, ?, 1024, 'worker-2', ?, ?)`
+          `INSERT INTO fulfillment_receipts (job_id, order_id, artifact_key, artifact_sha256, artifact_size_bytes, completed_at, created_at)
+           VALUES (?, ?, ?, ?, 1024, ?, ?)`
         )
           .bind('job_rcpt_2', orderId, `artifacts/${orderId}/job_rcpt_2/${sha}.zip`, sha, now, now)
           .run()

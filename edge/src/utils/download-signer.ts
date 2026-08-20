@@ -13,6 +13,22 @@ export function getDownloadTtlSeconds(envTtl?: string): number {
   return Math.max(MIN_TTL_SECONDS, Math.min(parsed, MAX_TTL_SECONDS));
 }
 
+export function formatTtlDescription(ttlSeconds: number): string {
+  if (ttlSeconds % 86400 === 0) {
+    const days = ttlSeconds / 86400;
+    return `${days} ${days === 1 ? 'day' : 'days'}`;
+  }
+  if (ttlSeconds % 3600 === 0) {
+    const hours = ttlSeconds / 3600;
+    return `${hours} ${hours === 1 ? 'hour' : 'hours'}`;
+  }
+  if (ttlSeconds % 60 === 0) {
+    const minutes = ttlSeconds / 60;
+    return `${minutes} ${minutes === 1 ? 'minute' : 'minutes'}`;
+  }
+  return `${ttlSeconds} seconds`;
+}
+
 export function buildCanonicalSignatureString(orderId: string, expires: number): string {
   return `v1:${orderId}:${expires}`;
 }
@@ -67,7 +83,17 @@ export async function generateSignedDownloadUrl(
 
   const basePath = `/downloads/${encodeURIComponent(orderId)}`;
   const query = `?expires=${expires}&sig=${signature}`;
-  const fullUrl = options?.baseUrl ? `${options.baseUrl.replace(/\/+$/, '')}${basePath}${query}` : `${basePath}${query}`;
+
+  let fullUrl: string;
+  if (options?.baseUrl && options.baseUrl.trim()) {
+    const rawBase = options.baseUrl.trim().replace(/\/+$/, '');
+    if (!/^https?:\/\//i.test(rawBase)) {
+      throw new Error('INVALID_BASE_URL');
+    }
+    fullUrl = `${rawBase}${basePath}${query}`;
+  } else {
+    fullUrl = `${basePath}${query}`;
+  }
 
   return {
     url: fullUrl,
@@ -91,7 +117,7 @@ export async function verifyDownloadSignature(
     return { valid: false, reason: 'INVALID_ORDER_ID' };
   }
 
-  if (!expiresParam || !/^\d{9,12}$/.test(expiresParam.trim())) {
+  if (!expiresParam || !/^-?\d{1,12}$/.test(expiresParam.trim())) {
     return { valid: false, reason: 'INVALID_EXPIRES_PARAM' };
   }
 

@@ -11,7 +11,7 @@ import { SUPPORTED_FORMATS } from '../types/session';
 import { escapeHtml } from '../utils/html';
 import { normalizeMyFontsUrl } from '../utils/myfonts';
 import { generateVietQrUrl } from '../utils/vietqr';
-import { generateSignedDownloadUrl } from '../utils/download-signer';
+import { generateSignedDownloadUrl, getDownloadTtlSeconds } from '../utils/download-signer';
 import { TelegramClient } from '../services/telegram-client';
 import { CatalogService } from '../services/catalog-service';
 import { SessionService, SessionConflictError } from '../services/session-service';
@@ -295,8 +295,10 @@ async function handleCallbackQuery(
     let signedDownloadUrl: string | undefined;
     if (order.status === 'COMPLETED' && env.DOWNLOAD_SIGNING_SECRET) {
       try {
+        const ttlSeconds = getDownloadTtlSeconds(env.DOWNLOAD_URL_TTL_SECONDS);
         const signed = await generateSignedDownloadUrl(order.id, env.DOWNLOAD_SIGNING_SECRET, {
           baseUrl: env.BASE_URL,
+          ttlSeconds,
         });
         signedDownloadUrl = signed.url;
       } catch {
