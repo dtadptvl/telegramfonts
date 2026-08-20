@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 import httpx
 
@@ -136,6 +137,26 @@ class FailResult:
     reason: str | None = None
 
 
+@dataclass(frozen=True)
+class UploadResult:
+    success: bool
+    fenced: bool
+    artifact_key: str | None = None
+    sha256: str | None = None
+    size: int = 0
+    reason: str | None = None
+
+
+@dataclass(frozen=True)
+class CompleteResult:
+    success: bool
+    status: str
+    queue_action: str  # "ack" | "retry"
+    completed_at: int | None = None
+    artifact_key: str | None = None
+    reason: str | None = None
+
+
 class WorkerJobClient:
     def __init__(self, settings: Settings, client: httpx.AsyncClient | None = None) -> None:
         self.settings = settings
@@ -190,7 +211,6 @@ class WorkerJobClient:
             )
         except httpx.RequestError as exc:
             logger.warning(f"Network error on job claim ({job_id}): {type(exc).__name__}")
-            # Transient error: do not drop, retry later
             return ClaimResult(status="NETWORK_ERROR", queue_action="retry", reason="network_error")
 
     async def heartbeat(self, job_id: str, lease_token: str) -> HeartbeatResult:
@@ -218,6 +238,108 @@ class WorkerJobClient:
         except httpx.RequestError as exc:
             logger.warning(f"Network error on heartbeat ({job_id}): {type(exc).__name__}")
             return HeartbeatResult(success=False, fenced=False)
+
+    async def upload_artifact(
+        self,
+        job_id: str,
+        lease_token: str,
+        zip_path: Path,
+        sha256_hex: str,
+    ) -> UploadResult:
+        """Stream computed ZIP artifact to private Edge R2 upload endpoint."""
+        url = f"{self.base_url}/{job_id}/artifact"
+        zip_bytes = zip_path.read_bytes()
+        headers = {
+            "Authorization": f"Bearer {self.settings.A23_NODE_SECRET.get_secret_value()}",
+            "X-Worker-Id": self.settings.A23_WORKER_ID,
+            "X-Lease-Token": lease_token,
+            "X-Artifact-SHA256": sha256_hex,
+            "Content-Type": "application/zip",
+            "Content-Length": str(len(zip_bytes)),
+        }
+
+        try:
+            resp = await self._client.put(url, headers=headers, content=zip_bytes)
+            data = resp.json() if resp.content else {}
+
+            if resp.status_code == 200:
+                return UploadResult(
+                    success=True,
+                    fenced=False,
+                    artifact_key=data.get("artifact_key"),
+                    sha256=data.get("sha256"),
+                    size=data.get("size", len(zip_bytes)),
+                )
+
+            if resp.status_code == 409:
+                return UploadResult(
+                    success=False,
+                    fenced=True,
+                    reason=data.get("reason", "lease_expired_or_fenced"),
+                )
+
+            return UploadResult(
+                success=False,
+                fenced=False,
+                reason=data.get("reason", f"upload_error_{resp.status_code}"),
+            )
+        except httpx.RequestError as exc:
+            logger.warning(f"Network error on artifact upload ({job_id}): {type(exc).__name__}")
+            return UploadResult(success=False, fenced=False, reason="network_error")
+
+    async def complete(
+        self,
+        job_id: str,
+        lease_token: str,
+        artifact_key: str,
+        sha256_hex: str,
+        size: int,
+    ) -> CompleteResult:
+        """Commit canonical job and order completion to D1."""
+        url = f"{self.base_url}/{job_id}/complete"
+        payload = {
+            "worker_id": self.settings.A23_WORKER_ID,
+            "lease_token": lease_token,
+            "artifact_key": artifact_key,
+            "sha256": sha256_hex,
+            "size": size,
+        }
+
+        try:
+            resp = await self._client.post(url, headers=self.headers, json=payload)
+            data = resp.json() if resp.content else {}
+
+            if resp.status_code == 200:
+                return CompleteResult(
+                    success=True,
+                    status="COMPLETED",
+                    queue_action=data.get("queue_action", "ack"),
+                    completed_at=data.get("completed_at"),
+                    artifact_key=data.get("artifact_key", artifact_key),
+                )
+
+            if resp.status_code == 409:
+                return CompleteResult(
+                    success=False,
+                    status="EXPIRED_OR_FENCED",
+                    queue_action=data.get("queue_action", "ack"),
+                    reason=data.get("reason", "lease_expired_or_fenced"),
+                )
+
+            return CompleteResult(
+                success=False,
+                status="ERROR",
+                queue_action="retry",
+                reason=data.get("reason", f"complete_error_{resp.status_code}"),
+            )
+        except httpx.RequestError as exc:
+            logger.warning(f"Network error on complete ({job_id}): {type(exc).__name__}")
+            return CompleteResult(
+                success=False,
+                status="AMBIGUOUS_ERROR",
+                queue_action="retry",
+                reason="network_error",
+            )
 
     async def fail(
         self,

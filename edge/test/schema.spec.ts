@@ -23,6 +23,9 @@ describe('D1 Database Schema & Constraints', () => {
       expect(
         migrations.results.some((m) => m.name === '0004_outbox_dispatch_and_job_lease.sql')
       ).toBe(true);
+      expect(
+        migrations.results.some((m) => m.name === '0005_r2_artifacts_and_delivery.sql')
+      ).toBe(true);
     });
   });
 
@@ -348,4 +351,36 @@ describe('D1 Database Schema & Constraints', () => {
       expect(style).toBeNull();
     });
   });
+
+  describe('Fulfillment Receipts Schema (Migration 0005)', () => {
+    it('enforces unique order_id on fulfillment_receipts', async () => {
+      const now = Date.now();
+      const orderId = 'ord_receipt_unique_test';
+      await env.DB.prepare(
+        `INSERT INTO orders (id, user_id, status, total_amount, currency, created_at, updated_at)
+         VALUES (?, ?, 'COMPLETED', 50000, 'VND', ?, ?)`
+      )
+        .bind(orderId, 'tg_user_rcpt', now, now)
+        .run();
+
+      const sha = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+      await env.DB.prepare(
+        `INSERT INTO fulfillment_receipts (job_id, order_id, artifact_key, artifact_sha256, artifact_size_bytes, worker_id, completed_at, created_at)
+         VALUES (?, ?, ?, ?, 1024, 'worker-1', ?, ?)`
+      )
+        .bind('job_rcpt_1', orderId, `artifacts/${orderId}/job_rcpt_1/${sha}.zip`, sha, now, now)
+        .run();
+
+      // Duplicate insert with different job_id but same order_id must fail unique constraint
+      await expect(
+        env.DB.prepare(
+          `INSERT INTO fulfillment_receipts (job_id, order_id, artifact_key, artifact_sha256, artifact_size_bytes, worker_id, completed_at, created_at)
+           VALUES (?, ?, ?, ?, 1024, 'worker-2', ?, ?)`
+        )
+          .bind('job_rcpt_2', orderId, `artifacts/${orderId}/job_rcpt_2/${sha}.zip`, sha, now, now)
+          .run()
+      ).rejects.toThrow();
+    });
+  });
 });
+

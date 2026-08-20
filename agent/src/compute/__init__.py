@@ -16,6 +16,7 @@ __all__ = [
     "ClaimStyle",
     "GeneratedFontFile",
     "GlyphVector",
+    "JobPackageManifest",
     "SourcePayload",
     "StagedManifest",
     "StyleSourceData",

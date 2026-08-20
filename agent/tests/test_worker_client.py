@@ -137,3 +137,61 @@ async def test_worker_heartbeat_and_fail(test_settings: Settings):
         assert fail_res.status == "RETRY"
         assert fail_res.queue_action == "retry"
         assert fail_res.delay_seconds == 20
+
+
+@pytest.mark.asyncio
+async def test_worker_upload_artifact_and_complete(tmp_path, test_settings: Settings):
+    dummy_zip = tmp_path / "test.zip"
+    dummy_zip.write_bytes(b"PK\x03\x04dummy_zip_content")
+    sha256_hex = "a" * 64
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "artifact" in request.url.path:
+            assert request.method == "PUT"
+            assert request.headers["Content-Type"] == "application/zip"
+            assert request.headers["X-Worker-Id"] == test_settings.A23_WORKER_ID
+            assert request.headers["X-Lease-Token"] == "tok_123"
+            assert request.headers["X-Artifact-SHA256"] == sha256_hex
+            return httpx.Response(200, json={
+                "success": True,
+                "artifact_key": f"artifacts/ord_1/job_1/{sha256_hex}.zip",
+                "sha256": sha256_hex,
+                "size": len(b"PK\x03\x04dummy_zip_content"),
+            })
+
+        if "complete" in request.url.path:
+            assert request.method == "POST"
+            body = json.loads(request.content)
+            assert body["worker_id"] == test_settings.A23_WORKER_ID
+            assert body["lease_token"] == "tok_123"
+            assert body["sha256"] == sha256_hex
+            return httpx.Response(200, json={
+                "success": True,
+                "status": "COMPLETED",
+                "queue_action": "ack",
+                "completed_at": 1700000000000,
+                "artifact_key": f"artifacts/ord_1/job_1/{sha256_hex}.zip",
+            })
+
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http_client:
+        client = WorkerJobClient(test_settings, client=http_client)
+
+        upload_res = await client.upload_artifact("job_1", "tok_123", dummy_zip, sha256_hex)
+        assert upload_res.success is True
+        assert upload_res.fenced is False
+        assert upload_res.artifact_key == f"artifacts/ord_1/job_1/{sha256_hex}.zip"
+
+        complete_res = await client.complete(
+            "job_1",
+            "tok_123",
+            upload_res.artifact_key,
+            sha256_hex,
+            upload_res.size,
+        )
+        assert complete_res.success is True
+        assert complete_res.status == "COMPLETED"
+        assert complete_res.queue_action == "ack"
+

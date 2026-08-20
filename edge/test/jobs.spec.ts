@@ -787,4 +787,223 @@ describe('Phase 4: A23 Internal Node Job Claim, Lease Fencing & Protocols', () =
       expect(resBadId.status).toBe('MALFORMED_METADATA');
     });
   });
+
+  describe('Phase 6: Private R2 Artifact Upload & Fenced Completion', () => {
+    it('handles PUT /internal/jobs/:job_id/artifact with authentication and lease validation', async () => {
+      const { jobId, orderId } = await setupTestJob('PENDING');
+      const jobService = new JobService(env.DB);
+
+      // Claim job to obtain valid lease token
+      const claimRes = await jobService.claimJob(jobId, 'worker-1', 300);
+      expect(claimRes.status).toBe('CLAIMED');
+      const leaseToken = claimRes.payload!.lease_token;
+
+      const dummyZip = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0x00, 0x00, 0x00, 0x00]);
+      // Calculate SHA256 of dummyZip
+      const shaBuffer = await crypto.subtle.digest('SHA-256', dummyZip);
+      const sha256Hex = Array.from(new Uint8Array(shaBuffer))
+        .map((b) => b.toString(16).padStart(2, '0'))
+        .join('');
+
+      // 1. Upload with wrong lease token -> 409
+      const reqBadToken = new Request(`http://example.com/internal/jobs/${jobId}/artifact`, {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${NODE_SECRET}`,
+          'X-Worker-Id': 'worker-1',
+          'X-Lease-Token': crypto.randomUUID(),
+          'X-Artifact-SHA256': sha256Hex,
+          'Content-Type': 'application/zip',
+          'Content-Length': dummyZip.byteLength.toString(),
+        },
+        body: dummyZip,
+      });
+
+      const ctx1 = createExecutionContext();
+      const resBadToken = await worker.fetch(reqBadToken, testEnv, ctx1);
+      await waitOnExecutionContext(ctx1);
+      expect(resBadToken.status).toBe(409);
+
+      // 2. Upload with valid lease -> 200
+      const reqValid = new Request(`http://example.com/internal/jobs/${jobId}/artifact`, {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${NODE_SECRET}`,
+          'X-Worker-Id': 'worker-1',
+          'X-Lease-Token': leaseToken,
+          'X-Artifact-SHA256': sha256Hex,
+          'Content-Type': 'application/zip',
+          'Content-Length': dummyZip.byteLength.toString(),
+        },
+        body: dummyZip,
+      });
+
+      const ctx2 = createExecutionContext();
+      const resValid = await worker.fetch(reqValid, testEnv, ctx2);
+      await waitOnExecutionContext(ctx2);
+      expect(resValid.status).toBe(200);
+
+      const validData = (await resValid.json()) as { success: boolean; artifact_key: string; sha256: string; size: number };
+      expect(validData.success).toBe(true);
+      expect(validData.sha256).toBe(sha256Hex);
+      expect(validData.artifact_key).toBe(`artifacts/${orderId}/${jobId}/${sha256Hex}.zip`);
+
+      // 3. Verify object in R2 bucket
+      const r2Obj = await env.ARTIFACTS_BUCKET.head(validData.artifact_key);
+      expect(r2Obj).not.toBeNull();
+      expect(r2Obj?.size).toBe(dummyZip.byteLength);
+      expect(r2Obj?.customMetadata?.job_id).toBe(jobId);
+      expect(r2Obj?.customMetadata?.order_id).toBe(orderId);
+
+      // 4. Duplicate matching upload returns 200 idempotently
+      const reqDup = new Request(`http://example.com/internal/jobs/${jobId}/artifact`, {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${NODE_SECRET}`,
+          'X-Worker-Id': 'worker-1',
+          'X-Lease-Token': leaseToken,
+          'X-Artifact-SHA256': sha256Hex,
+          'Content-Type': 'application/zip',
+          'Content-Length': dummyZip.byteLength.toString(),
+        },
+        body: dummyZip,
+      });
+
+      const ctx3 = createExecutionContext();
+      const resDup = await worker.fetch(reqDup, testEnv, ctx3);
+      await waitOnExecutionContext(ctx3);
+      expect(resDup.status).toBe(200);
+    });
+
+    it('handles POST /internal/jobs/:job_id/complete atomically and idempotently', async () => {
+      const { jobId, orderId } = await setupTestJob('PENDING');
+      const jobService = new JobService(env.DB);
+
+      // Claim job
+      const claimRes = await jobService.claimJob(jobId, 'worker-1', 300);
+      expect(claimRes.status).toBe('CLAIMED');
+      const leaseToken = claimRes.payload!.lease_token;
+
+      // Upload artifact to R2 first
+      const dummyZip = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0x01, 0x02, 0x03, 0x04]);
+      const shaBuffer = await crypto.subtle.digest('SHA-256', dummyZip);
+      const sha256Hex = Array.from(new Uint8Array(shaBuffer))
+        .map((b) => b.toString(16).padStart(2, '0'))
+        .join('');
+      const expectedKey = `artifacts/${orderId}/${jobId}/${sha256Hex}.zip`;
+
+      await env.ARTIFACTS_BUCKET.put(expectedKey, dummyZip, {
+        sha256: sha256Hex,
+        customMetadata: {
+          job_id: jobId,
+          order_id: orderId,
+          sha256: sha256Hex,
+        },
+      });
+
+      // 1. Complete with wrong lease token -> 409
+      const reqBadComplete = new Request(`http://example.com/internal/jobs/${jobId}/complete`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${NODE_SECRET}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          worker_id: 'worker-1',
+          lease_token: crypto.randomUUID(),
+          artifact_key: expectedKey,
+          sha256: sha256Hex,
+          size: dummyZip.byteLength,
+        }),
+      });
+
+      const ctx1 = createExecutionContext();
+      const resBad = await worker.fetch(reqBadComplete, testEnv, ctx1);
+      await waitOnExecutionContext(ctx1);
+      expect(resBad.status).toBe(409);
+
+      // 2. Valid complete -> 200
+      const reqValidComplete = new Request(`http://example.com/internal/jobs/${jobId}/complete`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${NODE_SECRET}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          worker_id: 'worker-1',
+          lease_token: leaseToken,
+          artifact_key: expectedKey,
+          sha256: sha256Hex,
+          size: dummyZip.byteLength,
+        }),
+      });
+
+      const ctx2 = createExecutionContext();
+      const resValid = await worker.fetch(reqValidComplete, testEnv, ctx2);
+      await waitOnExecutionContext(ctx2);
+      expect(resValid.status).toBe(200);
+
+      const completeData = (await resValid.json()) as { success: boolean; status: string; queue_action: string };
+      expect(completeData.success).toBe(true);
+      expect(completeData.status).toBe('COMPLETED');
+      expect(completeData.queue_action).toBe('ack');
+
+      // 3. Verify D1 state transitions:
+      // Receipt created
+      const receipt = await env.DB.prepare('SELECT * FROM fulfillment_receipts WHERE job_id = ?')
+        .bind(jobId)
+        .first<{ order_id: string; artifact_key: string }>();
+      expect(receipt).not.toBeNull();
+      expect(receipt?.order_id).toBe(orderId);
+      expect(receipt?.artifact_key).toBe(expectedKey);
+
+      // Job COMPLETED
+      const job = await env.DB.prepare('SELECT * FROM fulfillment_jobs WHERE id = ?')
+        .bind(jobId)
+        .first<{ status: string; artifact_key: string }>();
+      expect(job?.status).toBe('COMPLETED');
+      expect(job?.artifact_key).toBe(expectedKey);
+
+      // Order COMPLETED
+      const order = await env.DB.prepare('SELECT * FROM orders WHERE id = ?')
+        .bind(orderId)
+        .first<{ status: string; completed_at: number }>();
+      expect(order?.status).toBe('COMPLETED');
+      expect(order?.completed_at).toBeGreaterThan(0);
+
+      // Exactly one DELIVERY_READY outbox event created
+      const outbox = await env.DB.prepare('SELECT * FROM outbox_events WHERE aggregate_id = ? AND event_type = "DELIVERY_READY"')
+        .bind(orderId)
+        .all<{ id: string; status: string; payload: string }>();
+      expect(outbox.results.length).toBe(1);
+      expect(outbox.results[0].status).toBe('PENDING');
+
+      // 4. Duplicate completion replay returns 200 with queue_action: ack (no duplicate outbox event)
+      const reqReplay = new Request(`http://example.com/internal/jobs/${jobId}/complete`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${NODE_SECRET}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          worker_id: 'worker-1',
+          lease_token: leaseToken,
+          artifact_key: expectedKey,
+          sha256: sha256Hex,
+          size: dummyZip.byteLength,
+        }),
+      });
+
+      const ctx3 = createExecutionContext();
+      const resReplay = await worker.fetch(reqReplay, testEnv, ctx3);
+      await waitOnExecutionContext(ctx3);
+      expect(resReplay.status).toBe(200);
+
+      const outboxAfterReplay = await env.DB.prepare('SELECT * FROM outbox_events WHERE aggregate_id = ? AND event_type = "DELIVERY_READY"')
+        .bind(orderId)
+        .all();
+      expect(outboxAfterReplay.results.length).toBe(1);
+    });
+  });
 });
+
