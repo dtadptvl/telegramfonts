@@ -1,10 +1,14 @@
 import type { Env } from './env';
+import { handleTelegramWebhook } from './handlers/telegram-webhook';
 
-const REQUIRED_TABLES_COUNT = 6;
-const SCHEMA_CHECK_QUERY = `SELECT count(*) as count FROM sqlite_master WHERE type='table' AND name IN ('orders', 'order_items', 'payments', 'fulfillment_jobs', 'outbox_events', 'artifacts')`;
+const REQUIRED_TABLES_COUNT = 11;
+const SCHEMA_CHECK_QUERY = `SELECT count(*) as count FROM sqlite_master WHERE type='table' AND name IN (
+  'orders', 'order_items', 'payments', 'fulfillment_jobs', 'outbox_events', 'artifacts',
+  'telegram_users', 'catalogs', 'catalog_styles', 'catalog_requests', 'telegram_sessions'
+)`;
 
 export default {
-  async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
     if (request.method === 'GET' && url.pathname === '/health') {
@@ -41,6 +45,10 @@ export default {
           headers: { 'Content-Type': 'application/json' },
         });
       }
+    }
+
+    if (request.method === 'POST' && url.pathname === '/webhooks/telegram') {
+      return handleTelegramWebhook(request, env, ctx);
     }
 
     return new Response(JSON.stringify({ error: 'Not Found' }), {
