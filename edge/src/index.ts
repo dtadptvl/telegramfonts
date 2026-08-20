@@ -1,6 +1,8 @@
 import type { Env } from './env';
 import { handleTelegramWebhook } from './handlers/telegram-webhook';
 import { handleSePayWebhook } from './handlers/sepay-webhook';
+import { handleInternalJobs } from './handlers/internal-jobs';
+import { OutboxService } from './services/outbox-service';
 
 const REQUIRED_TABLES_COUNT = 12;
 const SCHEMA_CHECK_QUERY = `SELECT count(*) as count FROM sqlite_master WHERE type='table' AND name IN (
@@ -56,10 +58,21 @@ export default {
       return handleSePayWebhook(request, env, ctx);
     }
 
+    if (url.pathname.startsWith('/internal/jobs/')) {
+      return handleInternalJobs(request, env, ctx);
+    }
+
     return new Response(JSON.stringify({ error: 'Not Found' }), {
       status: 404,
       headers: { 'Content-Type': 'application/json' },
     });
   },
+
+  async scheduled(_event: ScheduledEvent, env: Env, _ctx: ExecutionContext): Promise<void> {
+    if (!env.DB || !env.FULFILLMENT_QUEUE) return;
+    const outboxService = new OutboxService(env.DB, env.FULFILLMENT_QUEUE);
+    await outboxService.dispatchPendingEvents({ batchSize: 20 });
+  },
 };
+
 export type { Env };

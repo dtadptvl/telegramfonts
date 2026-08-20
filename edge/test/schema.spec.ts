@@ -17,6 +17,12 @@ describe('D1 Database Schema & Constraints', () => {
       expect(
         migrations.results.some((m) => m.name === '0002_telegram_sessions_and_catalog.sql')
       ).toBe(true);
+      expect(
+        migrations.results.some((m) => m.name === '0003_payment_code_and_sepay.sql')
+      ).toBe(true);
+      expect(
+        migrations.results.some((m) => m.name === '0004_outbox_dispatch_and_job_lease.sql')
+      ).toBe(true);
     });
   });
 

@@ -11,6 +11,10 @@ export interface Env {
   SEPAY_API_TOKEN?: string;
   SEPAY_WEBHOOK_SECRET?: string;
 
+  // Internal Node Auth (A23 private compute node boundary)
+  A23_NODE_SECRET?: string;
+  A23_JOB_LEASE_SECONDS?: string;
+
   // Payment Recipient & VietQR Configuration (non-secret typed config)
   BANK_ID?: string; // e.g. 'MB', '970422'
   BANK_ACCOUNT_NUMBER?: string; // e.g. '0000123456789'
