@@ -1,0 +1,205 @@
+import { describe, it, expect } from 'vitest';
+import {
+  validateWranglerConfig,
+  validateEdgeEnvVars,
+  validateAgentConfig,
+  runFullPreflight,
+  type WranglerConfig,
+} from '../src/utils/preflight';
+
+describe('Phase 7: Release Preflight Validation', () => {
+  const validWrangler: WranglerConfig = {
+    name: 'telegramfonts-edge',
+    d1_databases: [
+      {
+        binding: 'DB',
+        database_name: 'telegramfonts-d1',
+        database_id: 'telegramfonts-d1-placeholder',
+      },
+    ],
+    queues: {
+      producers: [
+        {
+          binding: 'FULFILLMENT_QUEUE',
+          queue: 'telegramfonts-fulfillment',
+        },
+      ],
+    },
+    r2_buckets: [
+      {
+        binding: 'ARTIFACTS_BUCKET',
+        bucket_name: 'telegramfonts-artifacts',
+      },
+    ],
+  };
+
+  it('passes wrangler config validation in development mode', () => {
+    const results = validateWranglerConfig(validWrangler, { requireProdD1: false });
+    expect(results.every((r) => r.passed)).toBe(true);
+  });
+
+  it('fails wrangler config validation when D1 binding is missing', () => {
+    const invalid = { ...validWrangler, d1_databases: [] };
+    const results = validateWranglerConfig(invalid);
+    const d1Check = results.find((r) => r.name.includes('DB'));
+    expect(d1Check?.passed).toBe(false);
+  });
+
+  it('fails wrangler config validation when queue binding is missing', () => {
+    const invalid = { ...validWrangler, queues: { producers: [] } };
+    const results = validateWranglerConfig(invalid);
+    const qCheck = results.find((r) => r.name.includes('FULFILLMENT_QUEUE'));
+    expect(qCheck?.passed).toBe(false);
+  });
+
+  it('fails wrangler config validation when R2 bucket binding is missing', () => {
+    const invalid = { ...validWrangler, r2_buckets: [] };
+    const results = validateWranglerConfig(invalid);
+    const r2Check = results.find((r) => r.name.includes('ARTIFACTS_BUCKET'));
+    expect(r2Check?.passed).toBe(false);
+  });
+
+  it('fails wrangler config validation when in-worker push consumers are declared', () => {
+    const invalid = {
+      ...validWrangler,
+      queues: {
+        producers: validWrangler.queues?.producers,
+        consumers: [{ queue: 'telegramfonts-fulfillment' }],
+      },
+    };
+    const results = validateWranglerConfig(invalid);
+    const consCheck = results.find((r) => r.name.includes('No In-Worker Push Consumers'));
+    expect(consCheck?.passed).toBe(false);
+  });
+
+  it('fails wrangler config validation in prod mode if D1 database_id is placeholder', () => {
+    const results = validateWranglerConfig(validWrangler, { requireProdD1: true });
+    const idCheck = results.find((r) => r.name.includes('D1 Database ID'));
+    expect(idCheck?.passed).toBe(false);
+  });
+
+  it('validates Edge environment variables without leaking values', () => {
+    const validEnv = {
+      TELEGRAM_BOT_TOKEN: 'secret_123',
+      TELEGRAM_WEBHOOK_SECRET: 'secret_456',
+      SEPAY_WEBHOOK_SECRET: 'secret_789',
+      A23_NODE_SECRET: 'secret_node',
+      DOWNLOAD_SIGNING_SECRET: 'secret_sign',
+      BASE_URL: 'https://telefont.example.com',
+      DOWNLOAD_URL_TTL_SECONDS: '86400',
+      A23_JOB_LEASE_SECONDS: '300',
+    };
+
+    const results = validateEdgeEnvVars(validEnv, 'production');
+    expect(results.every((r) => r.passed)).toBe(true);
+
+    // Verify secret values are not printed in result messages
+    for (const r of results) {
+      if (r.name.includes('Secret')) {
+        expect(r.message).not.toContain('secret_123');
+        expect(r.message).not.toContain('secret_456');
+        expect(r.message).not.toContain('secret_789');
+      }
+    }
+  });
+
+  it('fails Edge environment validation when BASE_URL is insecure HTTP in production mode', () => {
+    const invalidEnv = {
+      TELEGRAM_BOT_TOKEN: 'secret_123',
+      TELEGRAM_WEBHOOK_SECRET: 'secret_456',
+      SEPAY_WEBHOOK_SECRET: 'secret_789',
+      A23_NODE_SECRET: 'secret_node',
+      DOWNLOAD_SIGNING_SECRET: 'secret_sign',
+      BASE_URL: 'http://insecure.example.com',
+    };
+
+    const results = validateEdgeEnvVars(invalidEnv, 'production');
+    const baseCheck = results.find((r) => r.name.includes('BASE_URL HTTPS'));
+    expect(baseCheck?.passed).toBe(false);
+  });
+
+  it('validates Agent configuration and queue/lease compatibility', () => {
+    const validAgent = {
+      CF_ACCOUNT_ID: 'acc_123',
+      CF_QUEUE_ID: 'queue_123',
+      CF_QUEUES_TOKEN: 'token_123',
+      EDGE_BASE_URL: 'https://telefont.example.com',
+      A23_NODE_SECRET: 'node_sec_123',
+      A23_WORKER_ID: 'worker_a23_01',
+      PULL_BATCH_SIZE: 1,
+      VISIBILITY_TIMEOUT_MS: 300000,
+      LEASE_DURATION_SECONDS: 300,
+      HEARTBEAT_INTERVAL_SECONDS: 60,
+    };
+
+    const results = validateAgentConfig(validAgent);
+    expect(results.every((r) => r.passed)).toBe(true);
+  });
+
+  it('fails Agent configuration when visibility timeout is shorter than lease duration', () => {
+    const invalidAgent = {
+      CF_ACCOUNT_ID: 'acc_123',
+      CF_QUEUE_ID: 'queue_123',
+      CF_QUEUES_TOKEN: 'token_123',
+      EDGE_BASE_URL: 'https://telefont.example.com',
+      A23_NODE_SECRET: 'node_sec_123',
+      A23_WORKER_ID: 'worker_a23_01',
+      VISIBILITY_TIMEOUT_MS: 60000, // 60s < 300s lease
+      LEASE_DURATION_SECONDS: 300,
+      HEARTBEAT_INTERVAL_SECONDS: 60,
+    };
+
+    const results = validateAgentConfig(invalidAgent);
+    const visCheck = results.find((r) => r.name.includes('Visibility Timeout >= Lease Duration'));
+    expect(visCheck?.passed).toBe(false);
+  });
+
+  it('fails Agent configuration when heartbeat interval is greater than or equal to lease duration', () => {
+    const invalidAgent = {
+      CF_ACCOUNT_ID: 'acc_123',
+      CF_QUEUE_ID: 'queue_123',
+      CF_QUEUES_TOKEN: 'token_123',
+      EDGE_BASE_URL: 'https://telefont.example.com',
+      A23_NODE_SECRET: 'node_sec_123',
+      A23_WORKER_ID: 'worker_a23_01',
+      VISIBILITY_TIMEOUT_MS: 300000,
+      LEASE_DURATION_SECONDS: 60,
+      HEARTBEAT_INTERVAL_SECONDS: 60, // hb >= lease
+    };
+
+    const results = validateAgentConfig(invalidAgent);
+    const hbCheck = results.find((r) => r.name.includes('Heartbeat < Lease Duration'));
+    expect(hbCheck?.passed).toBe(false);
+  });
+
+  it('runs full preflight and produces deterministic summary report', () => {
+    const report = runFullPreflight({
+      wranglerConfig: validWrangler,
+      edgeEnv: {
+        TELEGRAM_BOT_TOKEN: 'tok',
+        TELEGRAM_WEBHOOK_SECRET: 'sec',
+        SEPAY_WEBHOOK_SECRET: 'sec',
+        A23_NODE_SECRET: 'sec',
+        DOWNLOAD_SIGNING_SECRET: 'sec',
+        BASE_URL: 'https://telefont.example.com',
+      },
+      agentConfig: {
+        CF_ACCOUNT_ID: 'acc',
+        CF_QUEUE_ID: 'queue',
+        CF_QUEUES_TOKEN: 'tok',
+        EDGE_BASE_URL: 'https://telefont.example.com',
+        A23_NODE_SECRET: 'sec',
+        A23_WORKER_ID: 'w1',
+        VISIBILITY_TIMEOUT_MS: 300000,
+        LEASE_DURATION_SECONDS: 300,
+        HEARTBEAT_INTERVAL_SECONDS: 60,
+      },
+      mode: 'production',
+      requireProdD1: false,
+    });
+
+    expect(report.passed).toBe(true);
+    expect(report.failedChecks).toBe(0);
+    expect(report.totalChecks).toBeGreaterThan(10);
+  });
+});
