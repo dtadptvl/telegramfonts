@@ -6,7 +6,27 @@ import {
   runFullPreflight,
   type WranglerConfig,
 } from '../src/utils/preflight';
-import { runPreflightCheck } from '../../scripts/preflight.mjs';
+
+// @ts-expect-error importing mjs helper without declaration
+import { runPreflightCheck as runMjsPreflightCheck } from '../../scripts/preflight.mjs';
+
+interface PreflightCheckItem {
+  category: string;
+  name: string;
+  passed: boolean;
+  message?: string;
+}
+
+interface PreflightCliReport {
+  mode: string;
+  strict: boolean;
+  checks: PreflightCheckItem[];
+  passed: boolean;
+  passedCount: number;
+  failedCount: number;
+}
+
+const runPreflightCheck = runMjsPreflightCheck as (options?: Record<string, unknown>) => PreflightCliReport;
 
 describe('Phase 7: Release Preflight Validation', () => {
   const validWrangler: WranglerConfig = {
