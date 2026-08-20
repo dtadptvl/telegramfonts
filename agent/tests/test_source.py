@@ -156,3 +156,65 @@ def test_raster_preview_and_fixture_fail_closed():
             "source_url": "https://www.myfonts.com/collections/valid",
             "styles": [{"style_id": "s1", "style_name": "S1", "glyphs": {}}],
         })
+
+
+def test_extract_catalog_metadata_from_json_ld_and_html():
+    from compute.source import extract_catalog_metadata_from_html
+
+    # 1. JSON-LD schema parsing
+    json_ld_html = """
+    <html>
+      <head>
+        <meta property="og:title" content="Helvetica Now Font | Monotype | MyFonts">
+        <meta name="author" content="Monotype">
+        <script type="application/ld+json">
+        {
+          "@context": "https://schema.org",
+          "@type": "Product",
+          "name": "Helvetica Now",
+          "hasVariant": [
+            {"@type": "ProductModel", "name": "Helvetica Now Light", "price": 45000},
+            {"@type": "ProductModel", "name": "Helvetica Now Regular", "price": 50000},
+            {"@type": "ProductModel", "name": "Helvetica Now Bold", "price": 50000}
+          ]
+        }
+        </script>
+      </head>
+      <body></body>
+    </html>
+    """
+
+    res = extract_catalog_metadata_from_html(json_ld_html, "https://www.myfonts.com/collections/helvetica-now-monotype")
+    assert res["family_name"] == "Helvetica Now"
+    assert res["foundry"] == "Monotype"
+    assert len(res["styles"]) == 3
+    assert res["styles"][0]["display_name"] == "Helvetica Now Light"
+    assert res["styles"][0]["price"] == 45000
+    assert res["styles"][1]["id"] == "helvetica_now_regular"
+
+    # 2. HTML data attributes parsing
+    data_attr_html = """
+    <html>
+      <head>
+        <title>Futura Now - Monotype</title>
+      </head>
+      <body>
+        <div data-style-name="Futura Now Book"></div>
+        <div data-style-name="Futura Now Bold"></div>
+      </body>
+    </html>
+    """
+    res2 = extract_catalog_metadata_from_html(data_attr_html, "https://www.myfonts.com/collections/futura-now")
+    assert res2["family_name"] == "Futura Now"
+    assert len(res2["styles"]) == 2
+    assert res2["styles"][0]["id"] == "futura_now_book"
+    assert res2["styles"][1]["id"] == "futura_now_bold"
+
+
+def test_extract_catalog_metadata_fails_closed_without_synthetic_styles():
+    from compute.source import extract_catalog_metadata_from_html
+
+    # HTML without any styles fails closed and does NOT fabricate synthetic styles
+    empty_styles_html = "<html><head><title>Empty Font</title></head><body><p>No styles available</p></body></html>"
+    with pytest.raises(ValueError, match="NO_CATALOG_STYLES_FOUND"):
+        extract_catalog_metadata_from_html(empty_styles_html, "https://www.myfonts.com/collections/empty-font")

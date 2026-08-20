@@ -215,4 +215,209 @@ describe('Phase 7: Fresh-Catalog E2E Resolution & Scheduled Cron Delivery', () =
       fetchSpy.mockRestore();
     }
   });
+
+  it('two simultaneous users waiting on different catalogs: completing A changes only A, completing B changes only B', async () => {
+    const userA = 'user_aaa_111';
+    const chatA = 111111;
+    const userB = 'user_bbb_222';
+    const chatB = 222222;
+    const now = Date.now();
+
+    // 1. Create User A & User B records
+    await env.DB.prepare(
+      `INSERT INTO telegram_users (id, first_name, username, created_at, updated_at)
+       VALUES (?, 'UserA', 'usera', ?, ?), (?, 'UserB', 'userb', ?, ?)`
+    )
+      .bind(userA, now, now, userB, now, now)
+      .run();
+
+    // 2. Create AWAITING_CATALOG sessions
+    await env.DB.prepare(
+      `INSERT INTO telegram_sessions (user_id, chat_id, status, workflow_token, checkout_token, version, created_at, updated_at)
+       VALUES (?, ?, 'AWAITING_CATALOG', 'tok_a', 'chk_a', 1, ?, ?),
+              (?, ?, 'AWAITING_CATALOG', 'tok_b', 'chk_b', 1, ?, ?)`
+    )
+      .bind(userA, chatA, now, now, userB, chatB, now, now)
+      .run();
+
+    // 3. Create distinct pending catalog requests for User A and User B
+    const reqAId = 'req_user_a_helvetica';
+    const reqBId = 'req_user_b_futura';
+
+    await env.DB.prepare(
+      `INSERT INTO catalog_requests (id, user_id, canonical_key, source_url, status, created_at, updated_at)
+       VALUES (?, ?, 'myfonts:collections/helvetica-now', 'https://www.myfonts.com/collections/helvetica-now', 'PENDING', ?, ?),
+              (?, ?, 'myfonts:collections/futura-now', 'https://www.myfonts.com/collections/futura-now', 'PENDING', ?, ?)`
+    )
+      .bind(reqAId, userA, now, now, reqBId, userB, now, now)
+      .run();
+
+    const sentMessages: Array<{ chat_id: number; text: string }> = [];
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (info, init) => {
+      const urlStr = typeof info === 'string' ? info : info instanceof Request ? info.url : info.toString();
+      if (urlStr.includes('/sendMessage')) {
+        const bodyObj = JSON.parse(String(init?.body || '{}')) as { chat_id: number; text: string };
+        sentMessages.push(bodyObj);
+        return new Response(JSON.stringify({ ok: true, result: { message_id: 8888 } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    try {
+      // 4. Complete Request A only
+      const completeAReq = new Request(
+        `https://worker.local/internal/catalog-requests/${reqAId}/complete`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${nodeSecret}`,
+          },
+          body: JSON.stringify({
+            canonical_key: 'myfonts:collections/helvetica-now',
+            source_url: 'https://www.myfonts.com/collections/helvetica-now',
+            family_name: 'Helvetica Now',
+            styles: [{ id: 'regular', display_name: 'Regular', price: 50000 }],
+          }),
+        }
+      );
+      const respA = await worker.fetch(completeAReq, env, {} as ExecutionContext);
+      expect(respA.status).toBe(200);
+
+      // Verify Session A is SELECTING_STYLES, but Session B is still AWAITING_CATALOG
+      const sessionAAfterFirst = await env.DB
+        .prepare('SELECT status, catalog_id FROM telegram_sessions WHERE user_id = ?')
+        .bind(userA)
+        .first<{ status: string; catalog_id: string }>();
+      const sessionBAfterFirst = await env.DB
+        .prepare('SELECT status, catalog_id FROM telegram_sessions WHERE user_id = ?')
+        .bind(userB)
+        .first<{ status: string; catalog_id: string | null }>();
+
+      expect(sessionAAfterFirst?.status).toBe('SELECTING_STYLES');
+      expect(sessionAAfterFirst?.catalog_id).toBeDefined();
+      expect(sessionBAfterFirst?.status).toBe('AWAITING_CATALOG');
+      expect(sessionBAfterFirst?.catalog_id).toBeNull();
+      expect(sentMessages.length).toBe(1);
+      expect(Number(sentMessages[0].chat_id)).toBe(chatA);
+
+      // 5. Complete Request B
+      const completeBReq = new Request(
+        `https://worker.local/internal/catalog-requests/${reqBId}/complete`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${nodeSecret}`,
+          },
+          body: JSON.stringify({
+            canonical_key: 'myfonts:collections/futura-now',
+            source_url: 'https://www.myfonts.com/collections/futura-now',
+            family_name: 'Futura Now',
+            styles: [{ id: 'bold', display_name: 'Bold', price: 50000 }],
+          }),
+        }
+      );
+      const respB = await worker.fetch(completeBReq, env, {} as ExecutionContext);
+      expect(respB.status).toBe(200);
+
+      // Verify Session B is now SELECTING_STYLES with its own distinct catalog
+      const sessionBAfterSecond = await env.DB
+        .prepare('SELECT status, catalog_id FROM telegram_sessions WHERE user_id = ?')
+        .bind(userB)
+        .first<{ status: string; catalog_id: string }>();
+
+      expect(sessionBAfterSecond?.status).toBe('SELECTING_STYLES');
+      expect(sessionBAfterSecond?.catalog_id).not.toBe(sessionAAfterFirst?.catalog_id);
+      expect(sentMessages.length).toBe(2);
+      expect(Number(sentMessages[1].chat_id)).toBe(chatB);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('mismatched/unknown request id or canonical/source payload is rejected with no catalog/session mutation', async () => {
+    const userId = 'user_mismatch_333';
+    const chatId = 333333;
+    const now = Date.now();
+    const reqId = 'req_valid_333';
+
+    await env.DB.prepare(
+      `INSERT INTO telegram_users (id, first_name, username, created_at, updated_at)
+       VALUES (?, 'MismatchUser', 'mismatch', ?, ?)`
+    )
+      .bind(userId, now, now)
+      .run();
+
+    await env.DB.prepare(
+      `INSERT INTO telegram_sessions (user_id, chat_id, status, workflow_token, checkout_token, version, created_at, updated_at)
+       VALUES (?, ?, 'AWAITING_CATALOG', 'tok_m', 'chk_m', 1, ?, ?)`
+    )
+      .bind(userId, chatId, now, now)
+      .run();
+
+    await env.DB.prepare(
+      `INSERT INTO catalog_requests (id, user_id, canonical_key, source_url, status, created_at, updated_at)
+       VALUES (?, ?, 'myfonts:collections/real-font', 'https://www.myfonts.com/collections/real-font', 'PENDING', ?, ?)`
+    )
+      .bind(reqId, userId, now, now)
+      .run();
+
+    // 1. Unknown request id returns 404
+    const unknownReq = new Request(
+      'https://worker.local/internal/catalog-requests/unknown_request_id_999/complete',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${nodeSecret}`,
+        },
+        body: JSON.stringify({
+          canonical_key: 'myfonts:collections/real-font',
+          source_url: 'https://www.myfonts.com/collections/real-font',
+          family_name: 'Real Font',
+          styles: [{ id: 'regular', display_name: 'Regular', price: 50000 }],
+        }),
+      }
+    );
+    const unknownResp = await worker.fetch(unknownReq, env, {} as ExecutionContext);
+    expect(unknownResp.status).toBe(404);
+
+    // 2. Mismatched canonical_key / source_url returns 400
+    const mismatchReq = new Request(
+      `https://worker.local/internal/catalog-requests/${reqId}/complete`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${nodeSecret}`,
+        },
+        body: JSON.stringify({
+          canonical_key: 'myfonts:collections/evil-spoofed-font',
+          source_url: 'https://www.myfonts.com/collections/evil-spoofed-font',
+          family_name: 'Evil Font',
+          styles: [{ id: 'regular', display_name: 'Regular', price: 50000 }],
+        }),
+      }
+    );
+    const mismatchResp = await worker.fetch(mismatchReq, env, {} as ExecutionContext);
+    expect(mismatchResp.status).toBe(400);
+
+    // 3. Verify database was NOT mutated
+    const session = await env.DB
+      .prepare('SELECT status, catalog_id FROM telegram_sessions WHERE user_id = ?')
+      .bind(userId)
+      .first<{ status: string; catalog_id: string | null }>();
+    expect(session?.status).toBe('AWAITING_CATALOG');
+    expect(session?.catalog_id).toBeNull();
+
+    const requestRecord = await env.DB
+      .prepare('SELECT status FROM catalog_requests WHERE id = ?')
+      .bind(reqId)
+      .first<{ status: string }>();
+    expect(requestRecord?.status).toBe('PENDING');
+  });
 });

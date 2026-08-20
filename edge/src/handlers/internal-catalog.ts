@@ -70,9 +70,11 @@ export async function handleInternalCatalog(
     );
   }
 
-  // Route: POST /internal/catalog-requests/:id/complete OR /internal/catalog-requests/complete
-  const completeMatch = path.match(/^\/internal\/catalog-requests\/(?:([a-zA-Z0-9_-]+)\/)?complete$/);
+  // Route: POST /internal/catalog-requests/:id/complete
+  const completeMatch = path.match(/^\/internal\/catalog-requests\/([a-zA-Z0-9_-]+)\/complete$/);
   if (request.method === 'POST' && completeMatch) {
+    const requestId = completeMatch[1];
+
     let body: Record<string, unknown>;
     try {
       body = (await request.json()) as Record<string, unknown>;
@@ -101,11 +103,60 @@ export async function handleInternalCatalog(
       );
     }
 
-    const styles = rawStyles.map((s: Record<string, unknown>) => ({
-      id: String(s.id || '').trim(),
-      displayName: String(s.display_name || s.displayName || s.id || '').trim(),
-      price: typeof s.price === 'number' ? s.price : 50000,
-    })).filter((s) => s.id.length > 0);
+    // 1. Fetch the stored catalog request row
+    const reqRow = await env.DB
+      .prepare('SELECT id, user_id, canonical_key, source_url, status, catalog_id FROM catalog_requests WHERE id = ?')
+      .bind(requestId)
+      .first<{
+        id: string;
+        user_id: string;
+        canonical_key: string;
+        source_url: string;
+        status: string;
+        catalog_id: string | null;
+      }>();
+
+    if (!reqRow) {
+      return new Response(JSON.stringify({ error: 'Catalog request not found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    // Idempotency: if already completed, return existing catalog_id without re-mutating
+    if (reqRow.status === 'COMPLETED' && reqRow.catalog_id) {
+      return new Response(
+        JSON.stringify({
+          success: true,
+          catalog_id: reqRow.catalog_id,
+        }),
+        {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }
+      );
+    }
+
+    // Verify identity against stored request
+    if (reqRow.canonical_key !== canonicalKey || reqRow.source_url !== sourceUrl) {
+      return new Response(
+        JSON.stringify({
+          error: 'Payload canonical_key or source_url does not match stored request',
+        }),
+        {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' },
+        }
+      );
+    }
+
+    const styles = rawStyles
+      .map((s: Record<string, unknown>) => ({
+        id: String(s.id || '').trim(),
+        displayName: String(s.display_name || s.displayName || s.id || '').trim(),
+        price: typeof s.price === 'number' ? s.price : 50000,
+      }))
+      .filter((s) => s.id.length > 0);
 
     if (styles.length === 0) {
       return new Response(JSON.stringify({ error: 'At least one valid style is required' }), {
@@ -122,57 +173,65 @@ export async function handleInternalCatalog(
       styles,
     };
 
-    // 1. Persist catalog to D1 (atomically updates catalogs, catalog_styles, and marks catalog_requests as COMPLETED)
+    // 2. Persist catalog to D1 (atomically updates catalogs, catalog_styles, and marks catalog_requests as COMPLETED)
     const catalogId = await catalogService.persistCatalogResult(catalog);
 
-    // 2. Find any user sessions waiting for this catalog and advance them to SELECTING_STYLES
-    const waitingSessions = await env.DB
+    // 3. Advance ONLY the matching user session for this specific request
+    const userSession = await env.DB
       .prepare(
-        `SELECT user_id, chat_id, last_message_id, workflow_token, version
+        `SELECT user_id, chat_id, last_message_id, workflow_token, version, status
          FROM telegram_sessions
-         WHERE status = 'AWAITING_CATALOG'`
+         WHERE user_id = ? AND status = 'AWAITING_CATALOG'`
       )
-      .all<{
+      .bind(reqRow.user_id)
+      .first<{
         user_id: string;
         chat_id: number;
         last_message_id: number | null;
         workflow_token: string;
         version: number;
+        status: string;
       }>();
 
-    if (waitingSessions.results && waitingSessions.results.length > 0 && env.TELEGRAM_BOT_TOKEN) {
+    if (userSession && env.TELEGRAM_BOT_TOKEN) {
       const tg = new TelegramClient(env.TELEGRAM_BOT_TOKEN);
 
-      for (const sess of waitingSessions.results) {
-        // Update session to SELECTING_STYLES
-        await sessionService.updateSessionCatalog(
-          sess.user_id,
-          catalogId,
-          'SELECTING_STYLES'
-        );
+      // Update session to SELECTING_STYLES
+      await sessionService.updateSessionCatalog(
+        userSession.user_id,
+        catalogId,
+        'SELECTING_STYLES'
+      );
 
-        // Render and send the interactive style selection message to user
-        const { text: msgText, replyMarkup } = renderStyleSelection(
-          catalog,
-          [],
-          sess.workflow_token
-        );
+      // Render and send the interactive style selection message to user
+      const { text: msgText, replyMarkup } = renderStyleSelection(
+        catalog,
+        [],
+        userSession.workflow_token
+      );
 
-        try {
-          const sent = await tg.sendMessage({
-            chat_id: sess.chat_id,
-            text: msgText,
-            reply_markup: replyMarkup,
-          });
+      try {
+        const sent = await tg.sendMessage({
+          chat_id: userSession.chat_id,
+          text: msgText,
+          reply_markup: replyMarkup,
+        });
 
-          if (sent.message_id) {
-            await sessionService.setStatusUnconditional(sess.user_id, 'SELECTING_STYLES', sent.message_id);
-          }
-        } catch {
-          // Log or tolerate telegram transport hiccups
+        if (sent.message_id) {
+          await sessionService.setStatusUnconditional(userSession.user_id, 'SELECTING_STYLES', sent.message_id);
         }
+      } catch {
+        // Log or tolerate telegram transport hiccups
       }
     }
+
+    emitStructuredLog({
+      event: 'catalog_completed' as any,
+      request_id: requestId,
+      user_id: reqRow.user_id,
+      canonical_key: canonicalKey,
+      catalog_id: catalogId,
+    });
 
     return new Response(
       JSON.stringify({

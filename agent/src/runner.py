@@ -321,7 +321,7 @@ class JobRunner:
             await heartbeat_task
 
     async def process_pending_catalogs(self) -> int:
-        """Resolve any pending catalog requests awaiting font metadata."""
+        """Resolve any pending catalog requests awaiting authentic font metadata."""
         try:
             reqs = await self.worker_client.get_pending_catalog_requests()
         except Exception as exc:
@@ -331,30 +331,15 @@ class JobRunner:
         processed = 0
         for req in reqs:
             try:
-                # Extract family name from URL
-                parsed = urlparse(req.source_url)
-                path_parts = [p for p in parsed.path.split("/") if p]
-                family_name = path_parts[-1].replace("-", " ").title() if path_parts else "Custom Font"
+                # Acquire authentic metadata from source layer; fails closed if no styles found
+                metadata = await self.source_acquirer.acquire_catalog_metadata(req.source_url)
+                metadata["canonical_key"] = req.canonical_key
+                metadata["source_url"] = req.source_url
 
-                styles = [
-                    {"id": "regular", "display_name": "Regular", "price": 50000},
-                    {"id": "bold", "display_name": "Bold", "price": 50000},
-                    {"id": "italic", "display_name": "Italic", "price": 50000},
-                    {"id": "bold_italic", "display_name": "Bold Italic", "price": 50000},
-                ]
-
-                payload = {
-                    "canonical_key": req.canonical_key,
-                    "source_url": req.source_url,
-                    "family_name": family_name,
-                    "foundry": "MyFonts",
-                    "styles": styles,
-                }
-
-                success = await self.worker_client.complete_catalog_request(req.id, payload)
+                success = await self.worker_client.complete_catalog_request(req.id, metadata)
                 if success:
                     processed += 1
-                    logger.info(f"Catalog request {req.id} resolved for {family_name}")
+                    logger.info(f"Catalog request {req.id} resolved with authentic styles for {metadata.get('family_name')}")
             except Exception as exc:
                 logger.warning(f"Failed to process catalog request {req.id}: {exc}")
         return processed

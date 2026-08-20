@@ -207,7 +207,7 @@ describe('Phase 7: Release Preflight Validation', () => {
       expect(report.passed).toBe(true);
     });
 
-    it('fails in strict mode when secrets and agent vars are missing', () => {
+    it('fails in strict mode when agent vars or production D1 are missing, while secret names are verified by contract', () => {
       const report = runFullPreflight({
         mode: 'production',
         requireProdD1: true,
@@ -218,8 +218,9 @@ describe('Phase 7: Release Preflight Validation', () => {
       expect(report.passed).toBe(false);
       expect(report.failedChecks).toBeGreaterThan(0);
 
-      const secretFailure = report.checks.find((c) => c.name.includes('TELEGRAM_BOT_TOKEN'));
-      expect(secretFailure?.passed).toBe(false);
+      const secretCheck = report.checks.find((c) => c.name.includes('TELEGRAM_BOT_TOKEN'));
+      expect(secretCheck?.passed).toBe(true);
+      expect(secretCheck?.message).toContain('secret contract');
 
       const agentFailure = report.checks.find((c) => c.name.includes('CF_ACCOUNT_ID'));
       expect(agentFailure?.passed).toBe(false);
