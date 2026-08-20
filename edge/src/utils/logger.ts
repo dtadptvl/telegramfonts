@@ -66,6 +66,14 @@ export interface DownloadServedLogEvent extends LogEventBase {
   size_bytes: number;
 }
 
+export interface CatalogCompletedLogEvent extends LogEventBase {
+  event: 'catalog_completed';
+  request_id: string;
+  user_id: string;
+  canonical_key: string;
+  catalog_id: string;
+}
+
 export type StructuredLogEvent =
   | PaymentAcceptedLogEvent
   | OutboxDispatchedLogEvent
@@ -73,7 +81,8 @@ export type StructuredLogEvent =
   | JobHeartbeatLogEvent
   | JobCompletedLogEvent
   | TelegramDeliveredLogEvent
-  | DownloadServedLogEvent;
+  | DownloadServedLogEvent
+  | CatalogCompletedLogEvent;
 
 const SENSITIVE_SUBSTRINGS = [
   'authorization',
