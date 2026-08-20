@@ -10,8 +10,23 @@ export interface FulfillmentJobRecord {
   max_attempts: number;
   next_retry_at: number | null;
   last_error: string | null;
+  artifact_key?: string | null;
+  artifact_sha256?: string | null;
+  artifact_size_bytes?: number | null;
+  completed_at?: number | null;
   created_at: number;
   updated_at: number;
+}
+
+export interface FulfillmentReceiptRecord {
+  job_id: string;
+  order_id: string;
+  artifact_key: string;
+  artifact_sha256: string;
+  artifact_size_bytes: number;
+  worker_id: string;
+  completed_at: number;
+  created_at: number;
 }
 
 export interface ClaimComputePayload {
@@ -47,6 +62,21 @@ export interface FailJobResult {
   reason?: string;
 }
 
+export interface CompleteJobResult {
+  status: 'COMPLETED' | 'ALREADY_COMPLETED' | 'CONFLICT_DIFFERENT_ARTIFACT' | 'EXPIRED_OR_FENCED' | 'NOT_FOUND' | 'ERROR';
+  queue_action: 'ack' | 'retry';
+  completed_at?: number;
+  artifact_key?: string;
+  reason?: string;
+}
+
+export function buildArtifactStorageKey(orderId: string, jobId: string, sha256Hex: string): string {
+  const cleanOrder = orderId.trim().replace(/[^a-zA-Z0-9_-]/g, '');
+  const cleanJob = jobId.trim().replace(/[^a-zA-Z0-9_-]/g, '');
+  const cleanSha = sha256Hex.trim().toLowerCase().replace(/[^0-9a-f]/g, '');
+  return `artifacts/${cleanOrder}/${cleanJob}/${cleanSha}.zip`;
+}
+
 const ALLOWED_FORMATS = new Set(['TTF', 'OTF', 'WOFF', 'WOFF2']);
 
 export class JobService {
@@ -59,12 +89,75 @@ export class JobService {
       .first<FulfillmentJobRecord>();
   }
 
+  async getReceiptByJobId(jobId: string): Promise<FulfillmentReceiptRecord | null> {
+    return this.db
+      .prepare('SELECT * FROM fulfillment_receipts WHERE job_id = ?')
+      .bind(jobId)
+      .first<FulfillmentReceiptRecord>();
+  }
+
+  async getReceiptByOrderId(orderId: string): Promise<FulfillmentReceiptRecord | null> {
+    return this.db
+      .prepare('SELECT * FROM fulfillment_receipts WHERE order_id = ?')
+      .bind(orderId)
+      .first<FulfillmentReceiptRecord>();
+  }
+
+  async validateLeaseForArtifactUpload(
+    jobId: string,
+    workerId: string,
+    leaseToken: string
+  ): Promise<{ valid: boolean; orderId?: string; reason?: string }> {
+    const cleanWorkerId = workerId.trim();
+    const cleanToken = leaseToken.trim();
+
+    if (!/^[a-zA-Z0-9_-]{1,64}$/.test(cleanWorkerId) || !/^[0-9a-fA-F-]{36}$/.test(cleanToken)) {
+      return { valid: false, reason: 'invalid_credentials' };
+    }
+
+    const now = Date.now();
+    const safetyMarginMs = 15000;
+
+    const job = await this.db
+      .prepare(
+        `SELECT id, order_id, status, lease_owner, lease_token, lease_expires_at
+         FROM fulfillment_jobs
+         WHERE id = ?`
+      )
+      .bind(jobId)
+      .first<{
+        id: string;
+        order_id: string;
+        status: string;
+        lease_owner: string | null;
+        lease_token: string | null;
+        lease_expires_at: number | null;
+      }>();
+
+    if (!job) {
+      return { valid: false, reason: 'job_not_found' };
+    }
+
+    if (job.status !== 'PROCESSING') {
+      return { valid: false, reason: `job_status_${job.status.toLowerCase()}` };
+    }
+
+    if (job.lease_owner !== cleanWorkerId || job.lease_token !== cleanToken) {
+      return { valid: false, reason: 'lease_token_mismatch' };
+    }
+
+    if (!job.lease_expires_at || job.lease_expires_at <= now + safetyMarginMs) {
+      return { valid: false, reason: 'lease_expired_or_near_margin' };
+    }
+
+    return { valid: true, orderId: job.order_id };
+  }
+
   async claimJob(
     jobId: string,
     workerId: string,
     leaseDurationSeconds = 300
   ): Promise<ClaimJobResult> {
-    // 1. Enforce bounded safe identifier for worker_id (BLOCK 6)
     const cleanWorkerId = workerId.trim();
     if (!/^[a-zA-Z0-9_-]{1,64}$/.test(cleanWorkerId)) {
       return { status: 'CONFLICT', queue_action: 'retry', reason: 'invalid_worker_id' };
@@ -90,7 +183,6 @@ export class JobService {
 
     // Check if attempt count exhausted (BLOCK 5)
     if (job.attempt_count >= job.max_attempts) {
-      // If previous worker crashed on final attempt, terminalize atomically before returning ACK
       if (
         job.status === 'PROCESSING' &&
         (job.lease_expires_at === null || job.lease_expires_at <= now)
@@ -156,7 +248,6 @@ export class JobService {
     const leaseExpiresAt = now + boundedLeaseSeconds * 1000;
 
     const statements: D1PreparedStatement[] = [
-      // 1. Update job with optimistic fencing AND order precondition check
       this.db
         .prepare(
           `UPDATE fulfillment_jobs
@@ -179,7 +270,6 @@ export class JobService {
         )
         .bind(cleanWorkerId, newLeaseToken, now, leaseExpiresAt, now, jobId, now, now),
 
-      // 2. Transition order PAID -> PROCESSING atomically bound to successful job lease
       this.db
         .prepare(
           `UPDATE orders
@@ -236,7 +326,6 @@ export class JobService {
         throw new Error('invalid_metadata_type');
       }
 
-      // Must be canonical MyFonts HTTPS URL (BLOCK B)
       if (
         typeof parsedMeta.source_url !== 'string' ||
         !/^https:\/\/(www\.)?myfonts\.com\/[a-zA-Z0-9_\-\/]+$/.test(parsedMeta.source_url.trim())
@@ -252,7 +341,6 @@ export class JobService {
         foundry = parsedMeta.foundry.trim().slice(0, 128);
       }
 
-      // Formats must be non-empty array with only supported values (no fallback default!) (BLOCK B)
       if (!Array.isArray(parsedMeta.selected_formats) || parsedMeta.selected_formats.length === 0) {
         throw new Error('missing_or_empty_formats');
       }
@@ -367,6 +455,204 @@ export class JobService {
     return { status: 'EXPIRED_OR_FENCED', queue_action: 'ack' };
   }
 
+  async completeJob(params: {
+    jobId: string;
+    workerId: string;
+    leaseToken: string;
+    artifactKey: string;
+    artifactSha256: string;
+    artifactSizeBytes: number;
+  }): Promise<CompleteJobResult> {
+    const { jobId, workerId, leaseToken, artifactKey, artifactSha256, artifactSizeBytes } = params;
+    const cleanWorkerId = workerId.trim();
+    const cleanToken = leaseToken.trim();
+    const cleanSha = artifactSha256.trim().toLowerCase();
+
+    if (
+      !/^[a-zA-Z0-9_-]{1,64}$/.test(cleanWorkerId) ||
+      !/^[0-9a-fA-F-]{36}$/.test(cleanToken) ||
+      !/^[0-9a-f]{64}$/.test(cleanSha) ||
+      artifactSizeBytes <= 0 ||
+      artifactSizeBytes > 50 * 1024 * 1024
+    ) {
+      return { status: 'ERROR', queue_action: 'retry', reason: 'invalid_completion_params' };
+    }
+
+    // 1. Idempotency check: inspect existing fulfillment_receipts
+    const existingReceipt = await this.getReceiptByJobId(jobId);
+    if (existingReceipt) {
+      if (
+        existingReceipt.artifact_key === artifactKey &&
+        existingReceipt.artifact_sha256 === cleanSha
+      ) {
+        return {
+          status: 'ALREADY_COMPLETED',
+          queue_action: 'ack',
+          completed_at: existingReceipt.completed_at,
+          artifact_key: existingReceipt.artifact_key,
+        };
+      }
+      return {
+        status: 'CONFLICT_DIFFERENT_ARTIFACT',
+        queue_action: 'ack',
+        reason: 'Job already completed with different artifact',
+      };
+    }
+
+    const job = await this.getJobById(jobId);
+    if (!job) {
+      return { status: 'NOT_FOUND', queue_action: 'ack', reason: 'job_not_found' };
+    }
+
+    // Check if already completed on job record
+    if (job.status === 'COMPLETED') {
+      if (job.artifact_key === artifactKey && job.artifact_sha256 === cleanSha) {
+        return {
+          status: 'ALREADY_COMPLETED',
+          queue_action: 'ack',
+          completed_at: job.completed_at || job.updated_at,
+          artifact_key: job.artifact_key || artifactKey,
+        };
+      }
+      return {
+        status: 'CONFLICT_DIFFERENT_ARTIFACT',
+        queue_action: 'ack',
+        reason: 'Job already completed with different artifact',
+      };
+    }
+
+    const now = Date.now();
+
+    // 2. Validate active unexpired lease fencing
+    if (
+      job.status !== 'PROCESSING' ||
+      job.lease_owner !== cleanWorkerId ||
+      job.lease_token !== cleanToken ||
+      !job.lease_expires_at ||
+      job.lease_expires_at <= now
+    ) {
+      return {
+        status: 'EXPIRED_OR_FENCED',
+        queue_action: 'retry',
+        reason: 'lease_superseded_or_expired',
+      };
+    }
+
+    const orderId = job.order_id;
+    const outboxId = crypto.randomUUID();
+    const outboxPayload = JSON.stringify({ order_id: orderId });
+    const artifactId = crypto.randomUUID();
+
+    // 3. Atomic D1 transactional batch (BLOCK 4)
+    const statements: D1PreparedStatement[] = [
+      // 1. Insert completion receipt
+      this.db
+        .prepare(
+          `INSERT INTO fulfillment_receipts (
+             job_id, order_id, artifact_key, artifact_sha256, artifact_size_bytes, worker_id, completed_at, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .bind(jobId, orderId, artifactKey, cleanSha, artifactSizeBytes, cleanWorkerId, now, now),
+
+      // 2. Transition fulfillment_job to COMPLETED
+      this.db
+        .prepare(
+          `UPDATE fulfillment_jobs
+           SET status = 'COMPLETED',
+               artifact_key = ?,
+               artifact_sha256 = ?,
+               artifact_size_bytes = ?,
+               completed_at = ?,
+               lease_owner = NULL,
+               lease_token = NULL,
+               leased_at = NULL,
+               lease_expires_at = NULL,
+               updated_at = ?
+           WHERE id = ?
+             AND status = 'PROCESSING'
+             AND lease_owner = ?
+             AND lease_token = ?
+             AND lease_expires_at > ?`
+        )
+        .bind(artifactKey, cleanSha, artifactSizeBytes, now, now, jobId, cleanWorkerId, cleanToken, now),
+
+      // 3. Transition order to COMPLETED
+      this.db
+        .prepare(
+          `UPDATE orders
+           SET status = 'COMPLETED',
+               completed_at = ?,
+               updated_at = ?
+           WHERE id = ?
+             AND status = 'PROCESSING'`
+        )
+        .bind(now, now, orderId),
+
+      // 4. Insert exactly one PENDING DELIVERY_READY outbox event
+      this.db
+        .prepare(
+          `INSERT INTO outbox_events (
+             id, event_type, aggregate_type, aggregate_id, payload, status, created_at
+           ) VALUES (?, 'DELIVERY_READY', 'order', ?, ?, 'PENDING', ?)`
+        )
+        .bind(outboxId, orderId, outboxPayload, now),
+
+      // 5. Insert artifact record
+      this.db
+        .prepare(
+          `INSERT OR IGNORE INTO artifacts (
+             id, order_id, job_id, storage_key, file_name, file_size, mime_type, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, 'application/zip', ?)`
+        )
+        .bind(artifactId, orderId, jobId, artifactKey, `${orderId}.zip`, artifactSizeBytes, now),
+    ];
+
+    try {
+      const results = await this.db.batch(statements);
+      const receiptChanges = results[0].meta.changes;
+      const jobChanges = results[1].meta.changes;
+
+      if (!receiptChanges || receiptChanges === 0 || !jobChanges || jobChanges === 0) {
+        return {
+          status: 'EXPIRED_OR_FENCED',
+          queue_action: 'retry',
+          reason: 'completion_cas_lost',
+        };
+      }
+
+      return {
+        status: 'COMPLETED',
+        queue_action: 'ack',
+        completed_at: now,
+        artifact_key: artifactKey,
+      };
+    } catch (err: unknown) {
+      // In case of unique constraint conflict due to concurrent race
+      const raceReceipt = await this.getReceiptByJobId(jobId);
+      if (raceReceipt) {
+        if (raceReceipt.artifact_key === artifactKey && raceReceipt.artifact_sha256 === cleanSha) {
+          return {
+            status: 'ALREADY_COMPLETED',
+            queue_action: 'ack',
+            completed_at: raceReceipt.completed_at,
+            artifact_key: raceReceipt.artifact_key,
+          };
+        }
+        return {
+          status: 'CONFLICT_DIFFERENT_ARTIFACT',
+          queue_action: 'ack',
+          reason: 'Job already completed with different artifact',
+        };
+      }
+
+      return {
+        status: 'ERROR',
+        queue_action: 'retry',
+        reason: err instanceof Error ? err.message : 'completion_batch_failed',
+      };
+    }
+  }
+
   async failJob(params: {
     jobId: string;
     workerId: string;
@@ -391,7 +677,6 @@ export class JobService {
 
     const now = Date.now();
 
-    // 1. Authoritative D1 check: must be active non-expired lease (BLOCK 4)
     const job = await this.db
       .prepare(
         `SELECT * FROM fulfillment_jobs
@@ -408,7 +693,6 @@ export class JobService {
       return { status: 'EXPIRED_OR_FENCED', queue_action: 'ack', reason: 'lease_superseded_or_expired' };
     }
 
-    // 2. Retryable failure with attempts remaining
     if (retryable && job.attempt_count < job.max_attempts) {
       const backoffSeconds = Math.min(300, 10 * Math.pow(2, job.attempt_count - 1));
       const nextRetryAt = now + backoffSeconds * 1000;
@@ -446,12 +730,10 @@ export class JobService {
       return { status: 'EXPIRED_OR_FENCED', queue_action: 'ack' };
     }
 
-    // 3. Terminal failure or exhausted attempts: atomic job + order FAILED transition (BLOCK 4)
     const terminalReason =
       job.attempt_count >= job.max_attempts ? 'max_attempts_exhausted' : cleanReason;
 
     const statements: D1PreparedStatement[] = [
-      // Update job conditional on active lease
       this.db
         .prepare(
           `UPDATE fulfillment_jobs
@@ -470,7 +752,6 @@ export class JobService {
         )
         .bind(terminalReason, now, jobId, cleanWorkerId, cleanToken, now),
 
-      // Update order conditional on job FAILED transition above
       this.db
         .prepare(
           `UPDATE orders
