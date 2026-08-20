@@ -18,7 +18,7 @@ Hybrid cloud architecture for automated Vietnamese font processing and fulfillme
 
 - **Control Plane (`edge/`)**: TypeScript Cloudflare Worker terminating Telegram and SePay webhooks, managing canonical durable state via Cloudflare D1, dispatching jobs via Queues, and storing assets in R2.
 - **Compute Plane (`agent/`)**: Reserved directory for the future Python A23 compute worker that will process font generation requests without opening public inbound ports.
-- **Boundary Note**: Production Cloudflare resources, deployment bindings, and live secrets are **NOT** provisioned in this initial phase. All development and testing run against local simulated bindings (Miniflare/D1 local SQLite).
+- **Boundary Note**: Production Cloudflare resources, deployment bindings, and live secrets are **NOT** provisioned in this phase. All development and testing run against local simulated bindings (Miniflare/D1 local SQLite).
 
 ## Repository Layout
 
@@ -31,15 +31,23 @@ Hybrid cloud architecture for automated Vietnamese font processing and fulfillme
 │   └── README.md
 ├── edge/                        # Cloudflare Worker control-plane
 │   ├── migrations/              # D1 database migrations
-│   │   └── 0001_initial_schema.sql
+│   │   ├── 0001_initial_schema.sql
+│   │   └── 0002_telegram_sessions_and_catalog.sql
 │   ├── src/                     # Worker TypeScript source
+│   │   ├── handlers/            # Webhook and route handlers
+│   │   ├── services/            # Telegram client, catalog, session, order services
+│   │   ├── types/               # Telegram, catalog, and session domain types
+│   │   ├── utils/               # URL normalization and HTML escaping
 │   │   ├── env.ts               # Typed environment & bindings
-│   │   └── index.ts             # Entrypoint & minimal health/ready routes
+│   │   └── index.ts             # Entrypoint & routing
 │   ├── test/                    # Automated tests (Vitest + Cloudflare Workers Pool)
 │   │   ├── apply-migrations.ts
 │   │   ├── env.d.ts
+│   │   ├── html.spec.ts
 │   │   ├── index.spec.ts
-│   │   └── schema.spec.ts
+│   │   ├── myfonts.spec.ts
+│   │   ├── schema.spec.ts
+│   │   └── telegram.spec.ts
 │   ├── package.json
 │   ├── tsconfig.json
 │   ├── vitest.config.ts
@@ -83,13 +91,15 @@ npm ci
    npm run --workspace=edge dev
    ```
 
-### Minimal Worker Endpoints
+### Worker Endpoints
 
 - `GET /health` -> Liveness check returning `200 {"status": "ok"}`.
 - `GET /ready` -> Readiness check querying D1 database returning `200 {"status": "ready", "database": "connected"}` or `503` if unavailable.
+- `POST /webhooks/telegram` -> Telegram Bot webhook endpoint (requires `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, and `X-Telegram-Bot-Api-Secret-Token` header).
 - All other routes return `404 Not Found`.
 
 ## Canonical States
 
 - **Orders**: `AWAITING_PAYMENT`, `PAID`, `PROCESSING`, `COMPLETED`, `FAILED`, `CANCELLED`
 - **Fulfillment Jobs**: `PENDING`, `PROCESSING`, `RETRY`, `COMPLETED`, `FAILED`
+- **Telegram Sessions**: `IDLE`, `AWAITING_CATALOG`, `SELECTING_STYLES`, `SELECTING_FORMATS`, `CONFIRMING`, `ORDER_CREATED`
