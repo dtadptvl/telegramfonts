@@ -1,8 +1,9 @@
-"""A23 Compute Runner state machine and message lifecycle."""
+"""A23 Compute Runner state machine, message lifecycle, and consumer loop."""
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -21,6 +22,8 @@ from scratch import ScratchManager
 from worker_client import ClaimedJob, WorkerJobClient
 
 logger = logging.getLogger("telegramfonts.agent.runner")
+
+LEASE_SAFETY_MARGIN_MS = 15_000  # 15 seconds safety deadline before lease expiry
 
 
 class RunnerAction(str, Enum):
@@ -57,24 +60,37 @@ class A23Runner:
         self.source_acquirer = source_acquirer or SourceAcquirer(settings.HTTP_TIMEOUT_SECONDS)
         self.font_builder = font_builder or FontBuilderService()
         self.packager = packager or PackagerService()
+        self.held_job_ids: set[str] = set()
+
+    async def close(self) -> None:
+        await self.queue_client.close()
+        await self.worker_client.close()
 
     async def _heartbeat_loop(
         self,
         job_id: str,
         lease_token: str,
+        expiry_holder: list[int],
         fenced_event: asyncio.Event,
         stop_event: asyncio.Event,
     ) -> None:
-        """Background heartbeat loop maintaining D1 lease until compute finishes or fences."""
+        """Background heartbeat loop maintaining D1 lease with authoritative expiry tracking (BLOCK D)."""
         interval = self.settings.HEARTBEAT_INTERVAL_SECONDS
         while not stop_event.is_set():
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=interval)
                 break  # Stop requested
             except asyncio.TimeoutError:
-                pass  # Interval reached, send heartbeat
+                pass  # Interval reached
 
             if stop_event.is_set():
+                break
+
+            # Check if already within safety margin of expiration before sending
+            now_ms = int(time.time() * 1000)
+            if now_ms + LEASE_SAFETY_MARGIN_MS >= expiry_holder[0]:
+                logger.warning(f"Lease safety deadline exceeded before heartbeat for job {job_id}")
+                fenced_event.set()
                 break
 
             hb_res = await self.worker_client.heartbeat(job_id, lease_token)
@@ -82,6 +98,17 @@ class A23Runner:
                 logger.warning(f"Heartbeat detected lease fencing for job {job_id}")
                 fenced_event.set()
                 break
+
+            if hb_res.success and hb_res.lease_expires_at:
+                expiry_holder[0] = hb_res.lease_expires_at
+                logger.debug(f"Heartbeat extended lease for {job_id} to {hb_res.lease_expires_at}")
+            else:
+                # Transient network error on heartbeat: check if lease expired
+                now_ms_after = int(time.time() * 1000)
+                if now_ms_after + LEASE_SAFETY_MARGIN_MS >= expiry_holder[0]:
+                    logger.warning(f"Lease safety deadline expired after failed heartbeat for {job_id}")
+                    fenced_event.set()
+                    break
 
     async def process_message(self, msg: QueueMessage) -> ProcessResult:
         logger.info(f"Processing message {msg.id} (attempts: {msg.attempts})")
@@ -93,6 +120,11 @@ class A23Runner:
             return ProcessResult(action=RunnerAction.ACKED, reason="invalid_job_id")
 
         job_id = msg.job_id
+
+        # Skip if already held for completion in this process run (BLOCK A)
+        if job_id in self.held_job_ids:
+            logger.info(f"Job {job_id} already in HOLD_FOR_COMPLETION; skipping recompute")
+            return ProcessResult(action=RunnerAction.HOLD_FOR_COMPLETION, job_id=job_id, reason="already_held")
 
         # 2. Authoritative claim against Worker D1
         claim_res = await self.worker_client.claim(job_id)
@@ -117,30 +149,37 @@ class A23Runner:
         job_dir = self.scratch_manager.get_job_dir(job.job_id, job.lease_token)
         fenced_event = asyncio.Event()
         stop_event = asyncio.Event()
+        expiry_holder = [job.lease_expires_at]
 
         heartbeat_task = asyncio.create_task(
-            self._heartbeat_loop(job.job_id, job.lease_token, fenced_event, stop_event)
+            self._heartbeat_loop(job.job_id, job.lease_token, expiry_holder, fenced_event, stop_event)
         )
 
         try:
-            # Step A: Validate and acquire source
-            await self.source_acquirer.acquire_source(job.source_url)
+            # Step A: Validate and acquire source payload (BLOCK B)
+            source_payload = await self.source_acquirer.acquire_source(job.source_url, job.styles)
 
-            # Step B: Generate requested styles and formats
+            # Step B: Generate requested styles and formats from source data
             generated_files = []
-            family_name = job.family_name or "TeleFont"
+            family_name = job.family_name or source_payload.family_name or "TeleFont"
 
             for style in job.styles:
+                style_source = source_payload.styles.get(style.id)
+                if not style_source:
+                    raise ValueError(f"MISSING_STYLE_SOURCE_DATA_{style.id}")
+
                 for fmt in job.formats:
-                    if fenced_event.is_set():
-                        raise RuntimeError("LEASE_FENCED")
+                    # Check lease safety deadline (BLOCK D)
+                    now_ms = int(time.time() * 1000)
+                    if fenced_event.is_set() or (now_ms + LEASE_SAFETY_MARGIN_MS >= expiry_holder[0]):
+                        raise RuntimeError("LEASE_FENCED_OR_EXPIRED")
 
                     if fmt not in ("TTF", "OTF", "WOFF2"):
                         raise ValueError(f"UNSUPPORTED_FORMAT_{fmt}")
 
                     font_file = self.font_builder.build_font(
+                        style_source=style_source,
                         family_name=family_name,
-                        style_name=style.display_name,
                         format_type=fmt,
                         output_dir=job_dir,
                     )
@@ -154,10 +193,12 @@ class A23Runner:
             if not generated_files:
                 raise ValueError("NO_FILES_GENERATED")
 
-            if fenced_event.is_set():
-                raise RuntimeError("LEASE_FENCED")
+            # Final lease safety check before staging (BLOCK D)
+            now_ms_final = int(time.time() * 1000)
+            if fenced_event.is_set() or (now_ms_final + LEASE_SAFETY_MARGIN_MS >= expiry_holder[0]):
+                raise RuntimeError("LEASE_FENCED_OR_EXPIRED")
 
-            # Step C: Package outputs into deterministic ZIP and manifest
+            # Step C: Package outputs into deterministic ZIP and manifest (BLOCK E & BLOCK C)
             manifest = self.packager.package_job_output(
                 job_id=job.job_id,
                 order_id=job.order_id,
@@ -166,6 +207,7 @@ class A23Runner:
                 output_dir=job_dir,
             )
 
+            self.held_job_ids.add(job.job_id)
             logger.info(
                 f"Successfully computed job {job.job_id} -> staged {manifest.zip_filename} "
                 f"({manifest.zip_size_bytes} bytes, HOLD_FOR_COMPLETION)"
@@ -181,16 +223,26 @@ class A23Runner:
         except Exception as exc:
             logger.error(f"Compute error for job {job.job_id}: {exc}")
 
-            if isinstance(exc, RuntimeError) and "LEASE_FENCED" in str(exc):
+            if isinstance(exc, RuntimeError) and "LEASE_FENCED_OR_EXPIRED" in str(exc):
                 return ProcessResult(
                     action=RunnerAction.FENCED_ABORT,
                     job_id=job.job_id,
-                    reason="lease_fenced",
+                    reason="lease_fenced_or_expired",
                 )
 
             # Classify error: retryable vs terminal
             err_text = str(exc)
-            if any(k in err_text for k in ("INVALID_SOURCE_URL", "UNSUPPORTED_FORMAT", "GENERATED_FONT_INVALID", "NO_FILES_GENERATED")):
+            if any(
+                k in err_text
+                for k in (
+                    "INVALID_SOURCE_URL",
+                    "UNSUPPORTED_FORMAT",
+                    "GENERATED_FONT_INVALID",
+                    "NO_FILES_GENERATED",
+                    "MISSING_STYLE_SOURCE_DATA",
+                    "MALFORMED_SOURCE_INPUT",
+                )
+            ):
                 retryable = False
                 reason_code = err_text.replace(" ", "_").upper()[:64]
             else:
@@ -215,3 +267,42 @@ class A23Runner:
         finally:
             stop_event.set()
             await heartbeat_task
+
+    async def run_once(self) -> list[ProcessResult]:
+        """Pull a batch of messages and process each sequentially (BLOCK A)."""
+        messages = await self.queue_client.pull_messages()
+        results: list[ProcessResult] = []
+        for msg in messages:
+            res = await self.process_message(msg)
+            results.append(res)
+        return results
+
+    async def run_loop(
+        self,
+        stop_event: asyncio.Event | None = None,
+        max_iterations: int | None = None,
+    ) -> None:
+        """Continuous consumer loop with bounded idle/error backoff (BLOCK A)."""
+        iterations = 0
+        logger.info("Starting A23 Runner consumer loop...")
+
+        while stop_event is None or not stop_event.is_set():
+            if max_iterations is not None and iterations >= max_iterations:
+                break
+            iterations += 1
+
+            try:
+                messages = await self.queue_client.pull_messages()
+                if not messages:
+                    # Idle backoff
+                    await asyncio.sleep(self.settings.IDLE_BACKOFF_SECONDS)
+                    continue
+
+                for msg in messages:
+                    if stop_event and stop_event.is_set():
+                        break
+                    await self.process_message(msg)
+
+            except Exception as exc:
+                logger.error(f"Error in runner loop iteration: {exc}")
+                await asyncio.sleep(self.settings.ERROR_BACKOFF_SECONDS)

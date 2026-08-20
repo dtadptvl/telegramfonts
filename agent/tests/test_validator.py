@@ -3,16 +3,23 @@ from pathlib import Path
 import pytest
 
 from compute.font_builder import FontBuilderService
+from compute.source import SourceAcquirer
 from compute.validator import validate_font_file
+from worker_client import ClaimStyle
 
 
-def test_validate_valid_fonts(tmp_path: Path):
+@pytest.mark.asyncio
+async def test_validate_valid_fonts(tmp_path: Path):
+    source_acquirer = SourceAcquirer()
     builder = FontBuilderService()
 
-    ttf_file = builder.build_font("Roboto Flex", "Regular", "TTF", tmp_path)
+    styles = [ClaimStyle(id="regular", display_name="Regular")]
+    payload = await source_acquirer.acquire_source("https://www.myfonts.com/collections/roboto-flex", styles)
+
+    ttf_file = builder.build_font(payload.styles["regular"], "Roboto Flex", "TTF", tmp_path)
     assert validate_font_file(ttf_file.file_path, "TTF") is True
 
-    woff2_file = builder.build_font("Roboto Flex", "Regular", "WOFF2", tmp_path)
+    woff2_file = builder.build_font(payload.styles["regular"], "Roboto Flex", "WOFF2", tmp_path)
     assert validate_font_file(woff2_file.file_path, "WOFF2") is True
 
 

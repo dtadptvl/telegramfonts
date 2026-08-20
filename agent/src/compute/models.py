@@ -5,6 +5,30 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+@dataclass
+class GlyphVector:
+    character: str
+    contours: list[list[tuple[float, float]]]  # list of contours, each a list of (x, y) points
+    advance_width: int = 600
+    lsb: int = 50
+
+
+@dataclass
+class StyleSourceData:
+    style_id: str
+    style_name: str
+    weight_class: int = 400
+    is_italic: bool = False
+    glyphs: dict[str, GlyphVector] = field(default_factory=dict)
+
+
+@dataclass
+class SourcePayload:
+    source_url: str
+    family_name: str
+    styles: dict[str, StyleSourceData] = field(default_factory=dict)
+
+
 @dataclass(frozen=True)
 class GeneratedFontFile:
     style_id: str

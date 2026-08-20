@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import zipfile
 from pathlib import Path
 
@@ -23,10 +24,16 @@ class PackagerService:
         files: list[GeneratedFontFile],
         output_dir: Path,
     ) -> StagedManifest:
-        sanitized_family = "".join(c for c in family_name if c.isalnum() or c in (" ", "-", "_")).strip()
-        slug = sanitized_family.lower().replace(" ", "_") or "font_bundle"
-        zip_filename = f"{slug}_{order_id}.zip"
-        zip_path = output_dir / zip_filename
+        clean_family = re.sub(r"[^a-zA-Z0-9_-]", "_", family_name.strip()).strip("_") or "font_bundle"
+        clean_order = re.sub(r"[^a-zA-Z0-9_-]", "_", order_id.strip()).strip("_") or "order"
+        zip_filename = f"{clean_family.lower()}_{clean_order}.zip"
+        zip_path = (output_dir / zip_filename).resolve()
+
+        # Path traversal guard on zip_path
+        try:
+            zip_path.relative_to(output_dir.resolve())
+        except ValueError:
+            raise ValueError(f"Zip path traversal detected: {zip_filename}")
 
         # Write deterministic ZIP file
         with zipfile.ZipFile(zip_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -47,7 +54,7 @@ class PackagerService:
         manifest = StagedManifest(
             job_id=job_id,
             order_id=order_id,
-            family_name=sanitized_family or "TeleFont",
+            family_name=family_name.strip() or "TeleFont",
             zip_filename=zip_filename,
             zip_file_path=zip_path,
             zip_size_bytes=len(zip_bytes),
