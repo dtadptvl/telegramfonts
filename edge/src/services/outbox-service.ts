@@ -36,11 +36,12 @@ export class OutboxService {
     const leaseDurationMs = Math.max(5, options.leaseDurationSeconds || 30) * 1000;
     const now = Date.now();
 
-    // 1. Select candidate pending outbox rows due for dispatch
+    // 1. Select candidate pending JOB_READY outbox rows due for dispatch (BLOCK 2)
     const candidates = await this.db
       .prepare(
         `SELECT * FROM outbox_events
          WHERE status = 'PENDING'
+           AND event_type = 'JOB_READY'
            AND (next_dispatch_at IS NULL OR next_dispatch_at <= ?)
            AND (dispatch_lease_expires_at IS NULL OR dispatch_lease_expires_at <= ?)
          ORDER BY created_at ASC
@@ -66,6 +67,7 @@ export class OutboxService {
                dispatch_attempts = dispatch_attempts + 1
            WHERE id = ?
              AND status = 'PENDING'
+             AND event_type = 'JOB_READY'
              AND (next_dispatch_at IS NULL OR next_dispatch_at <= ?)
              AND (dispatch_lease_expires_at IS NULL OR dispatch_lease_expires_at <= ?)`
         )
@@ -77,18 +79,50 @@ export class OutboxService {
         continue;
       }
 
-      // 3. Publish minimal payload to Queue
+      // 3. Defensively validate payload and extract ONLY job_id (BLOCK 2)
+      let parsed: Record<string, unknown> | null = null;
       try {
-        let queuePayload: unknown;
-        try {
-          queuePayload = JSON.parse(event.payload);
-        } catch {
-          queuePayload = { raw: event.payload };
-        }
+        parsed = JSON.parse(event.payload) as Record<string, unknown>;
+      } catch {
+        parsed = null;
+      }
 
-        await this.queue.send(queuePayload);
+      if (
+        !parsed ||
+        typeof parsed !== 'object' ||
+        Array.isArray(parsed) ||
+        typeof parsed.job_id !== 'string' ||
+        !/^[a-zA-Z0-9_-]{1,64}$/.test(parsed.job_id.trim())
+      ) {
+        // Malformed payload: do not publish to Queue. Release lease with bounded error code.
+        failureCount++;
+        const attempts = event.dispatch_attempts + 1;
+        const backoffSeconds = Math.min(300, 5 * Math.pow(2, attempts - 1));
+        const nextDispatchAt = Date.now() + backoffSeconds * 1000;
 
-        // 4. Mark SENT only if current lease token still owns the record
+        await this.db
+          .prepare(
+            `UPDATE outbox_events
+             SET dispatch_lease_token = NULL,
+                 dispatch_leased_at = NULL,
+                 dispatch_lease_expires_at = NULL,
+                 next_dispatch_at = ?,
+                 last_dispatch_error = 'INVALID_JOB_ID_PAYLOAD'
+             WHERE id = ? AND status = 'PENDING' AND dispatch_lease_token = ?`
+          )
+          .bind(nextDispatchAt, event.id, leaseToken)
+          .run();
+        continue;
+      }
+
+      const jobId = parsed.job_id.trim();
+      const queueMessage = { job_id: jobId };
+
+      // 4. Publish strictly minimal { job_id } to Queue
+      try {
+        await this.queue.send(queueMessage);
+
+        // 5. Mark SENT only if current lease token still owns the record
         const markSentResult = await this.db
           .prepare(
             `UPDATE outbox_events
@@ -106,14 +140,13 @@ export class OutboxService {
         if (markSentResult.meta.changes && markSentResult.meta.changes > 0) {
           dispatchedCount++;
         }
-      } catch (err: unknown) {
+      } catch {
         failureCount++;
-        const errorMessage = err instanceof Error ? err.message : String(err);
         const attempts = event.dispatch_attempts + 1;
         const backoffSeconds = Math.min(300, 5 * Math.pow(2, attempts - 1));
         const nextDispatchAt = Date.now() + backoffSeconds * 1000;
 
-        // Release lease and schedule bounded retry
+        // Release lease and schedule bounded retry with sanitized reason code
         await this.db
           .prepare(
             `UPDATE outbox_events
@@ -121,10 +154,10 @@ export class OutboxService {
                  dispatch_leased_at = NULL,
                  dispatch_lease_expires_at = NULL,
                  next_dispatch_at = ?,
-                 last_dispatch_error = ?
+                 last_dispatch_error = 'QUEUE_SEND_FAILED'
              WHERE id = ? AND status = 'PENDING' AND dispatch_lease_token = ?`
           )
-          .bind(nextDispatchAt, errorMessage.slice(0, 255), event.id, leaseToken)
+          .bind(nextDispatchAt, event.id, leaseToken)
           .run();
       }
     }

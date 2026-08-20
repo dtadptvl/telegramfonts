@@ -66,7 +66,7 @@ Hybrid cloud architecture for automated Vietnamese font processing and fulfillme
 
 Per Decision #6 D05:
 1. **No Queue Consumer Worker**: In Cloudflare Workers, no Queue push consumer Worker is deployed. A23 acts as an external HTTP-pull consumer.
-2. **Operational Enablement**: HTTP pull is enabled operationally via Cloudflare Dashboard or CLI (`wrangler queues consumer http-pull add`), not via `wrangler.jsonc`. It requires a scoped Cloudflare API token with `Queues:Read` and `Queues:Write` permissions.
+2. **Operational Enablement**: HTTP pull is enabled operationally via Cloudflare Dashboard or CLI (`npx wrangler queues consumer http add <QUEUE-NAME>`), not via `wrangler.jsonc`. It requires a scoped Cloudflare API token with `Queues:Read` and `Queues:Write` permissions.
 3. **Visibility Timeout & Fencing**: When pulling messages from Cloudflare Queue, A23 should explicitly request a visibility timeout suitable for long-running font reconstruction (e.g. 5–10 minutes) rather than relying on default short timeouts.
 4. **D1 Lease Fencing**: Cloudflare Queues provide at-least-once delivery. D1 lease fencing with cryptographically random `lease_token`s is authoritative: duplicate redeliveries or competing workers cannot corrupt state or double-process jobs.
 
