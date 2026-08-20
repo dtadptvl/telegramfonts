@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.wrangler/
+.mf/
+coverage/
+*.log
+.env
+.env.*
+!.env.example
+.DS_Store
+Thumbs.db
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
