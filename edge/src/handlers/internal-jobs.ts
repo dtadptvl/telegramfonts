@@ -233,9 +233,9 @@ export async function handleInternalJobs(
       }
 
       const putChecksum = checksumToHex(r2Obj.checksums?.sha256);
-      if (putChecksum !== null && putChecksum !== sha256Hex) {
+      if (putChecksum === null || putChecksum !== sha256Hex) {
         return new Response(
-          JSON.stringify({ error: 'Uploaded object checksum mismatch in R2' }),
+          JSON.stringify({ error: 'Uploaded object checksum missing or mismatch in R2' }),
           { status: 500, headers: { 'Content-Type': 'application/json' } }
         );
       }
