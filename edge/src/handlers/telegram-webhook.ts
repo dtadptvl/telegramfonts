@@ -650,13 +650,24 @@ async function replayAppliedCallbackUI(
 ): Promise<void> {
   const messageId = query.message?.message_id || session.last_message_id || undefined;
 
+  const safeAnswer = async (text?: string) => {
+    try {
+      await tg.answerCallbackQuery({
+        callback_query_id: query.id,
+        text,
+      });
+    } catch {
+      // Non-blocking best-effort on APPLIED replay
+    }
+  };
+
   if (session.status === 'IDLE') {
     await tg.editMessageText({
       chat_id: session.chat_id,
       message_id: messageId,
       text: '❌ <b>Order cancelled.</b>\n\nSend a new MyFonts link whenever you are ready.',
     });
-    await tg.answerCallbackQuery({ callback_query_id: query.id, text: 'Order cancelled' });
+    await safeAnswer('Order cancelled');
     return;
   }
 
@@ -691,21 +702,18 @@ async function replayAppliedCallbackUI(
       message_id: messageId,
       text: messageText,
     });
-    await tg.answerCallbackQuery({
-      callback_query_id: query.id,
-      text: 'Order created successfully!',
-    });
+    await safeAnswer('Order created successfully!');
     return;
   }
 
   if (!session.catalog_id) {
-    await tg.answerCallbackQuery({ callback_query_id: query.id });
+    await safeAnswer();
     return;
   }
 
   const catalog = await catalogService.getCatalogById(session.catalog_id);
   if (!catalog) {
-    await tg.answerCallbackQuery({ callback_query_id: query.id });
+    await safeAnswer();
     return;
   }
 
@@ -730,7 +738,7 @@ async function replayAppliedCallbackUI(
       text,
       reply_markup: replyMarkup,
     });
-    await tg.answerCallbackQuery({ callback_query_id: query.id });
+    await safeAnswer();
     return;
   }
 
@@ -747,7 +755,7 @@ async function replayAppliedCallbackUI(
       text,
       reply_markup: replyMarkup,
     });
-    await tg.answerCallbackQuery({ callback_query_id: query.id });
+    await safeAnswer();
     return;
   }
 
@@ -764,11 +772,11 @@ async function replayAppliedCallbackUI(
       text,
       reply_markup: replyMarkup,
     });
-    await tg.answerCallbackQuery({ callback_query_id: query.id });
+    await safeAnswer();
     return;
   }
 
-  await tg.answerCallbackQuery({ callback_query_id: query.id });
+  await safeAnswer();
 }
 
 function renderStyleSelection(
