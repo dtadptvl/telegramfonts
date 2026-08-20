@@ -1,4 +1,4 @@
-"""Tests for font file validation."""
+"""Tests for font file validation with format-distinct assertions."""
 from pathlib import Path
 import pytest
 
@@ -9,18 +9,64 @@ from worker_client import ClaimStyle
 
 
 @pytest.mark.asyncio
-async def test_validate_valid_fonts(tmp_path: Path):
+async def test_validate_valid_ttf_otf_woff2(tmp_path: Path):
     source_acquirer = SourceAcquirer()
     builder = FontBuilderService()
 
     styles = [ClaimStyle(id="regular", display_name="Regular")]
     payload = await source_acquirer.acquire_source("https://www.myfonts.com/collections/roboto-flex", styles)
 
+    # 1. Valid TTF
     ttf_file = builder.build_font(payload.styles["regular"], "Roboto Flex", "TTF", tmp_path)
     assert validate_font_file(ttf_file.file_path, "TTF") is True
 
+    # 2. Valid OTF (real OpenType CFF)
+    otf_file = builder.build_font(payload.styles["regular"], "Roboto Flex", "OTF", tmp_path)
+    assert validate_font_file(otf_file.file_path, "OTF") is True
+
+    # 3. Valid WOFF2
     woff2_file = builder.build_font(payload.styles["regular"], "Roboto Flex", "WOFF2", tmp_path)
     assert validate_font_file(woff2_file.file_path, "WOFF2") is True
+
+
+@pytest.mark.asyncio
+async def test_otf_validator_rejects_renamed_ttf_file(tmp_path: Path):
+    source_acquirer = SourceAcquirer()
+    builder = FontBuilderService()
+
+    styles = [ClaimStyle(id="regular", display_name="Regular")]
+    payload = await source_acquirer.acquire_source("https://www.myfonts.com/collections/roboto-flex", styles)
+
+    # Build real TTF file
+    ttf_file = builder.build_font(payload.styles["regular"], "Roboto Flex", "TTF", tmp_path)
+    assert validate_font_file(ttf_file.file_path, "TTF") is True
+
+    # Rename TTF file to .otf
+    fake_otf = tmp_path / "FakeOTF.otf"
+    fake_otf.write_bytes(ttf_file.file_path.read_bytes())
+
+    # Validating fake OTF as OTF must FAIL (BLOCK G: rejects renamed TTF)
+    assert validate_font_file(fake_otf, "OTF") is False
+
+
+@pytest.mark.asyncio
+async def test_ttf_validator_rejects_renamed_otf_file(tmp_path: Path):
+    source_acquirer = SourceAcquirer()
+    builder = FontBuilderService()
+
+    styles = [ClaimStyle(id="regular", display_name="Regular")]
+    payload = await source_acquirer.acquire_source("https://www.myfonts.com/collections/roboto-flex", styles)
+
+    # Build real OTF file
+    otf_file = builder.build_font(payload.styles["regular"], "Roboto Flex", "OTF", tmp_path)
+    assert validate_font_file(otf_file.file_path, "OTF") is True
+
+    # Rename OTF file to .ttf
+    fake_ttf = tmp_path / "FakeTTF.ttf"
+    fake_ttf.write_bytes(otf_file.file_path.read_bytes())
+
+    # Validating fake TTF as TTF must FAIL
+    assert validate_font_file(fake_ttf, "TTF") is False
 
 
 def test_validate_corrupt_or_empty_file(tmp_path: Path):

@@ -7,6 +7,8 @@ from pathlib import Path
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+LEASE_SAFETY_MARGIN_SECONDS = 15
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -86,9 +88,10 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_heartbeat_lease_safety(self) -> Settings:
-        if self.HEARTBEAT_INTERVAL_SECONDS >= self.LEASE_DURATION_SECONDS:
+        # Cadence + 15s safety margin must be strictly less than lease duration (BLOCK D)
+        if self.HEARTBEAT_INTERVAL_SECONDS + LEASE_SAFETY_MARGIN_SECONDS >= self.LEASE_DURATION_SECONDS:
             raise ValueError(
-                f"Unsafe configuration: HEARTBEAT_INTERVAL_SECONDS ({self.HEARTBEAT_INTERVAL_SECONDS}) "
-                f"must be less than LEASE_DURATION_SECONDS ({self.LEASE_DURATION_SECONDS})"
+                f"Unsafe configuration: HEARTBEAT_INTERVAL_SECONDS ({self.HEARTBEAT_INTERVAL_SECONDS}) + "
+                f"{LEASE_SAFETY_MARGIN_SECONDS}s safety margin must be less than LEASE_DURATION_SECONDS ({self.LEASE_DURATION_SECONDS})"
             )
         return self

@@ -10,8 +10,7 @@ from urllib.parse import urlparse
 import httpx
 from PIL import Image
 
-from compute.models import GlyphVector, SourcePayload, StyleSourceData
-from worker_client import ClaimStyle
+from compute.models import ClaimStyle, GlyphVector, SourcePayload, StyleSourceData
 
 logger = logging.getLogger("telegramfonts.agent.source")
 

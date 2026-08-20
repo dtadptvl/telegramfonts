@@ -28,8 +28,8 @@ def test_settings_validation(tmp_path: Path):
     assert settings.CF_QUEUES_TOKEN.get_secret_value() == "tok1"
 
 
-def test_settings_rejects_unsafe_heartbeat_lease_relation(tmp_path: Path):
-    # Heartbeat interval >= lease duration must fail validation (BLOCK D)
+def test_settings_rejects_unsafe_and_near_margin_heartbeat_lease_relation(tmp_path: Path):
+    # 1. Heartbeat interval >= lease duration
     with pytest.raises(ValidationError, match="Unsafe configuration"):
         Settings(
             CF_ACCOUNT_ID="acc1",
@@ -39,6 +39,19 @@ def test_settings_rejects_unsafe_heartbeat_lease_relation(tmp_path: Path):
             A23_NODE_SECRET="sec1",
             SCRATCH_DIR=tmp_path,
             HEARTBEAT_INTERVAL_SECONDS=300,
+            LEASE_DURATION_SECONDS=300,
+        )
+
+    # 2. Near-margin config: heartbeat + 15s >= lease duration (BLOCK D)
+    with pytest.raises(ValidationError, match="15s safety margin"):
+        Settings(
+            CF_ACCOUNT_ID="acc1",
+            CF_QUEUE_ID="q1",
+            CF_QUEUES_TOKEN="tok1",
+            EDGE_BASE_URL="http://example.com/edge",
+            A23_NODE_SECRET="sec1",
+            SCRATCH_DIR=tmp_path,
+            HEARTBEAT_INTERVAL_SECONDS=290,
             LEASE_DURATION_SECONDS=300,
         )
 

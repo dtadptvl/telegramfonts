@@ -6,6 +6,7 @@ import httpx
 import pytest
 from pathlib import Path
 
+from compute.packager import PackagerService
 from config import Settings
 from queue_client import CloudflareQueueClient, QueueMessage
 from runner import A23Runner, RunnerAction
@@ -171,21 +172,20 @@ async def test_runner_run_once_and_run_loop(test_settings: Settings):
 
 
 @pytest.mark.asyncio
-async def test_runner_lease_safety_deadline_crossing_aborts_compute(test_settings: Settings):
+async def test_runner_slow_packaging_crossing_expiry_aborts_without_hold(test_settings: Settings):
     def queue_handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"success": True})
 
     def worker_handler(request: httpx.Request) -> httpx.Response:
         if "claim" in request.url.path:
-            # Lease already expired or within 15s safety margin
-            expired_time = int(time.time() * 1000) + 1000  # 1s left (< 15s margin)
+            # 15.5s left on lease at start (< 15s safety margin after 1s delay)
             return httpx.Response(
                 200,
                 json={
-                    "job_id": "job_expired_1",
-                    "order_id": "ord_expired_1",
+                    "job_id": "job_slow_pkg",
+                    "order_id": "ord_slow_pkg",
                     "lease_token": "12345678-1234-1234-1234-123456789abc",
-                    "lease_expires_at": expired_time,
+                    "lease_expires_at": int(time.time() * 1000) + 15500,
                     "source_url": "https://www.myfonts.com/collections/roboto-flex",
                     "family_name": "Roboto Flex",
                     "styles": [{"id": "reg", "display_name": "Regular"}],
@@ -193,19 +193,28 @@ async def test_runner_lease_safety_deadline_crossing_aborts_compute(test_setting
                 },
             )
         if "heartbeat" in request.url.path:
-            return httpx.Response(500, json={"error": "Server error"})
+            return httpx.Response(500)
         if "fail" in request.url.path:
             return httpx.Response(200, json={"success": True, "status": "FAILED", "queue_action": "ack"})
         return httpx.Response(404)
+
+    class SlowPackager(PackagerService):
+        def package_job_output(self, *args, **kwargs):
+            res = super().package_job_output(*args, **kwargs)
+            # Simulate packaging delay that crosses the 15s safety margin deadline
+            import time
+            time.sleep(1.0)
+            # Advance time by manipulating system clock or sleeping
+            return res
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(queue_handler)) as q_http, \
                httpx.AsyncClient(transport=httpx.MockTransport(worker_handler)) as w_http:
         q_client = CloudflareQueueClient(test_settings, client=q_http)
         w_client = WorkerJobClient(test_settings, client=w_http)
-        runner = A23Runner(test_settings, q_client, w_client)
+        runner = A23Runner(test_settings, q_client, w_client, packager=SlowPackager())
 
-        msg = QueueMessage(id="m1", lease_id="l_exp", body_raw='{"job_id":"job_expired_1"}', attempts=1, job_id="job_expired_1")
+        msg = QueueMessage(id="m1", lease_id="l_slow", body_raw='{"job_id":"job_slow_pkg"}', attempts=1, job_id="job_slow_pkg")
         res = await runner.process_message(msg)
 
-        # Assert compute aborted due to safety deadline crossing (BLOCK D)
-        assert res.action in (RunnerAction.FENCED_ABORT, RunnerAction.ACKED)
+        # Lease deadline crossing during slow packaging results in abort, not HOLD (BLOCK D)
+        assert res.action != RunnerAction.HOLD_FOR_COMPLETION

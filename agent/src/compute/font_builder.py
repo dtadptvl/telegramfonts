@@ -6,6 +6,7 @@ import io
 import logging
 from pathlib import Path
 from fontTools.fontBuilder import FontBuilder
+from fontTools.pens.t2CharStringPen import T2CharStringPen
 from fontTools.pens.ttGlyphPen import TTGlyphPen
 
 from compute.models import GeneratedFontFile, StyleSourceData
@@ -51,9 +52,6 @@ class FontBuilderService:
         except ValueError:
             raise ValueError(f"Output path traversal detected: {filename}")
 
-        # Build font from style_source.glyphs
-        fb = FontBuilder(unitsPerEm=1024, isTTF=True)
-
         glyph_order = list(style_source.glyphs.keys())
         if ".notdef" not in glyph_order:
             glyph_order.insert(0, ".notdef")
@@ -63,42 +61,80 @@ class FontBuilderService:
             if g_name in UNICODE_MAP:
                 cmap[UNICODE_MAP[g_name]] = g_name
 
-        glyphs_dict: dict[str, object] = {}
         metrics_dict: dict[str, tuple[int, int]] = {}
-
         for g_name in glyph_order:
             g_vec = style_source.glyphs.get(g_name)
-            pen = TTGlyphPen(None)
-            if g_vec and g_vec.contours:
-                for contour in g_vec.contours:
-                    if len(contour) > 0:
-                        pen.moveTo(contour[0])
-                        for pt in contour[1:]:
-                            pen.lineTo(pt)
-                        pen.closePath()
-            glyph_obj = pen.glyph()
-            glyphs_dict[g_name] = glyph_obj
             adv = g_vec.advance_width if g_vec else 600
             lsb = g_vec.lsb if g_vec else 50
             metrics_dict[g_name] = (adv, lsb)
-
-        fb.setupGlyphOrder(glyph_order)
-        fb.setupCharacterMap(cmap)
-        fb.setupGlyf(glyphs_dict)
-        fb.setupHorizontalMetrics(metrics_dict)
-        fb.setupHorizontalHeader(ascent=800, descent=-200)
 
         name_strings = {
             "familyName": sanitized_family or "TeleFont",
             "styleName": sanitized_style or "Regular",
             "psName": ps_name or "TeleFont-Regular",
         }
-        fb.setupNameTable(name_strings)
-        fb.setupOS2(usWeightClass=style_source.weight_class)
-        fb.setupPost()
 
-        if clean_format == "WOFF2":
-            fb.font.flavor = "woff2"
+        # Build format-specific font representation (BLOCK G)
+        if clean_format == "OTF":
+            # Real OpenType font with PostScript CFF outlines (isTTF=False, magic=OTTO)
+            fb = FontBuilder(unitsPerEm=1024, isTTF=False)
+            fb.setupGlyphOrder(glyph_order)
+            fb.setupCharacterMap(cmap)
+
+            charstrings: dict[str, object] = {}
+            for g_name in glyph_order:
+                g_vec = style_source.glyphs.get(g_name)
+                adv = metrics_dict[g_name][0]
+                pen = T2CharStringPen(adv, None)
+                if g_vec and g_vec.contours:
+                    for contour in g_vec.contours:
+                        if len(contour) > 0:
+                            pen.moveTo(contour[0])
+                            for pt in contour[1:]:
+                                pen.lineTo(pt)
+                            pen.closePath()
+                charstrings[g_name] = pen.getCharString()
+
+            fb.setupCFF(
+                psName=ps_name,
+                fontInfo={"FullName": f"{sanitized_family} {sanitized_style}", "FamilyName": sanitized_family},
+                charStringsDict=charstrings,
+                privateDict={},
+            )
+            fb.setupHorizontalMetrics(metrics_dict)
+            fb.setupHorizontalHeader(ascent=800, descent=-200)
+            fb.setupNameTable(name_strings)
+            fb.setupOS2(usWeightClass=style_source.weight_class)
+            fb.setupPost()
+
+        else:
+            # TrueType outlines for TTF and WOFF2 (isTTF=True, magic=\x00\x01\x00\x00 or wOF2)
+            fb = FontBuilder(unitsPerEm=1024, isTTF=True)
+            fb.setupGlyphOrder(glyph_order)
+            fb.setupCharacterMap(cmap)
+
+            glyphs_dict: dict[str, object] = {}
+            for g_name in glyph_order:
+                g_vec = style_source.glyphs.get(g_name)
+                pen = TTGlyphPen(None)
+                if g_vec and g_vec.contours:
+                    for contour in g_vec.contours:
+                        if len(contour) > 0:
+                            pen.moveTo(contour[0])
+                            for pt in contour[1:]:
+                                pen.lineTo(pt)
+                            pen.closePath()
+                glyphs_dict[g_name] = pen.glyph()
+
+            fb.setupGlyf(glyphs_dict)
+            fb.setupHorizontalMetrics(metrics_dict)
+            fb.setupHorizontalHeader(ascent=800, descent=-200)
+            fb.setupNameTable(name_strings)
+            fb.setupOS2(usWeightClass=style_source.weight_class)
+            fb.setupPost()
+
+            if clean_format == "WOFF2":
+                fb.font.flavor = "woff2"
 
         buffer = io.BytesIO()
         fb.save(buffer)

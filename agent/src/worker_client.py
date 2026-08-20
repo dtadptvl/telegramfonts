@@ -6,15 +6,11 @@ from dataclasses import dataclass
 from typing import Any
 import httpx
 
+from compute.models import ClaimStyle
+from compute.source import validate_myfonts_url
 from config import Settings
 
 logger = logging.getLogger("telegramfonts.agent.worker")
-
-
-@dataclass(frozen=True)
-class ClaimStyle:
-    id: str
-    display_name: str
 
 
 @dataclass(frozen=True)
@@ -31,31 +27,36 @@ class ClaimedJob:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ClaimedJob:
-        # 1. Scalar identifier validation
-        job_id = str(data.get("job_id", "")).strip()
-        if not job_id or not all(c.isalnum() or c in ("-", "_") for c in job_id) or len(job_id) > 64:
+        if not isinstance(data, dict):
+            raise ValueError("MALFORMED_CLAIM_PAYLOAD_NOT_DICT")
+
+        # 1. Scalar identifier validation (BLOCK C: no loose type coercion)
+        raw_job_id = data.get("job_id")
+        if not isinstance(raw_job_id, str) or not raw_job_id.strip() or not all(c.isalnum() or c in ("-", "_") for c in raw_job_id.strip()) or len(raw_job_id.strip()) > 64:
             raise ValueError("MALFORMED_JOB_ID")
+        job_id = raw_job_id.strip()
 
-        order_id = str(data.get("order_id", "")).strip()
-        if not order_id or not all(c.isalnum() or c in ("-", "_") for c in order_id) or len(order_id) > 64:
+        raw_order_id = data.get("order_id")
+        if not isinstance(raw_order_id, str) or not raw_order_id.strip() or not all(c.isalnum() or c in ("-", "_") for c in raw_order_id.strip()) or len(raw_order_id.strip()) > 64:
             raise ValueError("MALFORMED_ORDER_ID")
+        order_id = raw_order_id.strip()
 
-        lease_token = str(data.get("lease_token", "")).strip()
-        if not lease_token or len(lease_token) != 36:
+        raw_lease_token = data.get("lease_token")
+        if not isinstance(raw_lease_token, str) or len(raw_lease_token.strip()) != 36:
             raise ValueError("MALFORMED_LEASE_TOKEN")
+        lease_token = raw_lease_token.strip()
 
-        try:
-            lease_expires_at = int(data.get("lease_expires_at", 0))
-            if lease_expires_at <= 0:
-                raise ValueError("MALFORMED_LEASE_EXPIRY")
-        except (ValueError, TypeError):
+        raw_lease_expires = data.get("lease_expires_at")
+        if not isinstance(raw_lease_expires, int) or raw_lease_expires <= 0:
             raise ValueError("MALFORMED_LEASE_EXPIRY")
+        lease_expires_at = raw_lease_expires
 
-        source_url = str(data.get("source_url", "")).strip()
-        if not source_url.startswith("https://") or ("myfonts.com" not in source_url):
+        raw_source_url = data.get("source_url")
+        if not isinstance(raw_source_url, str) or not validate_myfonts_url(raw_source_url):
             raise ValueError("MALFORMED_SOURCE_URL")
+        source_url = raw_source_url.strip()
 
-        # 2. Atomic styles validation (no silent dropping)
+        # 2. Atomic styles validation (BLOCK C: non-string or malformed style fails whole payload)
         raw_styles = data.get("styles")
         if not isinstance(raw_styles, list) or len(raw_styles) == 0:
             raise ValueError("MISSING_OR_EMPTY_STYLES")
@@ -64,15 +65,18 @@ class ClaimedJob:
         for s in raw_styles:
             if not isinstance(s, dict):
                 raise ValueError("INVALID_STYLE_ENTRY")
-            s_id = str(s.get("id", "")).strip()
-            s_name = str(s.get("display_name", s_id)).strip()
-            if not s_id or not all(c.isalnum() or c in ("-", "_") for c in s_id) or len(s_id) > 64:
-                raise ValueError(f"INVALID_STYLE_ID: {s_id}")
-            if not s_name or len(s_name) > 128:
-                raise ValueError(f"INVALID_STYLE_NAME: {s_name}")
-            styles.append(ClaimStyle(id=s_id, display_name=s_name))
 
-        # 3. Atomic formats validation (no silent dropping)
+            s_id = s.get("id")
+            if not isinstance(s_id, str) or not s_id.strip() or not all(c.isalnum() or c in ("-", "_") for c in s_id.strip()) or len(s_id.strip()) > 64:
+                raise ValueError(f"INVALID_STYLE_ID: {s_id}")
+
+            s_name = s.get("display_name")
+            if not isinstance(s_name, str) or not s_name.strip() or len(s_name.strip()) > 128:
+                raise ValueError(f"INVALID_STYLE_DISPLAY_NAME: {s_name}")
+
+            styles.append(ClaimStyle(id=s_id.strip(), display_name=s_name.strip()))
+
+        # 3. Atomic formats validation (BLOCK C: exact allowed formats)
         raw_formats = data.get("formats")
         if not isinstance(raw_formats, list) or len(raw_formats) == 0:
             raise ValueError("MISSING_OR_EMPTY_FORMATS")
@@ -88,14 +92,20 @@ class ClaimedJob:
             if clean_f not in formats:
                 formats.append(clean_f)
 
+        raw_family = data.get("family_name")
+        family_name = str(raw_family).strip() if (isinstance(raw_family, str) and raw_family.strip()) else None
+
+        raw_foundry = data.get("foundry")
+        foundry = str(raw_foundry).strip() if (isinstance(raw_foundry, str) and raw_foundry.strip()) else None
+
         return cls(
             job_id=job_id,
             order_id=order_id,
             lease_token=lease_token,
             lease_expires_at=lease_expires_at,
             source_url=source_url,
-            family_name=str(data["family_name"]).strip() if data.get("family_name") else None,
-            foundry=str(data["foundry"]).strip() if data.get("foundry") else None,
+            family_name=family_name,
+            foundry=foundry,
             styles=styles,
             formats=formats,
         )

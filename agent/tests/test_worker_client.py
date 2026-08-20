@@ -1,4 +1,4 @@
-"""Tests for Worker Job API client and fail-closed claim validation."""
+"""Tests for Worker Job API client and strict fail-closed claim validation."""
 import json
 import httpx
 import pytest
@@ -49,35 +49,50 @@ def test_claimed_job_fail_closed_validation():
         "formats": ["TTF"],
     }
 
-    # 1. Mixed valid + invalid styles fails closed (BLOCK C)
+    # 1. Sibling/substring host fails closed (BLOCK C)
+    with pytest.raises(ValueError, match="MALFORMED_SOURCE_URL"):
+        ClaimedJob.from_dict({**base_valid, "source_url": "https://evilmyfonts.com/font"})
+
+    with pytest.raises(ValueError, match="MALFORMED_SOURCE_URL"):
+        ClaimedJob.from_dict({**base_valid, "source_url": "https://myfonts.com.evil.com/font"})
+
+    # 2. Non-string display_name fails whole payload (BLOCK C)
+    with pytest.raises(ValueError, match="INVALID_STYLE_DISPLAY_NAME"):
+        ClaimedJob.from_dict({
+            **base_valid,
+            "styles": [{"id": "s1", "display_name": 12345}],
+        })
+
+    with pytest.raises(ValueError, match="INVALID_STYLE_DISPLAY_NAME"):
+        ClaimedJob.from_dict({
+            **base_valid,
+            "styles": [{"id": "s1", "display_name": True}],
+        })
+
+    # 3. Mixed valid + invalid styles fails closed (BLOCK C)
     with pytest.raises(ValueError, match="INVALID_STYLE_ID"):
         ClaimedJob.from_dict({
             **base_valid,
             "styles": [{"id": "s1", "display_name": "Regular"}, {"id": "bad style with spaces!", "display_name": "Bad"}],
         })
 
-    # 2. Mixed valid + invalid formats fails closed (BLOCK C)
+    # 4. Mixed valid + invalid formats fails closed (BLOCK C)
     with pytest.raises(ValueError, match="UNSUPPORTED_FORMAT"):
         ClaimedJob.from_dict({
             **base_valid,
             "formats": ["TTF", "EXE"],
         })
 
-    # 3. Empty styles or formats fails closed
+    # 5. Empty styles or formats fails closed
     with pytest.raises(ValueError, match="MISSING_OR_EMPTY_STYLES"):
         ClaimedJob.from_dict({**base_valid, "styles": []})
 
     with pytest.raises(ValueError, match="MISSING_OR_EMPTY_FORMATS"):
         ClaimedJob.from_dict({**base_valid, "formats": []})
 
-    # 4. Off-domain source url fails closed
-    with pytest.raises(ValueError, match="MALFORMED_SOURCE_URL"):
-        ClaimedJob.from_dict({**base_valid, "source_url": "https://evil.com/font"})
-
 
 @pytest.mark.asyncio
 async def test_worker_claim_terminal_and_conflict(test_settings: Settings):
-    # Terminal case (409 with queue_action=ack)
     def handler_terminal(request: httpx.Request) -> httpx.Response:
         return httpx.Response(409, json={"status": "TERMINAL", "queue_action": "ack", "reason": "job_completed"})
 
@@ -88,7 +103,6 @@ async def test_worker_claim_terminal_and_conflict(test_settings: Settings):
         assert res.queue_action == "ack"
         assert res.status == "TERMINAL"
 
-    # Not found case (404)
     def handler_404(request: httpx.Request) -> httpx.Response:
         return httpx.Response(404, json={"error": "Not Found", "queue_action": "ack"})
 
