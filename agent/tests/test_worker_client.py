@@ -287,7 +287,7 @@ async def test_worker_get_and_complete_catalog_requests(test_settings: Settings)
             "source_url": "https://www.myfonts.com/collections/helvetica-now-font",
             "family_name": "Helvetica Now",
             "foundry": "Monotype",
-            "styles": [{"id": "regular", "display_name": "Regular", "price": 50000}],
+            "styles": [{"id": "regular", "display_name": "Regular", "price": 5000}],
         }
         success = await client.complete_catalog_request("req_101", payload)
         assert success is True
