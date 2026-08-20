@@ -209,6 +209,58 @@ async def test_runner_ambiguous_completion_failure_does_not_call_fail(test_setti
 
 
 @pytest.mark.asyncio
+async def test_runner_completion_409_conflict_terminal_acks_queue(test_settings: Settings):
+    preview_bytes = _make_test_image_bytes(20, 60)
+    acked_leases = []
+
+    def queue_handler(request: httpx.Request) -> httpx.Response:
+        data = json.loads(request.content)
+        if "acks" in data:
+            acked_leases.extend([a["lease_id"] for a in data["acks"]])
+        return httpx.Response(200, json={"success": True})
+
+    def worker_handler(request: httpx.Request) -> httpx.Response:
+        if "claim" in request.url.path:
+            return httpx.Response(
+                200,
+                json={
+                    "job_id": "job_term_conflict",
+                    "order_id": "ord_term_conflict",
+                    "lease_token": "12345678-1234-1234-1234-123456789abc",
+                    "lease_expires_at": int(time.time() * 1000) + 300000,
+                    "source_url": "https://www.myfonts.com/collections/roboto-flex",
+                    "family_name": "Roboto Flex",
+                    "styles": [{"id": "rf_reg", "display_name": "Regular"}],
+                    "formats": ["TTF"],
+                },
+            )
+        if "heartbeat" in request.url.path:
+            return httpx.Response(200, json={"success": True, "lease_expires_at": int(time.time() * 1000) + 300000})
+        if "artifact" in request.url.path:
+            return httpx.Response(200, json={"success": True, "artifact_key": "artifacts/ord/job/sha.zip", "sha256": "a"*64, "size": 100})
+        if "complete" in request.url.path:
+            return httpx.Response(409, json={"status": "CONFLICT", "queue_action": "ack", "reason": "job_already_completed"})
+        return httpx.Response(404)
+
+    def source_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=preview_bytes, headers={"content-type": "image/png"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(queue_handler)) as q_http, \
+               httpx.AsyncClient(transport=httpx.MockTransport(worker_handler)) as w_http, \
+               httpx.AsyncClient(transport=httpx.MockTransport(source_handler)) as s_http:
+        q_client = CloudflareQueueClient(test_settings, client=q_http)
+        w_client = WorkerJobClient(test_settings, client=w_http)
+        runner = A23Runner(test_settings, q_client, w_client, source_acquirer=SourceAcquirer(client=s_http))
+
+        msg = QueueMessage(id="m1", lease_id="l_conf_ack", body_raw='{"job_id":"job_term_conflict"}', attempts=1, job_id="job_term_conflict")
+        res = await runner.process_message(msg)
+
+        # 409 with queue_action=ack must ACK queue (Point 4)
+        assert res.action == RunnerAction.ACKED
+        assert "l_conf_ack" in acked_leases
+
+
+@pytest.mark.asyncio
 async def test_missing_or_blocked_live_preview_fails_without_synthetic_success(test_settings: Settings):
     failed_reason_codes = []
 

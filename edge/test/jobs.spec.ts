@@ -1004,6 +1004,195 @@ describe('Phase 4: A23 Internal Node Job Claim, Lease Fencing & Protocols', () =
         .all();
       expect(outboxAfterReplay.results.length).toBe(1);
     });
+
+    it('rejects PUT /internal/jobs/:job_id/artifact duplicate upload when existing metadata or size mismatches', async () => {
+      const { jobId, orderId } = await setupTestJob('PENDING');
+      const jobService = new JobService(env.DB);
+      const claimRes = await jobService.claimJob(jobId, 'worker-1', 300);
+      const leaseToken = claimRes.payload!.lease_token;
+
+      const dummyZip = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
+      const sha256Hex = '11223344556677889900aabbccddeeff11223344556677889900aabbccddeeff';
+      const key = `artifacts/${orderId}/${jobId}/${sha256Hex}.zip`;
+
+      // Pre-seed an existing object with different size/metadata
+      await env.ARTIFACTS_BUCKET.put(key, new Uint8Array([0x01, 0x02]), {
+        customMetadata: { job_id: 'other-job', order_id: orderId, sha256: sha256Hex },
+      });
+
+      const req = new Request(`http://example.com/internal/jobs/${jobId}/artifact`, {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${NODE_SECRET}`,
+          'X-Worker-Id': 'worker-1',
+          'X-Lease-Token': leaseToken,
+          'X-Artifact-SHA256': sha256Hex,
+          'Content-Type': 'application/zip',
+          'Content-Length': dummyZip.byteLength.toString(),
+        },
+        body: dummyZip,
+      });
+
+      const ctx = createExecutionContext();
+      const res = await worker.fetch(req, testEnv, ctx);
+      await waitOnExecutionContext(ctx);
+
+      expect(res.status).toBe(409);
+      const data = (await res.json()) as { error: string; queue_action: string };
+      expect(data.error).toContain('mismatch');
+    });
+
+    it('rejects POST /internal/jobs/:job_id/complete when R2 metadata or checksum mismatches', async () => {
+      const { jobId, orderId } = await setupTestJob('PENDING');
+      const jobService = new JobService(env.DB);
+      const claimRes = await jobService.claimJob(jobId, 'worker-1', 300);
+      const leaseToken = claimRes.payload!.lease_token;
+
+      const sha256Hex = 'aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899';
+      const key = `artifacts/${orderId}/${jobId}/${sha256Hex}.zip`;
+
+      // Seed R2 object with mismatched size
+      await env.ARTIFACTS_BUCKET.put(key, new Uint8Array([0x50, 0x4b]), {
+        customMetadata: { job_id: jobId, order_id: orderId, sha256: sha256Hex },
+      });
+
+      const req = new Request(`http://example.com/internal/jobs/${jobId}/complete`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${NODE_SECRET}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          worker_id: 'worker-1',
+          lease_token: leaseToken,
+          artifact_key: key,
+          sha256: sha256Hex,
+          size: 1024, // Claims size is 1024, but R2 object is 2 bytes
+        }),
+      });
+
+      const ctx = createExecutionContext();
+      const res = await worker.fetch(req, testEnv, ctx);
+      await waitOnExecutionContext(ctx);
+
+      expect(res.status).toBe(400);
+      const data = (await res.json()) as { error: string };
+      expect(data.error).toContain('size mismatch');
+    });
+
+    it('rejects POST /internal/jobs/:job_id/complete when lease is fenced and rolls back D1 without side effects', async () => {
+      const { jobId, orderId } = await setupTestJob('PENDING');
+      const jobService = new JobService(env.DB);
+      const claimRes = await jobService.claimJob(jobId, 'worker-1', 300);
+      const leaseToken = claimRes.payload!.lease_token;
+
+      const dummyZip = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
+      const sha256Hex = 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef';
+      const key = `artifacts/${orderId}/${jobId}/${sha256Hex}.zip`;
+
+      await env.ARTIFACTS_BUCKET.put(key, dummyZip, {
+        customMetadata: { job_id: jobId, order_id: orderId, sha256: sha256Hex },
+      });
+
+      // Steal or expire the lease by setting lease_expires_at to the past
+      await env.DB.prepare('UPDATE fulfillment_jobs SET lease_expires_at = ? WHERE id = ?')
+        .bind(Date.now() - 10000, jobId)
+        .run();
+
+      const req = new Request(`http://example.com/internal/jobs/${jobId}/complete`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${NODE_SECRET}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          worker_id: 'worker-1',
+          lease_token: leaseToken,
+          artifact_key: key,
+          sha256: sha256Hex,
+          size: dummyZip.byteLength,
+        }),
+      });
+
+      const ctx = createExecutionContext();
+      const res = await worker.fetch(req, testEnv, ctx);
+      await waitOnExecutionContext(ctx);
+
+      expect(res.status).toBe(409);
+
+      // Verify ZERO mutations occurred in D1:
+      const receipt = await env.DB.prepare('SELECT * FROM fulfillment_receipts WHERE job_id = ?')
+        .bind(jobId)
+        .first();
+      expect(receipt).toBeNull();
+
+      const order = await env.DB.prepare('SELECT status FROM orders WHERE id = ?')
+        .bind(orderId)
+        .first<{ status: string }>();
+      expect(order?.status).toBe('PROCESSING');
+
+      const outbox = await env.DB.prepare('SELECT * FROM outbox_events WHERE aggregate_id = ? AND event_type = "DELIVERY_READY"')
+        .bind(orderId)
+        .all();
+      expect(outbox.results.length).toBe(0);
+    });
+
+    it('rejects POST /internal/jobs/:job_id/complete with conflict when already completed with different artifact', async () => {
+      const { jobId, orderId } = await setupTestJob('PENDING');
+      const jobService = new JobService(env.DB);
+      const claimRes = await jobService.claimJob(jobId, 'worker-1', 300);
+      const leaseToken = claimRes.payload!.lease_token;
+
+      const dummyZip = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
+      const sha1 = '1111111111111111111111111111111111111111111111111111111111111111';
+      const key1 = `artifacts/${orderId}/${jobId}/${sha1}.zip`;
+
+      await env.ARTIFACTS_BUCKET.put(key1, dummyZip, {
+        customMetadata: { job_id: jobId, order_id: orderId, sha256: sha1 },
+      });
+
+      // Complete first time
+      const completeRes = await jobService.completeJob({
+        jobId,
+        workerId: 'worker-1',
+        leaseToken,
+        artifactKey: key1,
+        artifactSha256: sha1,
+        artifactSizeBytes: dummyZip.byteLength,
+      });
+      expect(completeRes.status).toBe('COMPLETED');
+
+      // Attempt second completion with different artifact
+      const sha2 = '2222222222222222222222222222222222222222222222222222222222222222';
+      const key2 = `artifacts/${orderId}/${jobId}/${sha2}.zip`;
+      await env.ARTIFACTS_BUCKET.put(key2, dummyZip, {
+        customMetadata: { job_id: jobId, order_id: orderId, sha256: sha2 },
+      });
+
+      const reqDiff = new Request(`http://example.com/internal/jobs/${jobId}/complete`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${NODE_SECRET}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          worker_id: 'worker-1',
+          lease_token: leaseToken,
+          artifact_key: key2,
+          sha256: sha2,
+          size: dummyZip.byteLength,
+        }),
+      });
+
+      const ctx = createExecutionContext();
+      const resDiff = await worker.fetch(reqDiff, testEnv, ctx);
+      await waitOnExecutionContext(ctx);
+
+      expect(resDiff.status).toBe(409);
+      const data = (await resDiff.json()) as { error: string; queue_action: string };
+      expect(data.queue_action).toBe('ack');
+      expect(data.error).toContain('different artifact');
+    });
   });
 });
 

@@ -1,5 +1,5 @@
 import type { Env } from '../env';
-import { generateSignedDownloadUrl, getDownloadTtlSeconds } from '../utils/download-signer';
+import { generateSignedDownloadUrl, getDownloadTtlSeconds, formatTtlDescription } from '../utils/download-signer';
 import { TelegramClient } from './telegram-client';
 import { escapeHtml } from '../utils/html';
 
@@ -286,6 +286,7 @@ export class OutboxService {
 
         try {
           const ttlSeconds = getDownloadTtlSeconds(this.env?.DOWNLOAD_URL_TTL_SECONDS);
+          const ttlDesc = formatTtlDescription(ttlSeconds);
           const signed = await generateSignedDownloadUrl(order.id, signingSecret, {
             baseUrl: this.env?.BASE_URL,
             ttlSeconds,
@@ -294,7 +295,9 @@ export class OutboxService {
           const tg = new TelegramClient(botToken);
           const messageText = `📦 <b>Your fonts are ready!</b>\n\n• <b>Order ID:</b> <code>${escapeHtml(
             order.id
-          )}</code>\n\nClick the button below to download your complete ZIP bundle. Link is active for 24 hours.`;
+          )}</code>\n\nClick the button below to download your complete ZIP bundle. The download link is active for ${escapeHtml(
+            ttlDesc
+          )}.`;
 
           await tg.sendMessage({
             chat_id: userRecord.chat_id,

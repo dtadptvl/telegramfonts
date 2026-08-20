@@ -17,6 +17,30 @@ export function verifyInternalAuth(request: Request, secret: string | undefined)
   return crypto.subtle.timingSafeEqual(tokenBytes, secretBytes);
 }
 
+function hexToArrayBuffer(hex: string): ArrayBuffer {
+  const bytes = new Uint8Array(Math.ceil(hex.length / 2));
+  for (let i = 0; i < bytes.length; i++) {
+    bytes[i] = parseInt(hex.substring(i * 2, i * 2 + 2), 16);
+  }
+  return bytes.buffer;
+}
+
+function checksumToHex(checksum: unknown): string | null {
+  if (!checksum) return null;
+  if (typeof checksum === 'string') return checksum.toLowerCase();
+  if (checksum instanceof ArrayBuffer) {
+    return Array.from(new Uint8Array(checksum))
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('');
+  }
+  if (ArrayBuffer.isView(checksum)) {
+    return Array.from(new Uint8Array(checksum.buffer, checksum.byteOffset, checksum.byteLength))
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('');
+  }
+  return null;
+}
+
 export async function handleInternalJobs(
   request: Request,
   env: Env,
@@ -147,31 +171,52 @@ export async function handleInternalJobs(
     const sha256Hex = rawSha256.toLowerCase();
     const objectKey = buildArtifactStorageKey(orderId, jobId, sha256Hex);
 
-    // Check if matching object already exists in R2 (idempotent duplicate upload)
+    // Check if object already exists in R2 (idempotent duplicate upload)
     try {
       const existing = await env.ARTIFACTS_BUCKET.head(objectKey);
-      if (existing && existing.size === contentLength && existing.customMetadata?.sha256 === sha256Hex) {
-        return new Response(
-          JSON.stringify({
-            success: true,
-            artifact_key: objectKey,
-            sha256: sha256Hex,
-            size: existing.size,
-          }),
-          {
-            status: 200,
-            headers: { 'Content-Type': 'application/json' },
-          }
-        );
+      if (existing) {
+        const matchSize = existing.size === contentLength;
+        const matchSha = existing.customMetadata?.sha256 === sha256Hex;
+        const matchJob = existing.customMetadata?.job_id === jobId;
+        const matchOrder = existing.customMetadata?.order_id === orderId;
+
+        let matchChecksum = true;
+        const storedChecksum = checksumToHex(existing.checksums?.sha256);
+        if (storedChecksum && storedChecksum !== sha256Hex) {
+          matchChecksum = false;
+        }
+
+        if (matchSize && matchSha && matchJob && matchOrder && matchChecksum) {
+          return new Response(
+            JSON.stringify({
+              success: true,
+              artifact_key: objectKey,
+              sha256: sha256Hex,
+              size: existing.size,
+            }),
+            {
+              status: 200,
+              headers: { 'Content-Type': 'application/json' },
+            }
+          );
+        } else {
+          return new Response(
+            JSON.stringify({ error: 'Duplicate artifact upload metadata mismatch', queue_action: 'ack' }),
+            {
+              status: 409,
+              headers: { 'Content-Type': 'application/json' },
+            }
+          );
+        }
       }
     } catch {
       // Proceed with upload
     }
 
-    // 3. Stream request.body directly to R2 bucket without buffering in memory
+    // 3. Stream request.body directly to R2 bucket with sha256 integrity verification
     try {
-      await env.ARTIFACTS_BUCKET.put(objectKey, request.body, {
-        sha256: sha256Hex,
+      const r2Obj = await env.ARTIFACTS_BUCKET.put(objectKey, request.body, {
+        sha256: hexToArrayBuffer(sha256Hex),
         customMetadata: {
           job_id: jobId,
           order_id: orderId,
@@ -182,6 +227,13 @@ export async function handleInternalJobs(
           contentDisposition: `attachment; filename="${orderId}.zip"`,
         },
       });
+
+      if (r2Obj && r2Obj.size !== contentLength) {
+        return new Response(
+          JSON.stringify({ error: 'Uploaded object size mismatch in R2' }),
+          { status: 500, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
 
       return new Response(
         JSON.stringify({
@@ -317,6 +369,14 @@ export async function handleInternalJobs(
       });
     }
 
+    const storedChecksum = checksumToHex(r2Head.checksums?.sha256);
+    if (storedChecksum && storedChecksum !== sha256) {
+      return new Response(JSON.stringify({ error: 'Artifact stored checksum mismatch in R2' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
     // Atomic D1 completion
     const completeResult = await jobService.completeJob({
       jobId,
@@ -347,6 +407,7 @@ export async function handleInternalJobs(
       return new Response(
         JSON.stringify({
           error: 'Conflict: job already completed with different artifact',
+          status: 'CONFLICT',
           queue_action: 'ack',
           reason: completeResult.reason,
         }),
@@ -360,6 +421,7 @@ export async function handleInternalJobs(
     return new Response(
       JSON.stringify({
         error: 'Lease expired or fenced',
+        status: completeResult.status,
         queue_action: completeResult.queue_action,
         reason: completeResult.reason,
       }),

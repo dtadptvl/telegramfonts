@@ -248,18 +248,24 @@ class WorkerJobClient:
     ) -> UploadResult:
         """Stream computed ZIP artifact to private Edge R2 upload endpoint."""
         url = f"{self.base_url}/{job_id}/artifact"
-        zip_bytes = zip_path.read_bytes()
+        file_size = zip_path.stat().st_size
+
+        async def _chunk_stream():
+            with open(zip_path, "rb") as f:
+                while chunk := f.read(65536):
+                    yield chunk
+
         headers = {
             "Authorization": f"Bearer {self.settings.A23_NODE_SECRET.get_secret_value()}",
             "X-Worker-Id": self.settings.A23_WORKER_ID,
             "X-Lease-Token": lease_token,
             "X-Artifact-SHA256": sha256_hex,
             "Content-Type": "application/zip",
-            "Content-Length": str(len(zip_bytes)),
+            "Content-Length": str(file_size),
         }
 
         try:
-            resp = await self._client.put(url, headers=headers, content=zip_bytes)
+            resp = await self._client.put(url, headers=headers, content=_chunk_stream())
             data = resp.json() if resp.content else {}
 
             if resp.status_code == 200:
@@ -268,7 +274,7 @@ class WorkerJobClient:
                     fenced=False,
                     artifact_key=data.get("artifact_key"),
                     sha256=data.get("sha256"),
-                    size=data.get("size", len(zip_bytes)),
+                    size=data.get("size", file_size),
                 )
 
             if resp.status_code == 409:
@@ -319,11 +325,14 @@ class WorkerJobClient:
                 )
 
             if resp.status_code == 409:
+                queue_action = data.get("queue_action", "ack")
+                status = data.get("status", "CONFLICT")
+                reason = data.get("reason") or data.get("error", "conflict")
                 return CompleteResult(
                     success=False,
-                    status="EXPIRED_OR_FENCED",
-                    queue_action=data.get("queue_action", "ack"),
-                    reason=data.get("reason", "lease_expired_or_fenced"),
+                    status=status,
+                    queue_action=queue_action,
+                    reason=reason,
                 )
 
             return CompleteResult(
