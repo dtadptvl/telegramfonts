@@ -16,37 +16,37 @@ export class OrderService {
     session: TelegramSessionRecord,
     catalog: FontCatalog
   ): Promise<CreateOrderResult> {
-    // Check if session already has an active order (Idempotency)
-    if (session.status === 'ORDER_CREATED' && session.active_order_id) {
-      const existingOrder = await this.db
-        .prepare('SELECT * FROM orders WHERE id = ?')
-        .bind(session.active_order_id)
-        .first<{ id: string; total_amount: number; currency: string }>();
+    const checkoutToken = session.checkout_token;
 
-      if (existingOrder) {
-        const items = await this.db
-          .prepare('SELECT count(*) as count FROM order_items WHERE order_id = ?')
-          .bind(existingOrder.id)
-          .first<{ count: number }>();
+    // 1. Check if order with this checkout_token already exists (Idempotency)
+    const existingOrderByToken = await this.db
+      .prepare('SELECT * FROM orders WHERE checkout_token = ?')
+      .bind(checkoutToken)
+      .first<{ id: string; total_amount: number; currency: string }>();
 
-        return {
-          orderId: existingOrder.id,
-          isExisting: true,
-          totalAmount: existingOrder.total_amount,
-          currency: existingOrder.currency,
-          itemsCount: items?.count || 0,
-        };
-      }
+    if (existingOrderByToken) {
+      const items = await this.db
+        .prepare('SELECT count(*) as count FROM order_items WHERE order_id = ?')
+        .bind(existingOrderByToken.id)
+        .first<{ count: number }>();
+
+      return {
+        orderId: existingOrderByToken.id,
+        isExisting: true,
+        totalAmount: existingOrderByToken.total_amount,
+        currency: existingOrderByToken.currency,
+        itemsCount: items?.count || 0,
+      };
     }
 
-    // Invariant checks
+    // 2. Validate Session Invariants
     let selectedStyleIds: string[] = [];
     let selectedFormats: FontFormat[] = [];
     try {
       selectedStyleIds = JSON.parse(session.selected_styles);
       selectedFormats = JSON.parse(session.selected_formats);
     } catch {
-      throw new Error('Invalid session selection format');
+      throw new Error('Invalid session selection payload');
     }
 
     if (!selectedStyleIds.length) {
@@ -57,7 +57,7 @@ export class OrderService {
       throw new Error('Cannot create order with empty format selection');
     }
 
-    // Validate styles against persisted catalog styles (never trust client/callback text)
+    // Validate styles against authoritative persisted catalog (never trust client)
     const validStylesMap = new Map<string, Style>();
     for (const style of catalog.styles) {
       validStylesMap.set(style.id, style);
@@ -75,7 +75,6 @@ export class OrderService {
     const now = Date.now();
     const orderId = `ord_${crypto.randomUUID().replace(/-/g, '')}`;
 
-    // Compute total amount (sum of selected styles' prices)
     const totalAmount = selectedStyles.reduce(
       (sum, s) => sum + (s.price !== undefined ? s.price : 50000),
       0
@@ -91,35 +90,63 @@ export class OrderService {
       selected_formats: selectedFormats,
     });
 
-    // Insert Order
-    await this.db
-      .prepare(
-        `INSERT INTO orders (id, user_id, status, total_amount, currency, metadata, created_at, updated_at)
-         VALUES (?, ?, 'AWAITING_PAYMENT', ?, 'VND', ?, ?, ?)`
-      )
-      .bind(orderId, session.user_id, totalAmount, metadata, now, now)
-      .run();
+    // 3. Build atomic batch statements
+    const statements: D1PreparedStatement[] = [];
 
-    // Insert Order Items
+    // Order insert
+    statements.push(
+      this.db
+        .prepare(
+          `INSERT INTO orders (id, user_id, status, total_amount, currency, metadata, checkout_token, created_at, updated_at)
+           VALUES (?, ?, 'AWAITING_PAYMENT', ?, 'VND', ?, ?, ?, ?)`
+        )
+        .bind(orderId, session.user_id, totalAmount, metadata, checkoutToken, now, now)
+    );
+
+    // Order items insert
     for (const style of selectedStyles) {
       const itemId = `item_${crypto.randomUUID().replace(/-/g, '')}`;
       const price = style.price !== undefined ? style.price : 50000;
-      await this.db
-        .prepare(
-          `INSERT INTO order_items (id, order_id, font_id, font_name, price, created_at)
-           VALUES (?, ?, ?, ?, ?, ?)`
-        )
+      statements.push(
+        this.db
+          .prepare(
+            `INSERT INTO order_items (id, order_id, font_id, font_name, price, created_at)
+             VALUES (?, ?, ?, ?, ?, ?)`
+          )
           .bind(itemId, orderId, style.id, style.displayName, price, now)
-          .run();
+      );
     }
 
-    // Update Session with created order
-    await this.db
-      .prepare(
-        `UPDATE telegram_sessions SET status = 'ORDER_CREATED', active_order_id = ?, updated_at = ? WHERE id = ?`
-      )
-      .bind(orderId, now, session.id)
-      .run();
+    // Session update
+    statements.push(
+      this.db
+        .prepare(
+          `UPDATE telegram_sessions SET status = 'ORDER_CREATED', active_order_id = ?, updated_at = ? WHERE id = ?`
+        )
+        .bind(orderId, now, session.id)
+    );
+
+    // Execute atomic batch
+    try {
+      await this.db.batch(statements);
+    } catch (err: unknown) {
+      // If concurrent request already inserted with this checkout_token, resolve to existing order
+      const existingAfterCatch = await this.db
+        .prepare('SELECT * FROM orders WHERE checkout_token = ?')
+        .bind(checkoutToken)
+        .first<{ id: string; total_amount: number; currency: string }>();
+
+      if (existingAfterCatch) {
+        return {
+          orderId: existingAfterCatch.id,
+          isExisting: true,
+          totalAmount: existingAfterCatch.total_amount,
+          currency: existingAfterCatch.currency,
+          itemsCount: selectedStyles.length,
+        };
+      }
+      throw err;
+    }
 
     return {
       orderId,

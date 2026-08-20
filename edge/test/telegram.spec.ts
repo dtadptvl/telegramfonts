@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { env, createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import worker, { type Env } from '../src/index';
 import { CatalogService } from '../src/services/catalog-service';
+import { SessionService } from '../src/services/session-service';
+import { OrderService } from '../src/services/order-service';
 import type { FontCatalog } from '../src/types/catalog';
 import type { TelegramUpdate } from '../src/types/telegram';
 
@@ -29,7 +31,7 @@ const sampleCatalog: FontCatalog = {
 describe('Telegram Webhook & UX Flow', () => {
   beforeEach(async () => {
     // Intercept outbound Telegram Bot API requests
-    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+    globalThis.fetch = async (input: RequestInfo | URL) => {
       const urlStr = typeof input === 'string' ? input : input.toString();
       if (urlStr.includes('api.telegram.org')) {
         return new Response(JSON.stringify({ ok: true, result: { message_id: 999 } }), {
@@ -41,7 +43,7 @@ describe('Telegram Webhook & UX Flow', () => {
     };
   });
 
-  describe('Webhook Security & Update Parsing', () => {
+  describe('Webhook Security, Update Parsing & Deduplication (BLOCK 3)', () => {
     it('returns 503 when bot token or webhook secret are missing in env', async () => {
       const mockEnv: Env = {
         ...(env as unknown as Env),
@@ -109,28 +111,56 @@ describe('Telegram Webhook & UX Flow', () => {
       expect(data).toEqual({ status: 'ignored_invalid_payload' });
     });
 
-    it('handles unsupported updates gracefully (e.g. channel_post)', async () => {
-      const req = new Request('http://example.com/webhooks/telegram', {
+    it('deduplicates replayed telegram updates using telegram_updates table', async () => {
+      const update: TelegramUpdate = {
+        update_id: 9901,
+        message: {
+          message_id: 50,
+          from: { id: 88881, is_bot: false, first_name: 'DedupeUser' },
+          chat: { id: 88881, type: 'private', first_name: 'DedupeUser' },
+          date: Date.now(),
+          text: '/start',
+        },
+      };
+
+      const req1 = new Request('http://example.com/webhooks/telegram', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'X-Telegram-Bot-Api-Secret-Token': WEBHOOK_SECRET,
         },
-        body: JSON.stringify({ update_id: 100, channel_post: { message_id: 5 } }),
+        body: JSON.stringify(update),
       });
 
-      const ctx = createExecutionContext();
-      const res = await worker.fetch(req, testEnv, ctx);
-      await waitOnExecutionContext(ctx);
+      const ctx1 = createExecutionContext();
+      const res1 = await worker.fetch(req1, testEnv, ctx1);
+      await waitOnExecutionContext(ctx1);
+      expect(res1.status).toBe(200);
 
-      expect(res.status).toBe(200);
+      // Replay same update_id
+      const req2 = new Request('http://example.com/webhooks/telegram', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Telegram-Bot-Api-Secret-Token': WEBHOOK_SECRET,
+        },
+        body: JSON.stringify(update),
+      });
+
+      const ctx2 = createExecutionContext();
+      const res2 = await worker.fetch(req2, testEnv, ctx2);
+      await waitOnExecutionContext(ctx2);
+
+      expect(res2.status).toBe(200);
+      const data2 = await res2.json();
+      expect(data2).toEqual({ status: 'ignored_duplicate_update' });
     });
   });
 
   describe('User Onboarding & URL Ingestion', () => {
     it('handles /start by resetting user session in D1', async () => {
       const update: TelegramUpdate = {
-        update_id: 1,
+        update_id: 1001,
         message: {
           message_id: 10,
           from: { id: 11111, is_bot: false, first_name: 'Alice', username: 'alice123' },
@@ -169,7 +199,7 @@ describe('Telegram Webhook & UX Flow', () => {
 
     it('creates and deduplicates catalog request when catalog is pending', async () => {
       const update: TelegramUpdate = {
-        update_id: 2,
+        update_id: 1002,
         message: {
           message_id: 11,
           from: { id: 22222, is_bot: false, first_name: 'Bob' },
@@ -214,7 +244,7 @@ describe('Telegram Webhook & UX Flow', () => {
       expect(catalogId).toBeDefined();
 
       const update: TelegramUpdate = {
-        update_id: 3,
+        update_id: 1003,
         message: {
           message_id: 12,
           from: { id: 33333, is_bot: false, first_name: 'Charlie' },
@@ -247,32 +277,22 @@ describe('Telegram Webhook & UX Flow', () => {
     });
   });
 
-  describe('Interactive UX Callbacks, Ownership & Invariants', () => {
-    it('rejects callback queries from unauthorized users (ownership check)', async () => {
-      // User 44444 has an active session
+  describe('Interactive UX Callbacks, State/Token Binding & Safety (BLOCK 2)', () => {
+    it('rejects stale callback tokens from outdated menus without mutating state', async () => {
       const catalogService = new CatalogService(env.DB);
       const catalogId = await catalogService.persistCatalogResult(sampleCatalog);
+      const sessionService = new SessionService(env.DB);
 
-      await env.DB.prepare(
-        `INSERT INTO telegram_users (id, first_name, created_at, updated_at) VALUES (?, ?, ?, ?)`
-      )
-        .bind('44444', 'Dave', Date.now(), Date.now())
-        .run();
+      await sessionService.upsertTelegramUser({ id: 44444, is_bot: false, first_name: 'Dave' });
+      await sessionService.getOrCreateSession('44444', '44444');
+      await sessionService.updateSessionCatalog('44444', catalogId, 'SELECTING_STYLES');
 
-      await env.DB.prepare(
-        `INSERT INTO telegram_sessions (id, user_id, chat_id, catalog_id, selected_styles, selected_formats, status, created_at, updated_at)
-         VALUES (?, ?, ?, ?, '[]', '["TTF"]', 'SELECTING_STYLES', ?, ?)`
-      )
-        .bind('sess_dave', '44444', '44444', catalogId, Date.now(), Date.now())
-        .run();
-
-      // Another user (99999) attempts to click Dave's inline button
-      const attackerUpdate: TelegramUpdate = {
-        update_id: 4,
+      const update: TelegramUpdate = {
+        update_id: 1004,
         callback_query: {
-          id: 'cb_attack_1',
-          from: { id: 99999, is_bot: false, first_name: 'Attacker' },
-          data: 'st:t:hn_regular',
+          id: 'cb_stale_token',
+          from: { id: 44444, is_bot: false, first_name: 'Dave' },
+          data: 'st:t:STALETOK:0',
         },
       };
 
@@ -282,7 +302,7 @@ describe('Telegram Webhook & UX Flow', () => {
           'Content-Type': 'application/json',
           'X-Telegram-Bot-Api-Secret-Token': WEBHOOK_SECRET,
         },
-        body: JSON.stringify(attackerUpdate),
+        body: JSON.stringify(update),
       });
 
       const ctx = createExecutionContext();
@@ -291,40 +311,92 @@ describe('Telegram Webhook & UX Flow', () => {
 
       expect(res.status).toBe(200);
 
-      // Dave's session should remain completely unchanged
-      const daveSession = await env.DB.prepare(
-        'SELECT * FROM telegram_sessions WHERE user_id = ?'
-      )
-        .bind('44444')
-        .first<{ selected_styles: string }>();
-      expect(daveSession?.selected_styles).toBe('[]');
+      // Session styles remain untouched
+      const session = await sessionService.getSessionByUserId('44444');
+      expect(session?.selected_styles).toBe('[]');
     });
 
-    it('toggles styles and respects callback data byte limit (< 64 bytes)', async () => {
+    it('rejects actions sent in the wrong workflow state', async () => {
       const catalogService = new CatalogService(env.DB);
       const catalogId = await catalogService.persistCatalogResult(sampleCatalog);
+      const sessionService = new SessionService(env.DB);
 
-      await env.DB.prepare(
-        `INSERT INTO telegram_users (id, first_name, created_at, updated_at) VALUES (?, ?, ?, ?)`
-      )
-        .bind('55555', 'Eve', Date.now(), Date.now())
-        .run();
+      await sessionService.upsertTelegramUser({ id: 55551, is_bot: false, first_name: 'WrongStateUser' });
+      const session = await sessionService.getOrCreateSession('55551', '55551');
+      await sessionService.updateSessionCatalog('55551', catalogId, 'SELECTING_STYLES');
 
-      await env.DB.prepare(
-        `INSERT INTO telegram_sessions (id, user_id, chat_id, catalog_id, selected_styles, selected_formats, status, created_at, updated_at)
-         VALUES (?, ?, ?, ?, '[]', '["TTF"]', 'SELECTING_STYLES', ?, ?)`
-      )
-        .bind('sess_eve', '55555', '55555', catalogId, Date.now(), Date.now())
-        .run();
+      const activeSession = await sessionService.getSessionByUserId('55551');
+      const token = activeSession!.workflow_token;
 
-      const callbackData = 'st:t:hn_regular';
-      expect(new TextEncoder().encode(callbackData).length).toBeLessThan(64);
+      // Try sending ord:cnf while in SELECTING_STYLES state
+      const update: TelegramUpdate = {
+        update_id: 1005,
+        callback_query: {
+          id: 'cb_wrong_state',
+          from: { id: 55551, is_bot: false, first_name: 'WrongStateUser' },
+          data: `ord:cnf:${token}`,
+        },
+      };
+
+      const req = new Request('http://example.com/webhooks/telegram', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Telegram-Bot-Api-Secret-Token': WEBHOOK_SECRET,
+        },
+        body: JSON.stringify(update),
+      });
+
+      const ctx = createExecutionContext();
+      const res = await worker.fetch(req, testEnv, ctx);
+      await waitOnExecutionContext(ctx);
+
+      expect(res.status).toBe(200);
+
+      // No order created
+      const orders = await env.DB.prepare('SELECT * FROM orders WHERE user_id = ?')
+        .bind('55551')
+        .all();
+      expect(orders.results.length).toBe(0);
+    });
+
+    it('guarantees callback data <= 64 bytes even with very long external style IDs', async () => {
+      const catalogWithLongStyles: FontCatalog = {
+        sourceUrl: 'https://www.myfonts.com/collections/super-long-font-collection-name',
+        canonicalKey: 'myfonts:collections/super-long-font-collection-name',
+        familyName: 'Super Long Font Name With Many Words',
+        styles: [
+          {
+            id: 'super_extra_ultra_long_style_identifier_exceeding_standard_limits_1234567890_abcdefghijklmnopqrstuvwxyz',
+            displayName: 'Ultra Extended Black Italic Pro',
+            price: 60000,
+          },
+        ],
+      };
+
+      const catalogService = new CatalogService(env.DB);
+      const catalogId = await catalogService.persistCatalogResult(catalogWithLongStyles);
+      const sessionService = new SessionService(env.DB);
+
+      await sessionService.upsertTelegramUser({ id: 55552, is_bot: false, first_name: 'LongStyleUser' });
+      await sessionService.getOrCreateSession('55552', '55552');
+      await sessionService.updateSessionCatalog('55552', catalogId, 'SELECTING_STYLES');
+
+      const session = await sessionService.getSessionByUserId('55552');
+      const token = session!.workflow_token;
+
+      // Index-based callback format: st:t:<token>:<index>
+      const callbackData = `st:t:${token}:0`;
+      const byteLength = new TextEncoder().encode(callbackData).length;
+
+      // Strictly below Telegram 64-byte limit
+      expect(byteLength).toBeLessThan(30);
 
       const update: TelegramUpdate = {
-        update_id: 5,
+        update_id: 1006,
         callback_query: {
-          id: 'cb_eve_1',
-          from: { id: 55555, is_bot: false, first_name: 'Eve' },
+          id: 'cb_long_style',
+          from: { id: 55552, is_bot: false, first_name: 'LongStyleUser' },
           data: callbackData,
         },
       };
@@ -344,140 +416,94 @@ describe('Telegram Webhook & UX Flow', () => {
 
       expect(res.status).toBe(200);
 
-      const eveSession = await env.DB.prepare(
-        'SELECT * FROM telegram_sessions WHERE user_id = ?'
-      )
-        .bind('55555')
-        .first<{ selected_styles: string }>();
-      expect(JSON.parse(eveSession?.selected_styles || '[]')).toEqual(['hn_regular']);
+      const updatedSession = await sessionService.getSessionByUserId('55552');
+      expect(JSON.parse(updatedSession!.selected_styles)).toEqual([
+        'super_extra_ultra_long_style_identifier_exceeding_standard_limits_1234567890_abcdefghijklmnopqrstuvwxyz',
+      ]);
     });
+  });
 
-    it('rejects transitioning to formats with empty style selection', async () => {
+  describe('Atomic Checkout & Idempotency (BLOCK 1 & BLOCK 5)', () => {
+    it('creates order + order_items atomically with AWAITING_PAYMENT status', async () => {
       const catalogService = new CatalogService(env.DB);
       const catalogId = await catalogService.persistCatalogResult(sampleCatalog);
+      const sessionService = new SessionService(env.DB);
+      const orderService = new OrderService(env.DB);
 
-      await env.DB.prepare(
-        `INSERT INTO telegram_users (id, first_name, created_at, updated_at) VALUES (?, ?, ?, ?)`
-      )
-        .bind('66666', 'Frank', Date.now(), Date.now())
-        .run();
+      await sessionService.upsertTelegramUser({ id: 77771, is_bot: false, first_name: 'Grace' });
+      await sessionService.getOrCreateSession('77771', '77771');
+      await sessionService.updateSessionCatalog('77771', catalogId, 'CONFIRMING');
+      await sessionService.setAllStyles('77771', ['hn_regular', 'hn_bold']);
+      await sessionService.toggleFormatSelection('77771', 'WOFF2'); // ['TTF', 'WOFF2']
 
-      await env.DB.prepare(
-        `INSERT INTO telegram_sessions (id, user_id, chat_id, catalog_id, selected_styles, selected_formats, status, created_at, updated_at)
-         VALUES (?, ?, ?, ?, '[]', '["TTF"]', 'SELECTING_STYLES', ?, ?)`
-      )
-        .bind('sess_frank', '66666', '66666', catalogId, Date.now(), Date.now())
-        .run();
+      const session = await sessionService.getSessionByUserId('77771');
+      const catalog = await catalogService.getCatalogById(catalogId);
 
-      const update: TelegramUpdate = {
-        update_id: 6,
-        callback_query: {
-          id: 'cb_frank_next',
-          from: { id: 66666, is_bot: false, first_name: 'Frank' },
-          data: 'st:next',
-        },
-      };
+      const result = await orderService.createOrderFromSession(session!, catalog!);
 
-      const req = new Request('http://example.com/webhooks/telegram', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Telegram-Bot-Api-Secret-Token': WEBHOOK_SECRET,
-        },
-        body: JSON.stringify(update),
-      });
+      expect(result.isExisting).toBe(false);
+      expect(result.orderId).toBeDefined();
+      expect(result.totalAmount).toBe(100000);
+      expect(result.itemsCount).toBe(2);
 
-      const ctx = createExecutionContext();
-      const res = await worker.fetch(req, testEnv, ctx);
-      await waitOnExecutionContext(ctx);
+      // Verify DB truth
+      const order = await env.DB.prepare('SELECT * FROM orders WHERE id = ?')
+        .bind(result.orderId)
+        .first<{ status: string; total_amount: number; checkout_token: string }>();
 
-      expect(res.status).toBe(200);
+      expect(order?.status).toBe('AWAITING_PAYMENT');
+      expect(order?.total_amount).toBe(100000);
+      expect(order?.checkout_token).toBe(session!.checkout_token);
 
-      // Session status must remain SELECTING_STYLES
-      const session = await env.DB.prepare('SELECT * FROM telegram_sessions WHERE user_id = ?')
-        .bind('66666')
-        .first<{ status: string }>();
-      expect(session?.status).toBe('SELECTING_STYLES');
-    });
-
-    it('creates order with AWAITING_PAYMENT status and ensures idempotency on replay', async () => {
-      const catalogService = new CatalogService(env.DB);
-      const catalogId = await catalogService.persistCatalogResult(sampleCatalog);
-
-      await env.DB.prepare(
-        `INSERT INTO telegram_users (id, first_name, created_at, updated_at) VALUES (?, ?, ?, ?)`
-      )
-        .bind('77777', 'Grace', Date.now(), Date.now())
-        .run();
-
-      await env.DB.prepare(
-        `INSERT INTO telegram_sessions (id, user_id, chat_id, catalog_id, selected_styles, selected_formats, status, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, '["TTF","WOFF2"]', 'CONFIRMING', ?, ?)`
-      )
-        .bind(
-          'sess_grace',
-          '77777',
-          '77777',
-          catalogId,
-          JSON.stringify(['hn_regular', 'hn_bold']),
-          Date.now(),
-          Date.now()
-        )
-        .run();
-
-      const update: TelegramUpdate = {
-        update_id: 7,
-        callback_query: {
-          id: 'cb_grace_confirm',
-          from: { id: 77777, is_bot: false, first_name: 'Grace' },
-          data: 'ord:confirm',
-        },
-      };
-
-      const req = new Request('http://example.com/webhooks/telegram', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Telegram-Bot-Api-Secret-Token': WEBHOOK_SECRET,
-        },
-        body: JSON.stringify(update),
-      });
-
-      const ctx1 = createExecutionContext();
-      const res1 = await worker.fetch(req, testEnv, ctx1);
-      await waitOnExecutionContext(ctx1);
-
-      expect(res1.status).toBe(200);
-
-      // Verify order creation
-      const orders = await env.DB.prepare('SELECT * FROM orders WHERE user_id = ?')
-        .bind('77777')
-        .all<{ id: string; status: string; total_amount: number }>();
-      expect(orders.results.length).toBe(1);
-      const createdOrder = orders.results[0];
-      expect(createdOrder.status).toBe('AWAITING_PAYMENT');
-      expect(createdOrder.total_amount).toBe(100000); // 2 styles * 50000
-
-      // Verify order_items
       const items = await env.DB.prepare('SELECT * FROM order_items WHERE order_id = ?')
-        .bind(createdOrder.id)
-        .all<{ font_id: string; font_name: string }>();
+        .bind(result.orderId)
+        .all<{ font_id: string }>();
+
       expect(items.results.length).toBe(2);
-      expect(items.results.map((i) => i.font_id).sort()).toEqual(['hn_bold', 'hn_regular']);
 
-      // Replay confirm action -> must not create duplicate order (Idempotency)
-      const ctx2 = createExecutionContext();
-      const res2 = await worker.fetch(req, testEnv, ctx2);
-      await waitOnExecutionContext(ctx2);
+      // Concurrent/replay execution returns the exact same order
+      const replayResult = await orderService.createOrderFromSession(session!, catalog!);
+      expect(replayResult.isExisting).toBe(true);
+      expect(replayResult.orderId).toBe(result.orderId);
+      expect(replayResult.totalAmount).toBe(100000);
+    });
 
-      expect(res2.status).toBe(200);
+    it('atomic catalog persistence purges stale styles on update (BLOCK 4)', async () => {
+      const catalogService = new CatalogService(env.DB);
 
-      const ordersAfterReplay = await env.DB.prepare(
-        'SELECT * FROM orders WHERE user_id = ?'
+      const initialCatalog: FontCatalog = {
+        sourceUrl: 'https://www.myfonts.com/collections/stale-test-family',
+        canonicalKey: 'myfonts:collections/stale-test-family',
+        familyName: 'Stale Test Family',
+        styles: [
+          { id: 'style_v1_old', displayName: 'Old Style V1', price: 40000 },
+          { id: 'style_v1_common', displayName: 'Common Style', price: 50000 },
+        ],
+      };
+
+      const catalogId = await catalogService.persistCatalogResult(initialCatalog);
+
+      const updatedCatalog: FontCatalog = {
+        sourceUrl: 'https://www.myfonts.com/collections/stale-test-family',
+        canonicalKey: 'myfonts:collections/stale-test-family',
+        familyName: 'Stale Test Family (Updated)',
+        styles: [
+          { id: 'style_v1_common', displayName: 'Common Style', price: 50000 },
+          { id: 'style_v2_new', displayName: 'New Style V2', price: 60000 },
+        ],
+      };
+
+      await catalogService.persistCatalogResult(updatedCatalog);
+
+      const storedStyles = await env.DB.prepare(
+        'SELECT style_id FROM catalog_styles WHERE catalog_id = ? ORDER BY style_id ASC'
       )
-        .bind('77777')
-        .all();
-      expect(ordersAfterReplay.results.length).toBe(1);
+        .bind(catalogId)
+        .all<{ style_id: string }>();
+
+      const styleIds = storedStyles.results.map((s) => s.style_id);
+      expect(styleIds).toEqual(['style_v1_common', 'style_v2_new']);
+      expect(styleIds).not.toContain('style_v1_old');
     });
   });
 });

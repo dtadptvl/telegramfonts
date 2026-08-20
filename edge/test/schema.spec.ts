@@ -20,7 +20,7 @@ describe('D1 Database Schema & Constraints', () => {
     });
   });
 
-  describe('Orders Table', () => {
+  describe('Orders Table & Checkout Idempotency', () => {
     it('allows inserting orders with valid canonical states', async () => {
       const canonicalStates = [
         'AWAITING_PAYMENT',
@@ -35,8 +35,8 @@ describe('D1 Database Schema & Constraints', () => {
       for (const [index, status] of canonicalStates.entries()) {
         const orderId = `ord_test_${index}_${status.toLowerCase()}`;
         await env.DB.prepare(
-          `INSERT INTO orders (id, user_id, status, total_amount, currency, metadata, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+          `INSERT INTO orders (id, user_id, status, total_amount, currency, metadata, checkout_token, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
           .bind(
             orderId,
@@ -45,6 +45,7 @@ describe('D1 Database Schema & Constraints', () => {
             50000,
             'VND',
             JSON.stringify({ chat_id: 12345 }),
+            `chk_test_${index}`,
             now,
             now
           )
@@ -59,6 +60,27 @@ describe('D1 Database Schema & Constraints', () => {
         expect(inserted?.status).toBe(status);
         expect(inserted?.total_amount).toBe(50000);
       }
+    });
+
+    it('enforces unique checkout_token on orders for idempotency', async () => {
+      const now = Date.now();
+      const chkToken = 'chk_unique_test_123';
+
+      await env.DB.prepare(
+        `INSERT INTO orders (id, user_id, status, total_amount, currency, checkout_token, created_at, updated_at)
+         VALUES (?, ?, 'AWAITING_PAYMENT', 50000, 'VND', ?, ?, ?)`
+      )
+        .bind('ord_chk_1', 'tg_user_chk', chkToken, now, now)
+        .run();
+
+      await expect(
+        env.DB.prepare(
+          `INSERT INTO orders (id, user_id, status, total_amount, currency, checkout_token, created_at, updated_at)
+           VALUES (?, ?, 'AWAITING_PAYMENT', 50000, 'VND', ?, ?, ?)`
+        )
+          .bind('ord_chk_2', 'tg_user_chk', chkToken, now, now)
+          .run()
+      ).rejects.toThrow();
     });
 
     it('rejects order with invalid state', async () => {
@@ -227,7 +249,8 @@ describe('D1 Database Schema & Constraints', () => {
         .run();
 
       await env.DB.prepare(
-        `INSERT INTO telegram_sessions (id, user_id, chat_id, status, created_at, updated_at) VALUES (?, ?, ?, 'IDLE', ?, ?)`
+        `INSERT INTO telegram_sessions (id, user_id, chat_id, workflow_token, checkout_token, status, created_at, updated_at)
+         VALUES (?, ?, ?, 'tok1', 'chk1', 'IDLE', ?, ?)`
       )
         .bind('sess_1', userId, 'chat_100', now, now)
         .run();
@@ -235,9 +258,52 @@ describe('D1 Database Schema & Constraints', () => {
       // Duplicate session for same user must fail
       await expect(
         env.DB.prepare(
-          `INSERT INTO telegram_sessions (id, user_id, chat_id, status, created_at, updated_at) VALUES (?, ?, ?, 'IDLE', ?, ?)`
+          `INSERT INTO telegram_sessions (id, user_id, chat_id, workflow_token, checkout_token, status, created_at, updated_at)
+           VALUES (?, ?, ?, 'tok2', 'chk2', 'IDLE', ?, ?)`
         )
           .bind('sess_2', userId, 'chat_100', now, now)
+          .run()
+      ).rejects.toThrow();
+    });
+
+    it('enforces unique (user_id, canonical_key) on catalog_requests', async () => {
+      const now = Date.now();
+      const userId = 'tg_user_req_100';
+
+      await env.DB.prepare(
+        `INSERT INTO telegram_users (id, username, first_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`
+      )
+        .bind(userId, 'tester_req', 'TestReq', now, now)
+        .run();
+
+      await env.DB.prepare(
+        `INSERT INTO catalog_requests (id, user_id, canonical_key, source_url, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 'PENDING', ?, ?)`
+      )
+        .bind(
+          'req_1',
+          userId,
+          'myfonts:collections/test-req-font',
+          'https://www.myfonts.com/collections/test-req-font',
+          now,
+          now
+        )
+        .run();
+
+      // Duplicate request for same user and canonical key must fail
+      await expect(
+        env.DB.prepare(
+          `INSERT INTO catalog_requests (id, user_id, canonical_key, source_url, status, created_at, updated_at)
+           VALUES (?, ?, ?, ?, 'PENDING', ?, ?)`
+        )
+          .bind(
+            'req_2',
+            userId,
+            'myfonts:collections/test-req-font',
+            'https://www.myfonts.com/collections/test-req-font',
+            now,
+            now
+          )
           .run()
       ).rejects.toThrow();
     });
