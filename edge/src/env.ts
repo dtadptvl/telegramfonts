@@ -10,4 +10,11 @@ export interface Env {
   TELEGRAM_WEBHOOK_SECRET?: string;
   SEPAY_API_TOKEN?: string;
   SEPAY_WEBHOOK_SECRET?: string;
+
+  // Payment Recipient & VietQR Configuration (non-secret typed config)
+  BANK_ID?: string; // e.g. 'MB', '970422'
+  BANK_ACCOUNT_NUMBER?: string; // e.g. '0000123456789'
+  BANK_ACCOUNT_NAME?: string; // e.g. 'TELEFONT STORE'
+  VIETQR_TEMPLATE?: string; // e.g. 'compact2', 'qr_only'
+  PAYMENT_CODE_PREFIX?: string; // e.g. 'TF' (default: 'TF')
 }
