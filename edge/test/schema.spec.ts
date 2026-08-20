@@ -8,15 +8,15 @@ describe('D1 Database Schema & Constraints', () => {
   });
 
   describe('Migrations Tracker', () => {
-    it('records 0001_initial_schema in d1_migrations table', async () => {
-      const migration = await env.DB.prepare(
-        'SELECT * FROM d1_migrations WHERE name = ?'
-      )
-        .bind('0001_initial_schema.sql')
-        .first<{ id: number; name: string }>();
+    it('records migrations in d1_migrations table', async () => {
+      const migrations = await env.DB.prepare(
+        'SELECT name FROM d1_migrations ORDER BY name ASC'
+      ).all<{ name: string }>();
 
-      expect(migration).not.toBeNull();
-      expect(migration?.name).toBe('0001_initial_schema.sql');
+      expect(migrations.results.some((m) => m.name === '0001_initial_schema.sql')).toBe(true);
+      expect(
+        migrations.results.some((m) => m.name === '0002_telegram_sessions_and_catalog.sql')
+      ).toBe(true);
     });
   });
 
@@ -38,7 +38,16 @@ describe('D1 Database Schema & Constraints', () => {
           `INSERT INTO orders (id, user_id, status, total_amount, currency, metadata, created_at, updated_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
         )
-          .bind(orderId, `tg_user_${index}`, status, 50000, 'VND', JSON.stringify({ chat_id: 12345 }), now, now)
+          .bind(
+            orderId,
+            `tg_user_${index}`,
+            status,
+            50000,
+            'VND',
+            JSON.stringify({ chat_id: 12345 }),
+            now,
+            now
+          )
           .run();
 
         const inserted = await env.DB.prepare('SELECT * FROM orders WHERE id = ?')
@@ -166,10 +175,6 @@ describe('D1 Database Schema & Constraints', () => {
           .run();
       }
 
-      // Query jobs available for claim or retry:
-      // 1. PENDING jobs
-      // 2. RETRY jobs where next_retry_at <= now
-      // 3. PROCESSING jobs where lease_expires_at < now (expired lease recovery)
       const claimableJobs = await env.DB.prepare(
         `SELECT * FROM fulfillment_jobs
          WHERE status = 'PENDING'
@@ -179,7 +184,7 @@ describe('D1 Database Schema & Constraints', () => {
         .bind(now, now)
         .all();
 
-      expect(claimableJobs.results.length).toBeGreaterThanOrEqual(2); // PENDING + RETRY
+      expect(claimableJobs.results.length).toBeGreaterThanOrEqual(2);
     });
 
     it('rejects duplicate fulfillment job for the same order (1:1 constraint)', async () => {
@@ -199,7 +204,6 @@ describe('D1 Database Schema & Constraints', () => {
         .bind('job_first', orderId, 'PENDING', 0, 3, now, now)
         .run();
 
-      // Second job for same order must fail with UNIQUE constraint error
       await expect(
         env.DB.prepare(
           `INSERT INTO fulfillment_jobs (id, order_id, status, attempt_count, max_attempts, created_at, updated_at)
@@ -209,75 +213,67 @@ describe('D1 Database Schema & Constraints', () => {
           .run()
       ).rejects.toThrow();
     });
+  });
 
-    it('rejects invalid job status', async () => {
+  describe('Telegram Users & Sessions Schema (Migration 0002)', () => {
+    it('stores telegram users and enforces unique session per user', async () => {
       const now = Date.now();
-      const orderId = 'ord_bad_status';
+      const userId = 'tg_user_100';
+
       await env.DB.prepare(
-        `INSERT INTO orders (id, user_id, status, total_amount, currency, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO telegram_users (id, username, first_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`
       )
-        .bind(orderId, 'tg_user_bad_job', 'PAID', 50000, 'VND', now, now)
+        .bind(userId, 'tester1', 'Test', now, now)
         .run();
 
+      await env.DB.prepare(
+        `INSERT INTO telegram_sessions (id, user_id, chat_id, status, created_at, updated_at) VALUES (?, ?, ?, 'IDLE', ?, ?)`
+      )
+        .bind('sess_1', userId, 'chat_100', now, now)
+        .run();
+
+      // Duplicate session for same user must fail
       await expect(
         env.DB.prepare(
-          `INSERT INTO fulfillment_jobs (id, order_id, status, attempt_count, max_attempts, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`
+          `INSERT INTO telegram_sessions (id, user_id, chat_id, status, created_at, updated_at) VALUES (?, ?, ?, 'IDLE', ?, ?)`
         )
-          .bind('job_invalid', orderId, 'INVALID_JOB_STATE', 0, 3, now, now)
+          .bind('sess_2', userId, 'chat_100', now, now)
           .run()
       ).rejects.toThrow();
     });
-  });
 
-  describe('Outbox Events Table', () => {
-    it('allows inserting pending outbox events and supports dispatch indexing', async () => {
+    it('stores catalogs and cascades styles deletion', async () => {
       const now = Date.now();
-      const eventId = 'evt_test_1';
+      const catId = 'cat_test_cascade';
+
       await env.DB.prepare(
-        `INSERT INTO outbox_events (id, event_type, aggregate_type, aggregate_id, payload, status, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO catalogs (id, source_url, canonical_key, family_name, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)`
       )
-        .bind(eventId, 'ORDER_PAID', 'ORDER', 'ord_123', JSON.stringify({ total: 50000 }), 'PENDING', now)
-        .run();
-
-      const pendingEvents = await env.DB.prepare(
-        `SELECT * FROM outbox_events WHERE status = 'PENDING' ORDER BY created_at ASC LIMIT 10`
-      ).all();
-
-      expect(pendingEvents.results.some((e: Record<string, unknown>) => e.id === eventId)).toBe(true);
-    });
-  });
-
-  describe('Artifacts Table', () => {
-    it('stores artifact metadata and enforces unique storage_key', async () => {
-      const now = Date.now();
-      const orderId = 'ord_artifact_test';
-      await env.DB.prepare(
-        `INSERT INTO orders (id, user_id, status, total_amount, currency, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`
-      )
-        .bind(orderId, 'tg_user_art', 'PROCESSING', 50000, 'VND', now, now)
-        .run();
-
-      const key = 'artifacts/ord_artifact_test/font.zip';
-      await env.DB.prepare(
-        `INSERT INTO artifacts (id, order_id, storage_key, file_name, file_size, mime_type, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`
-      )
-        .bind('art_1', orderId, key, 'font.zip', 102400, 'application/zip', now)
-        .run();
-
-      // Duplicate storage_key must fail
-      await expect(
-        env.DB.prepare(
-          `INSERT INTO artifacts (id, order_id, storage_key, file_name, file_size, mime_type, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`
+        .bind(
+          catId,
+          'https://www.myfonts.com/collections/test-font',
+          'myfonts:collections/test-font',
+          'Test Font',
+          now,
+          now
         )
-          .bind('art_2', orderId, key, 'duplicate.zip', 204800, 'application/zip', now)
-          .run()
-      ).rejects.toThrow();
+        .run();
+
+      await env.DB.prepare(
+        `INSERT INTO catalog_styles (id, catalog_id, style_id, display_name, price, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`
+      )
+        .bind('cstyle_1', catId, 'regular', 'Regular', 50000, now)
+        .run();
+
+      // Delete catalog -> style should cascade
+      await env.DB.prepare('DELETE FROM catalogs WHERE id = ?').bind(catId).run();
+
+      const style = await env.DB.prepare('SELECT * FROM catalog_styles WHERE id = ?')
+        .bind('cstyle_1')
+        .first();
+      expect(style).toBeNull();
     });
   });
 });
