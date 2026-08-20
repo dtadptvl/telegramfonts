@@ -1042,6 +1042,99 @@ describe('Phase 4: A23 Internal Node Job Claim, Lease Fencing & Protocols', () =
       expect(data.error).toContain('mismatch');
     });
 
+    it('rejects PUT /internal/jobs/:job_id/artifact when post-put R2 checksum is missing or mismatched', async () => {
+      const { jobId } = await setupTestJob('PENDING');
+      const jobService = new JobService(env.DB);
+      const claimRes = await jobService.claimJob(jobId, 'worker-1', 300);
+      const leaseToken = claimRes.payload!.lease_token;
+
+      const dummyZip = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
+      const shaBuffer = await crypto.subtle.digest('SHA-256', dummyZip);
+      const sha256Hex = Array.from(new Uint8Array(shaBuffer))
+        .map((b) => b.toString(16).padStart(2, '0'))
+        .join('');
+
+      // 1. Mock bucket where put returns an object with MISSING checksums.sha256
+      const mockBucketMissing = {
+        ...env.ARTIFACTS_BUCKET,
+        head: async () => null,
+        put: async (key: string) => ({
+          key,
+          size: dummyZip.byteLength,
+          etag: 'dummy_etag',
+          version: 'v1',
+          checksums: {}, // missing sha256
+        } as unknown as R2Object),
+      };
+
+      const mockEnvMissing: Env = {
+        ...testEnv,
+        ARTIFACTS_BUCKET: mockBucketMissing as unknown as R2Bucket,
+      };
+
+      const reqMissing = new Request(`http://example.com/internal/jobs/${jobId}/artifact`, {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${NODE_SECRET}`,
+          'X-Worker-Id': 'worker-1',
+          'X-Lease-Token': leaseToken,
+          'X-Artifact-SHA256': sha256Hex,
+          'Content-Type': 'application/zip',
+          'Content-Length': dummyZip.byteLength.toString(),
+        },
+        body: dummyZip,
+      });
+
+      const ctx1 = createExecutionContext();
+      const resMissing = await worker.fetch(reqMissing, mockEnvMissing, ctx1);
+      await waitOnExecutionContext(ctx1);
+
+      expect(resMissing.status).toBe(500);
+      const dataMissing = (await resMissing.json()) as { error: string };
+      expect(dataMissing.error).toContain('checksum missing or mismatch');
+
+      // 2. Mock bucket where put returns an object with MISMATCHED checksums.sha256
+      const mockBucketMismatch = {
+        ...env.ARTIFACTS_BUCKET,
+        head: async () => null,
+        put: async (key: string) => ({
+          key,
+          size: dummyZip.byteLength,
+          etag: 'dummy_etag',
+          version: 'v1',
+          checksums: {
+            sha256: 'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff',
+          },
+        } as unknown as R2Object),
+      };
+
+      const mockEnvMismatch: Env = {
+        ...testEnv,
+        ARTIFACTS_BUCKET: mockBucketMismatch as unknown as R2Bucket,
+      };
+
+      const reqMismatch = new Request(`http://example.com/internal/jobs/${jobId}/artifact`, {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${NODE_SECRET}`,
+          'X-Worker-Id': 'worker-1',
+          'X-Lease-Token': leaseToken,
+          'X-Artifact-SHA256': sha256Hex,
+          'Content-Type': 'application/zip',
+          'Content-Length': dummyZip.byteLength.toString(),
+        },
+        body: dummyZip,
+      });
+
+      const ctx2 = createExecutionContext();
+      const resMismatch = await worker.fetch(reqMismatch, mockEnvMismatch, ctx2);
+      await waitOnExecutionContext(ctx2);
+
+      expect(resMismatch.status).toBe(500);
+      const dataMismatch = (await resMismatch.json()) as { error: string };
+      expect(dataMismatch.error).toContain('checksum missing or mismatch');
+    });
+
     it('rejects POST /internal/jobs/:job_id/complete when R2 metadata or checksum mismatches', async () => {
       const { jobId, orderId } = await setupTestJob('PENDING');
       const jobService = new JobService(env.DB);
