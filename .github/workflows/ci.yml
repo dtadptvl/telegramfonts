@@ -7,8 +7,8 @@ on:
     branches: [main]
 
 jobs:
-  test:
-    name: Build & Test
+  edge:
+    name: Edge Build & Test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -28,3 +28,25 @@ jobs:
 
       - name: Run automated tests
         run: npm test
+
+  agent:
+    name: Agent Python 3.11 Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r agent/requirements-lock.txt
+
+      - name: Run pytest
+        run: |
+          pytest agent/tests
