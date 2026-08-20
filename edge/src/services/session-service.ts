@@ -99,13 +99,17 @@ export class SessionService {
       .first<TelegramSessionRecord>();
   }
 
-  async resetSession(userId: string, chatId: string): Promise<TelegramSessionRecord> {
+  async resetSession(
+    userId: string,
+    chatId: string,
+    updateId?: number
+  ): Promise<TelegramSessionRecord> {
     const now = Date.now();
     const workflowToken = generateShortToken();
     const checkoutToken = generateCheckoutToken();
     const defaultFormats = JSON.stringify(['TTF']);
 
-    await this.db
+    const updateSessionStmt = this.db
       .prepare(
         `UPDATE telegram_sessions SET
            chat_id = ?,
@@ -121,8 +125,19 @@ export class SessionService {
            updated_at = ?
          WHERE user_id = ?`
       )
-      .bind(chatId, workflowToken, checkoutToken, defaultFormats, now, userId)
-      .run();
+      .bind(chatId, workflowToken, checkoutToken, defaultFormats, now, userId);
+
+    if (updateId !== undefined) {
+      const updateLedgerStmt = this.db
+        .prepare(
+          `UPDATE telegram_updates SET status = 'APPLIED', updated_at = ? WHERE update_id = ?`
+        )
+        .bind(now, updateId);
+
+      await this.db.batch([updateSessionStmt, updateLedgerStmt]);
+    } else {
+      await updateSessionStmt.run();
+    }
 
     return this.getOrCreateSession(userId, chatId);
   }
@@ -130,13 +145,14 @@ export class SessionService {
   async updateSessionCatalog(
     userId: string,
     catalogId: string,
-    initialStatus: SessionStatus = 'SELECTING_STYLES'
+    initialStatus: SessionStatus = 'SELECTING_STYLES',
+    updateId?: number
   ): Promise<void> {
     const now = Date.now();
     const workflowToken = generateShortToken();
     const checkoutToken = generateCheckoutToken();
 
-    await this.db
+    const updateSessionStmt = this.db
       .prepare(
         `UPDATE telegram_sessions SET
            workflow_token = ?,
@@ -150,15 +166,27 @@ export class SessionService {
            updated_at = ?
          WHERE user_id = ?`
       )
-      .bind(workflowToken, checkoutToken, catalogId, initialStatus, now, userId)
-      .run();
+      .bind(workflowToken, checkoutToken, catalogId, initialStatus, now, userId);
+
+    if (updateId !== undefined) {
+      const updateLedgerStmt = this.db
+        .prepare(
+          `UPDATE telegram_updates SET status = 'APPLIED', updated_at = ? WHERE update_id = ?`
+        )
+        .bind(now, updateId);
+
+      await this.db.batch([updateSessionStmt, updateLedgerStmt]);
+    } else {
+      await updateSessionStmt.run();
+    }
   }
 
   async toggleStyleSelection(
     userId: string,
     workflowToken: string,
     styleId: string,
-    expectedVersion: number
+    expectedVersion: number,
+    updateId?: number
   ): Promise<string[]> {
     const session = await this.getSessionByUserId(userId);
     if (!session || session.workflow_token !== workflowToken || session.status !== 'SELECTING_STYLES') {
@@ -179,7 +207,7 @@ export class SessionService {
     }
 
     const now = Date.now();
-    const res = await this.db
+    const updateSessionStmt = this.db
       .prepare(
         `UPDATE telegram_sessions SET
            selected_styles = ?,
@@ -187,11 +215,25 @@ export class SessionService {
            updated_at = ?
          WHERE user_id = ? AND workflow_token = ? AND status = 'SELECTING_STYLES' AND version = ?`
       )
-      .bind(JSON.stringify(current), now, userId, workflowToken, expectedVersion)
-      .run();
+      .bind(JSON.stringify(current), now, userId, workflowToken, expectedVersion);
 
-    if (!res.meta.changes || res.meta.changes === 0) {
-      throw new SessionConflictError('Concurrent mutation conflict on style selection');
+    if (updateId !== undefined) {
+      const updateLedgerStmt = this.db
+        .prepare(
+          `UPDATE telegram_updates SET status = 'APPLIED', updated_at = ? WHERE update_id = ?`
+        )
+        .bind(now, updateId);
+
+      const results = await this.db.batch([updateSessionStmt, updateLedgerStmt]);
+      const sessionResult = results[0];
+      if (!sessionResult.meta.changes || sessionResult.meta.changes === 0) {
+        throw new SessionConflictError('Concurrent mutation conflict on style selection');
+      }
+    } else {
+      const res = await updateSessionStmt.run();
+      if (!res.meta.changes || res.meta.changes === 0) {
+        throw new SessionConflictError('Concurrent mutation conflict on style selection');
+      }
     }
 
     return current;
@@ -201,10 +243,11 @@ export class SessionService {
     userId: string,
     workflowToken: string,
     allStyleIds: string[],
-    expectedVersion: number
+    expectedVersion: number,
+    updateId?: number
   ): Promise<void> {
     const now = Date.now();
-    const res = await this.db
+    const updateSessionStmt = this.db
       .prepare(
         `UPDATE telegram_sessions SET
            selected_styles = ?,
@@ -212,21 +255,36 @@ export class SessionService {
            updated_at = ?
          WHERE user_id = ? AND workflow_token = ? AND status = 'SELECTING_STYLES' AND version = ?`
       )
-      .bind(JSON.stringify(allStyleIds), now, userId, workflowToken, expectedVersion)
-      .run();
+      .bind(JSON.stringify(allStyleIds), now, userId, workflowToken, expectedVersion);
 
-    if (!res.meta.changes || res.meta.changes === 0) {
-      throw new SessionConflictError('Concurrent mutation conflict');
+    if (updateId !== undefined) {
+      const updateLedgerStmt = this.db
+        .prepare(
+          `UPDATE telegram_updates SET status = 'APPLIED', updated_at = ? WHERE update_id = ?`
+        )
+        .bind(now, updateId);
+
+      const results = await this.db.batch([updateSessionStmt, updateLedgerStmt]);
+      const sessionResult = results[0];
+      if (!sessionResult.meta.changes || sessionResult.meta.changes === 0) {
+        throw new SessionConflictError('Concurrent mutation conflict');
+      }
+    } else {
+      const res = await updateSessionStmt.run();
+      if (!res.meta.changes || res.meta.changes === 0) {
+        throw new SessionConflictError('Concurrent mutation conflict');
+      }
     }
   }
 
   async clearStyles(
     userId: string,
     workflowToken: string,
-    expectedVersion: number
+    expectedVersion: number,
+    updateId?: number
   ): Promise<void> {
     const now = Date.now();
-    const res = await this.db
+    const updateSessionStmt = this.db
       .prepare(
         `UPDATE telegram_sessions SET
            selected_styles = '[]',
@@ -234,11 +292,25 @@ export class SessionService {
            updated_at = ?
          WHERE user_id = ? AND workflow_token = ? AND status = 'SELECTING_STYLES' AND version = ?`
       )
-      .bind(now, userId, workflowToken, expectedVersion)
-      .run();
+      .bind(now, userId, workflowToken, expectedVersion);
 
-    if (!res.meta.changes || res.meta.changes === 0) {
-      throw new SessionConflictError('Concurrent mutation conflict');
+    if (updateId !== undefined) {
+      const updateLedgerStmt = this.db
+        .prepare(
+          `UPDATE telegram_updates SET status = 'APPLIED', updated_at = ? WHERE update_id = ?`
+        )
+        .bind(now, updateId);
+
+      const results = await this.db.batch([updateSessionStmt, updateLedgerStmt]);
+      const sessionResult = results[0];
+      if (!sessionResult.meta.changes || sessionResult.meta.changes === 0) {
+        throw new SessionConflictError('Concurrent mutation conflict');
+      }
+    } else {
+      const res = await updateSessionStmt.run();
+      if (!res.meta.changes || res.meta.changes === 0) {
+        throw new SessionConflictError('Concurrent mutation conflict');
+      }
     }
   }
 
@@ -246,7 +318,8 @@ export class SessionService {
     userId: string,
     workflowToken: string,
     format: FontFormat,
-    expectedVersion: number
+    expectedVersion: number,
+    updateId?: number
   ): Promise<FontFormat[]> {
     const session = await this.getSessionByUserId(userId);
     if (!session || session.workflow_token !== workflowToken || session.status !== 'SELECTING_FORMATS') {
@@ -267,7 +340,7 @@ export class SessionService {
     }
 
     const now = Date.now();
-    const res = await this.db
+    const updateSessionStmt = this.db
       .prepare(
         `UPDATE telegram_sessions SET
            selected_formats = ?,
@@ -275,11 +348,25 @@ export class SessionService {
            updated_at = ?
          WHERE user_id = ? AND workflow_token = ? AND status = 'SELECTING_FORMATS' AND version = ?`
       )
-      .bind(JSON.stringify(current), now, userId, workflowToken, expectedVersion)
-      .run();
+      .bind(JSON.stringify(current), now, userId, workflowToken, expectedVersion);
 
-    if (!res.meta.changes || res.meta.changes === 0) {
-      throw new SessionConflictError('Concurrent mutation conflict on format selection');
+    if (updateId !== undefined) {
+      const updateLedgerStmt = this.db
+        .prepare(
+          `UPDATE telegram_updates SET status = 'APPLIED', updated_at = ? WHERE update_id = ?`
+        )
+        .bind(now, updateId);
+
+      const results = await this.db.batch([updateSessionStmt, updateLedgerStmt]);
+      const sessionResult = results[0];
+      if (!sessionResult.meta.changes || sessionResult.meta.changes === 0) {
+        throw new SessionConflictError('Concurrent mutation conflict on format selection');
+      }
+    } else {
+      const res = await updateSessionStmt.run();
+      if (!res.meta.changes || res.meta.changes === 0) {
+        throw new SessionConflictError('Concurrent mutation conflict on format selection');
+      }
     }
 
     return current;
@@ -291,7 +378,8 @@ export class SessionService {
     fromStatus: SessionStatus,
     toStatus: SessionStatus,
     expectedVersion: number,
-    lastMessageId?: number
+    lastMessageId?: number,
+    updateId?: number
   ): Promise<void> {
     const now = Date.now();
     const query =
@@ -301,32 +389,46 @@ export class SessionService {
         : `UPDATE telegram_sessions SET status = ?, version = version + 1, updated_at = ?
            WHERE user_id = ? AND workflow_token = ? AND status = ? AND version = ?`;
 
-    const res =
+    const updateSessionStmt =
       lastMessageId !== undefined
-        ? await this.db
+        ? this.db
             .prepare(query)
             .bind(toStatus, lastMessageId, now, userId, workflowToken, fromStatus, expectedVersion)
-            .run()
-        : await this.db
+        : this.db
             .prepare(query)
-            .bind(toStatus, now, userId, workflowToken, fromStatus, expectedVersion)
-            .run();
+            .bind(toStatus, now, userId, workflowToken, fromStatus, expectedVersion);
 
-    if (!res.meta.changes || res.meta.changes === 0) {
-      throw new SessionConflictError(`Cannot transition from ${fromStatus} to ${toStatus}: state conflict`);
+    if (updateId !== undefined) {
+      const updateLedgerStmt = this.db
+        .prepare(
+          `UPDATE telegram_updates SET status = 'APPLIED', updated_at = ? WHERE update_id = ?`
+        )
+        .bind(now, updateId);
+
+      const results = await this.db.batch([updateSessionStmt, updateLedgerStmt]);
+      const sessionResult = results[0];
+      if (!sessionResult.meta.changes || sessionResult.meta.changes === 0) {
+        throw new SessionConflictError(`Cannot transition from ${fromStatus} to ${toStatus}: state conflict`);
+      }
+    } else {
+      const res = await updateSessionStmt.run();
+      if (!res.meta.changes || res.meta.changes === 0) {
+        throw new SessionConflictError(`Cannot transition from ${fromStatus} to ${toStatus}: state conflict`);
+      }
     }
   }
 
   async cancelSession(
     userId: string,
     workflowToken: string,
-    expectedVersion: number
+    expectedVersion: number,
+    updateId?: number
   ): Promise<void> {
     const now = Date.now();
     const newWorkflowToken = generateShortToken();
     const newCheckoutToken = generateCheckoutToken();
 
-    const res = await this.db
+    const updateSessionStmt = this.db
       .prepare(
         `UPDATE telegram_sessions SET
            workflow_token = ?,
@@ -340,11 +442,25 @@ export class SessionService {
            updated_at = ?
          WHERE user_id = ? AND workflow_token = ? AND status IN ('SELECTING_STYLES', 'SELECTING_FORMATS', 'CONFIRMING') AND version = ?`
       )
-      .bind(newWorkflowToken, newCheckoutToken, now, userId, workflowToken, expectedVersion)
-      .run();
+      .bind(newWorkflowToken, newCheckoutToken, now, userId, workflowToken, expectedVersion);
 
-    if (!res.meta.changes || res.meta.changes === 0) {
-      throw new SessionConflictError('Cannot cancel inactive or completed session');
+    if (updateId !== undefined) {
+      const updateLedgerStmt = this.db
+        .prepare(
+          `UPDATE telegram_updates SET status = 'APPLIED', updated_at = ? WHERE update_id = ?`
+        )
+        .bind(now, updateId);
+
+      const results = await this.db.batch([updateSessionStmt, updateLedgerStmt]);
+      const sessionResult = results[0];
+      if (!sessionResult.meta.changes || sessionResult.meta.changes === 0) {
+        throw new SessionConflictError('Cannot cancel inactive or completed session');
+      }
+    } else {
+      const res = await updateSessionStmt.run();
+      if (!res.meta.changes || res.meta.changes === 0) {
+        throw new SessionConflictError('Cannot cancel inactive or completed session');
+      }
     }
   }
 
