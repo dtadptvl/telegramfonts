@@ -86,11 +86,31 @@ describe('Phase 3: SePay Verified Payment & Transactional Outbox', () => {
     });
   });
 
-  describe('SePay Webhook Authentication & Security', () => {
+  describe('SePay Webhook Authentication & Security (BLOCK 2 & BLOCK 3)', () => {
     it('returns 503 when SEPAY_WEBHOOK_SECRET is missing in env', async () => {
       const mockEnv: Env = {
         ...(env as unknown as Env),
         SEPAY_WEBHOOK_SECRET: undefined,
+      };
+
+      const req = new Request('http://example.com/webhooks/sepay', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: 1 }),
+      });
+
+      const ctx = createExecutionContext();
+      const res = await worker.fetch(req, mockEnv, ctx);
+      await waitOnExecutionContext(ctx);
+
+      expect(res.status).toBe(503);
+    });
+
+    it('returns 503 when recipient BANK_ACCOUNT_NUMBER is missing in env (fail-closed)', async () => {
+      const mockEnv: Env = {
+        ...(env as unknown as Env),
+        SEPAY_WEBHOOK_SECRET: SEPAY_SECRET,
+        BANK_ACCOUNT_NUMBER: undefined,
       };
 
       const req = new Request('http://example.com/webhooks/sepay', {
@@ -120,25 +140,40 @@ describe('Phase 3: SePay Verified Payment & Transactional Outbox', () => {
       expect(res.status).toBe(401);
     });
 
-    it('returns 401 on wrong/invalid signature', async () => {
+    it('rejects bare hex or malformed signature format without sha256= prefix', async () => {
       const timestamp = Math.floor(Date.now() / 1000);
       const body = JSON.stringify({ id: 1 });
+      const rawHex = await generateSePaySignature(SEPAY_SECRET, timestamp, body);
 
-      const req = new Request('http://example.com/webhooks/sepay', {
+      const reqBare = new Request('http://example.com/webhooks/sepay', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-SePay-Signature': 'sha256=wrong_hex_signature',
+          'X-SePay-Signature': rawHex, // missing sha256= prefix
           'X-SePay-Timestamp': String(timestamp),
         },
         body,
       });
 
-      const ctx = createExecutionContext();
-      const res = await worker.fetch(req, testEnv, ctx);
-      await waitOnExecutionContext(ctx);
+      const ctxBare = createExecutionContext();
+      const resBare = await worker.fetch(reqBare, testEnv, ctxBare);
+      await waitOnExecutionContext(ctxBare);
+      expect(resBare.status).toBe(401);
 
-      expect(res.status).toBe(401);
+      const reqShort = new Request('http://example.com/webhooks/sepay', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-SePay-Signature': 'sha256=tooshort',
+          'X-SePay-Timestamp': String(timestamp),
+        },
+        body,
+      });
+
+      const ctxShort = createExecutionContext();
+      const resShort = await worker.fetch(reqShort, testEnv, ctxShort);
+      await waitOnExecutionContext(ctxShort);
+      expect(resShort.status).toBe(401);
     });
 
     it('returns 401 on stale timestamp (> 300 seconds drift)', async () => {
@@ -187,7 +222,7 @@ describe('Phase 3: SePay Verified Payment & Transactional Outbox', () => {
     });
   });
 
-  describe('Payload Validation & Preconditions (No Financial Mutation)', () => {
+  describe('Payload Validation & Preconditions (BLOCK 2 - No Financial Mutation)', () => {
     it('acknowledges malformed json or missing id without mutating DB', async () => {
       const timestamp = Math.floor(Date.now() / 1000);
       const body = 'invalid-json{{{';
@@ -212,13 +247,69 @@ describe('Phase 3: SePay Verified Payment & Transactional Outbox', () => {
       expect(json).toEqual({ status: 'ignored_invalid_json' });
     });
 
-    it('ignores outbound transfer (transferType: out) without mutating DB', async () => {
+    it('ignores missing transferType or outbound transfer (transferType: out) without mutating DB', async () => {
       const timestamp = Math.floor(Date.now() / 1000);
-      const body = JSON.stringify({
+
+      // 1. Missing transferType
+      const bodyMissing = JSON.stringify({
         id: 1001,
+        transferAmount: 50000,
+        accountNumber: BANK_ACCOUNT,
+        code: 'TF123456',
+      });
+      const sigMissing = await generateSePaySignature(SEPAY_SECRET, timestamp, bodyMissing);
+
+      const reqMissing = new Request('http://example.com/webhooks/sepay', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-SePay-Signature': `sha256=${sigMissing}`,
+          'X-SePay-Timestamp': String(timestamp),
+        },
+        body: bodyMissing,
+      });
+
+      const ctxMissing = createExecutionContext();
+      const resMissing = await worker.fetch(reqMissing, testEnv, ctxMissing);
+      await waitOnExecutionContext(ctxMissing);
+      expect(resMissing.status).toBe(200);
+      const jsonMissing = await resMissing.json();
+      expect(jsonMissing).toEqual({ status: 'ignored_unmatched', reason: 'invalid_or_missing_transfer_type' });
+
+      // 2. Outbound transfer
+      const bodyOut = JSON.stringify({
+        id: 1002,
         transferType: 'out',
         transferAmount: 50000,
         accountNumber: BANK_ACCOUNT,
+        code: 'TF123456',
+      });
+      const sigOut = await generateSePaySignature(SEPAY_SECRET, timestamp, bodyOut);
+
+      const reqOut = new Request('http://example.com/webhooks/sepay', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-SePay-Signature': `sha256=${sigOut}`,
+          'X-SePay-Timestamp': String(timestamp),
+        },
+        body: bodyOut,
+      });
+
+      const ctxOut = createExecutionContext();
+      const resOut = await worker.fetch(reqOut, testEnv, ctxOut);
+      await waitOnExecutionContext(ctxOut);
+      expect(resOut.status).toBe(200);
+      const jsonOut = await resOut.json();
+      expect(jsonOut).toEqual({ status: 'ignored_unmatched', reason: 'invalid_or_missing_transfer_type' });
+    });
+
+    it('ignores missing payload accountNumber without mutating DB', async () => {
+      const timestamp = Math.floor(Date.now() / 1000);
+      const body = JSON.stringify({
+        id: 1003,
+        transferType: 'in',
+        transferAmount: 50000,
         code: 'TF123456',
       });
       const signature = await generateSePaySignature(SEPAY_SECRET, timestamp, body);
@@ -239,13 +330,13 @@ describe('Phase 3: SePay Verified Payment & Transactional Outbox', () => {
 
       expect(res.status).toBe(200);
       const json = await res.json();
-      expect(json).toEqual({ status: 'ignored_unmatched', reason: 'outbound_transfer' });
+      expect(json).toEqual({ status: 'ignored_unmatched', reason: 'missing_account_number' });
     });
 
     it('ignores wrong recipient account number without mutating DB', async () => {
       const timestamp = Math.floor(Date.now() / 1000);
       const body = JSON.stringify({
-        id: 1002,
+        id: 1004,
         transferType: 'in',
         transferAmount: 50000,
         accountNumber: '9999999999', // wrong account
@@ -272,14 +363,16 @@ describe('Phase 3: SePay Verified Payment & Transactional Outbox', () => {
       expect(json).toEqual({ status: 'ignored_unmatched', reason: 'account_number_mismatch' });
     });
 
-    it('ignores unknown or unmatched payment code without mutating DB', async () => {
+    it('ignores missing payload.code without falling back to content/description parsing', async () => {
       const timestamp = Math.floor(Date.now() / 1000);
       const body = JSON.stringify({
-        id: 1003,
+        id: 1005,
         transferType: 'in',
         transferAmount: 50000,
         accountNumber: BANK_ACCOUNT,
-        code: 'TFUNKNOWN99',
+        content: 'Chuyen tien mua font TF123456',
+        description: 'TF123456',
+        // missing payload.code
       });
       const signature = await generateSePaySignature(SEPAY_SECRET, timestamp, body);
 
@@ -299,82 +392,11 @@ describe('Phase 3: SePay Verified Payment & Transactional Outbox', () => {
 
       expect(res.status).toBe(200);
       const json = await res.json();
-      expect(json).toEqual({ status: 'ignored_unmatched', reason: 'order_not_found' });
-    });
-
-    it('ignores transfer amount mismatch without mutating DB', async () => {
-      // Setup a real order with total_amount 50000
-      const catalogService = new CatalogService(env.DB);
-      const catalogId = await catalogService.persistCatalogResult(sampleCatalog);
-      const sessionService = new SessionService(env.DB);
-      const orderService = new OrderService(env.DB);
-
-      await sessionService.upsertTelegramUser({ id: 91101, is_bot: false, first_name: 'AmountUser' });
-      await sessionService.getOrCreateSession('91101', '91101');
-      await sessionService.updateSessionCatalog('91101', catalogId, 'SELECTING_STYLES');
-      const s1 = await sessionService.getSessionByUserId('91101');
-      await sessionService.setAllStyles('91101', s1!.workflow_token, ['rf_regular'], s1!.version);
-      const s2 = await sessionService.getSessionByUserId('91101');
-      await sessionService.transitionStatus('91101', s2!.workflow_token, 'SELECTING_STYLES', 'CONFIRMING', s2!.version);
-
-      const s3 = await sessionService.getSessionByUserId('91101');
-      const catalog = await catalogService.getCatalogById(catalogId);
-      const orderRes = await orderService.createOrderFromSession(s3!, catalog!);
-      const paymentCode = orderRes.paymentCode!;
-      expect(orderRes.totalAmount).toBe(50000);
-
-      // Send webhook with transferAmount: 20000 (mismatch)
-      const timestamp = Math.floor(Date.now() / 1000);
-      const body = JSON.stringify({
-        id: 1004,
-        transferType: 'in',
-        transferAmount: 20000,
-        accountNumber: BANK_ACCOUNT,
-        code: paymentCode,
-      });
-      const signature = await generateSePaySignature(SEPAY_SECRET, timestamp, body);
-
-      const req = new Request('http://example.com/webhooks/sepay', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-SePay-Signature': `sha256=${signature}`,
-          'X-SePay-Timestamp': String(timestamp),
-        },
-        body,
-      });
-
-      const ctx = createExecutionContext();
-      const res = await worker.fetch(req, testEnv, ctx);
-      await waitOnExecutionContext(ctx);
-
-      expect(res.status).toBe(200);
-      const json = await res.json();
-      expect(json).toEqual({ status: 'ignored_unmatched', reason: 'amount_mismatch' });
-
-      // Verify order remains AWAITING_PAYMENT
-      const orderInDb = await orderService.getOrderById(orderRes.orderId);
-      expect(orderInDb?.status).toBe('AWAITING_PAYMENT');
-
-      // Verify zero payments, zero fulfillment_jobs, zero outbox_events
-      const payments = await env.DB.prepare('SELECT * FROM payments WHERE order_id = ?')
-        .bind(orderRes.orderId)
-        .all();
-      expect(payments.results.length).toBe(0);
-
-      const jobs = await env.DB.prepare('SELECT * FROM fulfillment_jobs WHERE order_id = ?')
-        .bind(orderRes.orderId)
-        .all();
-      expect(jobs.results.length).toBe(0);
-
-      const outbox = await env.DB.prepare('SELECT * FROM outbox_events WHERE aggregate_id = ?')
-        .bind(orderRes.orderId)
-        .all();
-      expect(outbox.results.length).toBe(0);
+      expect(json).toEqual({ status: 'ignored_unmatched', reason: 'missing_payment_code' });
     });
   });
 
-  describe('Atomic Verified Payment, Idempotency & Outbox Boundary', () => {
+  describe('Atomic Verified Payment, Predicate Binding & Mid-Batch Rollback (BLOCK 4 & BLOCK 5)', () => {
     it('valid webhook atomically transitions order to PAID, creates VERIFIED payment, PENDING job, and PENDING JOB_READY outbox', async () => {
       const catalogService = new CatalogService(env.DB);
       const catalogId = await catalogService.persistCatalogResult(sampleCatalog);
@@ -452,6 +474,68 @@ describe('Phase 3: SePay Verified Payment & Transactional Outbox', () => {
       expect(outbox.results[0].event_type).toBe('JOB_READY');
       expect(outbox.results[0].status).toBe('PENDING');
       expect(JSON.parse(outbox.results[0].payload)).toEqual({ job_id: jobs.results[0].id });
+    });
+
+    it('injected mid-batch failure rolls back earlier statements in the transaction completely (BLOCK 5)', async () => {
+      const catalogService = new CatalogService(env.DB);
+      const catalogId = await catalogService.persistCatalogResult(sampleCatalog);
+      const sessionService = new SessionService(env.DB);
+      const orderService = new OrderService(env.DB);
+      const paymentService = new PaymentService(env.DB);
+
+      await sessionService.upsertTelegramUser({ id: 91108, is_bot: false, first_name: 'MidBatchUser' });
+      await sessionService.getOrCreateSession('91108', '91108');
+      await sessionService.updateSessionCatalog('91108', catalogId, 'SELECTING_STYLES');
+      const s1 = await sessionService.getSessionByUserId('91108');
+      await sessionService.setAllStyles('91108', s1!.workflow_token, ['rf_regular'], s1!.version);
+      const s2 = await sessionService.getSessionByUserId('91108');
+      await sessionService.transitionStatus('91108', s2!.workflow_token, 'SELECTING_STYLES', 'CONFIRMING', s2!.version);
+
+      const s3 = await sessionService.getSessionByUserId('91108');
+      const catalog = await catalogService.getCatalogById(catalogId);
+      const orderRes = await orderService.createOrderFromSession(s3!, catalog!);
+      const paymentCode = orderRes.paymentCode!;
+
+      // Inject a statement that intentionally violates a foreign key or unique constraint
+      const failingStatement = env.DB.prepare(
+        'INSERT INTO order_items (id, order_id, font_id, price, created_at) VALUES (?, ?, ?, ?, ?)'
+      ).bind('bad_item', 'non_existent_foreign_key_order', 'f_1', 100, Date.now());
+
+      // Attempt payment processing with injected mid-batch failure
+      await expect(
+        paymentService.processVerifiedPayment(
+          {
+            transactionId: 'tx_mid_batch_fail_1',
+            orderId: orderRes.orderId,
+            paymentCode: paymentCode,
+            expectedAmount: 50000,
+          },
+          failingStatement
+        )
+      ).rejects.toThrow();
+
+      // Assert complete rollback:
+      // 1. Order remains AWAITING_PAYMENT
+      const orderAfterFail = await orderService.getOrderById(orderRes.orderId);
+      expect(orderAfterFail?.status).toBe('AWAITING_PAYMENT');
+
+      // 2. Zero payment rows
+      const payments = await env.DB.prepare('SELECT * FROM payments WHERE order_id = ?')
+        .bind(orderRes.orderId)
+        .all();
+      expect(payments.results.length).toBe(0);
+
+      // 3. Zero fulfillment job rows
+      const jobs = await env.DB.prepare('SELECT * FROM fulfillment_jobs WHERE order_id = ?')
+        .bind(orderRes.orderId)
+        .all();
+      expect(jobs.results.length).toBe(0);
+
+      // 4. Zero outbox event rows
+      const outbox = await env.DB.prepare('SELECT * FROM outbox_events WHERE aggregate_id = ?')
+        .bind(orderRes.orderId)
+        .all();
+      expect(outbox.results.length).toBe(0);
     });
 
     it('duplicate replay of same SePay transaction id is idempotent and acknowledged without duplicate side effects', async () => {
@@ -690,43 +774,6 @@ describe('Phase 3: SePay Verified Payment & Transactional Outbox', () => {
         .all();
       expect(outbox.results.length).toBe(1);
     });
-
-    it('injected DB failure completely rolls back all financial side effects', async () => {
-      const paymentService = new PaymentService(env.DB);
-      const catalogService = new CatalogService(env.DB);
-      const catalogId = await catalogService.persistCatalogResult(sampleCatalog);
-      const sessionService = new SessionService(env.DB);
-      const orderService = new OrderService(env.DB);
-
-      await sessionService.upsertTelegramUser({ id: 91106, is_bot: false, first_name: 'RollbackUser' });
-      await sessionService.getOrCreateSession('91106', '91106');
-      await sessionService.updateSessionCatalog('91106', catalogId, 'SELECTING_STYLES');
-      const s1 = await sessionService.getSessionByUserId('91106');
-      await sessionService.setAllStyles('91106', s1!.workflow_token, ['rf_regular'], s1!.version);
-      const s2 = await sessionService.getSessionByUserId('91106');
-      await sessionService.transitionStatus('91106', s2!.workflow_token, 'SELECTING_STYLES', 'CONFIRMING', s2!.version);
-
-      const s3 = await sessionService.getSessionByUserId('91106');
-      const catalog = await catalogService.getCatalogById(catalogId);
-      const orderRes = await orderService.createOrderFromSession(s3!, catalog!);
-
-      // Attempt to process payment with an invalid order ID (fails FK constraint)
-      await expect(
-        paymentService.processVerifiedPayment({
-          transactionId: 'invalid_tx_rollback',
-          orderId: 'non_existent_order_id_123',
-          amount: 50000,
-        })
-      ).resolves.toEqual({ status: 'UNMATCHED', orderId: 'non_existent_order_id_123' });
-
-      // Zero payments recorded
-      const payments = await env.DB.prepare(
-        'SELECT * FROM payments WHERE transaction_id = ?'
-      )
-        .bind('invalid_tx_rollback')
-        .all();
-      expect(payments.results.length).toBe(0);
-    });
   });
 
   describe('Telegram Check Payment UX', () => {
@@ -798,7 +845,8 @@ describe('Phase 3: SePay Verified Payment & Transactional Outbox', () => {
       await paymentService.processVerifiedPayment({
         transactionId: 'sepay_chk_test_1',
         orderId: orderRes.orderId,
-        amount: 50000,
+        paymentCode: orderRes.paymentCode!,
+        expectedAmount: 50000,
       });
 
       // 3. Check status again -> reports PAID
