@@ -10,7 +10,7 @@
     {
       "binding": "DB",
       "database_name": "telegramfonts-d1",
-      "database_id": "telegramfonts-d1-placeholder",
+      "database_id": "4ab4ab25-37cc-4044-acc9-66fc98b9f831",
       "migrations_dir": "migrations"
     }
   ],
@@ -32,5 +32,11 @@
     "crons": [
       "* * * * *"
     ]
+  },
+  "vars": {
+    "BASE_URL": "https://telegramfonts-edge.dienluanphien98.workers.dev",
+    "BANK_ID": "970422",
+    "BANK_ACCOUNT_NUMBER": "0123456789",
+    "BANK_ACCOUNT_NAME": "TELEGRAMFONTS"
   }
 }
