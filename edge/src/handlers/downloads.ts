@@ -1,5 +1,6 @@
 import type { Env } from '../env';
 import { verifyDownloadSignature } from '../utils/download-signer';
+import { emitStructuredLog } from '../utils/logger';
 
 export async function handleDownload(
   request: Request,
@@ -98,6 +99,12 @@ export async function handleDownload(
     headers.set('ETag', object.httpEtag);
   }
   headers.set('Cache-Control', 'private, no-transform, max-age=3600');
+
+  emitStructuredLog({
+    event: 'download_served',
+    order_id: orderId,
+    size_bytes: object.size,
+  });
 
   return new Response(object.body, {
     status: 200,

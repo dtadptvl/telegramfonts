@@ -2,7 +2,7 @@
  * Release Preflight Validator for TelegramFonts.
  *
  * Deterministically verifies runtime configuration names, binding definitions,
- * and parameter boundaries without logging or exposing sensitive secret values.
+ * payment settings, and parameter boundaries without logging or exposing sensitive secret values.
  */
 
 export interface PreflightCheckResult {
@@ -183,6 +183,17 @@ export function validateEdgeEnvVars(
     });
   }
 
+  // Payment configuration (Bank ID & Account)
+  const bankId = envVars.BANK_ID?.trim();
+  const bankAccount = envVars.BANK_ACCOUNT_NUMBER?.trim();
+  const bankPresent = Boolean(bankId && bankAccount);
+  results.push({
+    category: 'Edge Payment Vars',
+    name: 'VietQR Bank Configuration (BANK_ID & BANK_ACCOUNT_NUMBER)',
+    passed: bankPresent,
+    message: bankPresent ? `Bank [${bankId}] Account configured (redacted)` : 'Missing BANK_ID or BANK_ACCOUNT_NUMBER',
+  });
+
   // Base URL validation
   const baseUrl = envVars.BASE_URL?.trim();
   if (!baseUrl) {
@@ -299,14 +310,14 @@ export function validateAgentConfig(config: AgentConfigInput): PreflightCheckRes
     });
   }
 
-  // Queue pull batch size
+  // Queue pull batch size (agent max is 10)
   const batchSize = parseInt(String(config.PULL_BATCH_SIZE || 1), 10);
-  const validBatch = !Number.isNaN(batchSize) && batchSize >= 1 && batchSize <= 100;
+  const validBatch = !Number.isNaN(batchSize) && batchSize >= 1 && batchSize <= 10;
   results.push({
     category: 'Agent Queue Boundaries',
-    name: 'PULL_BATCH_SIZE',
+    name: 'PULL_BATCH_SIZE (1..10)',
     passed: validBatch,
-    message: validBatch ? `${batchSize} msgs/pull (Cloudflare max: 100)` : 'Must be between 1 and 100',
+    message: validBatch ? `${batchSize} msgs/pull (app cap: 10)` : 'Must be between 1 and 10',
   });
 
   // Visibility Timeout vs Lease Duration
@@ -317,7 +328,7 @@ export function validateAgentConfig(config: AgentConfigInput): PreflightCheckRes
   const validVisMax = !Number.isNaN(visMs) && visMs >= 10000 && visMs <= 43200000; // max 12 hours
   results.push({
     category: 'Agent Queue Boundaries',
-    name: 'VISIBILITY_TIMEOUT_MS Bound',
+    name: 'VISIBILITY_TIMEOUT_MS Bound (10s..12h)',
     passed: validVisMax,
     message: validVisMax ? `${visMs}ms (Cloudflare max: 12h / 43,200,000ms)` : 'Must be between 10,000 and 43,200,000 ms',
   });
@@ -332,14 +343,16 @@ export function validateAgentConfig(config: AgentConfigInput): PreflightCheckRes
       : `Visibility (${visMs}ms) is shorter than Lease (${leaseSec * 1000}ms); risk of premature redelivery`,
   });
 
-  const hbLtLease = hbSec < leaseSec;
+  // Heartbeat must be strictly less than lease duration with at least 15s safety margin
+  const hbMargin = leaseSec - hbSec;
+  const hbSafe = hbSec > 0 && hbMargin >= 15;
   results.push({
     category: 'Agent Lease Boundaries',
-    name: 'Heartbeat < Lease Duration',
-    passed: hbLtLease,
-    message: hbLtLease
-      ? `Heartbeat (${hbSec}s) < Lease (${leaseSec}s)`
-      : `Heartbeat (${hbSec}s) >= Lease (${leaseSec}s); lease would expire between heartbeats`,
+    name: 'Heartbeat Safety Margin (>= 15s)',
+    passed: hbSafe,
+    message: hbSafe
+      ? `Heartbeat (${hbSec}s) provides ${hbMargin}s safety margin before lease expiry (${leaseSec}s)`
+      : `Heartbeat (${hbSec}s) leaves insufficient safety margin (${hbMargin}s < 15s) for lease (${leaseSec}s)`,
   });
 
   return results;

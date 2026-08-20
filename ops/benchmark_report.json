@@ -1,11 +1,15 @@
 {
-  "git_sha": "78ee3766ba7538f06622947cae7dc26943bdd393",
-  "timestamp": "2026-08-20T16:02:41Z",
+  "git_sha": "d7c5adf8ec1cd5f78a080b87326a754727a18fc7",
+  "git_is_dirty": true,
+  "timestamp": "2026-08-20T16:24:22Z",
   "is_production_proof": false,
-  "platform_info": {
+  "is_valid": true,
+  "device_identity": {
+    "hostname": "DESKTOP-1GIB12N",
     "os": "Windows",
     "os_release": "10",
     "architecture": "AMD64",
+    "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel",
     "python_version": "3.14.6",
     "cpu_count": 12
   },
@@ -22,30 +26,33 @@
   "samples_count": 5,
   "success_count": 5,
   "failure_count": 0,
-  "p50_total_ms": 1394.59,
-  "p95_total_ms": 1442.23,
-  "min_total_ms": 1369.27,
-  "max_total_ms": 1451.24,
-  "mean_total_ms": 1401.08,
+  "p50_total_ms": 1518.48,
+  "p95_total_ms": 1587.16,
+  "min_total_ms": 1486.78,
+  "max_total_ms": 1602.56,
+  "mean_total_ms": 1526.87,
   "p95_stage_ms": {
-    "acquire_ms": 1321.88,
-    "build_ms": 123.98,
-    "package_ms": 2.52
+    "acquire_ms": 1469.08,
+    "build_ms": 121.39,
+    "validate_ms": 2.92,
+    "package_ms": 2.44
   },
-  "avg_artifact_size_bytes": 4920,
+  "avg_artifact_size_bytes": 4918,
   "peak_rss_mb": 0.0,
   "capacity_model": {
+    "status": "VALID",
     "target_1000_jobs_day": {
       "arrival_rate_sec": 86.4,
       "required_consumers": 1,
-      "steady_state_utilization_at_1_worker": 1.67
+      "steady_state_utilization_at_1_worker": 1.84
     },
     "target_500_jobs_day": {
       "arrival_rate_sec": 172.8,
       "required_consumers": 1,
-      "steady_state_utilization_at_1_worker": 0.83
+      "steady_state_utilization_at_1_worker": 0.92
     },
-    "daily_capacity_per_consumer_at_60pct_utilization": 35944
+    "daily_capacity_per_consumer_at_60pct_utilization": 32662
   },
+  "error_summary": null,
   "disclaimer": "NOTE: This benchmark is a development/CI environment execution. Per Issue #16 policy, production capacity proof requires execution on a physical A23 Android/ARM64 device."
 }

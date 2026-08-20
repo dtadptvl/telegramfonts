@@ -1,7 +1,8 @@
 """A23 Compute Pipeline Capacity Benchmark Harness.
 
 Measures local compute performance across font reconstruction (TTF, OTF, WOFF2),
-ZIP packaging, and calculates conservative consumer dimensioning for 500 & 1000 jobs/day.
+production font validation, ZIP packaging, and calculates conservative consumer dimensioning
+for 500 & 1000 jobs/day.
 
 Usage:
     python agent/src/benchmark.py [--samples 10] [--styles 2] [--json-out report.json]
@@ -30,10 +31,13 @@ from compute.font_builder import FontBuilderService
 from compute.models import ClaimStyle, GeneratedFontFile, StagedManifest
 from compute.packager import PackagerService
 from compute.source import SourceAcquirer
+from compute.validator import validate_font_file
 
 
-def get_git_sha() -> str:
-    """Resolve current git commit SHA if available."""
+def get_git_metadata() -> dict[str, Any]:
+    """Resolve current git commit SHA and dirty state."""
+    sha = "unknown"
+    is_dirty = False
     try:
         res = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -43,10 +47,49 @@ def get_git_sha() -> str:
             check=False,
         )
         if res.returncode == 0:
-            return res.stdout.strip()
+            sha = res.stdout.strip()
+
+        status_res = subprocess.run(
+            ["git", "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+        if status_res.returncode == 0:
+            is_dirty = len(status_res.stdout.strip()) > 0
     except Exception:
         pass
-    return os.environ.get("GIT_SHA", "unknown")
+
+    if sha == "unknown":
+        sha = os.environ.get("GIT_SHA", "unknown")
+
+    return {"git_sha": sha, "git_is_dirty": is_dirty}
+
+
+def get_device_identity() -> dict[str, Any]:
+    """Resolve hardware and OS device identity details."""
+    cpu_model = platform.processor() or "unknown"
+    if sys.platform != "win32":
+        try:
+            cpuinfo = Path("/proc/cpuinfo")
+            if cpuinfo.exists():
+                for line in cpuinfo.read_text(encoding="utf-8", errors="ignore").splitlines():
+                    if "model name" in line or "Hardware" in line or "Processor" in line:
+                        cpu_model = line.split(":", 1)[1].strip()
+                        break
+        except Exception:
+            pass
+
+    return {
+        "hostname": platform.node(),
+        "os": platform.system(),
+        "os_release": platform.release(),
+        "architecture": platform.machine(),
+        "processor": cpu_model,
+        "python_version": platform.python_version(),
+        "cpu_count": os.cpu_count() or 1,
+    }
 
 
 def get_peak_rss_mb() -> float:
@@ -108,6 +151,7 @@ def make_representative_preview_bytes() -> bytes:
 class IterationResult:
     acquire_time_ms: float
     build_time_ms: float
+    validate_time_ms: float
     package_time_ms: float
     total_time_ms: float
     artifact_size_bytes: int
@@ -118,9 +162,11 @@ class IterationResult:
 @dataclass
 class BenchmarkReport:
     git_sha: str
+    git_is_dirty: bool
     timestamp: str
     is_production_proof: bool
-    platform_info: dict[str, Any]
+    is_valid: bool
+    device_identity: dict[str, Any]
     config: dict[str, Any]
     samples_count: int
     success_count: int
@@ -133,7 +179,8 @@ class BenchmarkReport:
     p95_stage_ms: dict[str, float]
     avg_artifact_size_bytes: int
     peak_rss_mb: float
-    capacity_model: dict[str, Any]
+    capacity_model: dict[str, Any] | None
+    error_summary: str | None
     disclaimer: str
 
 
@@ -190,7 +237,15 @@ async def run_single_iteration(
                 built_files.append(font_file)
         t_bld_ms = (time.perf_counter() - t_bld_start) * 1000
 
-        # 3. Package
+        # 3. Production Font Validation
+        t_val_start = time.perf_counter()
+        for font_file in built_files:
+            is_valid_font = validate_font_file(font_file.file_path, font_file.format)
+            if not is_valid_font:
+                raise ValueError(f"Font validation failed for {font_file.filename}")
+        t_val_ms = (time.perf_counter() - t_val_start) * 1000
+
+        # 4. Deterministic Packaging
         t_pkg_start = time.perf_counter()
         staged_manifest = packager.package_job_output(
             job_id=job_id,
@@ -206,6 +261,7 @@ async def run_single_iteration(
         return IterationResult(
             acquire_time_ms=t_acq_ms,
             build_time_ms=t_bld_ms,
+            validate_time_ms=t_val_ms,
             package_time_ms=t_pkg_ms,
             total_time_ms=t_tot_ms,
             artifact_size_bytes=artifact_size,
@@ -216,6 +272,7 @@ async def run_single_iteration(
         return IterationResult(
             acquire_time_ms=0.0,
             build_time_ms=0.0,
+            validate_time_ms=0.0,
             package_time_ms=0.0,
             total_time_ms=t_tot_ms,
             artifact_size_bytes=0,
@@ -241,14 +298,25 @@ async def run_benchmark(
     style_count: int = 2,
     formats: list[str] | None = None,
 ) -> BenchmarkReport:
+    if sample_count < 1:
+        raise ValueError("sample_count must be >= 1")
+    if style_count < 1:
+        raise ValueError("style_count must be >= 1")
+
     if formats is None:
         formats = ["TTF", "OTF", "WOFF2"]
+    for f in formats:
+        if f.upper() not in ("TTF", "OTF", "WOFF", "WOFF2"):
+            raise ValueError(f"Unsupported format in benchmark: {f}")
+
+    git_meta = get_git_metadata()
+    device_meta = get_device_identity()
 
     preview_bytes = make_representative_preview_bytes()
     style_names = ["Regular", "Bold", "Italic", "Light"]
     claim_styles = [
-        ClaimStyle(id=f"style_{i+1}", display_name=style_names[i])
-        for i in range(min(style_count, len(style_names)))
+        ClaimStyle(id=f"style_{i+1}", display_name=style_names[i % len(style_names)])
+        for i in range(style_count)
     ]
 
     source_acquirer = SourceAcquirer()
@@ -271,12 +339,19 @@ async def run_benchmark(
             results.append(res)
 
     successful = [r for r in results if r.success]
+    failures = [r for r in results if not r.success]
     success_count = len(successful)
-    failure_count = len(results) - success_count
+    failure_count = len(failures)
+
+    is_valid = failure_count == 0 and success_count > 0
+    error_summary = None
+    if failure_count > 0:
+        error_summary = f"{failure_count} sample(s) failed: {', '.join(f.error or 'unknown' for f in failures[:3])}"
 
     total_times = [r.total_time_ms for r in successful]
     acq_times = [r.acquire_time_ms for r in successful]
     bld_times = [r.build_time_ms for r in successful]
+    val_times = [r.validate_time_ms for r in successful]
     pkg_times = [r.package_time_ms for r in successful]
     sizes = [r.artifact_size_bytes for r in successful]
 
@@ -288,58 +363,27 @@ async def run_benchmark(
 
     p95_acq = calculate_percentile(acq_times, 95)
     p95_bld = calculate_percentile(bld_times, 95)
+    p95_val = calculate_percentile(val_times, 95)
     p95_pkg = calculate_percentile(pkg_times, 95)
     avg_size = int(sum(sizes) / len(sizes)) if sizes else 0
 
-    # Capacity Model Calculation:
-    # Target 1: 1000 jobs/day = 1000/86400 jobs/sec (1 job every 86.4s)
-    # Target 2: 500 jobs/day = 500/86400 jobs/sec (1 job every 172.8s)
-    # Max steady-state utilization: 60% (0.60)
-    # N = ceil((arrival_rate) * p95_seconds / max_utilization), min 1
-    p95_seconds = p95_total / 1000.0
-    arrival_1000 = 1000.0 / 86400.0
-    arrival_500 = 500.0 / 86400.0
-    max_utilization = 0.60
-
-    req_consumers_1000 = max(1, math.ceil((arrival_1000 * p95_seconds) / max_utilization))
-    req_consumers_500 = max(1, math.ceil((arrival_500 * p95_seconds) / max_utilization))
-    daily_cap_per_consumer = math.floor((86400.0 * max_utilization) / max(0.001, p95_seconds))
-
     peak_rss = get_peak_rss_mb()
 
-    return BenchmarkReport(
-        git_sha=get_git_sha(),
-        timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        is_production_proof=False,
-        platform_info={
-            "os": platform.system(),
-            "os_release": platform.release(),
-            "architecture": platform.machine(),
-            "python_version": platform.python_version(),
-            "cpu_count": os.cpu_count() or 1,
-        },
-        config={
-            "styles_per_job": style_count,
-            "formats_per_style": formats,
-            "total_fonts_per_job": style_count * len(formats),
-            "target_utilization_max": max_utilization,
-        },
-        samples_count=sample_count,
-        success_count=success_count,
-        failure_count=failure_count,
-        p50_total_ms=round(p50_total, 2),
-        p95_total_ms=round(p95_total, 2),
-        min_total_ms=round(min_total, 2),
-        max_total_ms=round(max_total, 2),
-        mean_total_ms=round(mean_total, 2),
-        p95_stage_ms={
-            "acquire_ms": round(p95_acq, 2),
-            "build_ms": round(p95_bld, 2),
-            "package_ms": round(p95_pkg, 2),
-        },
-        avg_artifact_size_bytes=avg_size,
-        peak_rss_mb=round(peak_rss, 2),
-        capacity_model={
+    # Capacity Model Calculation:
+    # Only emit a valid capacity model when all samples succeeded!
+    capacity_model: dict[str, Any] | None = None
+    if is_valid:
+        p95_seconds = p95_total / 1000.0
+        arrival_1000 = 1000.0 / 86400.0
+        arrival_500 = 500.0 / 86400.0
+        max_utilization = 0.60
+
+        req_consumers_1000 = max(1, math.ceil((arrival_1000 * p95_seconds) / max_utilization))
+        req_consumers_500 = max(1, math.ceil((arrival_500 * p95_seconds) / max_utilization))
+        daily_cap_per_consumer = math.floor((86400.0 * max_utilization) / max(0.001, p95_seconds))
+
+        capacity_model = {
+            "status": "VALID",
             "target_1000_jobs_day": {
                 "arrival_rate_sec": round(86400.0 / 1000.0, 1),
                 "required_consumers": req_consumers_1000,
@@ -355,7 +399,39 @@ async def run_benchmark(
                 ),
             },
             "daily_capacity_per_consumer_at_60pct_utilization": daily_cap_per_consumer,
+        }
+
+    return BenchmarkReport(
+        git_sha=git_meta["git_sha"],
+        git_is_dirty=git_meta["git_is_dirty"],
+        timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        is_production_proof=False,
+        is_valid=is_valid,
+        device_identity=device_meta,
+        config={
+            "styles_per_job": style_count,
+            "formats_per_style": formats,
+            "total_fonts_per_job": style_count * len(formats),
+            "target_utilization_max": 0.60,
         },
+        samples_count=sample_count,
+        success_count=success_count,
+        failure_count=failure_count,
+        p50_total_ms=round(p50_total, 2),
+        p95_total_ms=round(p95_total, 2),
+        min_total_ms=round(min_total, 2),
+        max_total_ms=round(max_total, 2),
+        mean_total_ms=round(mean_total, 2),
+        p95_stage_ms={
+            "acquire_ms": round(p95_acq, 2),
+            "build_ms": round(p95_bld, 2),
+            "validate_ms": round(p95_val, 2),
+            "package_ms": round(p95_pkg, 2),
+        },
+        avg_artifact_size_bytes=avg_size,
+        peak_rss_mb=round(peak_rss, 2),
+        capacity_model=capacity_model,
+        error_summary=error_summary,
         disclaimer=(
             "NOTE: This benchmark is a development/CI environment execution. Per Issue #16 policy, "
             "production capacity proof requires execution on a physical A23 Android/ARM64 device."
@@ -367,13 +443,25 @@ def print_human_summary(report: BenchmarkReport) -> None:
     print("\n============================================================")
     print("  TelegramFonts A23 Compute Pipeline Capacity Benchmark")
     print("============================================================")
-    print(f"Git SHA:         {report.git_sha}")
-    print(f"Platform:        {report.platform_info['os']} {report.platform_info['architecture']} (Python {report.platform_info['python_version']})")
-    print(f"CPUs:            {report.platform_info['cpu_count']}")
+    dirty_tag = " (DIRTY)" if report.git_is_dirty else " (CLEAN)"
+    print(f"Git SHA:         {report.git_sha}{dirty_tag}")
+    dev = report.device_identity
+    print(f"Platform:        {dev['os']} {dev['architecture']} ({dev['processor']}) [Python {dev['python_version']}]")
+    print(f"CPUs:            {dev['cpu_count']}")
     print(f"Workload:        {report.config['styles_per_job']} styles x {len(report.config['formats_per_style'])} formats = {report.config['total_fonts_per_job']} font binaries/job")
     print(f"Samples:         {report.samples_count} ({report.success_count} success, {report.failure_count} failed)")
     print(f"Peak RSS:        {report.peak_rss_mb:.2f} MB")
     print("------------------------------------------------------------")
+
+    if not report.is_valid:
+        print("  BENCHMARK STATUS: FAILED")
+        print(f"  Error: {report.error_summary}")
+        print("  Capacity model invalidated due to sample failures.")
+        print("------------------------------------------------------------")
+        print(f"[DISCLAIMER] {report.disclaimer}")
+        print("============================================================\n")
+        return
+
     print("  Latency Timings (End-to-End Compute & Packaging)")
     print("------------------------------------------------------------")
     print(f"  p50 (Median):  {report.p50_total_ms:.2f} ms ({report.p50_total_ms / 1000:.3f} s)")
@@ -385,17 +473,19 @@ def print_human_summary(report: BenchmarkReport) -> None:
     print("------------------------------------------------------------")
     print(f"  Acquisition:   {report.p95_stage_ms['acquire_ms']:.2f} ms")
     print(f"  Font Build:    {report.p95_stage_ms['build_ms']:.2f} ms")
+    print(f"  Validation:    {report.p95_stage_ms['validate_ms']:.2f} ms")
     print(f"  ZIP Package:   {report.p95_stage_ms['package_ms']:.2f} ms")
     print(f"  Avg ZIP Size:  {report.avg_artifact_size_bytes:,} bytes")
     print("------------------------------------------------------------")
     print("  Conservative Capacity Model (Target Utilization <= 60%)")
     print("------------------------------------------------------------")
     cm = report.capacity_model
-    t1000 = cm["target_1000_jobs_day"]
-    t500 = cm["target_500_jobs_day"]
-    print(f"  1000 jobs/day (1 job / {t1000['arrival_rate_sec']}s):  Requires {t1000['required_consumers']} consumer(s) (util: {t1000['steady_state_utilization_at_1_worker']:.2f}%)")
-    print(f"  500 jobs/day  (1 job / {t500['arrival_rate_sec']}s):  Requires {t500['required_consumers']} consumer(s) (util: {t500['steady_state_utilization_at_1_worker']:.2f}%)")
-    print(f"  Single-consumer capacity (@ 60% util): ~{cm['daily_capacity_per_consumer_at_60pct_utilization']:,} jobs/day")
+    if cm:
+        t1000 = cm["target_1000_jobs_day"]
+        t500 = cm["target_500_jobs_day"]
+        print(f"  1000 jobs/day (1 job / {t1000['arrival_rate_sec']}s):  Requires {t1000['required_consumers']} consumer(s) (util: {t1000['steady_state_utilization_at_1_worker']:.2f}%)")
+        print(f"  500 jobs/day  (1 job / {t500['arrival_rate_sec']}s):  Requires {t500['required_consumers']} consumer(s) (util: {t500['steady_state_utilization_at_1_worker']:.2f}%)")
+        print(f"  Single-consumer capacity (@ 60% util): ~{cm['daily_capacity_per_consumer_at_60pct_utilization']:,} jobs/day")
     print("------------------------------------------------------------")
     print(f"[DISCLAIMER] {report.disclaimer}")
     print("============================================================\n")
@@ -420,6 +510,9 @@ def main() -> None:
         out_p.parent.mkdir(parents=True, exist_ok=True)
         out_p.write_text(json.dumps(asdict(report), indent=2), encoding="utf-8")
         print(f"Machine-readable benchmark report written to {out_p}")
+
+    if not report.is_valid:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
