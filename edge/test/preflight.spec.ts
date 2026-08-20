@@ -6,6 +6,7 @@ import {
   runFullPreflight,
   type WranglerConfig,
 } from '../src/utils/preflight';
+import { runPreflightCheck } from '../../scripts/preflight.mjs';
 
 describe('Phase 7: Release Preflight Validation', () => {
   const validWrangler: WranglerConfig = {
@@ -85,6 +86,8 @@ describe('Phase 7: Release Preflight Validation', () => {
       SEPAY_WEBHOOK_SECRET: 'secret_789',
       A23_NODE_SECRET: 'secret_node',
       DOWNLOAD_SIGNING_SECRET: 'secret_sign',
+      BANK_ID: '970422',
+      BANK_ACCOUNT_NUMBER: '1234567890',
       BASE_URL: 'https://telefont.example.com',
       DOWNLOAD_URL_TTL_SECONDS: '86400',
       A23_JOB_LEASE_SECONDS: '300',
@@ -95,12 +98,28 @@ describe('Phase 7: Release Preflight Validation', () => {
 
     // Verify secret values are not printed in result messages
     for (const r of results) {
-      if (r.name.includes('Secret')) {
+      if (r.name.includes('Secret') || r.name.includes('Bank')) {
         expect(r.message).not.toContain('secret_123');
         expect(r.message).not.toContain('secret_456');
         expect(r.message).not.toContain('secret_789');
+        expect(r.message).not.toContain('1234567890');
       }
     }
+  });
+
+  it('fails Edge environment validation when BANK_ID or BANK_ACCOUNT_NUMBER is missing', () => {
+    const invalidEnv = {
+      TELEGRAM_BOT_TOKEN: 'secret_123',
+      TELEGRAM_WEBHOOK_SECRET: 'secret_456',
+      SEPAY_WEBHOOK_SECRET: 'secret_789',
+      A23_NODE_SECRET: 'secret_node',
+      DOWNLOAD_SIGNING_SECRET: 'secret_sign',
+      BASE_URL: 'https://telefont.example.com',
+    };
+
+    const results = validateEdgeEnvVars(invalidEnv, 'production');
+    const bankCheck = results.find((r) => r.name.includes('Bank Configuration'));
+    expect(bankCheck?.passed).toBe(false);
   });
 
   it('fails Edge environment validation when BASE_URL is insecure HTTP in production mode', () => {
@@ -110,6 +129,8 @@ describe('Phase 7: Release Preflight Validation', () => {
       SEPAY_WEBHOOK_SECRET: 'secret_789',
       A23_NODE_SECRET: 'secret_node',
       DOWNLOAD_SIGNING_SECRET: 'secret_sign',
+      BANK_ID: '970422',
+      BANK_ACCOUNT_NUMBER: '1234567890',
       BASE_URL: 'http://insecure.example.com',
     };
 
@@ -136,6 +157,24 @@ describe('Phase 7: Release Preflight Validation', () => {
     expect(results.every((r) => r.passed)).toBe(true);
   });
 
+  it('fails Agent configuration when heartbeat leaves < 15s safety margin', () => {
+    const invalidAgent = {
+      CF_ACCOUNT_ID: 'acc_123',
+      CF_QUEUE_ID: 'queue_123',
+      CF_QUEUES_TOKEN: 'token_123',
+      EDGE_BASE_URL: 'https://telefont.example.com',
+      A23_NODE_SECRET: 'node_sec_123',
+      A23_WORKER_ID: 'worker_a23_01',
+      VISIBILITY_TIMEOUT_MS: 300000,
+      LEASE_DURATION_SECONDS: 60,
+      HEARTBEAT_INTERVAL_SECONDS: 50, // 60 - 50 = 10s margin < 15s
+    };
+
+    const results = validateAgentConfig(invalidAgent);
+    const hbCheck = results.find((r) => r.name.includes('Heartbeat Safety Margin'));
+    expect(hbCheck?.passed).toBe(false);
+  });
+
   it('fails Agent configuration when visibility timeout is shorter than lease duration', () => {
     const invalidAgent = {
       CF_ACCOUNT_ID: 'acc_123',
@@ -154,52 +193,49 @@ describe('Phase 7: Release Preflight Validation', () => {
     expect(visCheck?.passed).toBe(false);
   });
 
-  it('fails Agent configuration when heartbeat interval is greater than or equal to lease duration', () => {
-    const invalidAgent = {
-      CF_ACCOUNT_ID: 'acc_123',
-      CF_QUEUE_ID: 'queue_123',
-      CF_QUEUES_TOKEN: 'token_123',
-      EDGE_BASE_URL: 'https://telefont.example.com',
-      A23_NODE_SECRET: 'node_sec_123',
-      A23_WORKER_ID: 'worker_a23_01',
-      VISIBILITY_TIMEOUT_MS: 300000,
-      LEASE_DURATION_SECONDS: 60,
-      HEARTBEAT_INTERVAL_SECONDS: 60, // hb >= lease
-    };
+  describe('CLI Script (scripts/preflight.mjs) Negative & Strict Tests', () => {
+    it('passes in test fixture mode without live env', () => {
+      const report = runPreflightCheck({ mode: 'test', strict: false, env: {}, wranglerConfig: validWrangler });
+      expect(report.passed).toBe(true);
+    });
 
-    const results = validateAgentConfig(invalidAgent);
-    const hbCheck = results.find((r) => r.name.includes('Heartbeat < Lease Duration'));
-    expect(hbCheck?.passed).toBe(false);
-  });
+    it('fails in strict mode when secrets and agent vars are missing', () => {
+      const report = runPreflightCheck({ mode: 'production', strict: true, env: {}, wranglerConfig: validWrangler });
+      expect(report.passed).toBe(false);
+      expect(report.failedCount).toBeGreaterThan(0);
 
-  it('runs full preflight and produces deterministic summary report', () => {
-    const report = runFullPreflight({
-      wranglerConfig: validWrangler,
-      edgeEnv: {
+      const secretFailure = report.checks.find((c) => c.name.includes('TELEGRAM_BOT_TOKEN'));
+      expect(secretFailure?.passed).toBe(false);
+
+      const agentFailure = report.checks.find((c) => c.name.includes('CF_ACCOUNT_ID'));
+      expect(agentFailure?.passed).toBe(false);
+
+      const d1Failure = report.checks.find((c) => c.name.includes('D1 Database ID'));
+      expect(d1Failure?.passed).toBe(false);
+    });
+
+    it('fails in strict mode when heartbeat margin is less than 15 seconds', () => {
+      const customEnv = {
         TELEGRAM_BOT_TOKEN: 'tok',
         TELEGRAM_WEBHOOK_SECRET: 'sec',
         SEPAY_WEBHOOK_SECRET: 'sec',
         A23_NODE_SECRET: 'sec',
         DOWNLOAD_SIGNING_SECRET: 'sec',
+        BANK_ID: '970422',
+        BANK_ACCOUNT_NUMBER: '1234567890',
         BASE_URL: 'https://telefont.example.com',
-      },
-      agentConfig: {
         CF_ACCOUNT_ID: 'acc',
         CF_QUEUE_ID: 'queue',
         CF_QUEUES_TOKEN: 'tok',
         EDGE_BASE_URL: 'https://telefont.example.com',
-        A23_NODE_SECRET: 'sec',
         A23_WORKER_ID: 'w1',
-        VISIBILITY_TIMEOUT_MS: 300000,
-        LEASE_DURATION_SECONDS: 300,
-        HEARTBEAT_INTERVAL_SECONDS: 60,
-      },
-      mode: 'production',
-      requireProdD1: false,
-    });
+        A23_JOB_LEASE_SECONDS: '30',
+        HEARTBEAT_INTERVAL_SECONDS: '25', // 5s margin < 15s
+      };
 
-    expect(report.passed).toBe(true);
-    expect(report.failedChecks).toBe(0);
-    expect(report.totalChecks).toBeGreaterThan(10);
+      const report = runPreflightCheck({ mode: 'test', strict: true, env: customEnv, wranglerConfig: validWrangler });
+      const hbCheck = report.checks.find((c) => c.name.includes('Heartbeat Safety Margin'));
+      expect(hbCheck?.passed).toBe(false);
+    });
   });
 });

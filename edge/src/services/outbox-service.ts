@@ -2,6 +2,7 @@ import type { Env } from '../env';
 import { generateSignedDownloadUrl, getDownloadTtlSeconds, formatTtlDescription } from '../utils/download-signer';
 import { TelegramClient } from './telegram-client';
 import { escapeHtml } from '../utils/html';
+import { emitStructuredLog } from '../utils/logger';
 
 export interface OutboxEventRecord {
   id: string;
@@ -147,6 +148,14 @@ export class OutboxService {
 
           if (markSentResult.meta.changes && markSentResult.meta.changes > 0) {
             dispatchedCount++;
+            emitStructuredLog({
+              event: 'outbox_dispatched',
+              event_id: event.id,
+              event_type: event.event_type,
+              aggregate_id: event.aggregate_id,
+              attempt: event.dispatch_attempts + 1,
+              status: 'SENT',
+            });
           }
         } catch {
           failureCount++;
@@ -332,6 +341,20 @@ export class OutboxService {
 
           if (markSentResult.meta.changes && markSentResult.meta.changes > 0) {
             dispatchedCount++;
+            emitStructuredLog({
+              event: 'telegram_delivered',
+              order_id: order.id,
+              chat_id: userRecord.chat_id,
+              event_id: event.id,
+            });
+            emitStructuredLog({
+              event: 'outbox_dispatched',
+              event_id: event.id,
+              event_type: event.event_type,
+              aggregate_id: event.aggregate_id,
+              attempt: event.dispatch_attempts + 1,
+              status: 'SENT',
+            });
           }
         } catch {
           failureCount++;
