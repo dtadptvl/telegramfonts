@@ -38,8 +38,9 @@ This document specifies secret separation boundaries, permission scoping, networ
 
 ### 1. Rotating `TELEGRAM_BOT_TOKEN` & `TELEGRAM_WEBHOOK_SECRET`
 1. Generate new Bot Token in @BotFather or generate new 32-byte webhook secret: `NEW_SECRET=$(openssl rand -hex 32)`.
-2. Update Worker secret:
+2. Update Worker secrets:
    ```bash
+   npx wrangler secret put TELEGRAM_BOT_TOKEN --config edge/wrangler.jsonc
    npx wrangler secret put TELEGRAM_WEBHOOK_SECRET --config edge/wrangler.jsonc
    ```
 3. Update Telegram Webhook URL & Secret:

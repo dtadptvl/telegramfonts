@@ -7,27 +7,6 @@ import {
   type WranglerConfig,
 } from '../src/utils/preflight';
 
-// @ts-expect-error importing mjs helper without declaration
-import { runPreflightCheck as runMjsPreflightCheck } from '../../scripts/preflight.mjs';
-
-interface PreflightCheckItem {
-  category: string;
-  name: string;
-  passed: boolean;
-  message?: string;
-}
-
-interface PreflightCliReport {
-  mode: string;
-  strict: boolean;
-  checks: PreflightCheckItem[];
-  passed: boolean;
-  passedCount: number;
-  failedCount: number;
-}
-
-const runPreflightCheck = runMjsPreflightCheck as (options?: Record<string, unknown>) => PreflightCliReport;
-
 describe('Phase 7: Release Preflight Validation', () => {
   const validWrangler: WranglerConfig = {
     name: 'telegramfonts-edge',
@@ -52,6 +31,9 @@ describe('Phase 7: Release Preflight Validation', () => {
         bucket_name: 'telegramfonts-artifacts',
       },
     ],
+    triggers: {
+      crons: ['* * * * *'],
+    },
   };
 
   it('passes wrangler config validation in development mode', () => {
@@ -213,16 +195,28 @@ describe('Phase 7: Release Preflight Validation', () => {
     expect(visCheck?.passed).toBe(false);
   });
 
-  describe('CLI Script (scripts/preflight.mjs) Negative & Strict Tests', () => {
+  describe('Preflight Strict & Boundary Negative Tests', () => {
     it('passes in test fixture mode without live env', () => {
-      const report = runPreflightCheck({ mode: 'test', strict: false, env: {}, wranglerConfig: validWrangler });
+      const report = runFullPreflight({
+        mode: 'test',
+        requireProdD1: false,
+        wranglerConfig: validWrangler,
+        edgeEnv: {},
+        agentConfig: {},
+      });
       expect(report.passed).toBe(true);
     });
 
     it('fails in strict mode when secrets and agent vars are missing', () => {
-      const report = runPreflightCheck({ mode: 'production', strict: true, env: {}, wranglerConfig: validWrangler });
+      const report = runFullPreflight({
+        mode: 'production',
+        requireProdD1: true,
+        wranglerConfig: validWrangler,
+        edgeEnv: {},
+        agentConfig: {},
+      });
       expect(report.passed).toBe(false);
-      expect(report.failedCount).toBeGreaterThan(0);
+      expect(report.failedChecks).toBeGreaterThan(0);
 
       const secretFailure = report.checks.find((c) => c.name.includes('TELEGRAM_BOT_TOKEN'));
       expect(secretFailure?.passed).toBe(false);
@@ -234,7 +228,7 @@ describe('Phase 7: Release Preflight Validation', () => {
       expect(d1Failure?.passed).toBe(false);
     });
 
-    it('fails in strict mode when heartbeat margin is less than 15 seconds', () => {
+    it('fails in strict mode when heartbeat margin is exactly 15 seconds (must be strictly > 15s)', () => {
       const customEnv = {
         TELEGRAM_BOT_TOKEN: 'tok',
         TELEGRAM_WEBHOOK_SECRET: 'sec',
@@ -244,18 +238,90 @@ describe('Phase 7: Release Preflight Validation', () => {
         BANK_ID: '970422',
         BANK_ACCOUNT_NUMBER: '1234567890',
         BASE_URL: 'https://telefont.example.com',
+      };
+      const customAgent = {
         CF_ACCOUNT_ID: 'acc',
         CF_QUEUE_ID: 'queue',
         CF_QUEUES_TOKEN: 'tok',
         EDGE_BASE_URL: 'https://telefont.example.com',
+        A23_NODE_SECRET: 'sec',
         A23_WORKER_ID: 'w1',
-        A23_JOB_LEASE_SECONDS: '30',
-        HEARTBEAT_INTERVAL_SECONDS: '25', // 5s margin < 15s
+        LEASE_DURATION_SECONDS: 300,
+        HEARTBEAT_INTERVAL_SECONDS: 285, // 300 - 285 = exactly 15s margin (rejected)
       };
 
-      const report = runPreflightCheck({ mode: 'test', strict: true, env: customEnv, wranglerConfig: validWrangler });
+      const report = runFullPreflight({
+        mode: 'production',
+        requireProdD1: false,
+        wranglerConfig: validWrangler,
+        edgeEnv: customEnv,
+        agentConfig: customAgent,
+      });
       const hbCheck = report.checks.find((c) => c.name.includes('Heartbeat Safety Margin'));
       expect(hbCheck?.passed).toBe(false);
+    });
+
+    it('fails in strict mode when EDGE_BASE_URL is insecure HTTP', () => {
+      const customEnv = {
+        TELEGRAM_BOT_TOKEN: 'tok',
+        TELEGRAM_WEBHOOK_SECRET: 'sec',
+        SEPAY_WEBHOOK_SECRET: 'sec',
+        A23_NODE_SECRET: 'sec',
+        DOWNLOAD_SIGNING_SECRET: 'sec',
+        BANK_ID: '970422',
+        BANK_ACCOUNT_NUMBER: '1234567890',
+        BASE_URL: 'https://telefont.example.com',
+      };
+      const customAgent = {
+        CF_ACCOUNT_ID: 'acc',
+        CF_QUEUE_ID: 'queue',
+        CF_QUEUES_TOKEN: 'tok',
+        EDGE_BASE_URL: 'http://insecure-edge.example.com',
+        A23_NODE_SECRET: 'sec',
+        A23_WORKER_ID: 'w1',
+      };
+
+      const report = runFullPreflight({
+        mode: 'production',
+        requireProdD1: false,
+        wranglerConfig: validWrangler,
+        edgeEnv: customEnv,
+        agentConfig: customAgent,
+      });
+      const edgeCheck = report.checks.find((c) => c.name.includes('EDGE_BASE_URL HTTPS'));
+      expect(edgeCheck?.passed).toBe(false);
+    });
+
+    it('fails in strict mode when Wrangler Cron Trigger is missing', () => {
+      const wranglerWithoutCron = { ...validWrangler, triggers: { crons: [] } };
+      const customEnv = {
+        TELEGRAM_BOT_TOKEN: 'tok',
+        TELEGRAM_WEBHOOK_SECRET: 'sec',
+        SEPAY_WEBHOOK_SECRET: 'sec',
+        A23_NODE_SECRET: 'sec',
+        DOWNLOAD_SIGNING_SECRET: 'sec',
+        BANK_ID: '970422',
+        BANK_ACCOUNT_NUMBER: '1234567890',
+        BASE_URL: 'https://telefont.example.com',
+      };
+      const customAgent = {
+        CF_ACCOUNT_ID: 'acc',
+        CF_QUEUE_ID: 'queue',
+        CF_QUEUES_TOKEN: 'tok',
+        EDGE_BASE_URL: 'https://telefont.example.com',
+        A23_NODE_SECRET: 'sec',
+        A23_WORKER_ID: 'w1',
+      };
+
+      const report = runFullPreflight({
+        mode: 'production',
+        requireProdD1: true,
+        wranglerConfig: wranglerWithoutCron,
+        edgeEnv: customEnv,
+        agentConfig: customAgent,
+      });
+      const cronCheck = report.checks.find((c) => c.name.includes('Cron Trigger'));
+      expect(cronCheck?.passed).toBe(false);
     });
   });
 });

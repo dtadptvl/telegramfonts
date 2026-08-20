@@ -401,3 +401,52 @@ class WorkerJobClient:
                 status="NETWORK_ERROR",
                 queue_action="retry",
             )
+
+    async def get_pending_catalog_requests(self) -> list[PendingCatalogRequest]:
+        """Fetch pending catalog requests awaiting metadata acquisition."""
+        url = f"{self.settings.EDGE_BASE_URL}/internal/catalog-requests/pending"
+        try:
+            resp = await self._client.get(url, headers=self.headers)
+            if resp.status_code == 200:
+                data = resp.json()
+                reqs = data.get("requests", [])
+                return [
+                    PendingCatalogRequest(
+                        id=str(r.get("id", "")),
+                        user_id=str(r.get("user_id", "")),
+                        canonical_key=str(r.get("canonical_key", "")),
+                        source_url=str(r.get("source_url", "")),
+                        status=str(r.get("status", "PENDING")),
+                        created_at=int(r.get("created_at", 0)),
+                    )
+                    for r in reqs
+                    if r.get("id") and r.get("source_url")
+                ]
+            return []
+        except Exception as exc:
+            logger.warning(f"Error fetching pending catalog requests: {exc}")
+            return []
+
+    async def complete_catalog_request(
+        self,
+        request_id: str,
+        payload: dict[str, Any],
+    ) -> bool:
+        """Post completed font catalog metadata back to Edge."""
+        url = f"{self.settings.EDGE_BASE_URL}/internal/catalog-requests/{request_id}/complete"
+        try:
+            resp = await self._client.post(url, headers=self.headers, json=payload)
+            return resp.status_code == 200
+        except Exception as exc:
+            logger.warning(f"Error completing catalog request ({request_id}): {exc}")
+            return False
+
+
+@dataclass(frozen=True)
+class PendingCatalogRequest:
+    id: str
+    user_id: str
+    canonical_key: str
+    source_url: str
+    status: str
+    created_at: int

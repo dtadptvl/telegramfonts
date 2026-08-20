@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 /**
  * TelegramFonts Release Preflight CLI
  *
@@ -193,6 +192,23 @@ export function runPreflightCheck(options = {}) {
           passed: true,
           message: 'External HTTP-pull architecture confirmed',
         });
+      // Cron triggers check
+      const crons = wranglerConfig.triggers?.crons;
+      const hasCrons = Array.isArray(crons) && crons.length > 0;
+      if (!hasCrons) {
+        checks.push({
+          category: 'Wrangler Triggers',
+          name: 'Cron Trigger (Scheduled Dispatcher)',
+          passed: !strict,
+          message: hasCrons ? `Configured crons: ${crons.join(', ')}` : 'Missing triggers.crons (required for scheduled outbox dispatcher)',
+        });
+      } else {
+        checks.push({
+          category: 'Wrangler Triggers',
+          name: 'Cron Trigger (Scheduled Dispatcher)',
+          passed: true,
+          message: `Configured crons: ${crons.join(', ')}`,
+        });
       }
     } catch (err) {
       checks.push({
@@ -321,6 +337,36 @@ export function runPreflightCheck(options = {}) {
     }
   }
 
+  // Validate EDGE_BASE_URL HTTPS in production
+  const edgeBaseUrl = env.EDGE_BASE_URL;
+  if (edgeBaseUrl) {
+    try {
+      const parsedEdge = new URL(edgeBaseUrl);
+      if (strict && parsedEdge.protocol !== 'https:') {
+        checks.push({
+          category: 'Agent Config (Names Only)',
+          name: 'EDGE_BASE_URL HTTPS',
+          passed: false,
+          message: `EDGE_BASE_URL protocol is "${parsedEdge.protocol}"; must be "https:" in production`,
+        });
+      } else {
+        checks.push({
+          category: 'Agent Config (Names Only)',
+          name: 'EDGE_BASE_URL Protocol',
+          passed: true,
+          message: `Valid protocol: ${parsedEdge.protocol}`,
+        });
+      }
+    } catch {
+      checks.push({
+        category: 'Agent Config (Names Only)',
+        name: 'EDGE_BASE_URL Protocol',
+        passed: false,
+        message: 'Invalid EDGE_BASE_URL format',
+      });
+    }
+  }
+
   // 5. Agent Queue & Lease Boundaries
   const batchSize = parseInt(env.PULL_BATCH_SIZE || '1', 10);
   const validBatch = !Number.isNaN(batchSize) && batchSize >= 1 && batchSize <= 10;
@@ -354,14 +400,14 @@ export function runPreflightCheck(options = {}) {
   });
 
   const hbMargin = leaseSec - hbSec;
-  const hbSafe = hbSec > 0 && hbMargin >= 15;
+  const hbSafe = hbSec > 0 && hbMargin > 15;
   checks.push({
     category: 'Agent Lease Boundaries',
-    name: 'Heartbeat Safety Margin (>= 15s)',
+    name: 'Heartbeat Safety Margin (> 15s)',
     passed: hbSafe,
     message: hbSafe
       ? `Heartbeat (${hbSec}s) provides ${hbMargin}s safety margin before lease (${leaseSec}s)`
-      : `Heartbeat (${hbSec}s) leaves insufficient margin (${hbMargin}s < 15s) for lease (${leaseSec}s)`,
+      : `Heartbeat (${hbSec}s) leaves insufficient margin (${hbMargin}s <= 15s) for lease (${leaseSec}s)`,
   });
 
   const passedCount = checks.filter((c) => c.passed).length;
