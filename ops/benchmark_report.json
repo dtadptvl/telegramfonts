@@ -1,0 +1,51 @@
+{
+  "git_sha": "78ee3766ba7538f06622947cae7dc26943bdd393",
+  "timestamp": "2026-08-20T16:02:41Z",
+  "is_production_proof": false,
+  "platform_info": {
+    "os": "Windows",
+    "os_release": "10",
+    "architecture": "AMD64",
+    "python_version": "3.14.6",
+    "cpu_count": 12
+  },
+  "config": {
+    "styles_per_job": 2,
+    "formats_per_style": [
+      "TTF",
+      "OTF",
+      "WOFF2"
+    ],
+    "total_fonts_per_job": 6,
+    "target_utilization_max": 0.6
+  },
+  "samples_count": 5,
+  "success_count": 5,
+  "failure_count": 0,
+  "p50_total_ms": 1394.59,
+  "p95_total_ms": 1442.23,
+  "min_total_ms": 1369.27,
+  "max_total_ms": 1451.24,
+  "mean_total_ms": 1401.08,
+  "p95_stage_ms": {
+    "acquire_ms": 1321.88,
+    "build_ms": 123.98,
+    "package_ms": 2.52
+  },
+  "avg_artifact_size_bytes": 4920,
+  "peak_rss_mb": 0.0,
+  "capacity_model": {
+    "target_1000_jobs_day": {
+      "arrival_rate_sec": 86.4,
+      "required_consumers": 1,
+      "steady_state_utilization_at_1_worker": 1.67
+    },
+    "target_500_jobs_day": {
+      "arrival_rate_sec": 172.8,
+      "required_consumers": 1,
+      "steady_state_utilization_at_1_worker": 0.83
+    },
+    "daily_capacity_per_consumer_at_60pct_utilization": 35944
+  },
+  "disclaimer": "NOTE: This benchmark is a development/CI environment execution. Per Issue #16 policy, production capacity proof requires execution on a physical A23 Android/ARM64 device."
+}
