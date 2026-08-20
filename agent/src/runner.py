@@ -1,4 +1,4 @@
-"""A23 Compute Runner state machine, message lifecycle, and consumer loop."""
+"""A23 Compute Runner pipeline: Queue polling, source fetch, build, upload, and completion."""
 from __future__ import annotations
 
 import asyncio
@@ -9,42 +9,39 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from compute.font_builder import FontBuilderService
+from compute.models import GeneratedFontFile, JobPackageManifest, SourcePayload
+from compute.packager import PackagerService
+from compute.source import SourceAcquirer
+from compute.validator import validate_font_file
 from config import Settings
-from compute import (
-    FontBuilderService,
-    GeneratedFontFile,
-    PackagerService,
-    SourceAcquirer,
-    SourcePayload,
-    StagedManifest,
-    validate_font_file,
-)
 from queue_client import CloudflareQueueClient, QueueMessage
 from scratch import ScratchManager
 from worker_client import ClaimedJob, WorkerJobClient
 
+QueueClient = CloudflareQueueClient
 logger = logging.getLogger("telegramfonts.agent.runner")
 
-LEASE_SAFETY_MARGIN_MS = 15_000  # 15 seconds safety deadline before lease expiry
+LEASE_SAFETY_MARGIN_MS = 15000  # 15s deadline safety margin
 
 
 class RunnerAction(str, Enum):
-    HOLD_FOR_COMPLETION = "HOLD_FOR_COMPLETION"
-    ACKED = "ACKED"
-    RETRIED = "RETRIED"
-    FENCED_ABORT = "FENCED_ABORT"
-    ERROR = "ERROR"
+    ACKED = "acked"
+    RETRIED = "retried"
+    FAILED_TERMINAL = "failed_terminal"
+    FENCED_ABORT = "fenced_abort"
+    HOLD_FOR_COMPLETION = "hold_for_completion"
 
 
 @dataclass
 class ProcessResult:
     action: RunnerAction
     job_id: str | None = None
-    manifest: StagedManifest | None = None
     reason: str | None = None
+    manifest: JobPackageManifest | None = None
 
 
-class A23Runner:
+class JobRunner:
     def __init__(
         self,
         settings: Settings,
@@ -59,15 +56,9 @@ class A23Runner:
         self.queue_client = queue_client
         self.worker_client = worker_client
         self.scratch_manager = scratch_manager or ScratchManager(settings.SCRATCH_DIR)
-        self.source_acquirer = source_acquirer or SourceAcquirer(settings.HTTP_TIMEOUT_SECONDS)
+        self.source_acquirer = source_acquirer or SourceAcquirer(timeout=settings.HTTP_TIMEOUT_SECONDS)
         self.font_builder = font_builder or FontBuilderService()
         self.packager = packager or PackagerService()
-        self.held_job_ids: set[str] = set()
-
-    async def close(self) -> None:
-        await self.queue_client.close()
-        await self.worker_client.close()
-        await self.source_acquirer.close()
 
     async def _heartbeat_loop(
         self,
@@ -77,41 +68,28 @@ class A23Runner:
         fenced_event: asyncio.Event,
         stop_event: asyncio.Event,
     ) -> None:
-        """Background heartbeat loop maintaining D1 lease with authoritative expiry tracking (BLOCK D)."""
+        """Background concurrent heartbeat loop."""
         interval = self.settings.HEARTBEAT_INTERVAL_SECONDS
         while not stop_event.is_set():
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=interval)
-                break  # Stop requested
+                break
             except asyncio.TimeoutError:
-                pass  # Interval reached
+                pass
 
             if stop_event.is_set():
                 break
 
-            # Check if already within safety margin of expiration before sending
-            now_ms = int(time.time() * 1000)
-            if now_ms + LEASE_SAFETY_MARGIN_MS >= expiry_holder[0]:
-                logger.warning(f"Lease safety deadline exceeded before heartbeat for job {job_id}")
-                fenced_event.set()
-                break
-
             hb_res = await self.worker_client.heartbeat(job_id, lease_token)
-            if hb_res.fenced:
-                logger.warning(f"Heartbeat detected lease fencing for job {job_id}")
-                fenced_event.set()
-                break
-
             if hb_res.success and hb_res.lease_expires_at:
                 expiry_holder[0] = hb_res.lease_expires_at
-                logger.debug(f"Heartbeat extended lease for {job_id} to {hb_res.lease_expires_at}")
+                logger.debug(f"Heartbeat renewed for job {job_id}, new expiry={hb_res.lease_expires_at}")
+            elif hb_res.fenced:
+                logger.warning(f"Job {job_id} lease was fenced or expired during execution")
+                fenced_event.set()
+                break
             else:
-                # Transient network error on heartbeat: check if lease expired
-                now_ms_after = int(time.time() * 1000)
-                if now_ms_after + LEASE_SAFETY_MARGIN_MS >= expiry_holder[0]:
-                    logger.warning(f"Lease safety deadline expired after failed heartbeat for {job_id}")
-                    fenced_event.set()
-                    break
+                logger.warning(f"Heartbeat transient failure for job {job_id}")
 
     def _sync_build_validate_and_package(
         self,
@@ -120,33 +98,31 @@ class A23Runner:
         job_dir: Path,
         fenced_event: asyncio.Event,
         expiry_holder: list[int],
-    ) -> StagedManifest:
-        """Synchronous CPU/file compute pipeline executed off the event loop."""
-        family_name = job.family_name or source_payload.family_name or "TeleFont"
+    ) -> JobPackageManifest:
+        """Synchronous CPU-bound pipeline running in a worker thread."""
+        family_name = job.family_name or source_payload.family_name
+        build_dir = job_dir / "build"
+        build_dir.mkdir(parents=True, exist_ok=True)
+
         generated_files: list[GeneratedFontFile] = []
 
         for style in job.styles:
-            style_source = source_payload.styles.get(style.id)
-            if not style_source:
-                raise ValueError(f"MISSING_STYLE_SOURCE_DATA_{style.id}")
+            style_data = source_payload.styles.get(style.id)
+            if not style_data:
+                raise ValueError(f"STYLE_MISSING_IN_SOURCE_{style.id}")
 
             for fmt in job.formats:
-                # Check lease safety deadline during compute iteration
                 now_ms = int(time.time() * 1000)
                 if fenced_event.is_set() or (now_ms + LEASE_SAFETY_MARGIN_MS >= expiry_holder[0]):
                     raise RuntimeError("LEASE_FENCED_OR_EXPIRED")
 
-                if fmt not in ("TTF", "OTF", "WOFF2"):
-                    raise ValueError(f"UNSUPPORTED_FORMAT_{fmt}")
-
                 font_file = self.font_builder.build_font(
-                    style_source=style_source,
-                    family_name=family_name,
-                    format_type=fmt,
-                    output_dir=job_dir,
+                    style_data,
+                    family_name,
+                    fmt,
+                    build_dir,
                 )
 
-                # Validate generated font binary (BLOCK G)
                 if not validate_font_file(font_file.file_path, fmt):
                     raise ValueError(f"GENERATED_FONT_INVALID_{fmt}")
 
@@ -155,12 +131,10 @@ class A23Runner:
         if not generated_files:
             raise ValueError("NO_FILES_GENERATED")
 
-        # Lease safety check before packaging
         now_ms_pre_pkg = int(time.time() * 1000)
         if fenced_event.is_set() or (now_ms_pre_pkg + LEASE_SAFETY_MARGIN_MS >= expiry_holder[0]):
             raise RuntimeError("LEASE_FENCED_OR_EXPIRED")
 
-        # Package outputs into deterministic ZIP and manifest (BLOCK E & BLOCK C)
         manifest = self.packager.package_job_output(
             job_id=job.job_id,
             order_id=job.order_id,
@@ -169,7 +143,6 @@ class A23Runner:
             output_dir=job_dir,
         )
 
-        # Final authoritative lease check after packaging and before accepting HOLD (BLOCK D)
         now_ms_post_pkg = int(time.time() * 1000)
         if fenced_event.is_set() or (now_ms_post_pkg + LEASE_SAFETY_MARGIN_MS >= expiry_holder[0]):
             self.scratch_manager.cleanup_job_dir(job_dir)
@@ -184,7 +157,6 @@ class A23Runner:
     ) -> ProcessResult:
         logger.info(f"Processing message {msg.id} (attempts: {msg.attempts})")
 
-        # 1. Validate payload contains job_id
         if not msg.job_id:
             logger.warning(f"Message {msg.id} has invalid or missing job_id; acknowledging/discarding")
             await self.queue_client.acknowledge_messages([msg.lease_id])
@@ -192,12 +164,7 @@ class A23Runner:
 
         job_id = msg.job_id
 
-        # Skip if already held for completion in this process run (BLOCK A)
-        if job_id in self.held_job_ids:
-            logger.info(f"Job {job_id} already in HOLD_FOR_COMPLETION; skipping recompute")
-            return ProcessResult(action=RunnerAction.HOLD_FOR_COMPLETION, job_id=job_id, reason="already_held")
-
-        # 2. Authoritative claim against Worker D1
+        # 1. Authoritative claim against Worker D1
         claim_res = await self.worker_client.claim(job_id)
 
         if claim_res.queue_action == "ack":
@@ -215,7 +182,7 @@ class A23Runner:
             await self.queue_client.retry_messages([(msg.lease_id, 30)])
             return ProcessResult(action=RunnerAction.RETRIED, job_id=job_id, reason="claim_no_job")
 
-        # 3. Job successfully CLAIMED -> Execute isolated compute pipeline
+        # 2. Job successfully CLAIMED -> Execute isolated compute pipeline
         job = claim_res.job
         job_dir = self.scratch_manager.get_job_dir(job.job_id, job.lease_token)
         fenced_event = asyncio.Event()
@@ -227,7 +194,7 @@ class A23Runner:
         )
 
         try:
-            # Step A: Validate and acquire source payload from real preview content (BLOCK B)
+            # Step A: Validate and acquire source payload from real preview content
             source_payload = await self.source_acquirer.acquire_source(
                 source_url=job.source_url,
                 styles=job.styles,
@@ -244,74 +211,128 @@ class A23Runner:
                 expiry_holder,
             )
 
-            self.held_job_ids.add(job.job_id)
-            logger.info(
-                f"Successfully computed job {job.job_id} -> staged {manifest.zip_filename} "
-                f"({manifest.zip_size_bytes} bytes, HOLD_FOR_COMPLETION)"
-            )
+            # Step D: Upload ZIP artifact to private R2 storage endpoint
+            if fenced_event.is_set():
+                raise RuntimeError("LEASE_FENCED_OR_EXPIRED")
 
-            # Hold for Phase 6 completion without ACK-ing queue message or marking complete
-            return ProcessResult(
-                action=RunnerAction.HOLD_FOR_COMPLETION,
+            upload_res = await self.worker_client.upload_artifact(
                 job_id=job.job_id,
-                manifest=manifest,
+                lease_token=job.lease_token,
+                zip_path=manifest.zip_file_path,
+                sha256_hex=manifest.zip_sha256_hex,
             )
 
-        except Exception as exc:
-            logger.error(f"Compute error for job {job.job_id}: {exc}")
+            if upload_res.fenced:
+                logger.warning(f"Upload for job {job.job_id} was fenced")
+                self.scratch_manager.cleanup_job_dir(job_dir)
+                return ProcessResult(action=RunnerAction.FENCED_ABORT, job_id=job.job_id, reason="upload_fenced")
 
-            if isinstance(exc, RuntimeError) and "LEASE_FENCED_OR_EXPIRED" in str(exc):
-                return ProcessResult(
-                    action=RunnerAction.FENCED_ABORT,
-                    job_id=job.job_id,
-                    reason="lease_fenced_or_expired",
+            if not upload_res.success or not upload_res.artifact_key:
+                logger.warning(f"Upload failed for job {job.job_id}: {upload_res.reason}")
+                await self.worker_client.fail(
+                    job.job_id,
+                    job.lease_token,
+                    retryable=True,
+                    reason_code="UPLOAD_FAILED",
                 )
+                await self.queue_client.retry_messages([(msg.lease_id, 30)])
+                self.scratch_manager.cleanup_job_dir(job_dir)
+                return ProcessResult(action=RunnerAction.RETRIED, job_id=job.job_id, reason="upload_failed")
 
-            # Classify error: retryable vs terminal
-            err_text = str(exc)
-            if any(
-                k in err_text
-                for k in (
-                    "INVALID_SOURCE_URL",
-                    "UNSUPPORTED_FORMAT",
-                    "GENERATED_FONT_INVALID",
-                    "NO_FILES_GENERATED",
-                    "MISSING_STYLE_SOURCE_DATA",
-                    "MALFORMED_SOURCE_INPUT",
-                    "NO_PUBLIC_PREVIEW_FOUND",
-                    "SOURCE_ACQUISITION_BLOCKED",
-                    "SOURCE_HTTP_ERROR",
-                    "UNSUPPORTED_CONTENT_TYPE",
-                )
-            ):
-                retryable = False
-                reason_code = err_text.replace(" ", "_").upper()[:64]
+            # Step E: Fenced atomic D1 completion
+            if fenced_event.is_set():
+                raise RuntimeError("LEASE_FENCED_OR_EXPIRED")
+
+            complete_res = await self.worker_client.complete(
+                job_id=job.job_id,
+                lease_token=job.lease_token,
+                artifact_key=upload_res.artifact_key,
+                sha256_hex=manifest.zip_sha256_hex,
+                size=manifest.zip_size_bytes,
+            )
+
+            # Step F: Finalize and ACK Queue boundary (BLOCK 6)
+            if complete_res.success:
+                # Durable completion committed to D1 -> Acknowledge Queue message
+                await self.queue_client.acknowledge_messages([msg.lease_id])
+                self.scratch_manager.cleanup_job_dir(job_dir)
+                logger.info(f"Job {job.job_id} durably completed and ACKed from queue")
+                return ProcessResult(action=RunnerAction.ACKED, job_id=job.job_id, manifest=manifest)
+
+            if complete_res.status == "EXPIRED_OR_FENCED":
+                logger.warning(f"Completion for job {job.job_id} was fenced")
+                self.scratch_manager.cleanup_job_dir(job_dir)
+                return ProcessResult(action=RunnerAction.FENCED_ABORT, job_id=job.job_id, reason="completion_fenced")
+
+            if complete_res.status == "AMBIGUOUS_ERROR":
+                logger.warning(f"Ambiguous network failure on complete for {job.job_id}; retrying message")
+                await self.queue_client.retry_messages([(msg.lease_id, 30)])
+                return ProcessResult(action=RunnerAction.RETRIED, job_id=job.job_id, reason="ambiguous_completion_network_error")
+
+            self.scratch_manager.cleanup_job_dir(job_dir)
+            if complete_res.queue_action == "ack":
+                await self.queue_client.acknowledge_messages([msg.lease_id])
+                return ProcessResult(action=RunnerAction.ACKED, job_id=job.job_id, reason=complete_res.reason)
             else:
-                retryable = True
-                reason_code = "COMPUTE_ERROR"
+                await self.queue_client.retry_messages([(msg.lease_id, 30)])
+                return ProcessResult(action=RunnerAction.RETRIED, job_id=job.job_id, reason=complete_res.reason)
+
+        except (ValueError, RuntimeError) as exc:
+            err_code = str(exc)
+            logger.warning(f"Error during compute execution for {job.job_id}: {err_code}")
+
+            if "LEASE_FENCED" in err_code:
+                self.scratch_manager.cleanup_job_dir(job_dir)
+                return ProcessResult(action=RunnerAction.FENCED_ABORT, job_id=job.job_id, reason="fenced")
+
+            terminal_codes = {
+                "INVALID_SOURCE_URL",
+                "NO_PUBLIC_PREVIEW_FOUND",
+                "SOURCE_ACQUISITION_BLOCKED_403",
+                "SOURCE_ACQUISITION_BLOCKED_429",
+                "SOURCE_PREVIEW_PARSE_FAILED",
+                "MALFORMED_SOURCE_INPUT",
+                "CORRUPT_SOURCE_IMAGE",
+                "UNSUPPORTED_FORMAT",
+                "NO_FILES_GENERATED",
+            }
+            is_terminal = any(tc in err_code for tc in terminal_codes)
 
             fail_res = await self.worker_client.fail(
                 job_id=job.job_id,
                 lease_token=job.lease_token,
-                retryable=retryable,
-                reason_code=reason_code,
+                retryable=not is_terminal,
+                reason_code=err_code[:64],
             )
+
+            self.scratch_manager.cleanup_job_dir(job_dir)
 
             if fail_res.queue_action == "ack":
                 await self.queue_client.acknowledge_messages([msg.lease_id])
-                return ProcessResult(action=RunnerAction.ACKED, job_id=job.job_id, reason=reason_code)
+                return ProcessResult(action=RunnerAction.FAILED_TERMINAL, job_id=job.job_id, reason=err_code)
             else:
                 delay = fail_res.delay_seconds or 30
                 await self.queue_client.retry_messages([(msg.lease_id, delay)])
-                return ProcessResult(action=RunnerAction.RETRIED, job_id=job.job_id, reason=reason_code)
+                return ProcessResult(action=RunnerAction.RETRIED, job_id=job.job_id, reason=err_code)
 
         finally:
             stop_event.set()
             await heartbeat_task
 
+    async def close(self) -> None:
+        """Close client connections and release resources."""
+        await self.queue_client.close()
+        await self.worker_client.close()
+        if hasattr(self.source_acquirer, "close"):
+            await self.source_acquirer.close()
+
     async def run_once(self) -> list[ProcessResult]:
-        """Pull a batch of messages and process each sequentially (BLOCK A)."""
-        messages = await self.queue_client.pull_messages()
+        """Pull a batch of messages from Queue and process each."""
+        messages = await self.queue_client.pull_messages(
+            batch_size=self.settings.PULL_BATCH_SIZE,
+            visibility_timeout_ms=self.settings.VISIBILITY_TIMEOUT_MS,
+        )
+
         results: list[ProcessResult] = []
         for msg in messages:
             res = await self.process_message(msg)
@@ -323,26 +344,40 @@ class A23Runner:
         stop_event: asyncio.Event | None = None,
         max_iterations: int | None = None,
     ) -> None:
-        """Continuous consumer loop with bounded idle/error backoff (BLOCK A)."""
+        """Continuous long-polling runner loop with graceful stop support."""
         iterations = 0
-        logger.info("Starting A23 Runner consumer loop...")
-
-        while stop_event is None or not stop_event.is_set():
-            if max_iterations is not None and iterations >= max_iterations:
-                break
+        while (stop_event is None or not stop_event.is_set()) and (
+            max_iterations is None or iterations < max_iterations
+        ):
             iterations += 1
-
             try:
-                messages = await self.queue_client.pull_messages()
-                if not messages:
-                    await asyncio.sleep(self.settings.IDLE_BACKOFF_SECONDS)
-                    continue
-
-                for msg in messages:
-                    if stop_event and stop_event.is_set():
-                        break
-                    await self.process_message(msg)
-
+                results = await self.run_once()
+                if not results:
+                    if stop_event is not None:
+                        try:
+                            await asyncio.wait_for(
+                                stop_event.wait(), timeout=self.settings.IDLE_BACKOFF_SECONDS
+                            )
+                            break
+                        except asyncio.TimeoutError:
+                            pass
+                    else:
+                        await asyncio.sleep(self.settings.IDLE_BACKOFF_SECONDS)
+            except asyncio.CancelledError:
+                break
             except Exception as exc:
-                logger.error(f"Error in runner loop iteration: {exc}")
-                await asyncio.sleep(self.settings.ERROR_BACKOFF_SECONDS)
+                logger.error(f"Error in runner loop iteration {iterations}: {exc}")
+                if stop_event is not None:
+                    try:
+                        await asyncio.wait_for(
+                            stop_event.wait(), timeout=self.settings.ERROR_BACKOFF_SECONDS
+                        )
+                        break
+                    except asyncio.TimeoutError:
+                        pass
+                else:
+                    await asyncio.sleep(self.settings.ERROR_BACKOFF_SECONDS)
+
+
+A23Runner = JobRunner
+

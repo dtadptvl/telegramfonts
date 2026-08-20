@@ -95,6 +95,37 @@ describe('Worker Routes', () => {
     expect(body).toEqual({ status: 'unavailable' });
   });
 
+  it('GET /ready returns 503 when migration 0005 columns/tables are missing (pre-0005 schema)', async () => {
+    const request = new Request('http://example.com/ready', { method: 'GET' });
+    const ctx = createExecutionContext();
+    const mockDb: Partial<D1Database> = {
+      prepare: () => ({
+        bind: () => ({} as D1PreparedStatement),
+        first: async () => ({
+          table_count: 12, // only 12 tables (missing fulfillment_receipts)
+          has_outbox_lease: 1,
+          has_job_lease: 1,
+          has_payment_code: 1,
+          has_artifact_key: 0, // missing migration 0005 column
+          has_order_completed_at: 0,
+        }),
+        all: async () => ({ results: [], success: true, meta: {} as D1Meta }),
+        run: async () => ({ success: true, meta: {} as D1Meta }),
+        raw: async () => [],
+      } as unknown as D1PreparedStatement),
+    };
+    const mockEnv: Env = {
+      ...(env as unknown as Env),
+      DB: mockDb as D1Database,
+    };
+    const response = await worker.fetch(request, mockEnv, ctx);
+    await waitOnExecutionContext(ctx);
+
+    expect(response.status).toBe(503);
+    const body = await response.json();
+    expect(body).toEqual({ status: 'unavailable' });
+  });
+
   it('GET /ready returns generic 503 and suppresses raw D1 exception text on query error', async () => {
     const request = new Request('http://example.com/ready', { method: 'GET' });
     const ctx = createExecutionContext();
