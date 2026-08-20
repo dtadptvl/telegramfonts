@@ -1,5 +1,12 @@
 -- Migration: 0002_telegram_sessions_and_catalog.sql
--- D1 Migration for Telegram users, sessions, and font catalog metadata
+-- D1 Migration for Telegram users, updates dedupe, sessions, and font catalog metadata
+
+-- Telegram updates deduplication table (crash & replay safety)
+CREATE TABLE IF NOT EXISTS telegram_updates (
+    update_id INTEGER PRIMARY KEY,
+    user_id TEXT,
+    created_at INTEGER NOT NULL
+);
 
 -- Telegram users table
 CREATE TABLE IF NOT EXISTS telegram_users (
@@ -37,7 +44,7 @@ CREATE TABLE IF NOT EXISTS catalog_styles (
 
 CREATE INDEX IF NOT EXISTS idx_catalog_styles_catalog_id ON catalog_styles(catalog_id);
 
--- Catalog requests table
+-- Catalog requests table (with UNIQUE user_id + canonical_key constraint for concurrent dedupe)
 CREATE TABLE IF NOT EXISTS catalog_requests (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL REFERENCES telegram_users(id) ON DELETE CASCADE,
@@ -46,17 +53,20 @@ CREATE TABLE IF NOT EXISTS catalog_requests (
     status TEXT NOT NULL CHECK(status IN ('PENDING', 'COMPLETED', 'FAILED')),
     catalog_id TEXT REFERENCES catalogs(id) ON DELETE SET NULL,
     created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
+    updated_at INTEGER NOT NULL,
+    UNIQUE(user_id, canonical_key)
 );
 
 CREATE INDEX IF NOT EXISTS idx_catalog_requests_canonical_key ON catalog_requests(canonical_key);
 CREATE INDEX IF NOT EXISTS idx_catalog_requests_user_id ON catalog_requests(user_id);
 
--- Telegram interactive sessions table (restart-safe state machine)
+-- Telegram interactive sessions table (with workflow_token and checkout_token for callback & checkout safety)
 CREATE TABLE IF NOT EXISTS telegram_sessions (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL UNIQUE REFERENCES telegram_users(id) ON DELETE CASCADE,
     chat_id TEXT NOT NULL,
+    workflow_token TEXT NOT NULL,
+    checkout_token TEXT NOT NULL,
     catalog_id TEXT REFERENCES catalogs(id) ON DELETE SET NULL,
     selected_styles TEXT NOT NULL DEFAULT '[]',
     selected_formats TEXT NOT NULL DEFAULT '["TTF"]',
@@ -68,3 +78,7 @@ CREATE TABLE IF NOT EXISTS telegram_sessions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_telegram_sessions_user_id ON telegram_sessions(user_id);
+
+-- Add checkout_token column to orders table for atomic checkout idempotency
+ALTER TABLE orders ADD COLUMN checkout_token TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_checkout_token ON orders(checkout_token);

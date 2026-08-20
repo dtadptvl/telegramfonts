@@ -1,6 +1,14 @@
 import type { TelegramSessionRecord, SessionStatus, FontFormat } from '../types/session';
 import type { TelegramUser } from '../types/telegram';
 
+function generateShortToken(): string {
+  return crypto.randomUUID().slice(0, 8);
+}
+
+function generateCheckoutToken(): string {
+  return `chk_${crypto.randomUUID().replace(/-/g, '')}`;
+}
+
 export class SessionService {
   constructor(private readonly db: D1Database) {}
 
@@ -47,20 +55,24 @@ export class SessionService {
 
     const now = Date.now();
     const sessionId = crypto.randomUUID();
+    const workflowToken = generateShortToken();
+    const checkoutToken = generateCheckoutToken();
     const defaultFormats = JSON.stringify(['TTF']);
 
     await this.db
       .prepare(
-        `INSERT INTO telegram_sessions (id, user_id, chat_id, catalog_id, selected_styles, selected_formats, last_message_id, status, active_order_id, created_at, updated_at)
-         VALUES (?, ?, ?, NULL, '[]', ?, NULL, 'IDLE', NULL, ?, ?)`
+        `INSERT INTO telegram_sessions (id, user_id, chat_id, workflow_token, checkout_token, catalog_id, selected_styles, selected_formats, last_message_id, status, active_order_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, NULL, '[]', ?, NULL, 'IDLE', NULL, ?, ?)`
       )
-      .bind(sessionId, userId, chatId, defaultFormats, now, now)
+      .bind(sessionId, userId, chatId, workflowToken, checkoutToken, defaultFormats, now, now)
       .run();
 
     return {
       id: sessionId,
       user_id: userId,
       chat_id: chatId,
+      workflow_token: workflowToken,
+      checkout_token: checkoutToken,
       catalog_id: null,
       selected_styles: '[]',
       selected_formats: defaultFormats,
@@ -81,11 +93,16 @@ export class SessionService {
 
   async resetSession(userId: string, chatId: string): Promise<TelegramSessionRecord> {
     const now = Date.now();
+    const workflowToken = generateShortToken();
+    const checkoutToken = generateCheckoutToken();
     const defaultFormats = JSON.stringify(['TTF']);
+
     await this.db
       .prepare(
         `UPDATE telegram_sessions SET
            chat_id = ?,
+           workflow_token = ?,
+           checkout_token = ?,
            catalog_id = NULL,
            selected_styles = '[]',
            selected_formats = ?,
@@ -95,7 +112,7 @@ export class SessionService {
            updated_at = ?
          WHERE user_id = ?`
       )
-      .bind(chatId, defaultFormats, now, userId)
+      .bind(chatId, workflowToken, checkoutToken, defaultFormats, now, userId)
       .run();
 
     return this.getOrCreateSession(userId, chatId);
@@ -107,9 +124,14 @@ export class SessionService {
     initialStatus: SessionStatus = 'SELECTING_STYLES'
   ): Promise<void> {
     const now = Date.now();
+    const workflowToken = generateShortToken();
+    const checkoutToken = generateCheckoutToken();
+
     await this.db
       .prepare(
         `UPDATE telegram_sessions SET
+           workflow_token = ?,
+           checkout_token = ?,
            catalog_id = ?,
            selected_styles = '[]',
            selected_formats = '["TTF"]',
@@ -118,7 +140,7 @@ export class SessionService {
            updated_at = ?
          WHERE user_id = ?`
       )
-      .bind(catalogId, initialStatus, now, userId)
+      .bind(workflowToken, checkoutToken, catalogId, initialStatus, now, userId)
       .run();
   }
 
@@ -182,7 +204,6 @@ export class SessionService {
     }
 
     if (current.includes(format)) {
-      // Keep at least 1 or allow 0 (validation prevents checkout if 0)
       current = current.filter((f) => f !== format);
     } else {
       current.push(format);
@@ -220,15 +241,5 @@ export class SessionService {
         .bind(status, now, userId)
         .run();
     }
-  }
-
-  async setOrderCreated(userId: string, orderId: string): Promise<void> {
-    const now = Date.now();
-    await this.db
-      .prepare(
-        `UPDATE telegram_sessions SET status = 'ORDER_CREATED', active_order_id = ?, updated_at = ? WHERE user_id = ?`
-      )
-      .bind(orderId, now, userId)
-      .run();
   }
 }

@@ -1,10 +1,10 @@
 import type { Env } from './env';
 import { handleTelegramWebhook } from './handlers/telegram-webhook';
 
-const REQUIRED_TABLES_COUNT = 11;
+const REQUIRED_TABLES_COUNT = 12;
 const SCHEMA_CHECK_QUERY = `SELECT count(*) as count FROM sqlite_master WHERE type='table' AND name IN (
   'orders', 'order_items', 'payments', 'fulfillment_jobs', 'outbox_events', 'artifacts',
-  'telegram_users', 'catalogs', 'catalog_styles', 'catalog_requests', 'telegram_sessions'
+  'telegram_users', 'telegram_updates', 'catalogs', 'catalog_styles', 'catalog_requests', 'telegram_sessions'
 )`;
 
 export default {
