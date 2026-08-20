@@ -111,7 +111,7 @@ export class OrderService {
     const paymentCode = generatePaymentCode(paymentCodePrefix);
 
     const totalAmount = selectedStyles.reduce(
-      (sum, s) => sum + (s.price !== undefined ? s.price : 50000),
+      (sum, s) => sum + (s.price !== undefined ? s.price : 5000),
       0
     );
 
@@ -158,7 +158,7 @@ export class OrderService {
     // Order items insert: FK order_id references orders(id). If order conditional insert inserted 0 rows, FK constraint fails and rolls back batch!
     for (const style of selectedStyles) {
       const itemId = `item_${crypto.randomUUID().replace(/-/g, '')}`;
-      const price = style.price !== undefined ? style.price : 50000;
+      const price = style.price !== undefined ? style.price : 5000;
       statements.push(
         this.db
           .prepare(

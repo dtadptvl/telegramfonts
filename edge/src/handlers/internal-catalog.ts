@@ -150,12 +150,12 @@ export async function handleInternalCatalog(
       );
     }
 
-    const DEFAULT_STYLE_PRICE_VND = 50000;
+    const DEFAULT_STYLE_PRICE_VND = 5000;
     const styles = rawStyles
       .map((s: Record<string, unknown>) => ({
         id: String(s.id || '').trim(),
         displayName: String(s.display_name || s.displayName || s.id || '').trim(),
-        price: typeof s.price === 'number' && s.price >= 1000 ? s.price : DEFAULT_STYLE_PRICE_VND,
+        price: DEFAULT_STYLE_PRICE_VND,
       }))
       .filter((s) => s.id.length > 0);
 
