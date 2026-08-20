@@ -5,6 +5,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+@dataclass(frozen=True)
+class ClaimStyle:
+    id: str
+    display_name: str
+
+
 @dataclass
 class GlyphVector:
     character: str

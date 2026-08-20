@@ -193,11 +193,6 @@ class A23Runner:
             if not generated_files:
                 raise ValueError("NO_FILES_GENERATED")
 
-            # Final lease safety check before staging (BLOCK D)
-            now_ms_final = int(time.time() * 1000)
-            if fenced_event.is_set() or (now_ms_final + LEASE_SAFETY_MARGIN_MS >= expiry_holder[0]):
-                raise RuntimeError("LEASE_FENCED_OR_EXPIRED")
-
             # Step C: Package outputs into deterministic ZIP and manifest (BLOCK E & BLOCK C)
             manifest = self.packager.package_job_output(
                 job_id=job.job_id,
@@ -206,6 +201,13 @@ class A23Runner:
                 files=generated_files,
                 output_dir=job_dir,
             )
+
+            # Final authoritative lease check after packaging and before accepting HOLD (BLOCK D)
+            now_ms_post_pkg = int(time.time() * 1000)
+            if fenced_event.is_set() or (now_ms_post_pkg + LEASE_SAFETY_MARGIN_MS >= expiry_holder[0]):
+                # Cleanup staged files so nothing publishable remains
+                self.scratch_manager.cleanup_job_dir(job_dir)
+                raise RuntimeError("LEASE_FENCED_OR_EXPIRED")
 
             self.held_job_ids.add(job.job_id)
             logger.info(

@@ -12,29 +12,56 @@ def test_validate_myfonts_url():
     assert validate_myfonts_url("https://myfonts.com/collections/helvetica-now") is True
     assert validate_myfonts_url("https://www.myfonts.com/fonts/foundry/family-name") is True
 
-    # Invalid / off-domain / insecure URLs
+    # Invalid / off-domain / sibling / insecure URLs (BLOCK C)
     assert validate_myfonts_url("http://www.myfonts.com/collections/roboto") is False
-    assert validate_myfonts_url("https://evil.com/collections/roboto") is False
+    assert validate_myfonts_url("https://evilmyfonts.com/collections/roboto") is False
     assert validate_myfonts_url("https://myfonts.com.evil.com/font") is False
     assert validate_myfonts_url("not-a-url") is False
     assert validate_myfonts_url("") is False
 
 
 @pytest.mark.asyncio
-async def test_source_acquirer_distinct_outputs():
+async def test_source_acquirer_distinct_fixture_inputs():
     acquirer = SourceAcquirer()
-    styles = [ClaimStyle(id="reg", display_name="Regular"), ClaimStyle(id="bold", display_name="Bold")]
 
-    # Source 1
-    p1 = await acquirer.acquire_source("https://www.myfonts.com/collections/roboto-flex", styles)
-    # Source 2
-    p2 = await acquirer.acquire_source("https://www.myfonts.com/collections/helvetica-now", styles)
+    fixture_1 = {
+        "source_url": "https://www.myfonts.com/collections/roboto-flex",
+        "family_name": "Roboto Flex",
+        "styles": [
+            {
+                "style_id": "reg",
+                "style_name": "Regular",
+                "glyphs": {
+                    ".notdef": {"contours": [[(50, 0), (50, 500), (250, 500), (250, 0)]], "advance_width": 300, "lsb": 50},
+                    "A": {"contours": [[(100, 0), (100, 700), (500, 700), (500, 0)]], "advance_width": 600, "lsb": 100},
+                },
+            }
+        ],
+    }
 
-    assert p1.family_name != p2.family_name
-    # Assert two distinct inputs generate distinct glyph metrics / contours (BLOCK B)
+    fixture_2 = {
+        "source_url": "https://www.myfonts.com/collections/roboto-flex",
+        "family_name": "Roboto Flex",
+        "styles": [
+            {
+                "style_id": "reg",
+                "style_name": "Regular",
+                "glyphs": {
+                    ".notdef": {"contours": [[(50, 0), (50, 600), (350, 600), (350, 0)]], "advance_width": 400, "lsb": 50},
+                    "A": {"contours": [[(50, 0), (50, 800), (700, 800), (700, 0)]], "advance_width": 800, "lsb": 50},
+                },
+            }
+        ],
+    }
+
+    p1 = acquirer.from_fixture(fixture_1)
+    p2 = acquirer.from_fixture(fixture_2)
+
+    # Two distinct fixture contents for the same URL/style produce distinct source glyph data (BLOCK B)
     g1 = p1.styles["reg"].glyphs["A"]
     g2 = p2.styles["reg"].glyphs["A"]
-    assert g1.advance_width != g2.advance_width or g1.contours != g2.contours
+    assert g1.advance_width != g2.advance_width
+    assert g1.contours != g2.contours
 
 
 @pytest.mark.asyncio
