@@ -226,7 +226,7 @@ export async function handleInternalCatalog(
     }
 
     emitStructuredLog({
-      event: 'catalog_completed' as any,
+      event: 'catalog_completed',
       request_id: requestId,
       user_id: reqRow.user_id,
       canonical_key: canonicalKey,
