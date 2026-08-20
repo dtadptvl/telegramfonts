@@ -3,18 +3,18 @@ import { PaymentService } from '../services/payment-service';
 import { OrderService } from '../services/order-service';
 
 export interface SePayWebhookPayload {
-  id?: number | string;
-  gateway?: string;
-  transactionDate?: string;
-  accountNumber?: string;
-  code?: string | null;
-  content?: string | null;
-  transferType?: string;
-  transferAmount?: number;
-  accumulated?: number;
-  subAccount?: string | null;
-  referenceCode?: string | null;
-  description?: string | null;
+  id?: unknown;
+  gateway?: unknown;
+  transactionDate?: unknown;
+  accountNumber?: unknown;
+  code?: unknown;
+  content?: unknown;
+  transferType?: unknown;
+  transferAmount?: unknown;
+  accumulated?: unknown;
+  subAccount?: unknown;
+  referenceCode?: unknown;
+  description?: unknown;
 }
 
 export async function verifySePaySignature(
@@ -116,7 +116,7 @@ export async function handleSePayWebhook(
     );
   }
 
-  // 3. Parse JSON payload
+  // 3. Parse and strictly runtime-validate JSON payload (BLOCK 1 from rereview)
   let payload: SePayWebhookPayload;
   try {
     payload = JSON.parse(rawBody) as SePayWebhookPayload;
@@ -127,16 +127,35 @@ export async function handleSePayWebhook(
     });
   }
 
-  if (!payload || payload.id === undefined || payload.id === null) {
-    return new Response(JSON.stringify({ status: 'ignored_missing_id' }), {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return new Response(JSON.stringify({ status: 'ignored_invalid_payload' }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     });
   }
 
+  // Explicit provider ID validation
+  let transactionId = '';
+  if (typeof payload.id === 'number' && Number.isFinite(payload.id) && payload.id > 0) {
+    transactionId = String(payload.id);
+  } else if (typeof payload.id === 'string' && /^[0-9a-zA-Z_-]{1,64}$/.test(payload.id.trim())) {
+    transactionId = payload.id.trim();
+  } else {
+    return new Response(
+      JSON.stringify({ status: 'ignored_invalid_payload', reason: 'invalid_provider_id' }),
+      {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }
+    );
+  }
+
   // 4. Validate business preconditions before financial transition (BLOCK 2)
-  // A. transferType must be present and exactly 'in'
-  if (!payload.transferType || payload.transferType.toLowerCase() !== 'in') {
+  // A. transferType must be string and exactly 'in'
+  if (
+    typeof payload.transferType !== 'string' ||
+    payload.transferType.trim().toLowerCase() !== 'in'
+  ) {
     return new Response(
       JSON.stringify({ status: 'ignored_unmatched', reason: 'invalid_or_missing_transfer_type' }),
       {
@@ -146,8 +165,11 @@ export async function handleSePayWebhook(
     );
   }
 
-  // B. accountNumber must be present and exact-match configured recipient account
-  if (!payload.accountNumber || typeof payload.accountNumber !== 'string') {
+  // B. accountNumber must be non-empty string and exact-match configured recipient account
+  if (
+    typeof payload.accountNumber !== 'string' ||
+    !payload.accountNumber.trim()
+  ) {
     return new Response(
       JSON.stringify({ status: 'ignored_unmatched', reason: 'missing_account_number' }),
       {
@@ -167,8 +189,11 @@ export async function handleSePayWebhook(
     );
   }
 
-  // C. code must be present in payload.code (Issue #8 contract: no content/description fallback)
-  if (!payload.code || typeof payload.code !== 'string' || !payload.code.trim()) {
+  // C. code must be non-empty string in payload.code (Issue #8 contract: no content/description fallback)
+  if (
+    typeof payload.code !== 'string' ||
+    !payload.code.trim()
+  ) {
     return new Response(
       JSON.stringify({ status: 'ignored_unmatched', reason: 'missing_payment_code' }),
       {
@@ -179,6 +204,21 @@ export async function handleSePayWebhook(
   }
 
   const paymentCode = payload.code.trim().toUpperCase();
+
+  // D. transferAmount must be positive number
+  if (
+    typeof payload.transferAmount !== 'number' ||
+    !Number.isFinite(payload.transferAmount) ||
+    payload.transferAmount <= 0
+  ) {
+    return new Response(
+      JSON.stringify({ status: 'ignored_unmatched', reason: 'invalid_transfer_amount' }),
+      {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }
+    );
+  }
 
   const orderService = new OrderService(env.DB);
   const paymentService = new PaymentService(env.DB);
@@ -194,7 +234,7 @@ export async function handleSePayWebhook(
     );
   }
 
-  // D. Order currency must be VND
+  // E. Order currency must be VND
   if (order.currency !== 'VND') {
     return new Response(
       JSON.stringify({ status: 'ignored_unmatched', reason: 'unsupported_currency' }),
@@ -205,9 +245,8 @@ export async function handleSePayWebhook(
     );
   }
 
-  // E. Transfer amount must match order total_amount
-  const transferAmount = Number(payload.transferAmount);
-  if (isNaN(transferAmount) || transferAmount !== order.total_amount) {
+  // F. Transfer amount must match order total_amount
+  if (payload.transferAmount !== order.total_amount) {
     return new Response(
       JSON.stringify({ status: 'ignored_unmatched', reason: 'amount_mismatch' }),
       {
@@ -220,7 +259,7 @@ export async function handleSePayWebhook(
   // 5. Execute atomic financial transition with full predicate binding (BLOCK 4)
   try {
     const result = await paymentService.processVerifiedPayment({
-      transactionId: String(payload.id),
+      transactionId,
       orderId: order.id,
       paymentCode: order.payment_code || paymentCode,
       expectedAmount: order.total_amount,

@@ -5,7 +5,11 @@ import { CatalogService } from '../src/services/catalog-service';
 import { SessionService } from '../src/services/session-service';
 import { OrderService } from '../src/services/order-service';
 import { PaymentService } from '../src/services/payment-service';
-import { generatePaymentCode, generateVietQrUrl } from '../src/utils/vietqr';
+import {
+  generatePaymentCode,
+  validatePaymentCodePrefix,
+  generateVietQrUrl,
+} from '../src/utils/vietqr';
 import type { FontCatalog } from '../src/types/catalog';
 import type { TelegramUpdate } from '../src/types/telegram';
 
@@ -59,7 +63,39 @@ async function generateSePaySignature(
 }
 
 describe('Phase 3: SePay Verified Payment & Transactional Outbox', () => {
-  describe('VietQR & Payment Code Utilities', () => {
+  describe('VietQR & Payment Code Utilities (Gap 2)', () => {
+    it('defaults to TF prefix when unset or empty', () => {
+      expect(validatePaymentCodePrefix(undefined as any)).toBe('TF');
+      expect(validatePaymentCodePrefix(null as any)).toBe('TF');
+      expect(validatePaymentCodePrefix('')).toBe('TF');
+
+      const code = generatePaymentCode();
+      expect(code).toMatch(/^TF[2-9A-Z]{6}$/);
+    });
+
+    it('accepts valid 2-5 character uppercase/alphanumeric prefixes', () => {
+      expect(validatePaymentCodePrefix('tf')).toBe('TF');
+      expect(validatePaymentCodePrefix('TELE')).toBe('TELE');
+      expect(validatePaymentCodePrefix('A12B')).toBe('A12B');
+      expect(validatePaymentCodePrefix('TF123')).toBe('TF123');
+
+      const codeCustom = generatePaymentCode('TELE');
+      expect(codeCustom).toMatch(/^TELE[2-9A-Z]{6}$/);
+    });
+
+    it('strictly rejects invalid payment code prefixes (too short, too long, invalid charset)', () => {
+      // Too short (< 2 chars)
+      expect(() => validatePaymentCodePrefix('A')).toThrow(/Invalid payment code prefix/);
+
+      // Too long (> 5 chars)
+      expect(() => validatePaymentCodePrefix('TOOLONG')).toThrow(/Invalid payment code prefix/);
+
+      // Invalid characters
+      expect(() => validatePaymentCodePrefix('TF!')).toThrow(/Invalid payment code prefix/);
+      expect(() => validatePaymentCodePrefix('TF @')).toThrow(/Invalid payment code prefix/);
+      expect(() => validatePaymentCodePrefix('TF-1')).toThrow(/Invalid payment code prefix/);
+    });
+
     it('generates unique uppercase alphanumeric payment codes with configured prefix', () => {
       const code1 = generatePaymentCode('TF');
       const code2 = generatePaymentCode('TF');
@@ -222,8 +258,8 @@ describe('Phase 3: SePay Verified Payment & Transactional Outbox', () => {
     });
   });
 
-  describe('Payload Validation & Preconditions (BLOCK 2 - No Financial Mutation)', () => {
-    it('acknowledges malformed json or missing id without mutating DB', async () => {
+  describe('Payload Validation & Runtime Safety (Gap 1 & BLOCK 2)', () => {
+    it('acknowledges malformed json or non-object payload without mutating DB', async () => {
       const timestamp = Math.floor(Date.now() / 1000);
       const body = 'invalid-json{{{';
       const signature = await generateSePaySignature(SEPAY_SECRET, timestamp, body);
@@ -245,6 +281,44 @@ describe('Phase 3: SePay Verified Payment & Transactional Outbox', () => {
       expect(res.status).toBe(200);
       const json = await res.json();
       expect(json).toEqual({ status: 'ignored_invalid_json' });
+    });
+
+    it('handles authenticated wrong-typed payloads gracefully with HTTP 200 and zero mutation (Gap 1)', async () => {
+      const timestamp = Math.floor(Date.now() / 1000);
+
+      // Payload with wrong types for id, transferType, transferAmount, accountNumber, code
+      const wrongTypedPayloads = [
+        { id: {}, transferType: 123, transferAmount: 'abc', accountNumber: [], code: false },
+        { id: -5, transferType: 'in', transferAmount: 50000, accountNumber: BANK_ACCOUNT, code: 'TF1234' },
+        { id: 101, transferType: true, transferAmount: 50000, accountNumber: BANK_ACCOUNT, code: 'TF1234' },
+        { id: 102, transferType: 'in', transferAmount: '50000', accountNumber: BANK_ACCOUNT, code: 'TF1234' },
+        { id: 103, transferType: 'in', transferAmount: -1000, accountNumber: BANK_ACCOUNT, code: 'TF1234' },
+        { id: 104, transferType: 'in', transferAmount: 50000, accountNumber: 123456, code: 'TF1234' },
+        { id: 105, transferType: 'in', transferAmount: 50000, accountNumber: BANK_ACCOUNT, code: { complex: true } },
+      ];
+
+      for (const payload of wrongTypedPayloads) {
+        const body = JSON.stringify(payload);
+        const signature = await generateSePaySignature(SEPAY_SECRET, timestamp, body);
+
+        const req = new Request('http://example.com/webhooks/sepay', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-SePay-Signature': `sha256=${signature}`,
+            'X-SePay-Timestamp': String(timestamp),
+          },
+          body,
+        });
+
+        const ctx = createExecutionContext();
+        const res = await worker.fetch(req, testEnv, ctx);
+        await waitOnExecutionContext(ctx);
+
+        expect(res.status).toBe(200);
+        const json = (await res.json()) as { status: string };
+        expect(json.status).toMatch(/^ignored_/);
+      }
     });
 
     it('ignores missing transferType or outbound transfer (transferType: out) without mutating DB', async () => {
