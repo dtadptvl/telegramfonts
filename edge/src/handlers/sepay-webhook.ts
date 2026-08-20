@@ -27,6 +27,13 @@ export async function verifySePaySignature(
     return { isValid: false, reason: 'missing_auth_headers_or_secret' };
   }
 
+  // 1. Verify strict signature format: sha256=<64 hex chars> (BLOCK 3)
+  const match = signatureHeader.trim().match(/^sha256=([0-9a-fA-F]{64})$/);
+  if (!match) {
+    return { isValid: false, reason: 'invalid_signature_format' };
+  }
+
+  // 2. Verify timestamp within 300 seconds (5 minutes) drift
   const timestampNum = Number(timestampHeader);
   if (isNaN(timestampNum)) {
     return { isValid: false, reason: 'invalid_timestamp_format' };
@@ -40,9 +47,11 @@ export async function verifySePaySignature(
     return { isValid: false, reason: 'timestamp_drift_exceeded' };
   }
 
-  let expectedHex = signatureHeader.trim();
-  if (expectedHex.startsWith('sha256=')) {
-    expectedHex = expectedHex.slice(7);
+  // 3. Constant-time native HMAC verification using 32-byte buffer
+  const providedHex = match[1].toLowerCase();
+  const providedBytes = new Uint8Array(32);
+  for (let i = 0; i < 32; i++) {
+    providedBytes[i] = parseInt(providedHex.substring(i * 2, i * 2 + 2), 16);
   }
 
   const encoder = new TextEncoder();
@@ -54,24 +63,11 @@ export async function verifySePaySignature(
     keyData,
     { name: 'HMAC', hash: 'SHA-256' },
     false,
-    ['sign']
+    ['verify']
   );
 
-  const signatureBuffer = await crypto.subtle.sign('HMAC', cryptoKey, dataToSign);
-  const signatureArray = Array.from(new Uint8Array(signatureBuffer));
-  const calculatedHex = signatureArray
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
-
-  const calculatedBytes = encoder.encode(calculatedHex.toLowerCase());
-  const expectedBytes = encoder.encode(expectedHex.toLowerCase());
-
-  if (calculatedBytes.byteLength !== expectedBytes.byteLength) {
-    return { isValid: false, reason: 'signature_mismatch' };
-  }
-
-  const matches = crypto.subtle.timingSafeEqual(calculatedBytes, expectedBytes);
-  if (!matches) {
+  const isValid = await crypto.subtle.verify('HMAC', cryptoKey, providedBytes, dataToSign);
+  if (!isValid) {
     return { isValid: false, reason: 'signature_mismatch' };
   }
 
@@ -83,9 +79,16 @@ export async function handleSePayWebhook(
   env: Env,
   _ctx: ExecutionContext
 ): Promise<Response> {
-  // 1. Verify webhook secret configuration (fail-closed)
+  // 1. Verify webhook secret and recipient configuration (fail-closed, BLOCK 2)
   if (!env.SEPAY_WEBHOOK_SECRET) {
     return new Response(JSON.stringify({ error: 'SePay webhook secret not configured' }), {
+      status: 503,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  if (!env.BANK_ACCOUNT_NUMBER || !env.BANK_ACCOUNT_NUMBER.trim()) {
+    return new Response(JSON.stringify({ error: 'Recipient bank account not configured' }), {
       status: 503,
       headers: { 'Content-Type': 'application/json' },
     });
@@ -131,11 +134,11 @@ export async function handleSePayWebhook(
     });
   }
 
-  // 4. Validate business preconditions before financial transition
-  // A. Transfer type must be 'in'
-  if (payload.transferType && payload.transferType.toLowerCase() !== 'in') {
+  // 4. Validate business preconditions before financial transition (BLOCK 2)
+  // A. transferType must be present and exactly 'in'
+  if (!payload.transferType || payload.transferType.toLowerCase() !== 'in') {
     return new Response(
-      JSON.stringify({ status: 'ignored_unmatched', reason: 'outbound_transfer' }),
+      JSON.stringify({ status: 'ignored_unmatched', reason: 'invalid_or_missing_transfer_type' }),
       {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
@@ -143,34 +146,29 @@ export async function handleSePayWebhook(
     );
   }
 
-  // B. Account number must match configured recipient if configured
-  if (env.BANK_ACCOUNT_NUMBER && payload.accountNumber) {
-    const configuredAcc = env.BANK_ACCOUNT_NUMBER.trim();
-    const payloadAcc = payload.accountNumber.trim();
-    if (configuredAcc !== payloadAcc) {
-      return new Response(
-        JSON.stringify({ status: 'ignored_unmatched', reason: 'account_number_mismatch' }),
-        {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' },
-        }
-      );
-    }
+  // B. accountNumber must be present and exact-match configured recipient account
+  if (!payload.accountNumber || typeof payload.accountNumber !== 'string') {
+    return new Response(
+      JSON.stringify({ status: 'ignored_unmatched', reason: 'missing_account_number' }),
+      {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }
+    );
   }
 
-  // C. Extract payment code
-  let rawCode = payload.code ? String(payload.code).trim() : '';
-  if (!rawCode && (payload.content || payload.description)) {
-    const textToSearch = `${payload.content || ''} ${payload.description || ''}`;
-    const prefix = env.PAYMENT_CODE_PREFIX || 'TF';
-    const regex = new RegExp(`\\b(${prefix}[A-Z0-9]{4,10})\\b`, 'i');
-    const match = textToSearch.match(regex);
-    if (match) {
-      rawCode = match[1];
-    }
+  if (payload.accountNumber.trim() !== env.BANK_ACCOUNT_NUMBER.trim()) {
+    return new Response(
+      JSON.stringify({ status: 'ignored_unmatched', reason: 'account_number_mismatch' }),
+      {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }
+    );
   }
 
-  if (!rawCode) {
+  // C. code must be present in payload.code (Issue #8 contract: no content/description fallback)
+  if (!payload.code || typeof payload.code !== 'string' || !payload.code.trim()) {
     return new Response(
       JSON.stringify({ status: 'ignored_unmatched', reason: 'missing_payment_code' }),
       {
@@ -180,10 +178,12 @@ export async function handleSePayWebhook(
     );
   }
 
+  const paymentCode = payload.code.trim().toUpperCase();
+
   const orderService = new OrderService(env.DB);
   const paymentService = new PaymentService(env.DB);
 
-  const order = await orderService.getOrderByPaymentCode(rawCode);
+  const order = await orderService.getOrderByPaymentCode(paymentCode);
   if (!order) {
     return new Response(
       JSON.stringify({ status: 'ignored_unmatched', reason: 'order_not_found' }),
@@ -194,7 +194,7 @@ export async function handleSePayWebhook(
     );
   }
 
-  // D. Order must be in VND currency
+  // D. Order currency must be VND
   if (order.currency !== 'VND') {
     return new Response(
       JSON.stringify({ status: 'ignored_unmatched', reason: 'unsupported_currency' }),
@@ -217,12 +217,13 @@ export async function handleSePayWebhook(
     );
   }
 
-  // 5. Execute atomic financial transition
+  // 5. Execute atomic financial transition with full predicate binding (BLOCK 4)
   try {
     const result = await paymentService.processVerifiedPayment({
       transactionId: String(payload.id),
       orderId: order.id,
-      amount: order.total_amount,
+      paymentCode: order.payment_code || paymentCode,
+      expectedAmount: order.total_amount,
     });
 
     if (result.status === 'PROCESSED') {
