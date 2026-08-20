@@ -663,7 +663,7 @@ describe('Phase 4: A23 Internal Node Job Claim, Lease Fencing & Protocols', () =
     });
   });
 
-  describe('Defensive Metadata & Malformed Canonical State (BLOCK 6)', () => {
+  describe('Defensive Metadata & Malformed Canonical State (BLOCK 6 & BLOCK B)', () => {
     it('fails safely and returns recoverable error when persisted order metadata is corrupted JSON or invalid schema', async () => {
       const { jobId, orderId } = await setupTestJob('PENDING');
 
@@ -690,19 +690,101 @@ describe('Phase 4: A23 Internal Node Job Claim, Lease Fencing & Protocols', () =
       expect(data.queue_action).toBe('retry');
     });
 
-    it('fails safely when persisted metadata has invalid source_url or no formats', async () => {
+    it('fails safely with MALFORMED_METADATA when source_url is not canonical HTTPS MyFonts URL (BLOCK B)', async () => {
       const { jobId, orderId } = await setupTestJob('PENDING');
 
       await env.DB.prepare(
         'UPDATE orders SET metadata = ? WHERE id = ?'
       )
-        .bind(JSON.stringify({ source_url: 'ftp://not-http', selected_formats: ['INVALID'] }), orderId)
+        .bind(
+          JSON.stringify({
+            source_url: 'https://attacker.com/malicious-font',
+            selected_formats: ['TTF'],
+          }),
+          orderId
+        )
         .run();
 
       const jobService = new JobService(env.DB);
       const res = await jobService.claimJob(jobId, 'worker-1');
       expect(res.status).toBe('MALFORMED_METADATA');
       expect(res.queue_action).toBe('retry');
+    });
+
+    it('fails safely with MALFORMED_METADATA when formats is missing, empty, or contains invalid formats (BLOCK B)', async () => {
+      const jobService = new JobService(env.DB);
+
+      // 1. Missing formats
+      const job1 = await setupTestJob('PENDING');
+      await env.DB.prepare('UPDATE orders SET metadata = ? WHERE id = ?')
+        .bind(
+          JSON.stringify({
+            source_url: 'https://www.myfonts.com/collections/roboto-flex',
+            // missing selected_formats
+          }),
+          job1.orderId
+        )
+        .run();
+
+      const resMissing = await jobService.claimJob(job1.jobId, 'worker-1');
+      expect(resMissing.status).toBe('MALFORMED_METADATA');
+
+      // 2. Empty formats
+      const job2 = await setupTestJob('PENDING');
+      await env.DB.prepare('UPDATE orders SET metadata = ? WHERE id = ?')
+        .bind(
+          JSON.stringify({
+            source_url: 'https://www.myfonts.com/collections/roboto-flex',
+            selected_formats: [],
+          }),
+          job2.orderId
+        )
+        .run();
+
+      const resEmpty = await jobService.claimJob(job2.jobId, 'worker-1');
+      expect(resEmpty.status).toBe('MALFORMED_METADATA');
+
+      // 3. Invalid format entry
+      const job3 = await setupTestJob('PENDING');
+      await env.DB.prepare('UPDATE orders SET metadata = ? WHERE id = ?')
+        .bind(
+          JSON.stringify({
+            source_url: 'https://www.myfonts.com/collections/roboto-flex',
+            selected_formats: ['EXE', 'BAT'],
+          }),
+          job3.orderId
+        )
+        .run();
+
+      const resInvalid = await jobService.claimJob(job3.jobId, 'worker-1');
+      expect(resInvalid.status).toBe('MALFORMED_METADATA');
+    });
+
+    it('fails safely with MALFORMED_METADATA when order items are empty or contain invalid font IDs (BLOCK B)', async () => {
+      const jobService = new JobService(env.DB);
+
+      // 1. Delete all order items
+      const job1 = await setupTestJob('PENDING');
+      await env.DB.prepare('DELETE FROM order_items WHERE order_id = ?')
+        .bind(job1.orderId)
+        .run();
+
+      const resNoItems = await jobService.claimJob(job1.jobId, 'worker-1');
+      expect(resNoItems.status).toBe('MALFORMED_METADATA');
+
+      // 2. Insert invalid empty font_id
+      const job2 = await setupTestJob('PENDING');
+      await env.DB.prepare('DELETE FROM order_items WHERE order_id = ?')
+        .bind(job2.orderId)
+        .run();
+      await env.DB.prepare(
+        'INSERT INTO order_items (id, order_id, font_id, font_name, price, created_at) VALUES (?, ?, "", "Bad Item", 50000, ?)'
+      )
+        .bind(`item_bad_${Date.now()}`, job2.orderId, Date.now())
+        .run();
+
+      const resBadId = await jobService.claimJob(job2.jobId, 'worker-1');
+      expect(resBadId.status).toBe('MALFORMED_METADATA');
     });
   });
 });
