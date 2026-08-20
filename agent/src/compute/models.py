@@ -77,3 +77,7 @@ class StagedManifest:
                 for f in self.files
             ],
         }
+
+
+JobPackageManifest = StagedManifest
+

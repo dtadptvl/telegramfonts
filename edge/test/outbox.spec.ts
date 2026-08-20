@@ -280,9 +280,179 @@ describe('Phase 4: Transactional Outbox Dispatcher', () => {
     expect(row?.status).toBe('PENDING');
   });
 
+  describe('Phase 6: DELIVERY_READY Outbox Dispatcher', () => {
+    it('dispatches DELIVERY_READY to Telegram with signed download URL, never to fulfillment Queue', async () => {
+      const queueSentMessages: unknown[] = [];
+      const mockQueue = {
+        send: async (msg: unknown) => {
+          queueSentMessages.push(msg);
+        },
+        sendBatch: async () => {},
+      } as unknown as Queue<unknown>;
+
+      const orderId = `ord_delivery_${crypto.randomUUID().replace(/-/g, '')}`;
+      const userId = `user_delivery_${crypto.randomUUID()}`;
+      const now = Date.now();
+
+      // Insert user
+      await env.DB.prepare(
+        `INSERT INTO telegram_users (id, username, first_name, created_at, updated_at)
+         VALUES (?, 'delivery_user', 'Delivery', ?, ?)`
+      )
+        .bind(userId, now, now)
+        .run();
+
+      // Insert completed order
+      await env.DB.prepare(
+        `INSERT INTO orders (id, user_id, status, total_amount, currency, created_at, updated_at, completed_at)
+         VALUES (?, ?, 'COMPLETED', 100000, 'VND', ?, ?, ?)`
+      )
+        .bind(orderId, userId, now, now, now)
+        .run();
+
+      // Insert user session with chat_id
+      await env.DB.prepare(
+        `INSERT INTO telegram_sessions (id, user_id, chat_id, workflow_token, checkout_token, status, created_at, updated_at)
+         VALUES (?, ?, 987654321, 'wf_del', 'chk_del', 'ORDER_CREATED', ?, ?)`
+      )
+        .bind(`sess_${crypto.randomUUID()}`, userId, now, now)
+        .run();
+
+      // Clear any prior pending outbox events
+      await env.DB.prepare('DELETE FROM outbox_events WHERE status = "PENDING"').run();
+
+      // Insert DELIVERY_READY outbox event
+      const eventId = `outbox_del_${crypto.randomUUID()}`;
+      await env.DB.prepare(
+        `INSERT INTO outbox_events (id, event_type, aggregate_type, aggregate_id, payload, status, created_at)
+         VALUES (?, 'DELIVERY_READY', 'order', ?, ?, 'PENDING', ?)`
+      )
+        .bind(eventId, orderId, JSON.stringify({ order_id: orderId }), now)
+        .run();
+
+      const customEnv: Env = {
+        ...(env as unknown as Env),
+        TELEGRAM_BOT_TOKEN: 'fake_bot_token',
+        DOWNLOAD_SIGNING_SECRET: 'test_signing_secret_999',
+        DOWNLOAD_URL_TTL_SECONDS: '86400',
+        BASE_URL: 'https://telefont.example.com',
+      };
+
+      // Mock Telegram fetch
+      const fetchCalls: Array<{ url: string; body: any }> = [];
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url.includes('api.telegram.org')) {
+          const body = init?.body ? JSON.parse(init.body as string) : {};
+          fetchCalls.push({ url, body });
+          return new Response(JSON.stringify({ ok: true, result: { message_id: 123 } }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return originalFetch(input, init);
+      };
+
+      try {
+        const outboxService = new OutboxService(env.DB, mockQueue, customEnv);
+        const result = await outboxService.dispatchPendingEvents({ batchSize: 10 });
+
+        expect(result.dispatchedCount).toBe(1);
+        expect(result.failureCount).toBe(0);
+
+        // Queue was NOT called for DELIVERY_READY
+        expect(queueSentMessages.length).toBe(0);
+
+        // Telegram was called with signed download URL button
+        expect(fetchCalls.length).toBe(1);
+        expect(String(fetchCalls[0].body.chat_id)).toBe('987654321');
+        const inlineButton = fetchCalls[0].body.reply_markup.inline_keyboard[0][0];
+        expect(inlineButton.text).toContain('Download');
+        expect(inlineButton.url).toContain('https://telefont.example.com/downloads/');
+        expect(inlineButton.url).toContain(`/${orderId}?expires=`);
+        expect(inlineButton.url).toContain('&sig=');
+
+        // Outbox event marked SENT
+        const row = await env.DB.prepare('SELECT status, dispatched_at FROM outbox_events WHERE id = ?')
+          .bind(eventId)
+          .first<{ status: string; dispatched_at: number }>();
+        expect(row?.status).toBe('SENT');
+        expect(row?.dispatched_at).toBeGreaterThan(0);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    it('fails closed and keeps DELIVERY_READY recoverable PENDING when BASE_URL is missing or insecure', async () => {
+      const mockQueue = {
+        send: async () => {},
+        sendBatch: async () => {},
+      } as unknown as Queue<unknown>;
+
+      const orderId = `ord_del_insecure_${crypto.randomUUID().replace(/-/g, '')}`;
+      const userId = `user_del_insecure_${crypto.randomUUID()}`;
+      const now = Date.now();
+
+      await env.DB.prepare(
+        `INSERT INTO telegram_users (id, username, first_name, created_at, updated_at)
+         VALUES (?, 'insec_user', 'Insecure', ?, ?)`
+      )
+        .bind(userId, now, now)
+        .run();
+
+      await env.DB.prepare(
+        `INSERT INTO orders (id, user_id, status, total_amount, currency, created_at, updated_at, completed_at)
+         VALUES (?, ?, 'COMPLETED', 100000, 'VND', ?, ?, ?)`
+      )
+        .bind(orderId, userId, now, now, now)
+        .run();
+
+      await env.DB.prepare(
+        `INSERT INTO telegram_sessions (id, user_id, chat_id, workflow_token, checkout_token, status, created_at, updated_at)
+         VALUES (?, ?, 987654321, 'wf_insec', 'chk_insec', 'ORDER_CREATED', ?, ?)`
+      )
+        .bind(`sess_${crypto.randomUUID()}`, userId, now, now)
+        .run();
+
+      await env.DB.prepare('DELETE FROM outbox_events WHERE status = "PENDING"').run();
+
+      const eventId = `outbox_insec_${crypto.randomUUID()}`;
+      await env.DB.prepare(
+        `INSERT INTO outbox_events (id, event_type, aggregate_type, aggregate_id, payload, status, created_at)
+         VALUES (?, 'DELIVERY_READY', 'order', ?, ?, 'PENDING', ?)`
+      )
+        .bind(eventId, orderId, JSON.stringify({ order_id: orderId }), now)
+        .run();
+
+      // Insecure HTTP BASE_URL
+      const insecureEnv: Env = {
+        ...(env as unknown as Env),
+        TELEGRAM_BOT_TOKEN: 'fake_bot_token',
+        DOWNLOAD_SIGNING_SECRET: 'test_signing_secret_999',
+        BASE_URL: 'http://insecure.example.com',
+      };
+
+      const outboxService = new OutboxService(env.DB, mockQueue, insecureEnv);
+      const result = await outboxService.dispatchPendingEvents({ batchSize: 10 });
+
+      expect(result.dispatchedCount).toBe(0);
+      expect(result.failureCount).toBe(1);
+
+      // Row remains PENDING with backoff and error recorded
+      const row = await env.DB.prepare('SELECT status, dispatch_attempts, last_dispatch_error FROM outbox_events WHERE id = ?')
+        .bind(eventId)
+        .first<{ status: string; dispatch_attempts: number; last_dispatch_error: string }>();
+      expect(row?.status).toBe('PENDING');
+      expect(row?.dispatch_attempts).toBe(1);
+      expect(row?.last_dispatch_error).toBeDefined();
+    });
+  });
+
   it('runs scheduled outbox dispatcher safely without throwing', async () => {
     const ctx = createExecutionContext();
     await worker.scheduled({} as ScheduledEvent, testEnv, ctx);
     await waitOnExecutionContext(ctx);
   });
 });
+

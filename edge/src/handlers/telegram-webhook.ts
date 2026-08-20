@@ -11,6 +11,7 @@ import { SUPPORTED_FORMATS } from '../types/session';
 import { escapeHtml } from '../utils/html';
 import { normalizeMyFontsUrl } from '../utils/myfonts';
 import { generateVietQrUrl } from '../utils/vietqr';
+import { generateSignedDownloadUrl, getDownloadTtlSeconds } from '../utils/download-signer';
 import { TelegramClient } from '../services/telegram-client';
 import { CatalogService } from '../services/catalog-service';
 import { SessionService, SessionConflictError } from '../services/session-service';
@@ -291,7 +292,22 @@ async function handleCallbackQuery(
       return;
     }
 
-    const { text: msgText, replyMarkup } = renderOrderCreatedMessage(order, env);
+    let signedDownloadUrl: string | undefined;
+    if (order.status === 'COMPLETED' && env.DOWNLOAD_SIGNING_SECRET && env.BASE_URL) {
+      try {
+        const ttlSeconds = getDownloadTtlSeconds(env.DOWNLOAD_URL_TTL_SECONDS);
+        const signed = await generateSignedDownloadUrl(order.id, env.DOWNLOAD_SIGNING_SECRET, {
+          baseUrl: env.BASE_URL,
+          ttlSeconds,
+          requireHttps: true,
+        });
+        signedDownloadUrl = signed.url;
+      } catch {
+        // Fallback without signed link if signing or baseUrl validation fails
+      }
+    }
+
+    const { text: msgText, replyMarkup } = renderOrderCreatedMessage(order, env, signedDownloadUrl);
     await tg.editMessageText({
       chat_id: session.chat_id,
       message_id: query.message?.message_id || session.last_message_id || undefined,
@@ -928,7 +944,8 @@ function renderOrderConfirmation(
 
 export function renderOrderCreatedMessage(
   order: OrderRecord,
-  env: Env
+  env: Env,
+  signedDownloadUrl?: string
 ): { text: string; replyMarkup: InlineKeyboardMarkup } {
   const hasBankInfo = Boolean(env.BANK_ID && env.BANK_ACCOUNT_NUMBER);
   const paymentCode = order.payment_code || 'N/A';
@@ -961,26 +978,41 @@ export function renderOrderCreatedMessage(
 
   let statusBadge = `<code>${order.status}</code>`;
   let statusNote = '';
-  if (order.status === 'PAID') {
+  if (order.status === 'COMPLETED') {
+    statusBadge = `<b>COMPLETED 📦</b>`;
+    statusNote = `\n🎉 <b>Your font files are ready for download!</b>\n`;
+  } else if (order.status === 'PROCESSING') {
+    statusBadge = `<b>PROCESSING ⚙️</b>`;
+    statusNote = `\n⚙️ <i>Your fonts are currently being generated. This usually takes under a minute.</i>\n`;
+  } else if (order.status === 'PAID') {
     statusBadge = `<b>PAID ✅</b>`;
-    statusNote = `\n🎉 <i>Payment confirmed! Your order is being processed.</i>\n`;
+    statusNote = `\n🎉 <i>Payment confirmed! Your order is queued for processing.</i>\n`;
   } else if (order.status === 'AWAITING_PAYMENT') {
     statusBadge = `<b>AWAITING_PAYMENT ⏳</b>`;
     statusNote = `\n⏳ <i>Please transfer the exact amount with the transfer content above. Payment is confirmed automatically within 1-2 minutes.</i>\n`;
   }
 
-  const text = `🎉 <b>Order Created!</b>\n\n• <b>Order ID:</b> <code>${order.id}</code>\n• <b>Status:</b> ${statusBadge}\n• <b>Payment Code:</b> <code>${escapeHtml(
+  const text = `🎉 <b>Order Info:</b>\n\n• <b>Order ID:</b> <code>${order.id}</code>\n• <b>Status:</b> ${statusBadge}\n• <b>Payment Code:</b> <code>${escapeHtml(
     paymentCode
-  )}</code>\n• <b>Amount Due:</b> <b>${order.total_amount.toLocaleString('vi-VN')} VND</b>\n${bankSection}${qrSection}${statusNote}`;
+  )}</code>\n• <b>Amount:</b> <b>${order.total_amount.toLocaleString('vi-VN')} VND</b>\n${order.status === 'AWAITING_PAYMENT' ? bankSection + qrSection : ''}${statusNote}`;
 
-  const keyboard: InlineKeyboardMarkup['inline_keyboard'] = [
-    [
+  const keyboard: InlineKeyboardMarkup['inline_keyboard'] = [];
+
+  if (order.status === 'COMPLETED' && signedDownloadUrl) {
+    keyboard.push([
       {
-        text: '🔄 Check Payment Status',
-        callback_data: `ord:chk:${order.id}`,
+        text: '⬇️ Download Fonts (.ZIP)',
+        url: signedDownloadUrl,
       },
-    ],
-  ];
+    ]);
+  }
+
+  keyboard.push([
+    {
+      text: '🔄 Refresh Status',
+      callback_data: `ord:chk:${order.id}`,
+    },
+  ]);
 
   return { text, replyMarkup: { inline_keyboard: keyboard } };
 }

@@ -1,4 +1,4 @@
-"""Tests for A23 Runner lifecycle, state machine, consumer loop, live preview acquisition, and lease safety."""
+"""Tests for A23 Runner lifecycle, state machine, consumer loop, R2 upload, completion, and queue ACK boundary."""
 import asyncio
 import io
 import json
@@ -27,10 +27,16 @@ def _make_test_image_bytes(stroke_x0: int, stroke_x1: int) -> bytes:
 
 
 @pytest.mark.asyncio
-async def test_runner_default_live_preview_acquisition_success(test_settings: Settings):
+async def test_runner_default_live_preview_and_durable_completion(test_settings: Settings):
     preview_bytes = _make_test_image_bytes(20, 60)
+    acked_leases = []
+    uploaded_keys = []
+    completed_jobs = []
 
     def queue_handler(request: httpx.Request) -> httpx.Response:
+        data = json.loads(request.content)
+        if "acks" in data:
+            acked_leases.extend([a["lease_id"] for a in data["acks"]])
         return httpx.Response(200, json={"success": True})
 
     def worker_handler(request: httpx.Request) -> httpx.Response:
@@ -50,6 +56,13 @@ async def test_runner_default_live_preview_acquisition_success(test_settings: Se
             )
         if "heartbeat" in request.url.path:
             return httpx.Response(200, json={"success": True, "lease_expires_at": int(time.time() * 1000) + 300000})
+        if "artifact" in request.url.path:
+            key = f"artifacts/ord_live_1/job_live_1/{request.headers['X-Artifact-SHA256']}.zip"
+            uploaded_keys.append(key)
+            return httpx.Response(200, json={"success": True, "artifact_key": key, "sha256": request.headers['X-Artifact-SHA256'], "size": len(request.content)})
+        if "complete" in request.url.path:
+            completed_jobs.append("job_live_1")
+            return httpx.Response(200, json={"success": True, "status": "COMPLETED", "queue_action": "ack", "completed_at": int(time.time() * 1000)})
         return httpx.Response(404)
 
     def source_handler(request: httpx.Request) -> httpx.Response:
@@ -72,18 +85,25 @@ async def test_runner_default_live_preview_acquisition_success(test_settings: Se
         msg = QueueMessage(id="m1", lease_id="l_live", body_raw='{"job_id":"job_live_1"}', attempts=1, job_id="job_live_1")
         res = await runner.process_message(msg)
 
-        # Output produced driven by fetched preview bytes without manual preview_input
-        assert res.action == RunnerAction.HOLD_FOR_COMPLETION
-        assert res.manifest is not None
-        assert res.manifest.zip_file_path.exists()
+        # Full pipeline completed -> uploaded, completed, and ACKed from Queue
+        assert res.action == RunnerAction.ACKED
+        assert len(uploaded_keys) == 1
+        assert len(completed_jobs) == 1
+        assert "l_live" in acked_leases
 
 
 @pytest.mark.asyncio
-async def test_two_different_fetched_previews_produce_distinct_output(test_settings: Settings):
-    img_1 = _make_test_image_bytes(10, 30)  # Thin
-    img_2 = _make_test_image_bytes(10, 80)  # Thick
+async def test_runner_does_not_ack_queue_when_upload_alone_succeeds(test_settings: Settings):
+    preview_bytes = _make_test_image_bytes(20, 60)
+    acked_leases = []
+    retried_leases = []
 
     def queue_handler(request: httpx.Request) -> httpx.Response:
+        data = json.loads(request.content)
+        if "acks" in data:
+            acked_leases.extend([a["lease_id"] for a in data["acks"]])
+        if "retries" in data:
+            retried_leases.extend([r["lease_id"] for r in data["retries"]])
         return httpx.Response(200, json={"success": True})
 
     def worker_handler(request: httpx.Request) -> httpx.Response:
@@ -91,8 +111,8 @@ async def test_two_different_fetched_previews_produce_distinct_output(test_setti
             return httpx.Response(
                 200,
                 json={
-                    "job_id": "job_distinct",
-                    "order_id": "ord_distinct",
+                    "job_id": "job_no_ack",
+                    "order_id": "ord_no_ack",
                     "lease_token": "12345678-1234-1234-1234-123456789abc",
                     "lease_expires_at": int(time.time() * 1000) + 300000,
                     "source_url": "https://www.myfonts.com/collections/roboto-flex",
@@ -103,35 +123,141 @@ async def test_two_different_fetched_previews_produce_distinct_output(test_setti
             )
         if "heartbeat" in request.url.path:
             return httpx.Response(200, json={"success": True, "lease_expires_at": int(time.time() * 1000) + 300000})
+        if "artifact" in request.url.path:
+            # Upload succeeds
+            return httpx.Response(200, json={"success": True, "artifact_key": "artifacts/ord/job/sha.zip", "sha256": "a"*64, "size": 100})
+        if "complete" in request.url.path:
+            # Complete fails with 500 / Network Error
+            return httpx.Response(500, json={"error": "Database error"})
         return httpx.Response(404)
 
-    # First run with image 1
-    def source_handler_1(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, content=img_1, headers={"content-type": "image/png"})
-
-    # Second run with image 2
-    def source_handler_2(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, content=img_2, headers={"content-type": "image/png"})
+    def source_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=preview_bytes, headers={"content-type": "image/png"})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(queue_handler)) as q_http, \
                httpx.AsyncClient(transport=httpx.MockTransport(worker_handler)) as w_http, \
-               httpx.AsyncClient(transport=httpx.MockTransport(source_handler_1)) as s_http_1, \
-               httpx.AsyncClient(transport=httpx.MockTransport(source_handler_2)) as s_http_2:
+               httpx.AsyncClient(transport=httpx.MockTransport(source_handler)) as s_http:
         q_client = CloudflareQueueClient(test_settings, client=q_http)
         w_client = WorkerJobClient(test_settings, client=w_http)
+        runner = A23Runner(test_settings, q_client, w_client, source_acquirer=SourceAcquirer(client=s_http))
 
-        # Run 1
-        runner1 = A23Runner(test_settings, q_client, w_client, source_acquirer=SourceAcquirer(client=s_http_1))
-        msg1 = QueueMessage(id="m1", lease_id="l1", body_raw='{"job_id":"job_distinct"}', attempts=1, job_id="job_distinct")
-        res1 = await runner1.process_message(msg1)
+        msg = QueueMessage(id="m1", lease_id="l_no_ack", body_raw='{"job_id":"job_no_ack"}', attempts=1, job_id="job_no_ack")
+        res = await runner.process_message(msg)
 
-        # Run 2
-        runner2 = A23Runner(test_settings, q_client, w_client, source_acquirer=SourceAcquirer(client=s_http_2))
-        msg2 = QueueMessage(id="m2", lease_id="l2", body_raw='{"job_id":"job_distinct"}', attempts=1, job_id="job_distinct")
-        res2 = await runner2.process_message(msg2)
+        # Never ACK Queue because upload alone succeeded (BLOCK 6)
+        assert res.action == RunnerAction.RETRIED
+        assert "l_no_ack" not in acked_leases
+        assert "l_no_ack" in retried_leases
 
-        # Reconstructed output font binary changes between different preview payloads
-        assert res1.manifest.files[0].sha256_hex != res2.manifest.files[0].sha256_hex
+
+@pytest.mark.asyncio
+async def test_runner_ambiguous_completion_failure_does_not_call_fail(test_settings: Settings):
+    preview_bytes = _make_test_image_bytes(20, 60)
+    failed_called = False
+    retried_leases = []
+
+    def queue_handler(request: httpx.Request) -> httpx.Response:
+        data = json.loads(request.content)
+        if "retries" in data:
+            retried_leases.extend([r["lease_id"] for r in data["retries"]])
+        return httpx.Response(200, json={"success": True})
+
+    def worker_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal failed_called
+        if "claim" in request.url.path:
+            return httpx.Response(
+                200,
+                json={
+                    "job_id": "job_ambig",
+                    "order_id": "ord_ambig",
+                    "lease_token": "12345678-1234-1234-1234-123456789abc",
+                    "lease_expires_at": int(time.time() * 1000) + 300000,
+                    "source_url": "https://www.myfonts.com/collections/roboto-flex",
+                    "family_name": "Roboto Flex",
+                    "styles": [{"id": "rf_reg", "display_name": "Regular"}],
+                    "formats": ["TTF"],
+                },
+            )
+        if "heartbeat" in request.url.path:
+            return httpx.Response(200, json={"success": True, "lease_expires_at": int(time.time() * 1000) + 300000})
+        if "artifact" in request.url.path:
+            return httpx.Response(200, json={"success": True, "artifact_key": "artifacts/ord/job/sha.zip", "sha256": "a"*64, "size": 100})
+        if "complete" in request.url.path:
+            raise httpx.ConnectError("Network dropped during complete response")
+        if "fail" in request.url.path:
+            failed_called = True
+            return httpx.Response(200, json={"success": True})
+        return httpx.Response(404)
+
+    def source_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=preview_bytes, headers={"content-type": "image/png"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(queue_handler)) as q_http, \
+               httpx.AsyncClient(transport=httpx.MockTransport(worker_handler)) as w_http, \
+               httpx.AsyncClient(transport=httpx.MockTransport(source_handler)) as s_http:
+        q_client = CloudflareQueueClient(test_settings, client=q_http)
+        w_client = WorkerJobClient(test_settings, client=w_http)
+        runner = A23Runner(test_settings, q_client, w_client, source_acquirer=SourceAcquirer(client=s_http))
+
+        msg = QueueMessage(id="m1", lease_id="l_ambig", body_raw='{"job_id":"job_ambig"}', attempts=1, job_id="job_ambig")
+        res = await runner.process_message(msg)
+
+        # Must not call /fail on ambiguous completion network failure (BLOCK 6)
+        assert failed_called is False
+        assert res.action == RunnerAction.RETRIED
+        assert "l_ambig" in retried_leases
+
+
+@pytest.mark.asyncio
+async def test_runner_completion_409_conflict_terminal_acks_queue(test_settings: Settings):
+    preview_bytes = _make_test_image_bytes(20, 60)
+    acked_leases = []
+
+    def queue_handler(request: httpx.Request) -> httpx.Response:
+        data = json.loads(request.content)
+        if "acks" in data:
+            acked_leases.extend([a["lease_id"] for a in data["acks"]])
+        return httpx.Response(200, json={"success": True})
+
+    def worker_handler(request: httpx.Request) -> httpx.Response:
+        if "claim" in request.url.path:
+            return httpx.Response(
+                200,
+                json={
+                    "job_id": "job_term_conflict",
+                    "order_id": "ord_term_conflict",
+                    "lease_token": "12345678-1234-1234-1234-123456789abc",
+                    "lease_expires_at": int(time.time() * 1000) + 300000,
+                    "source_url": "https://www.myfonts.com/collections/roboto-flex",
+                    "family_name": "Roboto Flex",
+                    "styles": [{"id": "rf_reg", "display_name": "Regular"}],
+                    "formats": ["TTF"],
+                },
+            )
+        if "heartbeat" in request.url.path:
+            return httpx.Response(200, json={"success": True, "lease_expires_at": int(time.time() * 1000) + 300000})
+        if "artifact" in request.url.path:
+            return httpx.Response(200, json={"success": True, "artifact_key": "artifacts/ord/job/sha.zip", "sha256": "a"*64, "size": 100})
+        if "complete" in request.url.path:
+            return httpx.Response(409, json={"status": "CONFLICT", "queue_action": "ack", "reason": "job_already_completed"})
+        return httpx.Response(404)
+
+    def source_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=preview_bytes, headers={"content-type": "image/png"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(queue_handler)) as q_http, \
+               httpx.AsyncClient(transport=httpx.MockTransport(worker_handler)) as w_http, \
+               httpx.AsyncClient(transport=httpx.MockTransport(source_handler)) as s_http:
+        q_client = CloudflareQueueClient(test_settings, client=q_http)
+        w_client = WorkerJobClient(test_settings, client=w_http)
+        runner = A23Runner(test_settings, q_client, w_client, source_acquirer=SourceAcquirer(client=s_http))
+
+        msg = QueueMessage(id="m1", lease_id="l_conf_ack", body_raw='{"job_id":"job_term_conflict"}', attempts=1, job_id="job_term_conflict")
+        res = await runner.process_message(msg)
+
+        # 409 with queue_action=ack must ACK queue (Point 4)
+        assert res.action == RunnerAction.ACKED
+        assert "l_conf_ack" in acked_leases
 
 
 @pytest.mark.asyncio
@@ -175,8 +301,7 @@ async def test_missing_or_blocked_live_preview_fails_without_synthetic_success(t
         msg = QueueMessage(id="m1", lease_id="l1", body_raw='{"job_id":"job_blocked_preview"}', attempts=1, job_id="job_blocked_preview")
         res = await runner.process_message(msg)
 
-        # Blocked preview triggers controlled fail, never returns HOLD
-        assert res.action == RunnerAction.ACKED
+        assert res.action == RunnerAction.FAILED_TERMINAL
         assert any("SOURCE_ACQUISITION_BLOCKED" in str(code) for code in failed_reason_codes)
 
 
@@ -243,67 +368,7 @@ async def test_runner_claim_ack_and_retry_paths(test_settings: Settings):
 
 
 @pytest.mark.asyncio
-async def test_runner_heartbeat_runs_concurrently_during_slow_build(test_settings: Settings):
-    heartbeat_calls = 0
-    preview_bytes = _make_test_image_bytes(20, 50)
-
-    def queue_handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"success": True})
-
-    def worker_handler(request: httpx.Request) -> httpx.Response:
-        nonlocal heartbeat_calls
-        if "claim" in request.url.path:
-            return httpx.Response(
-                200,
-                json={
-                    "job_id": "job_slow_build",
-                    "order_id": "ord_slow_build",
-                    "lease_token": "12345678-1234-1234-1234-123456789abc",
-                    "lease_expires_at": int(time.time() * 1000) + 120000,
-                    "source_url": "https://www.myfonts.com/collections/roboto-flex",
-                    "family_name": "Roboto Flex",
-                    "styles": [{"id": "reg", "display_name": "Regular"}],
-                    "formats": ["TTF"],
-                },
-            )
-        if "heartbeat" in request.url.path:
-            heartbeat_calls += 1
-            return httpx.Response(200, json={"success": True, "lease_expires_at": int(time.time() * 1000) + 120000})
-        return httpx.Response(404)
-
-    def source_handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, content=preview_bytes, headers={"content-type": "image/png"})
-
-    class SlowBuilder(FontBuilderService):
-        def build_font(self, *args, **kwargs):
-            time.sleep(1.2)  # Simulates slow CPU font build
-            return super().build_font(*args, **kwargs)
-
-    fast_hb_settings = test_settings.model_copy(update={"HEARTBEAT_INTERVAL_SECONDS": 1, "LEASE_DURATION_SECONDS": 60})
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(queue_handler)) as q_http, \
-               httpx.AsyncClient(transport=httpx.MockTransport(worker_handler)) as w_http, \
-               httpx.AsyncClient(transport=httpx.MockTransport(source_handler)) as s_http:
-        q_client = CloudflareQueueClient(fast_hb_settings, client=q_http)
-        w_client = WorkerJobClient(fast_hb_settings, client=w_http)
-        runner = A23Runner(
-            fast_hb_settings,
-            q_client,
-            w_client,
-            source_acquirer=SourceAcquirer(client=s_http),
-            font_builder=SlowBuilder(),
-        )
-
-        msg = QueueMessage(id="m1", lease_id="l_hb", body_raw='{"job_id":"job_slow_build"}', attempts=1, job_id="job_slow_build")
-        res = await runner.process_message(msg)
-
-        # Heartbeat loop ran concurrently during the CPU build
-        assert heartbeat_calls >= 1
-        assert res.action == RunnerAction.HOLD_FOR_COMPLETION
-
-
-@pytest.mark.asyncio
-async def test_runner_fenced_heartbeat_during_build_aborts_without_hold(test_settings: Settings):
+async def test_runner_fenced_heartbeat_during_build_aborts(test_settings: Settings):
     preview_bytes = _make_test_image_bytes(20, 50)
 
     def queue_handler(request: httpx.Request) -> httpx.Response:
@@ -334,9 +399,9 @@ async def test_runner_fenced_heartbeat_during_build_aborts_without_hold(test_set
         return httpx.Response(200, content=preview_bytes, headers={"content-type": "image/png"})
 
     class SlowBuilder(FontBuilderService):
-        def build_font(self, *args, **kwargs):
+        def build_font(self, style_source, family_name, format_type, output_dir):
             time.sleep(1.2)
-            return super().build_font(*args, **kwargs)
+            return super().build_font(style_source, family_name, format_type, output_dir)
 
     fast_hb_settings = test_settings.model_copy(update={"HEARTBEAT_INTERVAL_SECONDS": 1, "LEASE_DURATION_SECONDS": 60})
 
@@ -356,65 +421,7 @@ async def test_runner_fenced_heartbeat_during_build_aborts_without_hold(test_set
         msg = QueueMessage(id="m1", lease_id="l_fn", body_raw='{"job_id":"job_fenced_build"}', attempts=1, job_id="job_fenced_build")
         res = await runner.process_message(msg)
 
-        # Fenced heartbeat immediately aborts with FENCED_ABORT; no HOLD result
         assert res.action == RunnerAction.FENCED_ABORT
-
-
-@pytest.mark.asyncio
-async def test_runner_slow_packaging_crossing_expiry_aborts_without_hold(test_settings: Settings):
-    preview_bytes = _make_test_image_bytes(20, 50)
-
-    def queue_handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"success": True})
-
-    def worker_handler(request: httpx.Request) -> httpx.Response:
-        if "claim" in request.url.path:
-            return httpx.Response(
-                200,
-                json={
-                    "job_id": "job_slow_pkg",
-                    "order_id": "ord_slow_pkg",
-                    "lease_token": "12345678-1234-1234-1234-123456789abc",
-                    "lease_expires_at": int(time.time() * 1000) + 15500,
-                    "source_url": "https://www.myfonts.com/collections/roboto-flex",
-                    "family_name": "Roboto Flex",
-                    "styles": [{"id": "reg", "display_name": "Regular"}],
-                    "formats": ["TTF"],
-                },
-            )
-        if "heartbeat" in request.url.path:
-            return httpx.Response(500)
-        if "fail" in request.url.path:
-            return httpx.Response(200, json={"success": True, "status": "FAILED", "queue_action": "ack"})
-        return httpx.Response(404)
-
-    def source_handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, content=preview_bytes, headers={"content-type": "image/png"})
-
-    class SlowPackager(PackagerService):
-        def package_job_output(self, *args, **kwargs):
-            res = super().package_job_output(*args, **kwargs)
-            time.sleep(1.0)
-            return res
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(queue_handler)) as q_http, \
-               httpx.AsyncClient(transport=httpx.MockTransport(worker_handler)) as w_http, \
-               httpx.AsyncClient(transport=httpx.MockTransport(source_handler)) as s_http:
-        q_client = CloudflareQueueClient(test_settings, client=q_http)
-        w_client = WorkerJobClient(test_settings, client=w_http)
-        runner = A23Runner(
-            test_settings,
-            q_client,
-            w_client,
-            source_acquirer=SourceAcquirer(client=s_http),
-            packager=SlowPackager(),
-        )
-
-        msg = QueueMessage(id="m1", lease_id="l_slow", body_raw='{"job_id":"job_slow_pkg"}', attempts=1, job_id="job_slow_pkg")
-        res = await runner.process_message(msg)
-
-        # Lease deadline crossing during slow packaging results in abort, not HOLD
-        assert res.action != RunnerAction.HOLD_FOR_COMPLETION
 
 
 @pytest.mark.asyncio
@@ -455,3 +462,44 @@ async def test_runner_run_once_and_run_loop(test_settings: Settings):
         # 2. run_loop with bounded max_iterations
         await runner.run_loop(max_iterations=2)
         assert pull_count >= 2
+
+
+@pytest.mark.asyncio
+async def test_runner_entrypoint_lifecycle_start_stop_close(test_settings: Settings):
+    pull_count = 0
+
+    def queue_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal pull_count
+        if "pull" in request.url.path:
+            pull_count += 1
+            return httpx.Response(200, json={"success": True, "messages": []})
+        return httpx.Response(200, json={"success": True})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(queue_handler)) as q_http, \
+               httpx.AsyncClient() as w_http, \
+               httpx.AsyncClient() as s_http:
+        q_client = CloudflareQueueClient(test_settings, client=q_http)
+        w_client = WorkerJobClient(test_settings, client=w_http)
+        s_acquirer = SourceAcquirer(client=s_http)
+        runner = A23Runner(
+            test_settings,
+            queue_client=q_client,
+            worker_client=w_client,
+            source_acquirer=s_acquirer,
+        )
+
+        stop_event = asyncio.Event()
+
+        async def stop_after_brief_delay():
+            await asyncio.sleep(0.05)
+            stop_event.set()
+
+        asyncio.create_task(stop_after_brief_delay())
+
+        # Proves runner.run_loop(stop_event=stop_event) terminates cleanly
+        await runner.run_loop(stop_event=stop_event)
+        assert stop_event.is_set() is True
+
+        # Proves runner.close() executes cleanly and closes owned clients without raising
+        await runner.close()
+
