@@ -1,0 +1,12 @@
+{
+  "name": "telegramfonts-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "edge"
+  ],
+  "scripts": {
+    "typecheck": "npm run --workspace=edge typecheck",
+    "test": "npm run --workspace=edge test"
+  }
+}
