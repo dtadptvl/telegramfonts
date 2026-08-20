@@ -12,7 +12,7 @@ import { escapeHtml } from '../utils/html';
 import { normalizeMyFontsUrl } from '../utils/myfonts';
 import { TelegramClient } from '../services/telegram-client';
 import { CatalogService } from '../services/catalog-service';
-import { SessionService } from '../services/session-service';
+import { SessionService, SessionConflictError } from '../services/session-service';
 import { OrderService } from '../services/order-service';
 
 export async function handleTelegramWebhook(
@@ -54,44 +54,44 @@ export async function handleTelegramWebhook(
     });
   }
 
-  // 3. Durable Telegram update_id deduplication (BLOCK 3)
+  // 3. Durable Telegram update_id ledger check (BLOCK A)
+  const existingUpdate = await env.DB.prepare(
+    'SELECT status FROM telegram_updates WHERE update_id = ?'
+  )
+    .bind(update.update_id)
+    .first<{ status: string }>();
+
+  // If already COMPLETED, safely ignore duplicate webhook replay
+  if (existingUpdate && existingUpdate.status === 'COMPLETED') {
+    return new Response(JSON.stringify({ status: 'ignored_duplicate_update' }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
   const userId = update.message?.from
     ? String(update.message.from.id)
     : update.callback_query?.from
     ? String(update.callback_query.from.id)
     : null;
 
-  try {
-    await env.DB.prepare(
-      `INSERT INTO telegram_updates (update_id, user_id, created_at) VALUES (?, ?, ?)`
-    )
-      .bind(update.update_id, userId, Date.now())
-      .run();
-  } catch (err: unknown) {
-    // If update_id was already recorded, ignore safely without re-processing (idempotent webhook acknowledgement)
-    const isConstraint =
-      err instanceof Error &&
-      (err.message.includes('UNIQUE constraint failed') || err.message.includes('PRIMARY KEY'));
+  const now = Date.now();
 
-    if (isConstraint) {
-      return new Response(JSON.stringify({ status: 'ignored_duplicate_update' }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }
-    // For other DB connectivity errors, return 500 so Telegram retries
-    return new Response(JSON.stringify({ error: 'Internal Server Error' }), {
-      status: 500,
-      headers: { 'Content-Type': 'application/json' },
-    });
-  }
+  // Record/update update status as PROCESSING
+  await env.DB.prepare(
+    `INSERT INTO telegram_updates (update_id, user_id, status, created_at, updated_at)
+     VALUES (?, ?, 'PROCESSING', ?, ?)
+     ON CONFLICT(update_id) DO UPDATE SET updated_at = excluded.updated_at`
+  )
+    .bind(update.update_id, userId, now, now)
+    .run();
 
   const tg = new TelegramClient(env.TELEGRAM_BOT_TOKEN);
   const catalogService = new CatalogService(env.DB);
   const sessionService = new SessionService(env.DB);
   const orderService = new OrderService(env.DB);
 
-  // 4. Process update (do not swallow transient DB/network errors)
+  // 4. Process update
   try {
     if (update.message) {
       await handleMessage(update.message, tg, sessionService, catalogService);
@@ -104,8 +104,15 @@ export async function handleTelegramWebhook(
         orderService
       );
     }
+
+    // Mark update as COMPLETED upon successful processing
+    await env.DB.prepare(
+      `UPDATE telegram_updates SET status = 'COMPLETED', updated_at = ? WHERE update_id = ?`
+    )
+      .bind(Date.now(), update.update_id)
+      .run();
   } catch (err: unknown) {
-    // Transient processing failure -> return 500 to signal Telegram to retry
+    // Leave update in PROCESSING status so Telegram retry will reprocess, and return 500
     return new Response(JSON.stringify({ error: 'Internal Processing Error' }), {
       status: 500,
       headers: { 'Content-Type': 'application/json' },
@@ -167,7 +174,7 @@ async function handleMessage(
 
   if (!catalog) {
     // Catalog pending (future A23 agent will satisfy this)
-    await sessionService.setStatus(userId, 'AWAITING_CATALOG');
+    await sessionService.setStatusUnconditional(userId, 'AWAITING_CATALOG');
     await tg.sendMessage({
       chat_id: chatId,
       text: `🔍 <b>Analyzing font catalog...</b>\n\nWe are analyzing:\n<code>${escapeHtml(
@@ -195,7 +202,7 @@ async function handleMessage(
     });
 
     if (sent.message_id) {
-      await sessionService.setStatus(userId, 'SELECTING_STYLES', sent.message_id);
+      await sessionService.setStatusUnconditional(userId, 'SELECTING_STYLES', sent.message_id);
     }
   }
 }
@@ -256,156 +263,115 @@ async function handleCallbackQuery(
     selectedFormats = ['TTF'];
   }
 
-  // Handle STYLE SELECTION actions (Prefix 'st')
-  if (prefix === 'st') {
-    if (session.status !== 'SELECTING_STYLES') {
-      await tg.answerCallbackQuery({
-        callback_query_id: query.id,
-        text: 'Action is no longer valid in current step.',
-        show_alert: true,
-      });
-      return;
-    }
-
-    // Toggle style by index
-    if (action === 't' && param !== undefined) {
-      const styleIndex = parseInt(param, 10);
-      const targetStyle = catalog.styles[styleIndex];
-
-      if (!targetStyle) {
+  try {
+    // Handle STYLE SELECTION actions (Prefix 'st')
+    if (prefix === 'st') {
+      if (session.status !== 'SELECTING_STYLES') {
         await tg.answerCallbackQuery({
           callback_query_id: query.id,
-          text: 'Style not found in catalog.',
+          text: 'Action is no longer valid in current step.',
           show_alert: true,
         });
         return;
       }
 
-      const updated = await sessionService.toggleStyleSelection(userId, targetStyle.id);
-      const { text, replyMarkup } = renderStyleSelection(
-        catalog,
-        updated,
-        session.workflow_token
-      );
+      // Toggle style by index
+      if (action === 't' && param !== undefined) {
+        const styleIndex = parseInt(param, 10);
+        const targetStyle = catalog.styles[styleIndex];
 
-      await tg.editMessageText({
-        chat_id: session.chat_id,
-        message_id: query.message?.message_id || session.last_message_id || undefined,
-        text,
-        reply_markup: replyMarkup,
-      });
-      await tg.answerCallbackQuery({ callback_query_id: query.id });
-      return;
-    }
+        if (!targetStyle) {
+          await tg.answerCallbackQuery({
+            callback_query_id: query.id,
+            text: 'Style not found in catalog.',
+            show_alert: true,
+          });
+          return;
+        }
 
-    // Select all styles
-    if (action === 'all') {
-      const allIds = catalog.styles.map((s) => s.id);
-      await sessionService.setAllStyles(userId, allIds);
-      const { text, replyMarkup } = renderStyleSelection(
-        catalog,
-        allIds,
-        session.workflow_token
-      );
+        const updated = await sessionService.toggleStyleSelection(
+          userId,
+          session.workflow_token,
+          targetStyle.id,
+          session.version
+        );
+        const { text, replyMarkup } = renderStyleSelection(
+          catalog,
+          updated,
+          session.workflow_token
+        );
 
-      await tg.editMessageText({
-        chat_id: session.chat_id,
-        message_id: query.message?.message_id || session.last_message_id || undefined,
-        text,
-        reply_markup: replyMarkup,
-      });
-      await tg.answerCallbackQuery({ callback_query_id: query.id, text: 'All styles selected' });
-      return;
-    }
-
-    // Clear styles
-    if (action === 'clr') {
-      await sessionService.clearStyles(userId);
-      const { text, replyMarkup } = renderStyleSelection(
-        catalog,
-        [],
-        session.workflow_token
-      );
-
-      await tg.editMessageText({
-        chat_id: session.chat_id,
-        message_id: query.message?.message_id || session.last_message_id || undefined,
-        text,
-        reply_markup: replyMarkup,
-      });
-      await tg.answerCallbackQuery({ callback_query_id: query.id, text: 'Selection cleared' });
-      return;
-    }
-
-    // Next to formats
-    if (action === 'nxt') {
-      if (!selectedStyles.length) {
-        await tg.answerCallbackQuery({
-          callback_query_id: query.id,
-          text: 'Please select at least 1 style to continue.',
-          show_alert: true,
+        await tg.editMessageText({
+          chat_id: session.chat_id,
+          message_id: query.message?.message_id || session.last_message_id || undefined,
+          text,
+          reply_markup: replyMarkup,
         });
+        await tg.answerCallbackQuery({ callback_query_id: query.id });
         return;
       }
 
-      await sessionService.setStatus(userId, 'SELECTING_FORMATS');
-      const { text, replyMarkup } = renderFormatSelection(
-        catalog,
-        selectedStyles.length,
-        selectedFormats,
-        session.workflow_token
-      );
+      // Select all styles
+      if (action === 'all') {
+        const allIds = catalog.styles.map((s) => s.id);
+        await sessionService.setAllStyles(userId, session.workflow_token, allIds, session.version);
+        const { text, replyMarkup } = renderStyleSelection(
+          catalog,
+          allIds,
+          session.workflow_token
+        );
 
-      await tg.editMessageText({
-        chat_id: session.chat_id,
-        message_id: query.message?.message_id || session.last_message_id || undefined,
-        text,
-        reply_markup: replyMarkup,
-      });
-      await tg.answerCallbackQuery({ callback_query_id: query.id });
-      return;
-    }
-  }
+        await tg.editMessageText({
+          chat_id: session.chat_id,
+          message_id: query.message?.message_id || session.last_message_id || undefined,
+          text,
+          reply_markup: replyMarkup,
+        });
+        await tg.answerCallbackQuery({ callback_query_id: query.id, text: 'All styles selected' });
+        return;
+      }
 
-  // Handle FORMAT SELECTION actions (Prefix 'fmt')
-  if (prefix === 'fmt') {
-    if (session.status !== 'SELECTING_FORMATS') {
-      await tg.answerCallbackQuery({
-        callback_query_id: query.id,
-        text: 'Action is no longer valid in current step.',
-        show_alert: true,
-      });
-      return;
-    }
+      // Clear styles
+      if (action === 'clr') {
+        await sessionService.clearStyles(userId, session.workflow_token, session.version);
+        const { text, replyMarkup } = renderStyleSelection(
+          catalog,
+          [],
+          session.workflow_token
+        );
 
-    // Back to styles
-    if (action === 'bck') {
-      await sessionService.setStatus(userId, 'SELECTING_STYLES');
-      const { text, replyMarkup } = renderStyleSelection(
-        catalog,
-        selectedStyles,
-        session.workflow_token
-      );
+        await tg.editMessageText({
+          chat_id: session.chat_id,
+          message_id: query.message?.message_id || session.last_message_id || undefined,
+          text,
+          reply_markup: replyMarkup,
+        });
+        await tg.answerCallbackQuery({ callback_query_id: query.id, text: 'Selection cleared' });
+        return;
+      }
 
-      await tg.editMessageText({
-        chat_id: session.chat_id,
-        message_id: query.message?.message_id || session.last_message_id || undefined,
-        text,
-        reply_markup: replyMarkup,
-      });
-      await tg.answerCallbackQuery({ callback_query_id: query.id });
-      return;
-    }
+      // Next to formats
+      if (action === 'nxt') {
+        if (!selectedStyles.length) {
+          await tg.answerCallbackQuery({
+            callback_query_id: query.id,
+            text: 'Please select at least 1 style to continue.',
+            show_alert: true,
+          });
+          return;
+        }
 
-    // Toggle format
-    if (action === 't' && param !== undefined) {
-      const format = param as FontFormat;
-      if (SUPPORTED_FORMATS.includes(format)) {
-        const updatedFormats = await sessionService.toggleFormatSelection(userId, format);
+        await sessionService.transitionStatus(
+          userId,
+          session.workflow_token,
+          'SELECTING_STYLES',
+          'SELECTING_FORMATS',
+          session.version
+        );
         const { text, replyMarkup } = renderFormatSelection(
           catalog,
           selectedStyles.length,
-          updatedFormats,
+          selectedFormats,
           session.workflow_token
         );
 
@@ -420,100 +386,168 @@ async function handleCallbackQuery(
       }
     }
 
-    // Next to confirmation
-    if (action === 'nxt') {
-      if (!selectedFormats.length) {
+    // Handle FORMAT SELECTION actions (Prefix 'fmt')
+    if (prefix === 'fmt') {
+      if (session.status !== 'SELECTING_FORMATS') {
         await tg.answerCallbackQuery({
           callback_query_id: query.id,
-          text: 'Please select at least 1 font format.',
+          text: 'Action is no longer valid in current step.',
           show_alert: true,
         });
         return;
       }
 
-      await sessionService.setStatus(userId, 'CONFIRMING');
-      const { text, replyMarkup } = renderOrderConfirmation(
-        catalog,
-        selectedStyles,
-        selectedFormats,
-        session.workflow_token
-      );
-
-      await tg.editMessageText({
-        chat_id: session.chat_id,
-        message_id: query.message?.message_id || session.last_message_id || undefined,
-        text,
-        reply_markup: replyMarkup,
-      });
-      await tg.answerCallbackQuery({ callback_query_id: query.id });
-      return;
-    }
-  }
-
-  // Handle ORDER actions (Prefix 'ord')
-  if (prefix === 'ord') {
-    // Cancel Order
-    if (action === 'ccl') {
-      if (
-        session.status !== 'SELECTING_STYLES' &&
-        session.status !== 'SELECTING_FORMATS' &&
-        session.status !== 'CONFIRMING'
-      ) {
-        await tg.answerCallbackQuery({
-          callback_query_id: query.id,
-          text: 'Cannot cancel completed or inactive order.',
-          show_alert: true,
-        });
-        return;
-      }
-
-      await sessionService.resetSession(userId, session.chat_id);
-      await tg.editMessageText({
-        chat_id: session.chat_id,
-        message_id: query.message?.message_id || session.last_message_id || undefined,
-        text: '❌ <b>Order cancelled.</b>\n\nSend a new MyFonts link whenever you are ready.',
-      });
-      await tg.answerCallbackQuery({ callback_query_id: query.id, text: 'Order cancelled' });
-      return;
-    }
-
-    // Confirm Order
-    if (action === 'cnf') {
-      if (session.status !== 'CONFIRMING') {
-        await tg.answerCallbackQuery({
-          callback_query_id: query.id,
-          text: 'Order confirmation is no longer valid.',
-          show_alert: true,
-        });
-        return;
-      }
-
-      try {
-        const result = await orderService.createOrderFromSession(session, catalog);
-
-        const messageText = `🎉 <b>Order Created!</b>\n\n• <b>Order ID:</b> <code>${result.orderId}</code>\n• <b>Status:</b> <code>AWAITING_PAYMENT</code>\n• <b>Amount Due:</b> <b>${result.totalAmount.toLocaleString('vi-VN')} VND</b>\n• <b>Styles Count:</b> ${result.itemsCount}\n\n⏳ <i>Payment instructions and QR code will be provided in the next phase.</i>`;
+      // Back to styles
+      if (action === 'bck') {
+        await sessionService.transitionStatus(
+          userId,
+          session.workflow_token,
+          'SELECTING_FORMATS',
+          'SELECTING_STYLES',
+          session.version
+        );
+        const { text, replyMarkup } = renderStyleSelection(
+          catalog,
+          selectedStyles,
+          session.workflow_token
+        );
 
         await tg.editMessageText({
           chat_id: session.chat_id,
           message_id: query.message?.message_id || session.last_message_id || undefined,
-          text: messageText,
+          text,
+          reply_markup: replyMarkup,
         });
-
-        await tg.answerCallbackQuery({
-          callback_query_id: query.id,
-          text: result.isExisting ? 'Order already placed!' : 'Order created successfully!',
-        });
+        await tg.answerCallbackQuery({ callback_query_id: query.id });
         return;
-      } catch {
-        // Controlled generic message without leaking internal D1 error text (BLOCK 5)
-        await tg.answerCallbackQuery({
-          callback_query_id: query.id,
-          text: 'An error occurred while creating your order. Please try again.',
-          show_alert: true,
+      }
+
+      // Toggle format
+      if (action === 't' && param !== undefined) {
+        const format = param as FontFormat;
+        if (SUPPORTED_FORMATS.includes(format)) {
+          const updatedFormats = await sessionService.toggleFormatSelection(
+            userId,
+            session.workflow_token,
+            format,
+            session.version
+          );
+          const { text, replyMarkup } = renderFormatSelection(
+            catalog,
+            selectedStyles.length,
+            updatedFormats,
+            session.workflow_token
+          );
+
+          await tg.editMessageText({
+            chat_id: session.chat_id,
+            message_id: query.message?.message_id || session.last_message_id || undefined,
+            text,
+            reply_markup: replyMarkup,
+          });
+          await tg.answerCallbackQuery({ callback_query_id: query.id });
+          return;
+        }
+      }
+
+      // Next to confirmation
+      if (action === 'nxt') {
+        if (!selectedFormats.length) {
+          await tg.answerCallbackQuery({
+            callback_query_id: query.id,
+            text: 'Please select at least 1 font format.',
+            show_alert: true,
+          });
+          return;
+        }
+
+        await sessionService.transitionStatus(
+          userId,
+          session.workflow_token,
+          'SELECTING_FORMATS',
+          'CONFIRMING',
+          session.version
+        );
+        const { text, replyMarkup } = renderOrderConfirmation(
+          catalog,
+          selectedStyles,
+          selectedFormats,
+          session.workflow_token
+        );
+
+        await tg.editMessageText({
+          chat_id: session.chat_id,
+          message_id: query.message?.message_id || session.last_message_id || undefined,
+          text,
+          reply_markup: replyMarkup,
         });
+        await tg.answerCallbackQuery({ callback_query_id: query.id });
         return;
       }
     }
+
+    // Handle ORDER actions (Prefix 'ord')
+    if (prefix === 'ord') {
+      // Cancel Order
+      if (action === 'ccl') {
+        await sessionService.cancelSession(userId, session.workflow_token, session.version);
+        await tg.editMessageText({
+          chat_id: session.chat_id,
+          message_id: query.message?.message_id || session.last_message_id || undefined,
+          text: '❌ <b>Order cancelled.</b>\n\nSend a new MyFonts link whenever you are ready.',
+        });
+        await tg.answerCallbackQuery({ callback_query_id: query.id, text: 'Order cancelled' });
+        return;
+      }
+
+      // Confirm Order
+      if (action === 'cnf') {
+        if (session.status !== 'CONFIRMING') {
+          await tg.answerCallbackQuery({
+            callback_query_id: query.id,
+            text: 'Order confirmation is no longer valid.',
+            show_alert: true,
+          });
+          return;
+        }
+
+        try {
+          const result = await orderService.createOrderFromSession(session, catalog);
+
+          const messageText = `🎉 <b>Order Created!</b>\n\n• <b>Order ID:</b> <code>${result.orderId}</code>\n• <b>Status:</b> <code>AWAITING_PAYMENT</code>\n• <b>Amount Due:</b> <b>${result.totalAmount.toLocaleString('vi-VN')} VND</b>\n• <b>Styles Count:</b> ${result.itemsCount}\n\n⏳ <i>Payment instructions and QR code will be provided in the next phase.</i>`;
+
+          await tg.editMessageText({
+            chat_id: session.chat_id,
+            message_id: query.message?.message_id || session.last_message_id || undefined,
+            text: messageText,
+          });
+
+          await tg.answerCallbackQuery({
+            callback_query_id: query.id,
+            text: result.isExisting ? 'Order already placed!' : 'Order created successfully!',
+          });
+          return;
+        } catch {
+          // Controlled generic message without leaking internal D1 error text (BLOCK 5)
+          await tg.answerCallbackQuery({
+            callback_query_id: query.id,
+            text: 'An error occurred while creating your order. Please try again.',
+            show_alert: true,
+          });
+          return;
+        }
+      }
+    }
+  } catch (err: unknown) {
+    if (err instanceof SessionConflictError) {
+      await tg.answerCallbackQuery({
+        callback_query_id: query.id,
+        text: 'Action conflict or menu expired. Please refresh.',
+        show_alert: true,
+      });
+      return;
+    }
+    throw err;
   }
 
   await tg.answerCallbackQuery({ callback_query_id: query.id });

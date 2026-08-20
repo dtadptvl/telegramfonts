@@ -6,6 +6,17 @@ import type {
   Style,
 } from '../types/catalog';
 
+function deterministicCatalogId(canonicalKey: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < canonicalKey.length; i++) {
+    hash ^= canonicalKey.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  const hex = (hash >>> 0).toString(16).padStart(8, '0');
+  const sanitized = canonicalKey.replace(/[^a-zA-Z0-9]/g, '_').slice(0, 30);
+  return `cat_${sanitized}_${hex}`;
+}
+
 export class CatalogService {
   constructor(private readonly db: D1Database) {}
 
@@ -106,42 +117,31 @@ export class CatalogService {
 
   async persistCatalogResult(catalog: FontCatalog): Promise<string> {
     const now = Date.now();
-
-    // Check if catalog already exists
-    const existing = await this.db
-      .prepare('SELECT id FROM catalogs WHERE canonical_key = ?')
-      .bind(catalog.canonicalKey)
-      .first<{ id: string }>();
-
-    const catalogId = existing ? existing.id : crypto.randomUUID();
+    const catalogId = deterministicCatalogId(catalog.canonicalKey);
     const statements: D1PreparedStatement[] = [];
 
-    if (existing) {
-      statements.push(
-        this.db
-          .prepare(
-            `UPDATE catalogs SET source_url = ?, family_name = ?, foundry = ?, updated_at = ? WHERE id = ?`
-          )
-          .bind(catalog.sourceUrl, catalog.familyName, catalog.foundry || null, now, catalogId)
-      );
-    } else {
-      statements.push(
-        this.db
-          .prepare(
-            `INSERT INTO catalogs (id, source_url, canonical_key, family_name, foundry, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)`
-          )
-          .bind(
-            catalogId,
-            catalog.sourceUrl,
-            catalog.canonicalKey,
-            catalog.familyName,
-            catalog.foundry || null,
-            now,
-            now
-          )
-      );
-    }
+    // Deterministic upsert ensuring concurrent first-creations resolve idempotently
+    statements.push(
+      this.db
+        .prepare(
+          `INSERT INTO catalogs (id, source_url, canonical_key, family_name, foundry, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(canonical_key) DO UPDATE SET
+             source_url = excluded.source_url,
+             family_name = excluded.family_name,
+             foundry = excluded.foundry,
+             updated_at = excluded.updated_at`
+        )
+        .bind(
+          catalogId,
+          catalog.sourceUrl,
+          catalog.canonicalKey,
+          catalog.familyName,
+          catalog.foundry || null,
+          now,
+          now
+        )
+    );
 
     // Atomically purge old styles so re-persisting does not retain stale styles
     statements.push(
