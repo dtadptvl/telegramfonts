@@ -1,11 +1,11 @@
 -- Migration: 0002_telegram_sessions_and_catalog.sql
 -- D1 Migration for Telegram users, updates dedupe ledger, sessions, and font catalog metadata
 
--- Telegram updates ledger table (crash & replay safety with processing status)
+-- Telegram updates ledger table (crash & replay safety with lifecycle states: RECEIVED, APPLIED, COMPLETED)
 CREATE TABLE IF NOT EXISTS telegram_updates (
     update_id INTEGER PRIMARY KEY,
     user_id TEXT,
-    status TEXT NOT NULL CHECK(status IN ('PROCESSING', 'COMPLETED')),
+    status TEXT NOT NULL CHECK(status IN ('RECEIVED', 'APPLIED', 'COMPLETED')),
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 );

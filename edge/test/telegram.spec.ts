@@ -157,11 +157,11 @@ describe('Telegram Webhook & UX Flow', () => {
       await waitOnExecutionContext(ctx1);
       expect(res1.status).toBe(500);
 
-      // Verify ledger left in PROCESSING state
+      // Verify ledger left in APPLIED state
       const updateRow = await env.DB.prepare('SELECT * FROM telegram_updates WHERE update_id = ?')
         .bind(9988)
         .first<{ status: string }>();
-      expect(updateRow?.status).toBe('PROCESSING');
+      expect(updateRow?.status).toBe('APPLIED');
 
       // Attempt 2: Telegram retries the same update_id -> succeeds
       const req2 = new Request('http://example.com/webhooks/telegram', {
@@ -200,6 +200,84 @@ describe('Telegram Webhook & UX Flow', () => {
       expect(res3.status).toBe(200);
       const data3 = await res3.json();
       expect(data3).toEqual({ status: 'ignored_duplicate_update' });
+    });
+
+    it('guarantees retry idempotency on style callback: mutate succeeds, Telegram edit fails, retry produces exactly one toggle effect (BLOCK A)', async () => {
+      const catalogService = new CatalogService(env.DB);
+      const catalogId = await catalogService.persistCatalogResult(sampleCatalog);
+      const sessionService = new SessionService(env.DB);
+
+      await sessionService.upsertTelegramUser({ id: 88883, is_bot: false, first_name: 'ToggleRetryUser' });
+      await sessionService.getOrCreateSession('88883', '88883');
+      await sessionService.updateSessionCatalog('88883', catalogId, 'SELECTING_STYLES');
+
+      const session = await sessionService.getSessionByUserId('88883');
+      const token = session!.workflow_token;
+
+      let failTelegramApi = true;
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const urlStr = typeof input === 'string' ? input : input.toString();
+        if (urlStr.includes('api.telegram.org')) {
+          if (failTelegramApi) {
+            failTelegramApi = false;
+            return new Response(JSON.stringify({ ok: false, error_code: 502, description: 'Bad Gateway' }), {
+              status: 502,
+            });
+          }
+          return new Response(JSON.stringify({ ok: true, result: { message_id: 100 } }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return new Response('Not found', { status: 404 });
+      };
+
+      const toggleUpdate: TelegramUpdate = {
+        update_id: 9989,
+        callback_query: {
+          id: 'cb_toggle_retry',
+          from: { id: 88883, is_bot: false, first_name: 'ToggleRetryUser' },
+          data: `st:t:${token}:0`, // toggle style 0 (hn_regular)
+        },
+      };
+
+      // Attempt 1: DB mutation applies style 0, but Telegram edit fails -> returns 500
+      const req1 = new Request('http://example.com/webhooks/telegram', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Telegram-Bot-Api-Secret-Token': WEBHOOK_SECRET,
+        },
+        body: JSON.stringify(toggleUpdate),
+      });
+
+      const ctx1 = createExecutionContext();
+      const res1 = await worker.fetch(req1, testEnv, ctx1);
+      await waitOnExecutionContext(ctx1);
+      expect(res1.status).toBe(500);
+
+      // Verify DB style is selected
+      const sessAfterAttempt1 = await sessionService.getSessionByUserId('88883');
+      expect(JSON.parse(sessAfterAttempt1!.selected_styles)).toEqual(['hn_regular']);
+
+      // Attempt 2: Telegram retries with SAME update_id -> must NOT toggle off/invert!
+      const req2 = new Request('http://example.com/webhooks/telegram', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Telegram-Bot-Api-Secret-Token': WEBHOOK_SECRET,
+        },
+        body: JSON.stringify(toggleUpdate),
+      });
+
+      const ctx2 = createExecutionContext();
+      const res2 = await worker.fetch(req2, testEnv, ctx2);
+      await waitOnExecutionContext(ctx2);
+      expect(res2.status).toBe(200);
+
+      // Selection remains exactly 1 style ['hn_regular'], not inverted to []!
+      const sessAfterAttempt2 = await sessionService.getSessionByUserId('88883');
+      expect(JSON.parse(sessAfterAttempt2!.selected_styles)).toEqual(['hn_regular']);
     });
   });
 
@@ -544,6 +622,49 @@ describe('Telegram Webhook & UX Flow', () => {
       expect(replayResult.isExisting).toBe(true);
       expect(replayResult.orderId).toBe(result.orderId);
       expect(replayResult.totalAmount).toBe(100000);
+    });
+
+    it('rejects order confirmation on stale/reset session and commits ZERO order rows (BLOCK B)', async () => {
+      const catalogService = new CatalogService(env.DB);
+      const catalogId = await catalogService.persistCatalogResult(sampleCatalog);
+      const sessionService = new SessionService(env.DB);
+      const orderService = new OrderService(env.DB);
+
+      await sessionService.upsertTelegramUser({ id: 77772, is_bot: false, first_name: 'StaleUser' });
+      await sessionService.getOrCreateSession('77772', '77772');
+      await sessionService.updateSessionCatalog('77772', catalogId, 'SELECTING_STYLES');
+      
+      const sess1 = await sessionService.getSessionByUserId('77772');
+      await sessionService.setAllStyles('77772', sess1!.workflow_token, ['hn_regular'], sess1!.version);
+      
+      const sess2 = await sessionService.getSessionByUserId('77772');
+      await sessionService.transitionStatus('77772', sess2!.workflow_token, 'SELECTING_STYLES', 'CONFIRMING', sess2!.version);
+
+      // Capture stale snapshot
+      const staleSnapshot = await sessionService.getSessionByUserId('77772');
+
+      // User resets session before confirmation executes
+      await sessionService.resetSession('77772', '77772');
+
+      const catalog = await catalogService.getCatalogById(catalogId);
+
+      // Attempting to create order with the stale session snapshot must throw SessionConflictError
+      await expect(
+        orderService.createOrderFromSession(staleSnapshot!, catalog!)
+      ).rejects.toThrow();
+
+      // Zero order rows and zero order_items rows must be committed
+      const orders = await env.DB.prepare('SELECT * FROM orders WHERE user_id = ?')
+        .bind('77772')
+        .all();
+      expect(orders.results.length).toBe(0);
+
+      const items = await env.DB.prepare(
+        'SELECT * FROM order_items WHERE order_id IN (SELECT id FROM orders WHERE user_id = ?)'
+      )
+        .bind('77772')
+        .all();
+      expect(items.results.length).toBe(0);
     });
 
     it('handles concurrent first catalog completion idempotently without unique constraint errors (BLOCK C)', async () => {

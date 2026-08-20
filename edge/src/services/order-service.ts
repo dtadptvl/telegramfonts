@@ -1,5 +1,6 @@
 import type { FontCatalog, Style } from '../types/catalog';
 import type { TelegramSessionRecord, FontFormat } from '../types/session';
+import { SessionConflictError } from './session-service';
 
 export interface CreateOrderResult {
   orderId: string;
@@ -14,7 +15,8 @@ export class OrderService {
 
   async createOrderFromSession(
     session: TelegramSessionRecord,
-    catalog: FontCatalog
+    catalog: FontCatalog,
+    updateId?: number
   ): Promise<CreateOrderResult> {
     const checkoutToken = session.checkout_token;
 
@@ -46,15 +48,15 @@ export class OrderService {
       selectedStyleIds = JSON.parse(session.selected_styles);
       selectedFormats = JSON.parse(session.selected_formats);
     } catch {
-      throw new Error('Invalid session selection payload');
+      throw new SessionConflictError('Invalid session selection payload');
     }
 
     if (!selectedStyleIds.length) {
-      throw new Error('Cannot create order with empty style selection');
+      throw new SessionConflictError('Cannot create order with empty style selection');
     }
 
     if (!selectedFormats.length) {
-      throw new Error('Cannot create order with empty format selection');
+      throw new SessionConflictError('Cannot create order with empty format selection');
     }
 
     // Validate styles against authoritative persisted catalog (never trust client)
@@ -67,7 +69,7 @@ export class OrderService {
     for (const styleId of selectedStyleIds) {
       const found = validStylesMap.get(styleId);
       if (!found) {
-        throw new Error(`Style ID "${styleId}" does not exist in catalog`);
+        throw new SessionConflictError(`Style ID "${styleId}" does not exist in catalog`);
       }
       selectedStyles.push(found);
     }
@@ -90,20 +92,36 @@ export class OrderService {
       selected_formats: selectedFormats,
     });
 
-    // 3. Build atomic batch statements with CAS session verification
+    // 3. Build strictly conditional atomic batch statements (BLOCK B)
     const statements: D1PreparedStatement[] = [];
 
-    // Order insert
+    // Conditional Order Insert: Only inserts if session currently matches workflow_token + checkout_token + CONFIRMING + version
     statements.push(
       this.db
         .prepare(
           `INSERT INTO orders (id, user_id, status, total_amount, currency, metadata, checkout_token, created_at, updated_at)
-           VALUES (?, ?, 'AWAITING_PAYMENT', ?, 'VND', ?, ?, ?, ?)`
+           SELECT ?, ?, 'AWAITING_PAYMENT', ?, 'VND', ?, ?, ?, ?
+           WHERE EXISTS (
+             SELECT 1 FROM telegram_sessions
+             WHERE id = ? AND workflow_token = ? AND checkout_token = ? AND status = 'CONFIRMING' AND version = ?
+           )`
         )
-        .bind(orderId, session.user_id, totalAmount, metadata, checkoutToken, now, now)
+        .bind(
+          orderId,
+          session.user_id,
+          totalAmount,
+          metadata,
+          checkoutToken,
+          now,
+          now,
+          session.id,
+          session.workflow_token,
+          session.checkout_token,
+          session.version
+        )
     );
 
-    // Order items insert
+    // Order items insert: FK order_id references orders(id). If order conditional insert inserted 0 rows, FK constraint fails and rolls back batch!
     for (const style of selectedStyles) {
       const itemId = `item_${crypto.randomUUID().replace(/-/g, '')}`;
       const price = style.price !== undefined ? style.price : 50000;
@@ -117,23 +135,47 @@ export class OrderService {
       );
     }
 
-    // Session update with CAS condition: must match current workflow_token, checkout_token, status and version
+    // Session update with CAS condition
     statements.push(
       this.db
         .prepare(
           `UPDATE telegram_sessions SET status = 'ORDER_CREATED', active_order_id = ?, version = version + 1, updated_at = ?
            WHERE id = ? AND workflow_token = ? AND checkout_token = ? AND status = 'CONFIRMING' AND version = ?`
         )
-        .bind(orderId, now, session.id, session.workflow_token, session.checkout_token, session.version)
+        .bind(
+          orderId,
+          now,
+          session.id,
+          session.workflow_token,
+          session.checkout_token,
+          session.version
+        )
     );
+
+    // Optional atomic update ledger transition to APPLIED
+    if (updateId !== undefined) {
+      statements.push(
+        this.db
+          .prepare(
+            `UPDATE telegram_updates SET status = 'APPLIED', updated_at = ? WHERE update_id = ?`
+          )
+          .bind(now, updateId)
+      );
+    }
 
     // Execute atomic batch
     try {
       const results = await this.db.batch(statements);
-      const sessionUpdateResult = results[results.length - 1];
+      const orderInsertResult = results[0];
+      const sessionUpdateResult = results[statements.length - (updateId !== undefined ? 2 : 1)];
 
-      if (!sessionUpdateResult.meta.changes || sessionUpdateResult.meta.changes === 0) {
-        // Check if concurrent request already created order with this checkout_token
+      if (
+        !orderInsertResult.meta.changes ||
+        orderInsertResult.meta.changes === 0 ||
+        !sessionUpdateResult.meta.changes ||
+        sessionUpdateResult.meta.changes === 0
+      ) {
+        // Stale CAS or condition failed: zero rows committed
         const existingOrder = await this.db
           .prepare('SELECT * FROM orders WHERE checkout_token = ?')
           .bind(checkoutToken)
@@ -148,7 +190,7 @@ export class OrderService {
             itemsCount: selectedStyles.length,
           };
         }
-        throw new Error('Session state conflict during order creation');
+        throw new SessionConflictError('Session state conflict during order creation');
       }
     } catch (err: unknown) {
       // If concurrent request already inserted with this checkout_token, resolve to existing order

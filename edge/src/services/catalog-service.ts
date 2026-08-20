@@ -29,7 +29,7 @@ export class CatalogService {
     if (!catalog) return null;
 
     const stylesResult = await this.db
-      .prepare('SELECT * FROM catalog_styles WHERE catalog_id = ? ORDER BY id ASC')
+      .prepare('SELECT * FROM catalog_styles WHERE catalog_id = ? ORDER BY rowid ASC')
       .bind(catalog.id)
       .all<CatalogStyleRecord>();
 
@@ -57,7 +57,7 @@ export class CatalogService {
     if (!catalog) return null;
 
     const stylesResult = await this.db
-      .prepare('SELECT * FROM catalog_styles WHERE catalog_id = ? ORDER BY id ASC')
+      .prepare('SELECT * FROM catalog_styles WHERE catalog_id = ? ORDER BY rowid ASC')
       .bind(catalog.id)
       .all<CatalogStyleRecord>();
 

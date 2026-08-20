@@ -69,6 +69,7 @@ export async function handleTelegramWebhook(
     });
   }
 
+  const alreadyApplied = existingUpdate?.status === 'APPLIED';
   const userId = update.message?.from
     ? String(update.message.from.id)
     : update.callback_query?.from
@@ -77,14 +78,15 @@ export async function handleTelegramWebhook(
 
   const now = Date.now();
 
-  // Record/update update status as PROCESSING
-  await env.DB.prepare(
-    `INSERT INTO telegram_updates (update_id, user_id, status, created_at, updated_at)
-     VALUES (?, ?, 'PROCESSING', ?, ?)
-     ON CONFLICT(update_id) DO UPDATE SET updated_at = excluded.updated_at`
-  )
-    .bind(update.update_id, userId, now, now)
-    .run();
+  // If not previously recorded, record as RECEIVED
+  if (!existingUpdate) {
+    await env.DB.prepare(
+      `INSERT INTO telegram_updates (update_id, user_id, status, created_at, updated_at)
+       VALUES (?, ?, 'RECEIVED', ?, ?)`
+    )
+      .bind(update.update_id, userId, now, now)
+      .run();
+  }
 
   const tg = new TelegramClient(env.TELEGRAM_BOT_TOKEN);
   const catalogService = new CatalogService(env.DB);
@@ -94,14 +96,16 @@ export async function handleTelegramWebhook(
   // 4. Process update
   try {
     if (update.message) {
-      await handleMessage(update.message, tg, sessionService, catalogService);
+      await handleMessage(update.message, tg, sessionService, catalogService, update.update_id, alreadyApplied);
     } else if (update.callback_query) {
       await handleCallbackQuery(
         update.callback_query,
         tg,
         sessionService,
         catalogService,
-        orderService
+        orderService,
+        update.update_id,
+        alreadyApplied
       );
     }
 
@@ -112,7 +116,7 @@ export async function handleTelegramWebhook(
       .bind(Date.now(), update.update_id)
       .run();
   } catch (err: unknown) {
-    // Leave update in PROCESSING status so Telegram retry will reprocess, and return 500
+    // Leave update in its current status (RECEIVED or APPLIED) so retry will reprocess safely, and return 500
     return new Response(JSON.stringify({ error: 'Internal Processing Error' }), {
       status: 500,
       headers: { 'Content-Type': 'application/json' },
@@ -129,7 +133,9 @@ async function handleMessage(
   message: TelegramMessage,
   tg: TelegramClient,
   sessionService: SessionService,
-  catalogService: CatalogService
+  catalogService: CatalogService,
+  updateId: number,
+  alreadyApplied: boolean
 ): Promise<void> {
   if (!message.from || !message.text) return;
 
@@ -142,7 +148,9 @@ async function handleMessage(
   await sessionService.getOrCreateSession(userId, chatId);
 
   if (text === '/start') {
-    await sessionService.resetSession(userId, chatId);
+    if (!alreadyApplied) {
+      await sessionService.resetSession(userId, chatId, updateId);
+    }
     await tg.sendMessage({
       chat_id: chatId,
       text: `<b>Welcome to TeleFont!</b> 🎨\n\nSend me a link to any font family on <b>MyFonts.com</b> to start.\n\n<i>Example:</i> <code>https://www.myfonts.com/collections/helvetica-now-font-monotype-imaging</code>`,
@@ -174,7 +182,9 @@ async function handleMessage(
 
   if (!catalog) {
     // Catalog pending (future A23 agent will satisfy this)
-    await sessionService.setStatusUnconditional(userId, 'AWAITING_CATALOG');
+    if (!alreadyApplied) {
+      await sessionService.setStatusUnconditional(userId, 'AWAITING_CATALOG');
+    }
     await tg.sendMessage({
       chat_id: chatId,
       text: `🔍 <b>Analyzing font catalog...</b>\n\nWe are analyzing:\n<code>${escapeHtml(
@@ -186,13 +196,22 @@ async function handleMessage(
 
   // Catalog is ready! Persist to session with fresh workflow_token and render style selection
   const catalogId = reqRecord.catalog_id || (await catalogService.persistCatalogResult(catalog));
-  await sessionService.updateSessionCatalog(userId, catalogId, 'SELECTING_STYLES');
+  if (!alreadyApplied) {
+    await sessionService.updateSessionCatalog(userId, catalogId, 'SELECTING_STYLES', updateId);
+  }
 
   const session = await sessionService.getSessionByUserId(userId);
   if (session) {
+    let selectedStyleIds: string[] = [];
+    try {
+      selectedStyleIds = JSON.parse(session.selected_styles);
+    } catch {
+      selectedStyleIds = [];
+    }
+
     const { text: msgText, replyMarkup } = renderStyleSelection(
       catalog,
-      [],
+      selectedStyleIds,
       session.workflow_token
     );
     const sent = await tg.sendMessage({
@@ -212,7 +231,9 @@ async function handleCallbackQuery(
   tg: TelegramClient,
   sessionService: SessionService,
   catalogService: CatalogService,
-  orderService: OrderService
+  orderService: OrderService,
+  updateId: number,
+  alreadyApplied: boolean
 ): Promise<void> {
   const userId = String(query.from.id);
   const data = query.data || '';
@@ -253,16 +274,6 @@ async function handleCallbackQuery(
     return;
   }
 
-  let selectedStyles: string[] = [];
-  let selectedFormats: FontFormat[] = [];
-  try {
-    selectedStyles = JSON.parse(session.selected_styles);
-    selectedFormats = JSON.parse(session.selected_formats);
-  } catch {
-    selectedStyles = [];
-    selectedFormats = ['TTF'];
-  }
-
   try {
     // Handle STYLE SELECTION actions (Prefix 'st')
     if (prefix === 'st') {
@@ -289,15 +300,26 @@ async function handleCallbackQuery(
           return;
         }
 
-        const updated = await sessionService.toggleStyleSelection(
-          userId,
-          session.workflow_token,
-          targetStyle.id,
-          session.version
-        );
+        let updatedStyles: string[] = [];
+        if (!alreadyApplied) {
+          updatedStyles = await sessionService.toggleStyleSelection(
+            userId,
+            session.workflow_token,
+            targetStyle.id,
+            session.version,
+            updateId
+          );
+        } else {
+          try {
+            updatedStyles = JSON.parse(session.selected_styles);
+          } catch {
+            updatedStyles = [];
+          }
+        }
+
         const { text, replyMarkup } = renderStyleSelection(
           catalog,
-          updated,
+          updatedStyles,
           session.workflow_token
         );
 
@@ -314,7 +336,15 @@ async function handleCallbackQuery(
       // Select all styles
       if (action === 'all') {
         const allIds = catalog.styles.map((s) => s.id);
-        await sessionService.setAllStyles(userId, session.workflow_token, allIds, session.version);
+        if (!alreadyApplied) {
+          await sessionService.setAllStyles(
+            userId,
+            session.workflow_token,
+            allIds,
+            session.version,
+            updateId
+          );
+        }
         const { text, replyMarkup } = renderStyleSelection(
           catalog,
           allIds,
@@ -333,7 +363,14 @@ async function handleCallbackQuery(
 
       // Clear styles
       if (action === 'clr') {
-        await sessionService.clearStyles(userId, session.workflow_token, session.version);
+        if (!alreadyApplied) {
+          await sessionService.clearStyles(
+            userId,
+            session.workflow_token,
+            session.version,
+            updateId
+          );
+        }
         const { text, replyMarkup } = renderStyleSelection(
           catalog,
           [],
@@ -352,7 +389,16 @@ async function handleCallbackQuery(
 
       // Next to formats
       if (action === 'nxt') {
-        if (!selectedStyles.length) {
+        let currentStyles: string[] = [];
+        let currentFormats: FontFormat[] = ['TTF'];
+        try {
+          currentStyles = JSON.parse(session.selected_styles);
+          currentFormats = JSON.parse(session.selected_formats);
+        } catch {
+          currentStyles = [];
+        }
+
+        if (!currentStyles.length) {
           await tg.answerCallbackQuery({
             callback_query_id: query.id,
             text: 'Please select at least 1 style to continue.',
@@ -361,17 +407,22 @@ async function handleCallbackQuery(
           return;
         }
 
-        await sessionService.transitionStatus(
-          userId,
-          session.workflow_token,
-          'SELECTING_STYLES',
-          'SELECTING_FORMATS',
-          session.version
-        );
+        if (!alreadyApplied) {
+          await sessionService.transitionStatus(
+            userId,
+            session.workflow_token,
+            'SELECTING_STYLES',
+            'SELECTING_FORMATS',
+            session.version,
+            undefined,
+            updateId
+          );
+        }
+
         const { text, replyMarkup } = renderFormatSelection(
           catalog,
-          selectedStyles.length,
-          selectedFormats,
+          currentStyles.length,
+          currentFormats,
           session.workflow_token
         );
 
@@ -397,18 +448,30 @@ async function handleCallbackQuery(
         return;
       }
 
+      let currentStyles: string[] = [];
+      try {
+        currentStyles = JSON.parse(session.selected_styles);
+      } catch {
+        currentStyles = [];
+      }
+
       // Back to styles
       if (action === 'bck') {
-        await sessionService.transitionStatus(
-          userId,
-          session.workflow_token,
-          'SELECTING_FORMATS',
-          'SELECTING_STYLES',
-          session.version
-        );
+        if (!alreadyApplied) {
+          await sessionService.transitionStatus(
+            userId,
+            session.workflow_token,
+            'SELECTING_FORMATS',
+            'SELECTING_STYLES',
+            session.version,
+            undefined,
+            updateId
+          );
+        }
+
         const { text, replyMarkup } = renderStyleSelection(
           catalog,
-          selectedStyles,
+          currentStyles,
           session.workflow_token
         );
 
@@ -426,15 +489,26 @@ async function handleCallbackQuery(
       if (action === 't' && param !== undefined) {
         const format = param as FontFormat;
         if (SUPPORTED_FORMATS.includes(format)) {
-          const updatedFormats = await sessionService.toggleFormatSelection(
-            userId,
-            session.workflow_token,
-            format,
-            session.version
-          );
+          let updatedFormats: FontFormat[] = ['TTF'];
+          if (!alreadyApplied) {
+            updatedFormats = await sessionService.toggleFormatSelection(
+              userId,
+              session.workflow_token,
+              format,
+              session.version,
+              updateId
+            );
+          } else {
+            try {
+              updatedFormats = JSON.parse(session.selected_formats);
+            } catch {
+              updatedFormats = ['TTF'];
+            }
+          }
+
           const { text, replyMarkup } = renderFormatSelection(
             catalog,
-            selectedStyles.length,
+            currentStyles.length,
             updatedFormats,
             session.workflow_token
           );
@@ -452,7 +526,14 @@ async function handleCallbackQuery(
 
       // Next to confirmation
       if (action === 'nxt') {
-        if (!selectedFormats.length) {
+        let currentFormats: FontFormat[] = ['TTF'];
+        try {
+          currentFormats = JSON.parse(session.selected_formats);
+        } catch {
+          currentFormats = ['TTF'];
+        }
+
+        if (!currentFormats.length) {
           await tg.answerCallbackQuery({
             callback_query_id: query.id,
             text: 'Please select at least 1 font format.',
@@ -461,17 +542,22 @@ async function handleCallbackQuery(
           return;
         }
 
-        await sessionService.transitionStatus(
-          userId,
-          session.workflow_token,
-          'SELECTING_FORMATS',
-          'CONFIRMING',
-          session.version
-        );
+        if (!alreadyApplied) {
+          await sessionService.transitionStatus(
+            userId,
+            session.workflow_token,
+            'SELECTING_FORMATS',
+            'CONFIRMING',
+            session.version,
+            undefined,
+            updateId
+          );
+        }
+
         const { text, replyMarkup } = renderOrderConfirmation(
           catalog,
-          selectedStyles,
-          selectedFormats,
+          currentStyles,
+          currentFormats,
           session.workflow_token
         );
 
@@ -490,7 +576,15 @@ async function handleCallbackQuery(
     if (prefix === 'ord') {
       // Cancel Order
       if (action === 'ccl') {
-        await sessionService.cancelSession(userId, session.workflow_token, session.version);
+        if (!alreadyApplied) {
+          await sessionService.cancelSession(
+            userId,
+            session.workflow_token,
+            session.version,
+            updateId
+          );
+        }
+
         await tg.editMessageText({
           chat_id: session.chat_id,
           message_id: query.message?.message_id || session.last_message_id || undefined,
@@ -502,7 +596,7 @@ async function handleCallbackQuery(
 
       // Confirm Order
       if (action === 'cnf') {
-        if (session.status !== 'CONFIRMING') {
+        if (session.status !== 'CONFIRMING' && !alreadyApplied) {
           await tg.answerCallbackQuery({
             callback_query_id: query.id,
             text: 'Order confirmation is no longer valid.',
@@ -512,7 +606,7 @@ async function handleCallbackQuery(
         }
 
         try {
-          const result = await orderService.createOrderFromSession(session, catalog);
+          const result = await orderService.createOrderFromSession(session, catalog, updateId);
 
           const messageText = `🎉 <b>Order Created!</b>\n\n• <b>Order ID:</b> <code>${result.orderId}</code>\n• <b>Status:</b> <code>AWAITING_PAYMENT</code>\n• <b>Amount Due:</b> <b>${result.totalAmount.toLocaleString('vi-VN')} VND</b>\n• <b>Styles Count:</b> ${result.itemsCount}\n\n⏳ <i>Payment instructions and QR code will be provided in the next phase.</i>`;
 
