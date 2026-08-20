@@ -1,11 +1,13 @@
 -- Migration: 0002_telegram_sessions_and_catalog.sql
--- D1 Migration for Telegram users, updates dedupe, sessions, and font catalog metadata
+-- D1 Migration for Telegram users, updates dedupe ledger, sessions, and font catalog metadata
 
--- Telegram updates deduplication table (crash & replay safety)
+-- Telegram updates ledger table (crash & replay safety with processing status)
 CREATE TABLE IF NOT EXISTS telegram_updates (
     update_id INTEGER PRIMARY KEY,
     user_id TEXT,
-    created_at INTEGER NOT NULL
+    status TEXT NOT NULL CHECK(status IN ('PROCESSING', 'COMPLETED')),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
 );
 
 -- Telegram users table
@@ -60,13 +62,14 @@ CREATE TABLE IF NOT EXISTS catalog_requests (
 CREATE INDEX IF NOT EXISTS idx_catalog_requests_canonical_key ON catalog_requests(canonical_key);
 CREATE INDEX IF NOT EXISTS idx_catalog_requests_user_id ON catalog_requests(user_id);
 
--- Telegram interactive sessions table (with workflow_token and checkout_token for callback & checkout safety)
+-- Telegram interactive sessions table (with workflow_token, checkout_token, and optimistic locking version)
 CREATE TABLE IF NOT EXISTS telegram_sessions (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL UNIQUE REFERENCES telegram_users(id) ON DELETE CASCADE,
     chat_id TEXT NOT NULL,
     workflow_token TEXT NOT NULL,
     checkout_token TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
     catalog_id TEXT REFERENCES catalogs(id) ON DELETE SET NULL,
     selected_styles TEXT NOT NULL DEFAULT '[]',
     selected_formats TEXT NOT NULL DEFAULT '["TTF"]',

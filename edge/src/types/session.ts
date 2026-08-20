@@ -16,6 +16,7 @@ export interface TelegramSessionRecord {
   chat_id: string;
   workflow_token: string;
   checkout_token: string;
+  version: number;
   catalog_id: string | null;
   selected_styles: string; // JSON string of string[]
   selected_formats: string; // JSON string of FontFormat[]

@@ -90,7 +90,7 @@ export class OrderService {
       selected_formats: selectedFormats,
     });
 
-    // 3. Build atomic batch statements
+    // 3. Build atomic batch statements with CAS session verification
     const statements: D1PreparedStatement[] = [];
 
     // Order insert
@@ -117,18 +117,39 @@ export class OrderService {
       );
     }
 
-    // Session update
+    // Session update with CAS condition: must match current workflow_token, checkout_token, status and version
     statements.push(
       this.db
         .prepare(
-          `UPDATE telegram_sessions SET status = 'ORDER_CREATED', active_order_id = ?, updated_at = ? WHERE id = ?`
+          `UPDATE telegram_sessions SET status = 'ORDER_CREATED', active_order_id = ?, version = version + 1, updated_at = ?
+           WHERE id = ? AND workflow_token = ? AND checkout_token = ? AND status = 'CONFIRMING' AND version = ?`
         )
-        .bind(orderId, now, session.id)
+        .bind(orderId, now, session.id, session.workflow_token, session.checkout_token, session.version)
     );
 
     // Execute atomic batch
     try {
-      await this.db.batch(statements);
+      const results = await this.db.batch(statements);
+      const sessionUpdateResult = results[results.length - 1];
+
+      if (!sessionUpdateResult.meta.changes || sessionUpdateResult.meta.changes === 0) {
+        // Check if concurrent request already created order with this checkout_token
+        const existingOrder = await this.db
+          .prepare('SELECT * FROM orders WHERE checkout_token = ?')
+          .bind(checkoutToken)
+          .first<{ id: string; total_amount: number; currency: string }>();
+
+        if (existingOrder) {
+          return {
+            orderId: existingOrder.id,
+            isExisting: true,
+            totalAmount: existingOrder.total_amount,
+            currency: existingOrder.currency,
+            itemsCount: selectedStyles.length,
+          };
+        }
+        throw new Error('Session state conflict during order creation');
+      }
     } catch (err: unknown) {
       // If concurrent request already inserted with this checkout_token, resolve to existing order
       const existingAfterCatch = await this.db

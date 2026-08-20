@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { env, createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import worker, { type Env } from '../src/index';
 import { CatalogService } from '../src/services/catalog-service';
-import { SessionService } from '../src/services/session-service';
+import { SessionService, SessionConflictError } from '../src/services/session-service';
 import { OrderService } from '../src/services/order-service';
 import type { FontCatalog } from '../src/types/catalog';
 import type { TelegramUpdate } from '../src/types/telegram';
@@ -43,7 +43,7 @@ describe('Telegram Webhook & UX Flow', () => {
     };
   });
 
-  describe('Webhook Security, Update Parsing & Deduplication (BLOCK 3)', () => {
+  describe('Webhook Security, Update Parsing & Retry Ledger (BLOCK A & BLOCK 3)', () => {
     it('returns 503 when bot token or webhook secret are missing in env', async () => {
       const mockEnv: Env = {
         ...(env as unknown as Env),
@@ -111,18 +111,38 @@ describe('Telegram Webhook & UX Flow', () => {
       expect(data).toEqual({ status: 'ignored_invalid_payload' });
     });
 
-    it('deduplicates replayed telegram updates using telegram_updates table', async () => {
+    it('recovers from transient processing failure: first attempt returns 500, retry succeeds, subsequent duplicate ignored', async () => {
+      let failFirstAttempt = true;
+
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const urlStr = typeof input === 'string' ? input : input.toString();
+        if (urlStr.includes('api.telegram.org')) {
+          if (failFirstAttempt) {
+            failFirstAttempt = false;
+            return new Response(JSON.stringify({ ok: false, error_code: 500, description: 'Transient Gateway Error' }), {
+              status: 500,
+            });
+          }
+          return new Response(JSON.stringify({ ok: true, result: { message_id: 1234 } }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return new Response('Not found', { status: 404 });
+      };
+
       const update: TelegramUpdate = {
-        update_id: 9901,
+        update_id: 9988,
         message: {
-          message_id: 50,
-          from: { id: 88881, is_bot: false, first_name: 'DedupeUser' },
-          chat: { id: 88881, type: 'private', first_name: 'DedupeUser' },
+          message_id: 60,
+          from: { id: 88882, is_bot: false, first_name: 'RetryUser' },
+          chat: { id: 88882, type: 'private', first_name: 'RetryUser' },
           date: Date.now(),
           text: '/start',
         },
       };
 
+      // Attempt 1: Fails downstream, returns 500
       const req1 = new Request('http://example.com/webhooks/telegram', {
         method: 'POST',
         headers: {
@@ -135,9 +155,15 @@ describe('Telegram Webhook & UX Flow', () => {
       const ctx1 = createExecutionContext();
       const res1 = await worker.fetch(req1, testEnv, ctx1);
       await waitOnExecutionContext(ctx1);
-      expect(res1.status).toBe(200);
+      expect(res1.status).toBe(500);
 
-      // Replay same update_id
+      // Verify ledger left in PROCESSING state
+      const updateRow = await env.DB.prepare('SELECT * FROM telegram_updates WHERE update_id = ?')
+        .bind(9988)
+        .first<{ status: string }>();
+      expect(updateRow?.status).toBe('PROCESSING');
+
+      // Attempt 2: Telegram retries the same update_id -> succeeds
       const req2 = new Request('http://example.com/webhooks/telegram', {
         method: 'POST',
         headers: {
@@ -150,10 +176,30 @@ describe('Telegram Webhook & UX Flow', () => {
       const ctx2 = createExecutionContext();
       const res2 = await worker.fetch(req2, testEnv, ctx2);
       await waitOnExecutionContext(ctx2);
-
       expect(res2.status).toBe(200);
-      const data2 = await res2.json();
-      expect(data2).toEqual({ status: 'ignored_duplicate_update' });
+
+      // Verify ledger updated to COMPLETED
+      const updateRowCompleted = await env.DB.prepare('SELECT * FROM telegram_updates WHERE update_id = ?')
+        .bind(9988)
+        .first<{ status: string }>();
+      expect(updateRowCompleted?.status).toBe('COMPLETED');
+
+      // Attempt 3: Duplicate retry after COMPLETED -> safely ignored without re-executing
+      const req3 = new Request('http://example.com/webhooks/telegram', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Telegram-Bot-Api-Secret-Token': WEBHOOK_SECRET,
+        },
+        body: JSON.stringify(update),
+      });
+
+      const ctx3 = createExecutionContext();
+      const res3 = await worker.fetch(req3, testEnv, ctx3);
+      await waitOnExecutionContext(ctx3);
+      expect(res3.status).toBe(200);
+      const data3 = await res3.json();
+      expect(data3).toEqual({ status: 'ignored_duplicate_update' });
     });
   });
 
@@ -277,7 +323,7 @@ describe('Telegram Webhook & UX Flow', () => {
     });
   });
 
-  describe('Interactive UX Callbacks, State/Token Binding & Safety (BLOCK 2)', () => {
+  describe('Interactive UX Callbacks, State/Token Binding & Safety (BLOCK B & BLOCK 2)', () => {
     it('rejects stale callback tokens from outdated menus without mutating state', async () => {
       const catalogService = new CatalogService(env.DB);
       const catalogId = await catalogService.persistCatalogResult(sampleCatalog);
@@ -322,7 +368,7 @@ describe('Telegram Webhook & UX Flow', () => {
       const sessionService = new SessionService(env.DB);
 
       await sessionService.upsertTelegramUser({ id: 55551, is_bot: false, first_name: 'WrongStateUser' });
-      const session = await sessionService.getOrCreateSession('55551', '55551');
+      await sessionService.getOrCreateSession('55551', '55551');
       await sessionService.updateSessionCatalog('55551', catalogId, 'SELECTING_STYLES');
 
       const activeSession = await sessionService.getSessionByUserId('55551');
@@ -421,9 +467,31 @@ describe('Telegram Webhook & UX Flow', () => {
         'super_extra_ultra_long_style_identifier_exceeding_standard_limits_1234567890_abcdefghijklmnopqrstuvwxyz',
       ]);
     });
+
+    it('detects concurrent CAS conflicts and prevents state corruption (BLOCK B)', async () => {
+      const catalogService = new CatalogService(env.DB);
+      const catalogId = await catalogService.persistCatalogResult(sampleCatalog);
+      const sessionService = new SessionService(env.DB);
+
+      await sessionService.upsertTelegramUser({ id: 55553, is_bot: false, first_name: 'CasUser' });
+      await sessionService.getOrCreateSession('55553', '55553');
+      await sessionService.updateSessionCatalog('55553', catalogId, 'SELECTING_STYLES');
+
+      const session = await sessionService.getSessionByUserId('55553');
+      const token = session!.workflow_token;
+      const initialVersion = session!.version;
+
+      // Mutate once to increment version
+      await sessionService.toggleStyleSelection('55553', token, 'hn_regular', initialVersion);
+
+      // Attempting to mutate with the now-stale initialVersion must throw SessionConflictError
+      await expect(
+        sessionService.toggleStyleSelection('55553', token, 'hn_bold', initialVersion)
+      ).rejects.toThrow(SessionConflictError);
+    });
   });
 
-  describe('Atomic Checkout & Idempotency (BLOCK 1 & BLOCK 5)', () => {
+  describe('Atomic Checkout & Concurrency Idempotency (BLOCK 1, BLOCK B & BLOCK C)', () => {
     it('creates order + order_items atomically with AWAITING_PAYMENT status', async () => {
       const catalogService = new CatalogService(env.DB);
       const catalogId = await catalogService.persistCatalogResult(sampleCatalog);
@@ -432,9 +500,19 @@ describe('Telegram Webhook & UX Flow', () => {
 
       await sessionService.upsertTelegramUser({ id: 77771, is_bot: false, first_name: 'Grace' });
       await sessionService.getOrCreateSession('77771', '77771');
-      await sessionService.updateSessionCatalog('77771', catalogId, 'CONFIRMING');
-      await sessionService.setAllStyles('77771', ['hn_regular', 'hn_bold']);
-      await sessionService.toggleFormatSelection('77771', 'WOFF2'); // ['TTF', 'WOFF2']
+      await sessionService.updateSessionCatalog('77771', catalogId, 'SELECTING_STYLES');
+      
+      const sess1 = await sessionService.getSessionByUserId('77771');
+      await sessionService.setAllStyles('77771', sess1!.workflow_token, ['hn_regular', 'hn_bold'], sess1!.version);
+      
+      const sess2 = await sessionService.getSessionByUserId('77771');
+      await sessionService.transitionStatus('77771', sess2!.workflow_token, 'SELECTING_STYLES', 'SELECTING_FORMATS', sess2!.version);
+
+      const sess3 = await sessionService.getSessionByUserId('77771');
+      await sessionService.toggleFormatSelection('77771', sess3!.workflow_token, 'WOFF2', sess3!.version); // ['TTF', 'WOFF2']
+
+      const sess4 = await sessionService.getSessionByUserId('77771');
+      await sessionService.transitionStatus('77771', sess4!.workflow_token, 'SELECTING_FORMATS', 'CONFIRMING', sess4!.version);
 
       const session = await sessionService.getSessionByUserId('77771');
       const catalog = await catalogService.getCatalogById(catalogId);
@@ -466,6 +544,38 @@ describe('Telegram Webhook & UX Flow', () => {
       expect(replayResult.isExisting).toBe(true);
       expect(replayResult.orderId).toBe(result.orderId);
       expect(replayResult.totalAmount).toBe(100000);
+    });
+
+    it('handles concurrent first catalog completion idempotently without unique constraint errors (BLOCK C)', async () => {
+      const catalogService = new CatalogService(env.DB);
+
+      const catalogA: FontCatalog = {
+        sourceUrl: 'https://www.myfonts.com/collections/concurrent-catalog-family',
+        canonicalKey: 'myfonts:collections/concurrent-catalog-family',
+        familyName: 'Concurrent Family',
+        styles: [
+          { id: 'style_c1', displayName: 'Concurrent Style 1', price: 50000 },
+          { id: 'style_c2', displayName: 'Concurrent Style 2', price: 50000 },
+        ],
+      };
+
+      const catalogB: FontCatalog = { ...catalogA };
+
+      // Simulate simultaneous first completion calls
+      const [id1, id2] = await Promise.all([
+        catalogService.persistCatalogResult(catalogA),
+        catalogService.persistCatalogResult(catalogB),
+      ]);
+
+      expect(id1).toBe(id2);
+
+      const storedStyles = await env.DB.prepare(
+        'SELECT style_id FROM catalog_styles WHERE catalog_id = ?'
+      )
+        .bind(id1)
+        .all();
+
+      expect(storedStyles.results.length).toBe(2);
     });
 
     it('atomic catalog persistence purges stale styles on update (BLOCK 4)', async () => {
