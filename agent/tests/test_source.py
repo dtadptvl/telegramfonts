@@ -189,8 +189,8 @@ def test_extract_catalog_metadata_from_json_ld_and_html():
     assert res["foundry"] == "Monotype"
     assert len(res["styles"]) == 3
     assert res["styles"][0]["display_name"] == "Helvetica Now Light"
-    # External JSON-LD price of 45 does NOT become 45 VND; app-defined VND price of 50000 is authoritative
-    assert res["styles"][0]["price"] == 50000
+    # External JSON-LD price of 45 does NOT become 45 VND; app-defined VND price of 5000 is authoritative
+    assert res["styles"][0]["price"] == 5000
     assert res["styles"][1]["id"] == "helvetica_now_regular"
 
     # 2. HTML data attributes parsing

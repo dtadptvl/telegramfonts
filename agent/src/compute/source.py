@@ -194,7 +194,7 @@ def extract_catalog_metadata_from_html(html_text: str, source_url: str) -> dict[
                                     styles_list.append({
                                         "id": s_id,
                                         "display_name": s_name_clean,
-                                        "price": 50000,
+                                        "price": 5000,
                                     })
         except Exception:
             pass
@@ -210,7 +210,7 @@ def extract_catalog_metadata_from_html(html_text: str, source_url: str) -> dict[
                 styles_list.append({
                     "id": s_id,
                     "display_name": s_name_clean,
-                    "price": 50000,
+                    "price": 5000,
                 })
 
     # Pattern C: Standard HTML style elements e.g. <span class="style-name">...</span>
@@ -224,7 +224,7 @@ def extract_catalog_metadata_from_html(html_text: str, source_url: str) -> dict[
                 styles_list.append({
                     "id": s_id,
                     "display_name": s_name_clean,
-                    "price": 50000,
+                    "price": 5000,
                 })
 
     # Fail closed: DO NOT fabricate or invent synthetic styles!

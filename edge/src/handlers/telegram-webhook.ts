@@ -912,7 +912,7 @@ function renderOrderConfirmation(
   }
 
   const totalAmount = selectedStyles.reduce(
-    (sum, s) => sum + (s.price !== undefined ? s.price : 50000),
+    (sum, s) => sum + (s.price !== undefined ? s.price : 5000),
     0
   );
 
