@@ -723,7 +723,7 @@ describe('Phase 7: Fresh-Catalog E2E Resolution & Scheduled Cron Delivery', () =
     const session1 = {
       id: 'sess_price_1',
       user_id: userId,
-      chat_id: chatId,
+      chat_id: String(chatId),
       status: 'CONFIRMING' as const,
       catalog_id: catalogId,
       selected_styles: JSON.stringify(['s_reg']),
@@ -732,6 +732,7 @@ describe('Phase 7: Fresh-Catalog E2E Resolution & Scheduled Cron Delivery', () =
       checkout_token: 'c_tok_1',
       version: 1,
       last_message_id: null,
+      active_order_id: null,
       created_at: now,
       updated_at: now,
     };
@@ -744,8 +745,7 @@ describe('Phase 7: Fresh-Catalog E2E Resolution & Scheduled Cron Delivery', () =
 
     const order1 = await orderService.createOrderFromSession(
       session1,
-      catalog!,
-      'c_tok_1'
+      catalog!
     );
     expect(order1.totalAmount).toBe(5000);
 
@@ -761,7 +761,7 @@ describe('Phase 7: Fresh-Catalog E2E Resolution & Scheduled Cron Delivery', () =
     const session4 = {
       id: 'sess_price_4',
       user_id: userId4,
-      chat_id: chatId,
+      chat_id: String(chatId),
       status: 'CONFIRMING' as const,
       catalog_id: catalogId,
       selected_styles: JSON.stringify(styleIds),
@@ -770,6 +770,7 @@ describe('Phase 7: Fresh-Catalog E2E Resolution & Scheduled Cron Delivery', () =
       checkout_token: 'c_tok_4',
       version: 1,
       last_message_id: null,
+      active_order_id: null,
       created_at: now,
       updated_at: now,
     };
@@ -782,8 +783,7 @@ describe('Phase 7: Fresh-Catalog E2E Resolution & Scheduled Cron Delivery', () =
 
     const order4 = await orderService.createOrderFromSession(
       session4,
-      catalog!,
-      'c_tok_4'
+      catalog!
     );
     expect(order4.totalAmount).toBe(20000);
   });
