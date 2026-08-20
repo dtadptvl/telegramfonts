@@ -661,7 +661,7 @@ describe('Phase 7: Fresh-Catalog E2E Resolution & Scheduled Cron Delivery', () =
     const resp = await worker.fetch(completeReq, env, {} as ExecutionContext);
     expect(resp.status).toBe(200);
 
-    // 2. Verify styles stored in D1 are normalized to authoritative VND pricing (50,000 VND)
+    // 2. Verify styles stored in D1 are normalized to authoritative VND pricing (5,000 VND)
     const savedStyles = await env.DB
       .prepare(
         `SELECT style_id, display_name, price
@@ -673,8 +673,118 @@ describe('Phase 7: Fresh-Catalog E2E Resolution & Scheduled Cron Delivery', () =
 
     expect(savedStyles.results?.length).toBe(2);
     for (const st of savedStyles.results || []) {
-      // Must be 50,000 VND, NEVER 45 VND or 0 VND
-      expect(st.price).toBe(50000);
+      // Must be 5,000 VND, NEVER 45 VND or 0 VND
+      expect(st.price).toBe(5000);
     }
+  });
+
+  it('calculates order total based on 5,000 VND per selected style: 1 style => 5,000 VND, 4 styles => 20,000 VND', async () => {
+    const userId = 'user_order_pricing';
+    const chatId = 778899;
+    const now = Date.now();
+    const catalogId = 'cat_pricing_calc_test';
+    const canonicalKey = 'myfonts:collections/pricing-calc-font';
+
+    // 1. Seed user, catalog, and 4 styles
+    await env.DB.prepare(
+      `INSERT INTO telegram_users (id, first_name, username, created_at, updated_at)
+       VALUES (?, 'OrderPriceUser', 'opuser', ?, ?)`
+    )
+      .bind(userId, now, now)
+      .run();
+
+    await env.DB.prepare(
+      `INSERT INTO catalogs (id, canonical_key, source_url, family_name, foundry, created_at, updated_at)
+       VALUES (?, ?, 'https://www.myfonts.com/collections/pricing-calc-font', 'Pricing Calc Font', 'Foundry X', ?, ?)`
+    )
+      .bind(catalogId, canonicalKey, now, now)
+      .run();
+
+    const styleIds = ['s_light', 's_reg', 's_bold', 's_black'];
+    for (const sId of styleIds) {
+      await env.DB.prepare(
+        `INSERT INTO catalog_styles (id, catalog_id, style_id, display_name, price, created_at)
+         VALUES (?, ?, ?, ?, 5000, ?)`
+      )
+        .bind(`style_${catalogId}_${sId}`, catalogId, sId, sId.toUpperCase(), now)
+        .run();
+    }
+
+    // 2. Test 1 selected style => 5,000 VND
+    const { OrderService } = await import('../src/services/order-service');
+    const { CatalogService } = await import('../src/services/catalog-service');
+    const orderService = new OrderService(env.DB);
+    const catalogService = new CatalogService(env.DB);
+
+    const catalog = await catalogService.getCatalogById(catalogId);
+    expect(catalog).toBeDefined();
+
+    // Session for 1 style
+    const session1 = {
+      id: 'sess_price_1',
+      user_id: userId,
+      chat_id: String(chatId),
+      status: 'CONFIRMING' as const,
+      catalog_id: catalogId,
+      selected_styles: JSON.stringify(['s_reg']),
+      selected_formats: JSON.stringify(['TTF', 'OTF', 'WOFF2']),
+      workflow_token: 'w_tok_1',
+      checkout_token: 'c_tok_1',
+      version: 1,
+      last_message_id: null,
+      active_order_id: null,
+      created_at: now,
+      updated_at: now,
+    };
+    await env.DB.prepare(
+      `INSERT INTO telegram_sessions (id, user_id, chat_id, status, catalog_id, selected_styles, selected_formats, workflow_token, checkout_token, version, created_at, updated_at)
+       VALUES (?, ?, ?, 'CONFIRMING', ?, ?, ?, 'w_tok_1', 'c_tok_1', 1, ?, ?)`
+    )
+      .bind('sess_price_1', userId, chatId, catalogId, session1.selected_styles, session1.selected_formats, now, now)
+      .run();
+
+    const order1 = await orderService.createOrderFromSession(
+      session1,
+      catalog!
+    );
+    expect(order1.totalAmount).toBe(5000);
+
+    // 3. Test 4 selected styles => 20,000 VND
+    const userId4 = 'user_order_pricing_4';
+    await env.DB.prepare(
+      `INSERT INTO telegram_users (id, first_name, username, created_at, updated_at)
+       VALUES (?, 'OrderPriceUser4', 'opuser4', ?, ?)`
+    )
+      .bind(userId4, now, now)
+      .run();
+
+    const session4 = {
+      id: 'sess_price_4',
+      user_id: userId4,
+      chat_id: String(chatId),
+      status: 'CONFIRMING' as const,
+      catalog_id: catalogId,
+      selected_styles: JSON.stringify(styleIds),
+      selected_formats: JSON.stringify(['TTF', 'OTF', 'WOFF2']),
+      workflow_token: 'w_tok_4',
+      checkout_token: 'c_tok_4',
+      version: 1,
+      last_message_id: null,
+      active_order_id: null,
+      created_at: now,
+      updated_at: now,
+    };
+    await env.DB.prepare(
+      `INSERT INTO telegram_sessions (id, user_id, chat_id, status, catalog_id, selected_styles, selected_formats, workflow_token, checkout_token, version, created_at, updated_at)
+       VALUES (?, ?, ?, 'CONFIRMING', ?, ?, ?, 'w_tok_4', 'c_tok_4', 1, ?, ?)`
+    )
+      .bind('sess_price_4', userId4, chatId, catalogId, session4.selected_styles, session4.selected_formats, now, now)
+      .run();
+
+    const order4 = await orderService.createOrderFromSession(
+      session4,
+      catalog!
+    );
+    expect(order4.totalAmount).toBe(20000);
   });
 });

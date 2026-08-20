@@ -153,7 +153,7 @@ export class CatalogService {
     // Insert authoritative style set
     for (const style of catalog.styles) {
       const styleRowId = `style_${catalogId}_${style.id}`;
-      const price = style.price !== undefined ? style.price : 50000;
+      const price = style.price !== undefined ? style.price : 5000;
       statements.push(
         this.db
           .prepare(

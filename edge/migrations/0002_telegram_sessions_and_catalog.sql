@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS catalog_styles (
     catalog_id TEXT NOT NULL REFERENCES catalogs(id) ON DELETE CASCADE,
     style_id TEXT NOT NULL,
     display_name TEXT NOT NULL,
-    price INTEGER NOT NULL DEFAULT 50000,
+    price INTEGER NOT NULL DEFAULT 5000,
     created_at INTEGER NOT NULL,
     UNIQUE(catalog_id, style_id)
 );
