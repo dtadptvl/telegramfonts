@@ -35,7 +35,7 @@ export interface JobClaimedLogEvent extends LogEventBase {
   job_id: string;
   worker_id: string;
   lease_duration_sec: number;
-  attempt_count: number;
+  attempt_count?: number;
 }
 
 export interface JobHeartbeatLogEvent extends LogEventBase {
