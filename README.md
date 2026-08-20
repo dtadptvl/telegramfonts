@@ -27,7 +27,18 @@ Hybrid cloud architecture for automated Vietnamese font processing and fulfillme
 ├── .github/
 │   └── workflows/
 │       └── ci.yml               # Continuous Integration (install, typecheck, test)
-├── agent/                       # Reserved for Python A23 compute worker
+├── agent/                       # Python A23 private compute worker
+│   ├── src/                     # Runner, Queue client, Worker client, compute pipeline
+│   │   ├── compute/             # FontBuilder, Source acquisition, Validator, Packager
+│   │   ├── config.py            # Environment settings
+│   │   ├── logging_utils.py     # Sanitized structured logging
+│   │   ├── queue_client.py      # Cloudflare Queues HTTP pull client
+│   │   ├── runner.py            # Runner state machine and lease heartbeat loop
+│   │   ├── scratch.py           # Scratch directory manager & path traversal guards
+│   │   └── worker_client.py     # Internal job control client
+│   ├── tests/                   # Pytest test suite
+│   ├── pyproject.toml
+│   ├── requirements.txt
 │   └── README.md
 ├── edge/                        # Cloudflare Worker control-plane
 │   ├── migrations/              # D1 database migrations
