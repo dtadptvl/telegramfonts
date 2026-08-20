@@ -192,6 +192,8 @@ export function runPreflightCheck(options = {}) {
           passed: true,
           message: 'External HTTP-pull architecture confirmed',
         });
+      }
+
       // Cron triggers check
       const crons = wranglerConfig.triggers?.crons;
       const hasCrons = Array.isArray(crons) && crons.length > 0;
