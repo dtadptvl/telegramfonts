@@ -279,6 +279,178 @@ describe('Telegram Webhook & UX Flow', () => {
       const sessAfterAttempt2 = await sessionService.getSessionByUserId('88883');
       expect(JSON.parse(sessAfterAttempt2!.selected_styles)).toEqual(['hn_regular']);
     });
+
+    it('replays transition callback UI on retry: DB applies, Telegram edit fails, retry resends correct next-step UI without state corruption', async () => {
+      const catalogService = new CatalogService(env.DB);
+      const catalogId = await catalogService.persistCatalogResult(sampleCatalog);
+      const sessionService = new SessionService(env.DB);
+
+      await sessionService.upsertTelegramUser({ id: 88884, is_bot: false, first_name: 'TransitionRetryUser' });
+      await sessionService.getOrCreateSession('88884', '88884');
+      await sessionService.updateSessionCatalog('88884', catalogId, 'SELECTING_STYLES');
+
+      const sess0 = await sessionService.getSessionByUserId('88884');
+      await sessionService.setAllStyles('88884', sess0!.workflow_token, ['hn_regular'], sess0!.version);
+
+      const session = await sessionService.getSessionByUserId('88884');
+      const token = session!.workflow_token;
+      const versionBeforeTransition = session!.version;
+
+      let failTelegramApi = true;
+      let lastEditPayload: { text?: string; reply_markup?: any } = {};
+
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        const urlStr = typeof input === 'string' ? input : input.toString();
+        if (urlStr.includes('editMessageText') && init?.body) {
+          lastEditPayload = JSON.parse(init.body as string);
+        }
+        if (urlStr.includes('api.telegram.org')) {
+          if (failTelegramApi) {
+            failTelegramApi = false;
+            return new Response(JSON.stringify({ ok: false, error_code: 500, description: 'Telegram Edit Error' }), {
+              status: 500,
+            });
+          }
+          return new Response(JSON.stringify({ ok: true, result: { message_id: 101 } }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return new Response('Not found', { status: 404 });
+      };
+
+      const nextUpdate: TelegramUpdate = {
+        update_id: 9990,
+        callback_query: {
+          id: 'cb_trans_retry',
+          from: { id: 88884, is_bot: false, first_name: 'TransitionRetryUser' },
+          data: `st:nxt:${token}`, // Next: Select Formats
+        },
+      };
+
+      // Attempt 1: DB transition to SELECTING_FORMATS commits, but Telegram API fails -> returns 500
+      const req1 = new Request('http://example.com/webhooks/telegram', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Telegram-Bot-Api-Secret-Token': WEBHOOK_SECRET,
+        },
+        body: JSON.stringify(nextUpdate),
+      });
+
+      const ctx1 = createExecutionContext();
+      const res1 = await worker.fetch(req1, testEnv, ctx1);
+      await waitOnExecutionContext(ctx1);
+      expect(res1.status).toBe(500);
+
+      const sessAfterAttempt1 = await sessionService.getSessionByUserId('88884');
+      expect(sessAfterAttempt1?.status).toBe('SELECTING_FORMATS');
+      const versionAfterAttempt1 = sessAfterAttempt1!.version;
+      expect(versionAfterAttempt1).toBe(versionBeforeTransition + 1);
+
+      // Attempt 2: Telegram retries with SAME update_id -> must resend format selection UI and NOT reject or bump version
+      const req2 = new Request('http://example.com/webhooks/telegram', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Telegram-Bot-Api-Secret-Token': WEBHOOK_SECRET,
+        },
+        body: JSON.stringify(nextUpdate),
+      });
+
+      const ctx2 = createExecutionContext();
+      const res2 = await worker.fetch(req2, testEnv, ctx2);
+      await waitOnExecutionContext(ctx2);
+      expect(res2.status).toBe(200);
+
+      // Verify UI text contains format selection menu
+      expect(lastEditPayload.text).toContain('Choose font formats to include');
+
+      // Verify state and version were not bumped again
+      const sessAfterAttempt2 = await sessionService.getSessionByUserId('88884');
+      expect(sessAfterAttempt2?.status).toBe('SELECTING_FORMATS');
+      expect(sessAfterAttempt2?.version).toBe(versionAfterAttempt1);
+    });
+
+    it('replays cancel callback UI on retry: DB applies cancel, Telegram edit fails, retry resends cancel UI without error', async () => {
+      const catalogService = new CatalogService(env.DB);
+      const catalogId = await catalogService.persistCatalogResult(sampleCatalog);
+      const sessionService = new SessionService(env.DB);
+
+      await sessionService.upsertTelegramUser({ id: 88885, is_bot: false, first_name: 'CancelRetryUser' });
+      await sessionService.getOrCreateSession('88885', '88885');
+      await sessionService.updateSessionCatalog('88885', catalogId, 'SELECTING_STYLES');
+
+      const session = await sessionService.getSessionByUserId('88885');
+      const token = session!.workflow_token;
+
+      let failTelegramApi = true;
+      let lastEditPayload: { text?: string } = {};
+
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        const urlStr = typeof input === 'string' ? input : input.toString();
+        if (urlStr.includes('editMessageText') && init?.body) {
+          lastEditPayload = JSON.parse(init.body as string);
+        }
+        if (urlStr.includes('api.telegram.org')) {
+          if (failTelegramApi) {
+            failTelegramApi = false;
+            return new Response(JSON.stringify({ ok: false, error_code: 500, description: 'Telegram Edit Error' }), {
+              status: 500,
+            });
+          }
+          return new Response(JSON.stringify({ ok: true, result: { message_id: 102 } }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return new Response('Not found', { status: 404 });
+      };
+
+      const cancelUpdate: TelegramUpdate = {
+        update_id: 9991,
+        callback_query: {
+          id: 'cb_cancel_retry',
+          from: { id: 88885, is_bot: false, first_name: 'CancelRetryUser' },
+          data: `ord:ccl:${token}`,
+        },
+      };
+
+      // Attempt 1: DB cancel applies, but Telegram API fails -> returns 500
+      const req1 = new Request('http://example.com/webhooks/telegram', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Telegram-Bot-Api-Secret-Token': WEBHOOK_SECRET,
+        },
+        body: JSON.stringify(cancelUpdate),
+      });
+
+      const ctx1 = createExecutionContext();
+      const res1 = await worker.fetch(req1, testEnv, ctx1);
+      await waitOnExecutionContext(ctx1);
+      expect(res1.status).toBe(500);
+
+      const sessAfterAttempt1 = await sessionService.getSessionByUserId('88885');
+      expect(sessAfterAttempt1?.status).toBe('IDLE');
+
+      // Attempt 2: Telegram retries with SAME update_id -> resends cancel confirmation
+      const req2 = new Request('http://example.com/webhooks/telegram', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Telegram-Bot-Api-Secret-Token': WEBHOOK_SECRET,
+        },
+        body: JSON.stringify(cancelUpdate),
+      });
+
+      const ctx2 = createExecutionContext();
+      const res2 = await worker.fetch(req2, testEnv, ctx2);
+      await waitOnExecutionContext(ctx2);
+      expect(res2.status).toBe(200);
+
+      expect(lastEditPayload.text).toContain('Order cancelled');
+    });
   });
 
   describe('User Onboarding & URL Ingestion', () => {
@@ -727,7 +899,7 @@ describe('Telegram Webhook & UX Flow', () => {
       await catalogService.persistCatalogResult(updatedCatalog);
 
       const storedStyles = await env.DB.prepare(
-        'SELECT style_id FROM catalog_styles WHERE catalog_id = ? ORDER BY style_id ASC'
+        'SELECT style_id FROM catalog_styles WHERE catalog_id = ? ORDER BY rowid ASC'
       )
         .bind(catalogId)
         .all<{ style_id: string }>();

@@ -96,11 +96,19 @@ export async function handleTelegramWebhook(
   // 4. Process update
   try {
     if (update.message) {
-      await handleMessage(update.message, tg, sessionService, catalogService, update.update_id, alreadyApplied);
+      await handleMessage(
+        update.message,
+        tg,
+        sessionService,
+        catalogService,
+        update.update_id,
+        alreadyApplied
+      );
     } else if (update.callback_query) {
       await handleCallbackQuery(
         update.callback_query,
         tg,
+        env.DB,
         sessionService,
         catalogService,
         orderService,
@@ -229,6 +237,7 @@ async function handleMessage(
 async function handleCallbackQuery(
   query: TelegramCallbackQuery,
   tg: TelegramClient,
+  db: D1Database,
   sessionService: SessionService,
   catalogService: CatalogService,
   orderService: OrderService,
@@ -238,9 +247,25 @@ async function handleCallbackQuery(
   const userId = String(query.from.id);
   const data = query.data || '';
 
-  // 1. Session & Catalog verification
+  // 1. Session verification
   const session = await sessionService.getSessionByUserId(userId);
-  if (!session || !session.catalog_id) {
+  if (!session) {
+    await tg.answerCallbackQuery({
+      callback_query_id: query.id,
+      text: 'Session expired. Please send a font link again.',
+      show_alert: true,
+    });
+    return;
+  }
+
+  // On APPLIED retry: skip pre-mutation guards and directly replay the outbound UI from durable post-state
+  if (alreadyApplied) {
+    await replayAppliedCallbackUI(query, session, tg, db, catalogService);
+    return;
+  }
+
+  // 2. Normal execution path with pre-mutation guards
+  if (!session.catalog_id) {
     await tg.answerCallbackQuery({
       callback_query_id: query.id,
       text: 'Session expired. Please send a font link again.',
@@ -259,8 +284,7 @@ async function handleCallbackQuery(
     return;
   }
 
-  // 2. Parse callback action and token (BLOCK 2)
-  // Format: <prefix>:<action>:<token>[:<param>]
+  // Parse callback action and token
   const parts = data.split(':');
   const [prefix, action, token, param] = parts;
 
@@ -300,22 +324,13 @@ async function handleCallbackQuery(
           return;
         }
 
-        let updatedStyles: string[] = [];
-        if (!alreadyApplied) {
-          updatedStyles = await sessionService.toggleStyleSelection(
-            userId,
-            session.workflow_token,
-            targetStyle.id,
-            session.version,
-            updateId
-          );
-        } else {
-          try {
-            updatedStyles = JSON.parse(session.selected_styles);
-          } catch {
-            updatedStyles = [];
-          }
-        }
+        const updatedStyles = await sessionService.toggleStyleSelection(
+          userId,
+          session.workflow_token,
+          targetStyle.id,
+          session.version,
+          updateId
+        );
 
         const { text, replyMarkup } = renderStyleSelection(
           catalog,
@@ -336,15 +351,13 @@ async function handleCallbackQuery(
       // Select all styles
       if (action === 'all') {
         const allIds = catalog.styles.map((s) => s.id);
-        if (!alreadyApplied) {
-          await sessionService.setAllStyles(
-            userId,
-            session.workflow_token,
-            allIds,
-            session.version,
-            updateId
-          );
-        }
+        await sessionService.setAllStyles(
+          userId,
+          session.workflow_token,
+          allIds,
+          session.version,
+          updateId
+        );
         const { text, replyMarkup } = renderStyleSelection(
           catalog,
           allIds,
@@ -363,14 +376,12 @@ async function handleCallbackQuery(
 
       // Clear styles
       if (action === 'clr') {
-        if (!alreadyApplied) {
-          await sessionService.clearStyles(
-            userId,
-            session.workflow_token,
-            session.version,
-            updateId
-          );
-        }
+        await sessionService.clearStyles(
+          userId,
+          session.workflow_token,
+          session.version,
+          updateId
+        );
         const { text, replyMarkup } = renderStyleSelection(
           catalog,
           [],
@@ -407,17 +418,15 @@ async function handleCallbackQuery(
           return;
         }
 
-        if (!alreadyApplied) {
-          await sessionService.transitionStatus(
-            userId,
-            session.workflow_token,
-            'SELECTING_STYLES',
-            'SELECTING_FORMATS',
-            session.version,
-            undefined,
-            updateId
-          );
-        }
+        await sessionService.transitionStatus(
+          userId,
+          session.workflow_token,
+          'SELECTING_STYLES',
+          'SELECTING_FORMATS',
+          session.version,
+          undefined,
+          updateId
+        );
 
         const { text, replyMarkup } = renderFormatSelection(
           catalog,
@@ -457,17 +466,15 @@ async function handleCallbackQuery(
 
       // Back to styles
       if (action === 'bck') {
-        if (!alreadyApplied) {
-          await sessionService.transitionStatus(
-            userId,
-            session.workflow_token,
-            'SELECTING_FORMATS',
-            'SELECTING_STYLES',
-            session.version,
-            undefined,
-            updateId
-          );
-        }
+        await sessionService.transitionStatus(
+          userId,
+          session.workflow_token,
+          'SELECTING_FORMATS',
+          'SELECTING_STYLES',
+          session.version,
+          undefined,
+          updateId
+        );
 
         const { text, replyMarkup } = renderStyleSelection(
           catalog,
@@ -489,22 +496,13 @@ async function handleCallbackQuery(
       if (action === 't' && param !== undefined) {
         const format = param as FontFormat;
         if (SUPPORTED_FORMATS.includes(format)) {
-          let updatedFormats: FontFormat[] = ['TTF'];
-          if (!alreadyApplied) {
-            updatedFormats = await sessionService.toggleFormatSelection(
-              userId,
-              session.workflow_token,
-              format,
-              session.version,
-              updateId
-            );
-          } else {
-            try {
-              updatedFormats = JSON.parse(session.selected_formats);
-            } catch {
-              updatedFormats = ['TTF'];
-            }
-          }
+          const updatedFormats = await sessionService.toggleFormatSelection(
+            userId,
+            session.workflow_token,
+            format,
+            session.version,
+            updateId
+          );
 
           const { text, replyMarkup } = renderFormatSelection(
             catalog,
@@ -542,17 +540,15 @@ async function handleCallbackQuery(
           return;
         }
 
-        if (!alreadyApplied) {
-          await sessionService.transitionStatus(
-            userId,
-            session.workflow_token,
-            'SELECTING_FORMATS',
-            'CONFIRMING',
-            session.version,
-            undefined,
-            updateId
-          );
-        }
+        await sessionService.transitionStatus(
+          userId,
+          session.workflow_token,
+          'SELECTING_FORMATS',
+          'CONFIRMING',
+          session.version,
+          undefined,
+          updateId
+        );
 
         const { text, replyMarkup } = renderOrderConfirmation(
           catalog,
@@ -576,14 +572,12 @@ async function handleCallbackQuery(
     if (prefix === 'ord') {
       // Cancel Order
       if (action === 'ccl') {
-        if (!alreadyApplied) {
-          await sessionService.cancelSession(
-            userId,
-            session.workflow_token,
-            session.version,
-            updateId
-          );
-        }
+        await sessionService.cancelSession(
+          userId,
+          session.workflow_token,
+          session.version,
+          updateId
+        );
 
         await tg.editMessageText({
           chat_id: session.chat_id,
@@ -596,7 +590,7 @@ async function handleCallbackQuery(
 
       // Confirm Order
       if (action === 'cnf') {
-        if (session.status !== 'CONFIRMING' && !alreadyApplied) {
+        if (session.status !== 'CONFIRMING') {
           await tg.answerCallbackQuery({
             callback_query_id: query.id,
             text: 'Order confirmation is no longer valid.',
@@ -642,6 +636,136 @@ async function handleCallbackQuery(
       return;
     }
     throw err;
+  }
+
+  await tg.answerCallbackQuery({ callback_query_id: query.id });
+}
+
+async function replayAppliedCallbackUI(
+  query: TelegramCallbackQuery,
+  session: TelegramSessionRecord,
+  tg: TelegramClient,
+  db: D1Database,
+  catalogService: CatalogService
+): Promise<void> {
+  const messageId = query.message?.message_id || session.last_message_id || undefined;
+
+  if (session.status === 'IDLE') {
+    await tg.editMessageText({
+      chat_id: session.chat_id,
+      message_id: messageId,
+      text: '❌ <b>Order cancelled.</b>\n\nSend a new MyFonts link whenever you are ready.',
+    });
+    await tg.answerCallbackQuery({ callback_query_id: query.id, text: 'Order cancelled' });
+    return;
+  }
+
+  if (session.status === 'ORDER_CREATED') {
+    let orderId = session.active_order_id || 'unknown';
+    let totalAmount = 0;
+
+    if (session.active_order_id) {
+      const order = await db
+        .prepare('SELECT id, total_amount FROM orders WHERE id = ?')
+        .bind(session.active_order_id)
+        .first<{ id: string; total_amount: number }>();
+      if (order) {
+        orderId = order.id;
+        totalAmount = order.total_amount;
+      }
+    }
+
+    let itemsCount = 0;
+    try {
+      itemsCount = JSON.parse(session.selected_styles).length;
+    } catch {
+      itemsCount = 0;
+    }
+
+    const messageText = `🎉 <b>Order Created!</b>\n\n• <b>Order ID:</b> <code>${orderId}</code>\n• <b>Status:</b> <code>AWAITING_PAYMENT</code>\n• <b>Amount Due:</b> <b>${totalAmount.toLocaleString(
+      'vi-VN'
+    )} VND</b>\n• <b>Styles Count:</b> ${itemsCount}\n\n⏳ <i>Payment instructions and QR code will be provided in the next phase.</i>`;
+
+    await tg.editMessageText({
+      chat_id: session.chat_id,
+      message_id: messageId,
+      text: messageText,
+    });
+    await tg.answerCallbackQuery({
+      callback_query_id: query.id,
+      text: 'Order created successfully!',
+    });
+    return;
+  }
+
+  if (!session.catalog_id) {
+    await tg.answerCallbackQuery({ callback_query_id: query.id });
+    return;
+  }
+
+  const catalog = await catalogService.getCatalogById(session.catalog_id);
+  if (!catalog) {
+    await tg.answerCallbackQuery({ callback_query_id: query.id });
+    return;
+  }
+
+  let selectedStyles: string[] = [];
+  let selectedFormats: FontFormat[] = ['TTF'];
+  try {
+    selectedStyles = JSON.parse(session.selected_styles);
+    selectedFormats = JSON.parse(session.selected_formats);
+  } catch {
+    selectedStyles = [];
+  }
+
+  if (session.status === 'SELECTING_STYLES') {
+    const { text, replyMarkup } = renderStyleSelection(
+      catalog,
+      selectedStyles,
+      session.workflow_token
+    );
+    await tg.editMessageText({
+      chat_id: session.chat_id,
+      message_id: messageId,
+      text,
+      reply_markup: replyMarkup,
+    });
+    await tg.answerCallbackQuery({ callback_query_id: query.id });
+    return;
+  }
+
+  if (session.status === 'SELECTING_FORMATS') {
+    const { text, replyMarkup } = renderFormatSelection(
+      catalog,
+      selectedStyles.length,
+      selectedFormats,
+      session.workflow_token
+    );
+    await tg.editMessageText({
+      chat_id: session.chat_id,
+      message_id: messageId,
+      text,
+      reply_markup: replyMarkup,
+    });
+    await tg.answerCallbackQuery({ callback_query_id: query.id });
+    return;
+  }
+
+  if (session.status === 'CONFIRMING') {
+    const { text, replyMarkup } = renderOrderConfirmation(
+      catalog,
+      selectedStyles,
+      selectedFormats,
+      session.workflow_token
+    );
+    await tg.editMessageText({
+      chat_id: session.chat_id,
+      message_id: messageId,
+      text,
+      reply_markup: replyMarkup,
+    });
+    await tg.answerCallbackQuery({ callback_query_id: query.id });
+    return;
   }
 
   await tg.answerCallbackQuery({ callback_query_id: query.id });
