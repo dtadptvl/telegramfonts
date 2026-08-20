@@ -462,3 +462,44 @@ async def test_runner_run_once_and_run_loop(test_settings: Settings):
         # 2. run_loop with bounded max_iterations
         await runner.run_loop(max_iterations=2)
         assert pull_count >= 2
+
+
+@pytest.mark.asyncio
+async def test_runner_entrypoint_lifecycle_start_stop_close(test_settings: Settings):
+    pull_count = 0
+
+    def queue_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal pull_count
+        if "pull" in request.url.path:
+            pull_count += 1
+            return httpx.Response(200, json={"success": True, "messages": []})
+        return httpx.Response(200, json={"success": True})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(queue_handler)) as q_http, \
+               httpx.AsyncClient() as w_http, \
+               httpx.AsyncClient() as s_http:
+        q_client = CloudflareQueueClient(test_settings, client=q_http)
+        w_client = WorkerJobClient(test_settings, client=w_http)
+        s_acquirer = SourceAcquirer(client=s_http)
+        runner = A23Runner(
+            test_settings,
+            queue_client=q_client,
+            worker_client=w_client,
+            source_acquirer=s_acquirer,
+        )
+
+        stop_event = asyncio.Event()
+
+        async def stop_after_brief_delay():
+            await asyncio.sleep(0.05)
+            stop_event.set()
+
+        asyncio.create_task(stop_after_brief_delay())
+
+        # Proves runner.run_loop(stop_event=stop_event) terminates cleanly
+        await runner.run_loop(stop_event=stop_event)
+        assert stop_event.is_set() is True
+
+        # Proves runner.close() executes cleanly and closes owned clients without raising
+        await runner.close()
+

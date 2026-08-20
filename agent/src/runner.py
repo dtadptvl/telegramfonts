@@ -319,6 +319,13 @@ class JobRunner:
             stop_event.set()
             await heartbeat_task
 
+    async def close(self) -> None:
+        """Close client connections and release resources."""
+        await self.queue_client.close()
+        await self.worker_client.close()
+        if hasattr(self.source_acquirer, "close"):
+            await self.source_acquirer.close()
+
     async def run_once(self) -> list[ProcessResult]:
         """Pull a batch of messages from Queue and process each."""
         messages = await self.queue_client.pull_messages(
@@ -332,20 +339,45 @@ class JobRunner:
             results.append(res)
         return results
 
-    async def run_loop(self, max_iterations: int | None = None) -> None:
-        """Continuous long-polling runner loop."""
+    async def run_loop(
+        self,
+        stop_event: asyncio.Event | None = None,
+        max_iterations: int | None = None,
+    ) -> None:
+        """Continuous long-polling runner loop with graceful stop support."""
         iterations = 0
-        while max_iterations is None or iterations < max_iterations:
+        while (stop_event is None or not stop_event.is_set()) and (
+            max_iterations is None or iterations < max_iterations
+        ):
             iterations += 1
             try:
                 results = await self.run_once()
                 if not results:
-                    await asyncio.sleep(self.settings.IDLE_BACKOFF_SECONDS)
+                    if stop_event is not None:
+                        try:
+                            await asyncio.wait_for(
+                                stop_event.wait(), timeout=self.settings.IDLE_BACKOFF_SECONDS
+                            )
+                            break
+                        except asyncio.TimeoutError:
+                            pass
+                    else:
+                        await asyncio.sleep(self.settings.IDLE_BACKOFF_SECONDS)
             except asyncio.CancelledError:
                 break
             except Exception as exc:
                 logger.error(f"Error in runner loop iteration {iterations}: {exc}")
-                await asyncio.sleep(self.settings.ERROR_BACKOFF_SECONDS)
+                if stop_event is not None:
+                    try:
+                        await asyncio.wait_for(
+                            stop_event.wait(), timeout=self.settings.ERROR_BACKOFF_SECONDS
+                        )
+                        break
+                    except asyncio.TimeoutError:
+                        pass
+                else:
+                    await asyncio.sleep(self.settings.ERROR_BACKOFF_SECONDS)
 
 
 A23Runner = JobRunner
+

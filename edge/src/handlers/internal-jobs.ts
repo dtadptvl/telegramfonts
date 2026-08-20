@@ -17,7 +17,7 @@ export function verifyInternalAuth(request: Request, secret: string | undefined)
   return crypto.subtle.timingSafeEqual(tokenBytes, secretBytes);
 }
 
-function hexToArrayBuffer(hex: string): ArrayBuffer {
+export function hexToArrayBuffer(hex: string): ArrayBuffer {
   const bytes = new Uint8Array(Math.ceil(hex.length / 2));
   for (let i = 0; i < bytes.length; i++) {
     bytes[i] = parseInt(hex.substring(i * 2, i * 2 + 2), 16);
@@ -25,7 +25,7 @@ function hexToArrayBuffer(hex: string): ArrayBuffer {
   return bytes.buffer;
 }
 
-function checksumToHex(checksum: unknown): string | null {
+export function checksumToHex(checksum: unknown): string | null {
   if (!checksum) return null;
   if (typeof checksum === 'string') return checksum.toLowerCase();
   if (checksum instanceof ArrayBuffer) {
@@ -179,12 +179,8 @@ export async function handleInternalJobs(
         const matchSha = existing.customMetadata?.sha256 === sha256Hex;
         const matchJob = existing.customMetadata?.job_id === jobId;
         const matchOrder = existing.customMetadata?.order_id === orderId;
-
-        let matchChecksum = true;
         const storedChecksum = checksumToHex(existing.checksums?.sha256);
-        if (storedChecksum && storedChecksum !== sha256Hex) {
-          matchChecksum = false;
-        }
+        const matchChecksum = storedChecksum !== null && storedChecksum === sha256Hex;
 
         if (matchSize && matchSha && matchJob && matchOrder && matchChecksum) {
           return new Response(
@@ -201,7 +197,7 @@ export async function handleInternalJobs(
           );
         } else {
           return new Response(
-            JSON.stringify({ error: 'Duplicate artifact upload metadata mismatch', queue_action: 'ack' }),
+            JSON.stringify({ error: 'Duplicate artifact upload metadata or checksum mismatch', queue_action: 'ack' }),
             {
               status: 409,
               headers: { 'Content-Type': 'application/json' },
@@ -215,8 +211,9 @@ export async function handleInternalJobs(
 
     // 3. Stream request.body directly to R2 bucket with sha256 integrity verification
     try {
+      const shaBuffer = hexToArrayBuffer(sha256Hex);
       const r2Obj = await env.ARTIFACTS_BUCKET.put(objectKey, request.body, {
-        sha256: hexToArrayBuffer(sha256Hex),
+        sha256: shaBuffer,
         customMetadata: {
           job_id: jobId,
           order_id: orderId,
@@ -228,9 +225,17 @@ export async function handleInternalJobs(
         },
       });
 
-      if (r2Obj && r2Obj.size !== contentLength) {
+      if (!r2Obj || r2Obj.size !== contentLength) {
         return new Response(
           JSON.stringify({ error: 'Uploaded object size mismatch in R2' }),
+          { status: 500, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+
+      const putChecksum = checksumToHex(r2Obj.checksums?.sha256);
+      if (putChecksum !== null && putChecksum !== sha256Hex) {
+        return new Response(
+          JSON.stringify({ error: 'Uploaded object checksum mismatch in R2' }),
           { status: 500, headers: { 'Content-Type': 'application/json' } }
         );
       }
@@ -370,8 +375,8 @@ export async function handleInternalJobs(
     }
 
     const storedChecksum = checksumToHex(r2Head.checksums?.sha256);
-    if (storedChecksum && storedChecksum !== sha256) {
-      return new Response(JSON.stringify({ error: 'Artifact stored checksum mismatch in R2' }), {
+    if (storedChecksum === null || storedChecksum !== sha256) {
+      return new Response(JSON.stringify({ error: 'Artifact stored checksum missing or mismatch in R2' }), {
         status: 400,
         headers: { 'Content-Type': 'application/json' },
       });
