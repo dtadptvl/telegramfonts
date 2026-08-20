@@ -2,6 +2,7 @@ import type { Env } from './env';
 import { handleTelegramWebhook } from './handlers/telegram-webhook';
 import { handleSePayWebhook } from './handlers/sepay-webhook';
 import { handleInternalJobs } from './handlers/internal-jobs';
+import { handleInternalCatalog } from './handlers/internal-catalog';
 import { handleDownload } from './handlers/downloads';
 import { OutboxService } from './services/outbox-service';
 
@@ -86,6 +87,10 @@ export default {
 
     if (url.pathname.startsWith('/internal/jobs/')) {
       return handleInternalJobs(request, env, ctx);
+    }
+
+    if (url.pathname.startsWith('/internal/catalog-requests')) {
+      return handleInternalCatalog(request, env, ctx);
     }
 
     if (url.pathname.startsWith('/downloads/')) {

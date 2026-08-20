@@ -127,6 +127,121 @@ def extract_preview_url_from_html(html_text: str) -> str | None:
     return None
 
 
+def extract_catalog_metadata_from_html(html_text: str, source_url: str) -> dict[str, Any]:
+    """
+    Parse authentic font family name, foundry, and available styles from MyFonts HTML.
+    Fails closed (raises ValueError) if no authentic styles are present. Never synthesizes fallback styles.
+    """
+    if not validate_myfonts_url(source_url):
+        raise ValueError("INVALID_SOURCE_URL")
+    if not html_text or not html_text.strip():
+        raise ValueError("EMPTY_HTML_CONTENT")
+
+    parsed_url = urlparse(source_url.strip())
+    path_parts = [p for p in parsed_url.path.split("/") if p]
+    default_family = path_parts[-1].replace("-", " ").title() if path_parts else "Custom Font"
+
+    # 1. Family Name
+    family_name = default_family
+    og_title_m = re.search(r'<meta\s+[^>]*property=["\']og:title["\'][^>]*content=["\']([^"\']+)["\']', html_text, re.IGNORECASE)
+    if not og_title_m:
+        og_title_m = re.search(r'<meta\s+[^>]*content=["\']([^"\']+)["\'][^>]*property=["\']og:title["\']', html_text, re.IGNORECASE)
+    if og_title_m:
+        raw_title = og_title_m.group(1).strip()
+        clean_title = re.split(r'\s*[\-\|\–]\s*|\s+Font\b', raw_title, flags=re.IGNORECASE)[0].strip()
+        if clean_title:
+            family_name = clean_title
+    else:
+        h1_m = re.search(r'<h1[^>]*>([^<]+)</h1>', html_text, re.IGNORECASE)
+        if h1_m:
+            clean_h1 = h1_m.group(1).strip()
+            if clean_h1:
+                family_name = clean_h1
+
+    # 2. Foundry
+    foundry: str | None = None
+    author_m = re.search(r'<meta\s+[^>]*name=["\']author["\'][^>]*content=["\']([^"\']+)["\']', html_text, re.IGNORECASE)
+    if author_m:
+        foundry = author_m.group(1).strip()
+    else:
+        foundry_m = re.search(r'(?:by|foundry:?)\s*<[^>]+>([^<]+)</', html_text, re.IGNORECASE)
+        if foundry_m:
+            foundry = foundry_m.group(1).strip()
+
+    # 3. Authentic Styles Extraction
+    styles_list: list[dict[str, Any]] = []
+    seen_style_ids: set[str] = set()
+
+    # Pattern A: Embedded JSON-LD schema
+    ld_matches = re.findall(r'<script\s+[^>]*type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', html_text, re.DOTALL | re.IGNORECASE)
+    for ld_text in ld_matches:
+        try:
+            data = json.loads(ld_text.strip())
+            items = data if isinstance(data, list) else [data]
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                variants = item.get("hasVariant") or item.get("offers") or item.get("itemListElement") or []
+                if isinstance(variants, list):
+                    for v in variants:
+                        if isinstance(v, dict):
+                            s_name = v.get("name") or v.get("item", {}).get("name")
+                            if s_name and isinstance(s_name, str):
+                                s_name_clean = s_name.strip()
+                                s_id = re.sub(r'[^a-zA-Z0-9_-]+', '_', s_name_clean.lower()).strip('_')
+                                if s_id and s_id not in seen_style_ids:
+                                    seen_style_ids.add(s_id)
+                                    styles_list.append({
+                                        "id": s_id,
+                                        "display_name": s_name_clean,
+                                        "price": 50000,
+                                    })
+        except Exception:
+            pass
+
+    # Pattern B: HTML data attributes e.g. data-style-name="...", data-font-style="..."
+    if not styles_list:
+        data_attr_matches = re.findall(r'data-(?:style-name|font-style|style-id)=["\']([^"\']+)["\']', html_text, re.IGNORECASE)
+        for s_match in data_attr_matches:
+            s_name_clean = s_match.strip()
+            s_id = re.sub(r'[^a-zA-Z0-9_-]+', '_', s_name_clean.lower()).strip('_')
+            if s_id and s_id not in seen_style_ids:
+                seen_style_ids.add(s_id)
+                styles_list.append({
+                    "id": s_id,
+                    "display_name": s_name_clean,
+                    "price": 50000,
+                })
+
+    # Pattern C: Standard HTML style elements e.g. <span class="style-name">...</span>
+    if not styles_list:
+        class_matches = re.findall(r'<(?:span|div|p)\s+[^>]*class=["\'][^"\']*(?:style-name|font-style-name|style-title)[^"\']*["\'][^>]*>([^<]+)</', html_text, re.IGNORECASE)
+        for s_match in class_matches:
+            s_name_clean = s_match.strip()
+            s_id = re.sub(r'[^a-zA-Z0-9_-]+', '_', s_name_clean.lower()).strip('_')
+            if s_id and s_id not in seen_style_ids:
+                seen_style_ids.add(s_id)
+                styles_list.append({
+                    "id": s_id,
+                    "display_name": s_name_clean,
+                    "price": 50000,
+                })
+
+    # Fail closed: DO NOT fabricate or invent synthetic styles!
+    if not styles_list:
+        raise ValueError("NO_CATALOG_STYLES_FOUND")
+
+    canonical_key = f"myfonts:{parsed_url.path.strip('/')}"
+
+    return {
+        "canonical_key": canonical_key,
+        "source_url": source_url.strip(),
+        "family_name": family_name,
+        "foundry": foundry,
+        "styles": styles_list,
+    }
+
+
 class SourceAcquirer:
     def __init__(self, timeout: float = 20.0, client: httpx.AsyncClient | None = None) -> None:
         self.timeout = timeout
@@ -136,6 +251,36 @@ class SourceAcquirer:
     async def close(self) -> None:
         if not self._external_client:
             await self.client.aclose()
+
+    async def acquire_catalog_metadata(
+        self,
+        source_url: str,
+        html_override: str | None = None,
+    ) -> dict[str, Any]:
+        """Fetch and parse authentic catalog metadata from source URL or html override."""
+        if not validate_myfonts_url(source_url):
+            raise ValueError("INVALID_SOURCE_URL")
+
+        if html_override is not None:
+            return extract_catalog_metadata_from_html(html_override, source_url)
+
+        try:
+            resp = await self.client.get(
+                source_url,
+                headers={"User-Agent": "TeleFont-Agent/1.0"},
+                timeout=self.timeout,
+                follow_redirects=True,
+            )
+        except httpx.RequestError as exc:
+            logger.warning(f"Network error during catalog metadata acquisition: {exc}")
+            raise
+
+        if resp.status_code in (403, 429):
+            raise ValueError(f"SOURCE_ACQUISITION_BLOCKED_{resp.status_code}")
+        if resp.status_code >= 400:
+            raise ValueError(f"SOURCE_HTTP_ERROR_{resp.status_code}")
+
+        return extract_catalog_metadata_from_html(resp.text, source_url)
 
     async def acquire_source(
         self,

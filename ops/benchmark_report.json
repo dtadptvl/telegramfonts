@@ -1,0 +1,58 @@
+{
+  "git_sha": "5246371b4f3463339e7cba88f3f3eea0f182072f",
+  "git_is_dirty": true,
+  "timestamp": "2026-08-20T17:05:12Z",
+  "is_production_proof": false,
+  "is_valid": true,
+  "device_identity": {
+    "hostname": "DESKTOP-1GIB12N",
+    "os": "Windows",
+    "os_release": "10",
+    "architecture": "AMD64",
+    "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel",
+    "python_version": "3.14.6",
+    "cpu_count": 12
+  },
+  "config": {
+    "styles_per_job": 2,
+    "formats_per_style": [
+      "TTF",
+      "OTF",
+      "WOFF2"
+    ],
+    "total_fonts_per_job": 6,
+    "target_utilization_max": 0.6
+  },
+  "samples_count": 5,
+  "success_count": 5,
+  "failure_count": 0,
+  "p50_total_ms": 1425.65,
+  "p95_total_ms": 1463.13,
+  "min_total_ms": 1335.56,
+  "max_total_ms": 1472.0,
+  "mean_total_ms": 1412.42,
+  "p95_stage_ms": {
+    "acquire_ms": 1345.18,
+    "build_ms": 114.62,
+    "validate_ms": 2.85,
+    "package_ms": 2.36
+  },
+  "avg_artifact_size_bytes": 4919,
+  "peak_rss_mb": 0.0,
+  "capacity_model": {
+    "status": "VALID",
+    "target_1000_jobs_day": {
+      "arrival_rate_sec": 86.4,
+      "required_consumers": 1,
+      "steady_state_utilization_at_1_worker": 1.69
+    },
+    "target_500_jobs_day": {
+      "arrival_rate_sec": 172.8,
+      "required_consumers": 1,
+      "steady_state_utilization_at_1_worker": 0.85
+    },
+    "daily_capacity_per_consumer_at_60pct_utilization": 35430
+  },
+  "error_summary": null,
+  "disclaimer": "NOTE: This benchmark is a development/CI environment execution. Per Issue #16 policy, production capacity proof requires execution on a physical A23 Android/ARM64 device."
+}

@@ -252,3 +252,44 @@ async def test_worker_complete_409_preserves_status_and_queue_action(test_settin
         assert res.reason == "lease_superseded_or_expired"
 
 
+@pytest.mark.asyncio
+async def test_worker_get_and_complete_catalog_requests(test_settings: Settings):
+    pending_list = [
+        {
+            "id": "req_101",
+            "user_id": "usr_202",
+            "canonical_key": "helvetica_now",
+            "source_url": "https://www.myfonts.com/collections/helvetica-now-font",
+            "status": "PENDING",
+            "created_at": 1700000000,
+        }
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["Authorization"] == f"Bearer {test_settings.A23_NODE_SECRET.get_secret_value()}"
+        if request.method == "GET" and request.url.path == "/internal/catalog-requests/pending":
+            return httpx.Response(200, json={"requests": pending_list})
+        if request.method == "POST" and request.url.path == "/internal/catalog-requests/req_101/complete":
+            return httpx.Response(200, json={"success": True, "catalog_id": "cat_101"})
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http_client:
+        client = WorkerJobClient(test_settings, client=http_client)
+
+        reqs = await client.get_pending_catalog_requests()
+        assert len(reqs) == 1
+        assert reqs[0].id == "req_101"
+        assert reqs[0].canonical_key == "helvetica_now"
+
+        payload = {
+            "canonical_key": "helvetica_now",
+            "source_url": "https://www.myfonts.com/collections/helvetica-now-font",
+            "family_name": "Helvetica Now",
+            "foundry": "Monotype",
+            "styles": [{"id": "regular", "display_name": "Regular", "price": 50000}],
+        }
+        success = await client.complete_catalog_request("req_101", payload)
+        assert success is True
+
+
