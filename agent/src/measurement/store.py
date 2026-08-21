@@ -152,6 +152,62 @@ class ObservationStore:
                 created_at=row["created_at"],
             )
 
+    def get_glyph_observations(
+        self, reference_id: str, style_id: str, code_point: int
+    ) -> list[tuple[ObservationRecord, bytes]]:
+        """Retrieve all observation records and raw PNG bytes for a specific glyph."""
+        with self._get_connection() as conn:
+            cur = conn.execute(
+                """
+                SELECT * FROM observations
+                WHERE reference_id = ? AND style_id = ? AND code_point = ?
+                ORDER BY resolution ASC, subpixel_x ASC, subpixel_y ASC
+                """,
+                (reference_id, style_id, code_point),
+            )
+            rows = cur.fetchall()
+            results = []
+            for row in rows:
+                metrics = DirectMetrics(
+                    code_point=row["code_point"],
+                    character=chr(row["code_point"]),
+                    font_size_px=200.0,
+                    raw_advance_width=row["advance_width_px"],
+                    raw_actual_left=row["lsb_px"],
+                    raw_actual_right=row["advance_width_px"] - row["rsb_px"],
+                    raw_actual_ascent=row["ascent_px"],
+                    raw_actual_descent=-row["descent_px"],
+                    raw_font_ascent=row["ascent_px"],
+                    raw_font_descent=-row["descent_px"],
+                    advance_width_upem=row["advance_width_upem"],
+                    lsb_upem=row["lsb_upem"],
+                    rsb_upem=row["rsb_upem"],
+                    ascent_upem=row["ascent_upem"],
+                    descent_upem=row["descent_upem"],
+                    bbox_width_upem=row["bbox_width_upem"],
+                    bbox_height_upem=row["bbox_height_upem"],
+                    sample_count=row["sample_count"],
+                    confidence=row["confidence"],
+                )
+                rec = ObservationRecord(
+                    cache_key=row["cache_key"],
+                    reference_id=row["reference_id"],
+                    style_id=row["style_id"],
+                    code_point=row["code_point"],
+                    resolution=row["resolution"],
+                    subpixel_x=row["subpixel_x"],
+                    subpixel_y=row["subpixel_y"],
+                    raster_relative_path=row["raster_relative_path"],
+                    raster_sha256=row["raster_sha256"],
+                    raster_size_bytes=row["raster_size_bytes"],
+                    metrics=metrics,
+                    created_at=row["created_at"],
+                )
+                png_path = self.base_dir / rec.raster_relative_path
+                png_bytes = png_path.read_bytes() if png_path.exists() else b""
+                results.append((rec, png_bytes))
+            return results
+
     def save_observation(self, record: ObservationRecord, png_bytes: bytes) -> None:
         """Save raster PNG to filesystem and write metadata record to SQLite index."""
         target_path = self.base_dir / record.raster_relative_path
