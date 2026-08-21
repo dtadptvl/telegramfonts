@@ -46,7 +46,7 @@ class PairKerningObservation:
     inferred_kerning_upem: int
     is_kerning_applied: bool
     confidence: float = 1.0
-    provenance: str = "authorized_browser_canvas_measurement"
+    provenance: str = "untrusted"
 
     @property
     def raw_delta_upem(self) -> float:
@@ -67,6 +67,9 @@ class TypographyDataset:
     observations: list[PairKerningObservation] = field(default_factory=list)
     total_pairs_probed: int = 0
     active_kerning_pairs_count: int = 0
+    provenance: str = ""
+    fit_rows_count: int = 0
+    fit_rows_sha256: str = ""
     inference_method: str = "browser_text_metrics_differential"
     created_at: str = field(default_factory=lambda: datetime.datetime.now(datetime.timezone.utc).isoformat())
 
@@ -79,6 +82,9 @@ class TypographyDataset:
             "family_name": self.family_name,
             "style_name": self.style_name,
             "units_per_em": self.units_per_em,
+            "provenance": self.provenance,
+            "fit_rows_count": self.fit_rows_count,
+            "fit_rows_sha256": self.fit_rows_sha256,
             "kerning_pairs": [
                 {
                     "left_cp": left_cp,
@@ -91,6 +97,7 @@ class TypographyDataset:
             ],
             "total_pairs_probed": self.total_pairs_probed,
             "active_kerning_pairs_count": self.active_kerning_pairs_count,
+            "observations": [obs.to_dict() for obs in self.observations],
             "inference_method": self.inference_method,
             "created_at": self.created_at,
         }

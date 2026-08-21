@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-08-21T13:20:54.494979+00:00",
+  "timestamp": "2026-08-21T13:56:47.930598+00:00",
   "device_identity": {
     "hostname": "DESKTOP-1GIB12N",
     "os": "Windows",
@@ -11,8 +11,8 @@
   },
   "reference_id": "be_vietnam_pro",
   "style_id": "regular",
-  "total_time_seconds": 13.72,
-  "peak_rss_mb": 107.18,
+  "total_time_seconds": 13.53,
+  "peak_rss_mb": 107.46,
   "candidate_family": {
     "family_name": "BeVietnamPro MAX",
     "style_name": "Regular",
@@ -40,8 +40,8 @@
         "format": "WOFF2",
         "filename": "BeVietnamProMAX-Regular.woff2",
         "file_path": "build\\candidate_fonts\\BeVietnamProMAX-Regular.woff2",
-        "size_bytes": 3712,
-        "sha256_hex": "b97264e712198dfb595f146c3b9002a71fba71f0688ffc3cdd6ccd975a0605ce",
+        "size_bytes": 3704,
+        "sha256_hex": "049ad1c50fedbee0072bfcf8d619cb88db82174722561a4f13f7a1300add2eee",
         "glyph_count": 15,
         "units_per_em": 1000
       }
@@ -58,12 +58,18 @@
     "held_out_in_cmap_kerning_delta_upem": 40.0,
     "mean_held_out_raster_iou": 0.7399,
     "requires_typography_phase_e": false,
-    "typography_evidence_summary": "In-cmap fit pairs confirm 0.0 UPEM advance delta with OpenType GPOS kerning active; separate held-out in-cmap pairs ('OA', 'OĐ', 'ơA', 'mơ') show no regressions (40 UPEM delta). No independent evidence justifies broad GSUB/mark extensions."
+    "typography_evidence_summary": "In-cmap fit pairs confirm 0.0 UPEM advance delta with OpenType GPOS kerning active; separate held-out in-cmap pairs ('OA', 'OĐ', 'ơA', 'mơ') show no regressions (40 UPEM delta). No independent evidence justifies broad GSUB/mark extensions.",
+    "typography_provenance": "chromium:Chrome/151.0.7922.140:canvas_text_metrics",
+    "typography_fit_rows_count": 12,
+    "typography_fit_rows_sha256": "202ddfce9ce1db2d0c5065e2294d164dff5a45a61993c81ce18a2f45709ea878"
   },
   "typography": {
     "family_name": "BeVietnamPro MAX",
     "style_name": "Regular",
     "units_per_em": 1000,
+    "provenance": "chromium:Chrome/151.0.7922.140:canvas_text_metrics",
+    "fit_rows_count": 12,
+    "fit_rows_sha256": "202ddfce9ce1db2d0c5065e2294d164dff5a45a61993c81ce18a2f45709ea878",
     "kerning_pairs": [
       {
         "left_cp": 65,
@@ -117,8 +123,166 @@
     ],
     "total_pairs_probed": 12,
     "active_kerning_pairs_count": 7,
+    "observations": [
+      {
+        "left_cp": 56,
+        "right_cp": 65,
+        "left_char": "8",
+        "right_char": "A",
+        "left_advance_upem": 634.0,
+        "right_advance_upem": 736.0,
+        "measured_pair_advance_upem": 1370.0,
+        "inferred_kerning_upem": 0,
+        "is_kerning_applied": false,
+        "confidence": 1.0,
+        "provenance": "chromium:Chrome/151.0.7922.140:canvas_text_metrics"
+      },
+      {
+        "left_cp": 65,
+        "right_cp": 37,
+        "left_char": "A",
+        "right_char": "%",
+        "left_advance_upem": 736.0,
+        "right_advance_upem": 849.0,
+        "measured_pair_advance_upem": 1545.0,
+        "inferred_kerning_upem": -40,
+        "is_kerning_applied": true,
+        "confidence": 1.0,
+        "provenance": "chromium:Chrome/151.0.7922.140:canvas_text_metrics"
+      },
+      {
+        "left_cp": 65,
+        "right_cp": 65,
+        "left_char": "A",
+        "right_char": "A",
+        "left_advance_upem": 736.0,
+        "right_advance_upem": 736.0,
+        "measured_pair_advance_upem": 1472.0,
+        "inferred_kerning_upem": 0,
+        "is_kerning_applied": false,
+        "confidence": 1.0,
+        "provenance": "chromium:Chrome/151.0.7922.140:canvas_text_metrics"
+      },
+      {
+        "left_cp": 65,
+        "right_cp": 79,
+        "left_char": "A",
+        "right_char": "O",
+        "left_advance_upem": 736.0,
+        "right_advance_upem": 826.0,
+        "measured_pair_advance_upem": 1522.0,
+        "inferred_kerning_upem": -40,
+        "is_kerning_applied": true,
+        "confidence": 1.0,
+        "provenance": "chromium:Chrome/151.0.7922.140:canvas_text_metrics"
+      },
+      {
+        "left_cp": 65,
+        "right_cp": 103,
+        "left_char": "A",
+        "right_char": "g",
+        "left_advance_upem": 736.0,
+        "right_advance_upem": 643.0,
+        "measured_pair_advance_upem": 1359.0,
+        "inferred_kerning_upem": -20,
+        "is_kerning_applied": true,
+        "confidence": 1.0,
+        "provenance": "chromium:Chrome/151.0.7922.140:canvas_text_metrics"
+      },
+      {
+        "left_cp": 65,
+        "right_cp": 417,
+        "left_char": "A",
+        "right_char": "ơ",
+        "left_advance_upem": 736.0,
+        "right_advance_upem": 642.0,
+        "measured_pair_advance_upem": 1358.0,
+        "inferred_kerning_upem": -20,
+        "is_kerning_applied": true,
+        "confidence": 1.0,
+        "provenance": "chromium:Chrome/151.0.7922.140:canvas_text_metrics"
+      },
+      {
+        "left_cp": 66,
+        "right_cp": 79,
+        "left_char": "B",
+        "right_char": "O",
+        "left_advance_upem": 674.0,
+        "right_advance_upem": 826.0,
+        "measured_pair_advance_upem": 1490.0,
+        "inferred_kerning_upem": -10,
+        "is_kerning_applied": true,
+        "confidence": 1.0,
+        "provenance": "chromium:Chrome/151.0.7922.140:canvas_text_metrics"
+      },
+      {
+        "left_cp": 79,
+        "right_cp": 79,
+        "left_char": "O",
+        "right_char": "O",
+        "left_advance_upem": 826.0,
+        "right_advance_upem": 826.0,
+        "measured_pair_advance_upem": 1652.0,
+        "inferred_kerning_upem": 0,
+        "is_kerning_applied": false,
+        "confidence": 1.0,
+        "provenance": "chromium:Chrome/151.0.7922.140:canvas_text_metrics"
+      },
+      {
+        "left_cp": 103,
+        "right_cp": 109,
+        "left_char": "g",
+        "right_char": "m",
+        "left_advance_upem": 643.0,
+        "right_advance_upem": 893.0,
+        "measured_pair_advance_upem": 1536.0,
+        "inferred_kerning_upem": 0,
+        "is_kerning_applied": false,
+        "confidence": 1.0,
+        "provenance": "chromium:Chrome/151.0.7922.140:canvas_text_metrics"
+      },
+      {
+        "left_cp": 103,
+        "right_cp": 7855,
+        "left_char": "g",
+        "right_char": "ắ",
+        "left_advance_upem": 643.0,
+        "right_advance_upem": 653.0,
+        "measured_pair_advance_upem": 1276.0,
+        "inferred_kerning_upem": -20,
+        "is_kerning_applied": true,
+        "confidence": 1.0,
+        "provenance": "chromium:Chrome/151.0.7922.140:canvas_text_metrics"
+      },
+      {
+        "left_cp": 272,
+        "right_cp": 65,
+        "left_char": "Đ",
+        "right_char": "A",
+        "left_advance_upem": 788.0,
+        "right_advance_upem": 736.0,
+        "measured_pair_advance_upem": 1484.0,
+        "inferred_kerning_upem": -40,
+        "is_kerning_applied": true,
+        "confidence": 1.0,
+        "provenance": "chromium:Chrome/151.0.7922.140:canvas_text_metrics"
+      },
+      {
+        "left_cp": 272,
+        "right_cp": 79,
+        "left_char": "Đ",
+        "right_char": "O",
+        "left_advance_upem": 788.0,
+        "right_advance_upem": 826.0,
+        "measured_pair_advance_upem": 1614.0,
+        "inferred_kerning_upem": 0,
+        "is_kerning_applied": false,
+        "confidence": 1.0,
+        "provenance": "chromium:Chrome/151.0.7922.140:canvas_text_metrics"
+      }
+    ],
     "inference_method": "observation_store_differential_derivation",
-    "created_at": "2026-08-21T13:20:54.147950+00:00"
+    "created_at": "2026-08-21T13:56:47.521319+00:00"
   },
   "chromium_validation": {
     "is_available": true,
@@ -348,8 +512,8 @@
     {
       "format": "WOFF2",
       "file_path": "build\\candidate_fonts\\BeVietnamProMAX-Regular.woff2",
-      "size_bytes": 3712,
-      "sha256_hex": "b97264e712198dfb595f146c3b9002a71fba71f0688ffc3cdd6ccd975a0605ce",
+      "size_bytes": 3704,
+      "sha256_hex": "049ad1c50fedbee0072bfcf8d619cb88db82174722561a4f13f7a1300add2eee",
       "is_direct_loadable_fonttools": true,
       "is_direct_loadable_freetype": false,
       "is_roundtrip_loadable_freetype": true,

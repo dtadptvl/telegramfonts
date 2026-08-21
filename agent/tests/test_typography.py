@@ -18,7 +18,12 @@ from reconstruction.models import (
 )
 from typography.gpos_builder import attach_gpos_to_font, generate_kern_feature_syntax
 from typography.kerning_inferencer import EvidenceKerningInferencer
-from typography.models import PairKerningObservation, TypographyDataset
+from typography.models import (
+    BOUNDED_FIT_PAIRS,
+    SEPARATE_HELD_OUT_IN_CMAP_PAIRS,
+    PairKerningObservation,
+    TypographyDataset,
+)
 
 
 def _make_glyph(code_point: int, character: str, advance_width: float = 736.0, lsb: float = 50.0) -> ReconstructedGlyph:
@@ -243,6 +248,7 @@ def test_no_truth_binary_leakage_in_runner_and_inferencer(tmp_path):
 
     store = ObservationStore(tmp_path / "obs_store")
     # Save observable measurements into store (pure numeric data)
+    valid_prov = "chromium:Chrome/151.0.7922.140:canvas_text_metrics"
     store.save_pair_observation(
         reference_id="test_font",
         style_id="regular",
@@ -255,25 +261,24 @@ def test_no_truth_binary_leakage_in_runner_and_inferencer(tmp_path):
         pair_advance_upem=1522.0,
         inferred_kerning_upem=0,  # Store 0: inferencer MUST derive -40 dynamically from raw advances!
         confidence=1.0,
-        provenance="authorized_browser_canvas_measurements",
+        provenance=valid_prov,
     )
 
     inferencer = EvidenceKerningInferencer(family_name="TestFont MAX", style_name="Regular")
-    dataset = inferencer.infer_from_store(store, "test_font", "regular")
+    dataset = inferencer.infer_from_store(store, "test_font", "regular", require_provenance=False)
 
     assert dataset.total_pairs_probed == 1
     assert dataset.active_kerning_pairs_count == 1
     assert dataset.get_kerning(65, 79) == -40
     assert dataset.inference_method == "observation_store_differential_derivation"
-    assert dataset.observations[0].provenance == "authorized_browser_canvas_measurements"
+    assert dataset.observations[0].provenance == valid_prov
 
 
-def test_infer_from_store_derives_adjustments_dynamically_from_raw_advances(tmp_path):
-    """Verify infer_from_store recomputes adjustments from raw advances rather than blindly trusting stored answers."""
+def test_infer_from_store_rejects_untrusted_or_legacy_provenance(tmp_path):
+    """Verify infer_from_store fails closed when encountering legacy or untrusted provenance."""
     from measurement.store import ObservationStore
 
-    store = ObservationStore(tmp_path / "obs_store")
-    # Feed raw measurements for AO (delta = -40) and BO (delta = -10) with inverted/bogus stored answers
+    store = ObservationStore(tmp_path / "obs_store_untrusted")
     store.save_pair_observation(
         reference_id="font_a",
         style_id="reg",
@@ -284,31 +289,54 @@ def test_infer_from_store_derives_adjustments_dynamically_from_raw_advances(tmp_
         left_advance_upem=736.0,
         right_advance_upem=826.0,
         pair_advance_upem=1522.0,
-        inferred_kerning_upem=999,  # Bogus stored answer
+        inferred_kerning_upem=-40,
         confidence=0.95,
-        provenance="authorized_browser_canvas_measurements",
+        provenance="legacy_untrusted_assertion",
     )
-    store.save_pair_observation(
-        reference_id="font_a",
-        style_id="reg",
-        left_cp=66,
-        right_cp=79,
-        left_char="B",
-        right_char="O",
-        left_advance_upem=674.0,
-        right_advance_upem=826.0,
-        pair_advance_upem=1490.0,
-        inferred_kerning_upem=-999,  # Bogus stored answer
-        confidence=0.95,
-        provenance="authorized_browser_canvas_measurements",
-    )
+
+    inferencer = EvidenceKerningInferencer(family_name="TestFont MAX", style_name="Regular")
+    with pytest.raises(ValueError, match="untrusted or missing Chromium provenance"):
+        inferencer.infer_from_store(store, "font_a", "reg")
+
+
+def test_infer_from_store_derives_adjustments_dynamically_from_raw_advances(tmp_path):
+    """Verify infer_from_store recomputes adjustments from raw advances and verifies authentic browser provenance."""
+    from measurement.store import ObservationStore
+
+    store = ObservationStore(tmp_path / "obs_store")
+    valid_prov = "chromium:Chrome/151.0.7922.140:canvas_text_metrics"
+
+    # Save all 12 bounded fit pairs with authentic Chromium provenance and bogus/inverted stored answers
+    for l, r in BOUNDED_FIT_PAIRS:
+        l_adv = 736.0 if l == 65 else (674.0 if l == 66 else (826.0 if l == 79 else 600.0))
+        r_adv = 826.0 if r == 79 else (736.0 if r == 65 else (849.0 if r == 37 else 600.0))
+        expected_kern = -40 if (l, r) in [(65, 79), (65, 37), (272, 65)] else (-10 if (l, r) == (66, 79) else (-20 if (l, r) in [(65, 103), (65, 417), (103, 7855)] else 0))
+        p_adv = l_adv + r_adv + expected_kern
+
+        store.save_pair_observation(
+            reference_id="font_a",
+            style_id="reg",
+            left_cp=l,
+            right_cp=r,
+            left_char=chr(l),
+            right_char=chr(r),
+            left_advance_upem=l_adv,
+            right_advance_upem=r_adv,
+            pair_advance_upem=p_adv,
+            inferred_kerning_upem=999,  # Bogus stored answer to ensure it is ignored
+            confidence=1.0,
+            provenance=valid_prov,
+        )
 
     inferencer = EvidenceKerningInferencer(family_name="TestFont MAX", style_name="Regular")
     dataset = inferencer.infer_from_store(store, "font_a", "reg")
 
-    # Dynamic derivation must ignore 999/-999 and derive -40 and -10 strictly from raw advances!
+    # Dynamic derivation must ignore 999 and derive -40 and -10 strictly from raw advances!
     assert dataset.get_kerning(65, 79) == -40
     assert dataset.get_kerning(66, 79) == -10
+    assert dataset.provenance == valid_prov
+    assert dataset.fit_rows_count == 12
+    assert len(dataset.fit_rows_sha256) == 64
 
 
 def test_held_out_in_cmap_validation_is_distinct_from_fit_set():
