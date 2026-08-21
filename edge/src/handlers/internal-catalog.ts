@@ -285,6 +285,120 @@ export async function handleInternalCatalog(
     );
   }
 
+  // Route: POST /internal/catalog-requests/:id/fail
+  const failMatch = path.match(/^\/internal\/catalog-requests\/([a-zA-Z0-9_-]+)\/fail$/);
+  if (request.method === 'POST' && failMatch) {
+    const requestId = failMatch[1];
+
+    let body: Record<string, unknown> = {};
+    try {
+      body = (await request.json()) as Record<string, unknown>;
+    } catch {
+      // Body is optional
+    }
+
+    const reason = typeof body.reason === 'string' ? body.reason.trim() : (typeof body.error_code === 'string' ? body.error_code.trim() : 'catalog_acquisition_failed');
+
+    const reqRow = await env.DB
+      .prepare('SELECT id, user_id, canonical_key, source_url, status FROM catalog_requests WHERE id = ?')
+      .bind(requestId)
+      .first<{
+        id: string;
+        user_id: string;
+        canonical_key: string;
+        source_url: string;
+        status: string;
+      }>();
+
+    if (!reqRow) {
+      return new Response(JSON.stringify({ error: 'Catalog request not found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    if (reqRow.status === 'FAILED' || reqRow.status === 'COMPLETED') {
+      return new Response(
+        JSON.stringify({
+          success: true,
+          status: reqRow.status,
+        }),
+        {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }
+      );
+    }
+
+    await catalogService.failCatalogRequest(requestId);
+
+    // Notify waiting Telegram user and unblock session if this is still the active request
+    if (env.TELEGRAM_BOT_TOKEN) {
+      const tg = new TelegramClient(env.TELEGRAM_BOT_TOKEN);
+
+      const userSession = await env.DB
+        .prepare(
+          `SELECT user_id, chat_id, last_message_id, status
+           FROM telegram_sessions
+           WHERE user_id = ? AND status = 'AWAITING_CATALOG'`
+        )
+        .bind(reqRow.user_id)
+        .first<{
+          user_id: string;
+          chat_id: number;
+          last_message_id: number | null;
+          status: string;
+        }>();
+
+      if (userSession) {
+        // Verify the user is still waiting on this catalog (and did not start a newer different pending request)
+        const latestReqForUser = await env.DB
+          .prepare(
+            `SELECT canonical_key
+             FROM catalog_requests
+             WHERE user_id = ?
+             ORDER BY created_at DESC
+             LIMIT 1`
+          )
+          .bind(reqRow.user_id)
+          .first<{ canonical_key: string }>();
+
+        if (!latestReqForUser || latestReqForUser.canonical_key === reqRow.canonical_key) {
+          // Reset session back to IDLE
+          await sessionService.setStatusUnconditional(userSession.user_id, 'IDLE');
+
+          try {
+            await tg.sendMessage({
+              chat_id: userSession.chat_id,
+              text: '⚠️ Không thể tải thông tin font từ liên kết này. Vui lòng kiểm tra lại liên kết MyFonts hợp lệ hoặc thử lại sau.',
+            });
+          } catch {
+            // Log or tolerate telegram transport hiccups
+          }
+        }
+      }
+    }
+
+    emitStructuredLog({
+      event: 'catalog_failed',
+      request_id: requestId,
+      user_id: reqRow.user_id,
+      canonical_key: reqRow.canonical_key,
+      reason,
+    });
+
+    return new Response(
+      JSON.stringify({
+        success: true,
+        status: 'FAILED',
+      }),
+      {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }
+    );
+  }
+
   return new Response(JSON.stringify({ error: 'Not Found' }), {
     status: 404,
     headers: { 'Content-Type': 'application/json' },
