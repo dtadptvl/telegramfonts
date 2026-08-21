@@ -24,11 +24,14 @@ This document tracks release candidate validation status across the TelegramFont
 | **Production Secrets Injection**| Security Config | `PROD_PASS` | All 5 production secrets injected via `wrangler secret put` |
 | **Worker Production Deploy** | Deployment | `PROD_PASS` | `https://telegramfonts-edge.dienluanphien98.workers.dev` live, `/health` and `/ready` 200 |
 | **Telegram Webhook Binding** | Integration | `PROD_PASS` | Registered with Telegram Bot API and verified via `getWebhookInfo` |
-| **Physical A23 Benchmark** | Hardware Proof | `PROD_PASS` | 20 samples executed on physical Galaxy A23 (Android 14 ARM64, 0 failures, p95: 4.61s) |
+| **SePay Ingress Endpoint** | Integration | `PROD_PASS` | Worker `/webhooks/sepay` verified live (unauthenticated 401, HMAC-SHA256 signed 200) |
+| **Physical A23 Benchmark** | Hardware Proof | `PROD_PASS` | 20 samples on physical Galaxy A23 (Android 14 ARM64, 0 failures, p95: 4.59s, `is_production_proof: true`) |
+| **SePay Provider Portal Enable** | Merchant Config | `WAIT_HUMAN_RUNTIME` | Operator must verify/save Webhook URL & Secret in SePay merchant dashboard |
 
 ---
 
 ## 2. Production Status Summary
 
-All repository code, migrations (0001–0005), Cloudflare infrastructure, production secrets, Telegram/SePay webhooks, physical Galaxy A23 execution, and capacity proofs are fully validated and live.
+All Cloudflare infrastructure (D1, Queue, R2, Worker), production secrets, Telegram Bot webhook, physical Galaxy A23 execution, and capacity proofs are fully validated and live. The SePay worker ingress endpoint is verified and awaiting merchant dashboard activation by the operator.
+
 
