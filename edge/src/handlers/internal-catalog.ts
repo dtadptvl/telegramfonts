@@ -365,7 +365,7 @@ export async function handleInternalCatalog(
 
         if (!latestReqForUser || latestReqForUser.canonical_key === reqRow.canonical_key) {
           // Reset session back to IDLE
-          await sessionService.setStatusUnconditional(userSession.user_id, 'IDLE', null);
+          await sessionService.setStatusUnconditional(userSession.user_id, 'IDLE');
 
           try {
             await tg.sendMessage({

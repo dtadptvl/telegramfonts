@@ -74,6 +74,14 @@ export interface CatalogCompletedLogEvent extends LogEventBase {
   catalog_id: string;
 }
 
+export interface CatalogFailedLogEvent extends LogEventBase {
+  event: 'catalog_failed';
+  request_id: string;
+  user_id: string;
+  canonical_key: string;
+  reason?: string;
+}
+
 export type StructuredLogEvent =
   | PaymentAcceptedLogEvent
   | OutboxDispatchedLogEvent
@@ -82,7 +90,8 @@ export type StructuredLogEvent =
   | JobCompletedLogEvent
   | TelegramDeliveredLogEvent
   | DownloadServedLogEvent
-  | CatalogCompletedLogEvent;
+  | CatalogCompletedLogEvent
+  | CatalogFailedLogEvent;
 
 const SENSITIVE_SUBSTRINGS = [
   'authorization',
