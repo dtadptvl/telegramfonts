@@ -179,4 +179,17 @@ export class CatalogService {
 
     return catalogId;
   }
+
+  async failCatalogRequest(requestId: string): Promise<boolean> {
+    const now = Date.now();
+    const result = await this.db
+      .prepare(
+        `UPDATE catalog_requests SET status = 'FAILED', updated_at = ?
+         WHERE id = ? AND status = 'PENDING'`
+      )
+      .bind(now, requestId)
+      .run();
+
+    return Boolean(result.meta.changes && result.meta.changes > 0);
+  }
 }

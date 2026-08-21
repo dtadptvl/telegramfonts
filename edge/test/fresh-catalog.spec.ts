@@ -787,4 +787,95 @@ describe('Phase 7: Fresh-Catalog E2E Resolution & Scheduled Cron Delivery', () =
     );
     expect(order4.totalAmount).toBe(20000);
   });
+
+  it('handles POST /internal/catalog-requests/:id/fail: marks request FAILED, resets session to IDLE, and notifies user', async () => {
+    const userId = 'user_fail_test_1';
+    const chatId = 888123;
+    const reqId = 'req_fail_101';
+    const now = Date.now();
+
+    await env.DB.prepare(
+      `INSERT INTO telegram_users (id, first_name, username, created_at, updated_at)
+       VALUES (?, 'FailTester', 'failuser', ?, ?)`
+    )
+      .bind(userId, now, now)
+      .run();
+
+    await env.DB.prepare(
+      `INSERT INTO telegram_sessions (id, user_id, chat_id, status, workflow_token, checkout_token, version, created_at, updated_at)
+       VALUES (?, ?, ?, 'AWAITING_CATALOG', 'w_fail_tok', 'c_fail_tok', 1, ?, ?)`
+    )
+      .bind('sess_fail_1', userId, chatId, now, now)
+      .run();
+
+    await env.DB.prepare(
+      `INSERT INTO catalog_requests (id, user_id, canonical_key, source_url, status, created_at, updated_at)
+       VALUES (?, ?, 'myfonts:collections/unsupported-font', 'https://www.myfonts.com/collections/unsupported-font', 'PENDING', ?, ?)`
+    )
+      .bind(reqId, userId, now, now)
+      .run();
+
+    let sentMessageText = '';
+    let sentChatId = 0;
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (info, init) => {
+      const urlStr = typeof info === 'string' ? info : info instanceof Request ? info.url : info.toString();
+      if (urlStr.includes('/sendMessage')) {
+        const bodyObj = JSON.parse(String(init?.body || '{}')) as { chat_id: number; text: string };
+        sentChatId = Number(bodyObj.chat_id);
+        sentMessageText = bodyObj.text;
+        return new Response(JSON.stringify({ ok: true, result: { message_id: 8888 } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    try {
+      // 1. Unauthorized fail request rejected
+      const unauthReq = new Request(
+        `https://worker.local/internal/catalog-requests/${reqId}/fail`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ reason: 'NO_CATALOG_STYLES_FOUND' }),
+        }
+      );
+      const unauthResp = await worker.fetch(unauthReq, env, {} as ExecutionContext);
+      expect(unauthResp.status).toBe(401);
+
+      // 2. Authorized fail request processed
+      const failReq = new Request(
+        `https://worker.local/internal/catalog-requests/${reqId}/fail`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${nodeSecret}`,
+          },
+          body: JSON.stringify({ reason: 'NO_CATALOG_STYLES_FOUND' }),
+        }
+      );
+      const failResp = await worker.fetch(failReq, env, {} as ExecutionContext);
+      expect(failResp.status).toBe(200);
+      const failData = (await failResp.json()) as { success: boolean; status: string };
+      expect(failData.success).toBe(true);
+      expect(failData.status).toBe('FAILED');
+
+      // 3. Verify D1 catalog_requests row transitioned to FAILED
+      const reqRow = await env.DB.prepare('SELECT status FROM catalog_requests WHERE id = ?').bind(reqId).first<{ status: string }>();
+      expect(reqRow?.status).toBe('FAILED');
+
+      // 4. Verify telegram_sessions row reset to IDLE
+      const sessRow = await env.DB.prepare('SELECT status FROM telegram_sessions WHERE user_id = ?').bind(userId).first<{ status: string }>();
+      expect(sessRow?.status).toBe('IDLE');
+
+      // 5. Verify user received notification on Telegram
+      expect(sentChatId).toBe(chatId);
+      expect(sentMessageText).toContain('Không thể tải thông tin font');
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
 });
+
