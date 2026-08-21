@@ -401,11 +401,25 @@ async def run_benchmark(
             "daily_capacity_per_consumer_at_60pct_utilization": daily_cap_per_consumer,
         }
 
+    is_android_arm64 = (
+        device_meta.get("os", "").lower() == "android"
+        and device_meta.get("architecture", "").lower() in ("aarch64", "arm64")
+    )
+    is_production_proof = bool(is_valid and is_android_arm64)
+    disclaimer = (
+        "Authoritative production capacity proof executed on physical Android ARM64 hardware."
+        if is_production_proof
+        else (
+            "NOTE: This benchmark is a development/CI environment execution. Per Issue #16 policy, "
+            "production capacity proof requires execution on a physical A23 Android/ARM64 device."
+        )
+    )
+
     return BenchmarkReport(
         git_sha=git_meta["git_sha"],
         git_is_dirty=git_meta["git_is_dirty"],
         timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        is_production_proof=False,
+        is_production_proof=is_production_proof,
         is_valid=is_valid,
         device_identity=device_meta,
         config={
@@ -432,10 +446,7 @@ async def run_benchmark(
         peak_rss_mb=round(peak_rss, 2),
         capacity_model=capacity_model,
         error_summary=error_summary,
-        disclaimer=(
-            "NOTE: This benchmark is a development/CI environment execution. Per Issue #16 policy, "
-            "production capacity proof requires execution on a physical A23 Android/ARM64 device."
-        ),
+        disclaimer=disclaimer,
     )
 
 

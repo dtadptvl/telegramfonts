@@ -81,8 +81,15 @@ export function runPreflightCheck(options = {}) {
 
   const userHomeEnv = homedir ? resolve(homedir(), '.telefont.env') : '';
   const localEnvFile = resolve(rootDir, '.env');
-  const fileEnv = { ...loadEnvFileIfPresent(localEnvFile), ...loadEnvFileIfPresent(userHomeEnv) };
-  const baseEnv = options.env || { ...fileEnv, ...process.env };
+  const edgeDevVars = resolve(rootDir, 'edge', '.dev.vars');
+  const edgeTelefontEnv = resolve(rootDir, 'edge', '.telefont.env');
+  const fileEnv = {
+    ...loadEnvFileIfPresent(localEnvFile),
+    ...loadEnvFileIfPresent(edgeDevVars),
+    ...loadEnvFileIfPresent(edgeTelefontEnv),
+    ...loadEnvFileIfPresent(userHomeEnv),
+  };
+  const baseEnv = { ...fileEnv, ...(options.env || process.env) };
 
   const checks = [];
 
@@ -248,7 +255,7 @@ export function runPreflightCheck(options = {}) {
     }
   }
 
-  const env = { ...(wranglerConfig?.vars || {}), ...baseEnv };
+  const env = { ...baseEnv, ...(wranglerConfig?.vars || {}) };
 
   // 2. Secret / Environment Key Names (never values!)
   const requiredSecrets = [

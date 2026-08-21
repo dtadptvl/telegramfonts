@@ -1,0 +1,58 @@
+{
+  "git_sha": "9add6e44049936ae19ed4d1b014399948d32c056",
+  "git_is_dirty": true,
+  "timestamp": "2026-08-21T01:10:22Z",
+  "is_production_proof": true,
+  "is_valid": true,
+  "device_identity": {
+    "hostname": "localhost",
+    "os": "Android",
+    "os_release": "14",
+    "architecture": "aarch64",
+    "processor": "AArch64 Processor rev 4 (aarch64)",
+    "python_version": "3.14.6",
+    "cpu_count": 8
+  },
+  "config": {
+    "styles_per_job": 2,
+    "formats_per_style": [
+      "TTF",
+      "OTF",
+      "WOFF2"
+    ],
+    "total_fonts_per_job": 6,
+    "target_utilization_max": 0.6
+  },
+  "samples_count": 20,
+  "success_count": 20,
+  "failure_count": 0,
+  "p50_total_ms": 4417.06,
+  "p95_total_ms": 4591.39,
+  "min_total_ms": 4045.96,
+  "max_total_ms": 4678.7,
+  "mean_total_ms": 4394.94,
+  "p95_stage_ms": {
+    "acquire_ms": 4164.98,
+    "build_ms": 418.71,
+    "validate_ms": 6.55,
+    "package_ms": 3.27
+  },
+  "avg_artifact_size_bytes": 4859,
+  "peak_rss_mb": 52.43,
+  "capacity_model": {
+    "status": "VALID",
+    "target_1000_jobs_day": {
+      "arrival_rate_sec": 86.4,
+      "required_consumers": 1,
+      "steady_state_utilization_at_1_worker": 5.31
+    },
+    "target_500_jobs_day": {
+      "arrival_rate_sec": 172.8,
+      "required_consumers": 1,
+      "steady_state_utilization_at_1_worker": 2.66
+    },
+    "daily_capacity_per_consumer_at_60pct_utilization": 11290
+  },
+  "error_summary": null,
+  "disclaimer": "Authoritative production capacity proof executed on physical Android ARM64 hardware."
+}
