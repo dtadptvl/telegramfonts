@@ -366,12 +366,16 @@ export class OutboxService {
           // Sort deterministically by part_index ascending
           parts.sort((a, b) => a.part_index - b.part_index);
 
-          // 2. Preflight check: verify EVERY canonical R2 part exists and matches recorded size/hash before upload (REQ 5)
-          const loadedParts: Array<{ part: ArtifactPartMeta; bytes: Uint8Array }> = [];
+          // 2. Preflight check: verify EVERY canonical R2 part exists and matches recorded size/hash before upload without retaining bodies
           for (const part of parts) {
             const r2Obj = await bucket.get(part.artifact_key);
             if (!r2Obj) {
               throw new Error(`R2_PART_NOT_FOUND: ${part.artifact_key}`);
+            }
+            if (r2Obj.size !== part.artifact_size_bytes) {
+              throw new Error(
+                `R2_PART_SIZE_MISMATCH: expected ${part.artifact_size_bytes}, got ${r2Obj.size}`
+              );
             }
             const arrayBuf = await r2Obj.arrayBuffer();
             if (arrayBuf.byteLength !== part.artifact_size_bytes) {
@@ -388,10 +392,10 @@ export class OutboxService {
                 `R2_PART_CHECKSUM_MISMATCH: expected ${part.artifact_sha256}, got ${shaHex}`
               );
             }
-            loadedParts.push({ part, bytes: new Uint8Array(arrayBuf) });
+            // Note: arrayBuf is not stored in any collection; eligible for immediate GC before next part
           }
 
-          // 3. Progressive delivery with per-part confirmed progress tracking (REQ 6)
+          // 3. Progressive delivery with per-part confirmed progress tracking: load and send at most one part body at a time
           let payloadObj: { order_id: string; confirmed_parts?: number[] } = {
             order_id: order.id,
             confirmed_parts: [],
@@ -409,11 +413,17 @@ export class OutboxService {
 
           const tg = new TelegramClient(botToken);
 
-          for (const { part, bytes } of loadedParts) {
+          for (const part of parts) {
             if (confirmedParts.includes(part.part_index)) {
               // Already confirmed by Telegram in earlier attempt
               continue;
             }
+
+            const r2Obj = await bucket.get(part.artifact_key);
+            if (!r2Obj) {
+              throw new Error(`R2_PART_NOT_FOUND_DURING_DELIVERY: ${part.artifact_key}`);
+            }
+            const partBuffer = await r2Obj.arrayBuffer();
 
             const caption =
               parts.length > 1
@@ -422,7 +432,7 @@ export class OutboxService {
 
             await tg.sendDocument({
               chat_id: userRecord.chat_id,
-              document: new Blob([bytes], { type: 'application/zip' }),
+              document: new Blob([partBuffer], { type: 'application/zip' }),
               filename: part.filename,
               caption,
             });
