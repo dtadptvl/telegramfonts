@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-08-21T15:06:05Z",
+  "timestamp": "2026-08-21T15:26:47Z",
   "device_identity": {
     "hostname": "localhost",
     "system": "Android",
@@ -7,38 +7,27 @@
     "machine": "aarch64",
     "python_version": "3.14.6"
   },
-  "cache_reuse_evidence": {
-    "test": "cache_reuse",
-    "family_id": "be_vietnam_pro",
-    "style_id": "regular",
-    "total_glyphs_checked": 13,
-    "total_observations_queried": 186,
-    "cache_hits": 186,
-    "cache_hit_rate_pct": 100.0,
-    "network_recrawls_triggered": 0,
-    "run1_retrieval_ms": 36.22,
-    "run2_retrieval_ms": 34.19,
+  "real_agent_cache_reuse_evidence": {
+    "test": "real_agent_cache_reuse",
+    "run1_job_id": "job_cache_1",
+    "run1_duration_seconds": 0.129,
+    "run1_network_requests": 2,
+    "run2_job_id": "job_cache_2",
+    "run2_duration_seconds": 0.039,
+    "run2_network_requests": 0,
+    "network_recrawls_prevented": true,
     "passed": true
   },
-  "resume_recovery_evidence": {
-    "test": "resume_and_recovery",
-    "job_id": "job-test-resume-a23-001",
-    "lease_token_1": "lease-token-attempt-1",
-    "lease_token_2": "lease-token-attempt-2",
-    "interrupted_after_glyphs": 6,
-    "resumed_remaining_glyphs": 7,
-    "total_glyphs_completed": 13,
-    "repeated_work_count": 0,
-    "state_corruption_detected": false,
-    "duplicate_fulfillment_prevented": true,
-    "lease_fencing_honored": true,
-    "recovered_font_artifacts": {
-      "ttf_bytes": 6312,
-      "otf_bytes": 5052,
-      "woff2_bytes": 3604
-    },
-    "phase1_duration_s": 21.83,
-    "phase2_duration_s": 27.435,
+  "real_agent_resume_recovery_evidence": {
+    "test": "real_agent_resume_recovery_and_fencing",
+    "job_id": "job_resume_real_3",
+    "stale_lease_token": "33333333-3333-3333-3333-333333333333",
+    "active_lease_token": "44444444-4444-4444-4444-444444444444",
+    "stale_lease_fenced_and_rejected": true,
+    "fenced_attempts_detected_by_worker": 1,
+    "resumed_worker_action": "acked",
+    "uploaded_artifact_count": 1,
+    "job_completed_in_d1": true,
     "passed": true
   }
 }
