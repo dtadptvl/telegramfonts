@@ -93,10 +93,57 @@ def test_geometry_optimizer_no_truth_leakage():
     assert "reference_binary" not in src
 
 
-def test_geometry_optimizer_cache_only_operation():
+def test_geometry_optimizer_cache_only_operation(tmp_path):
     """Verify optimizer operates directly on cached observation store items."""
-    store = ObservationStore("observations/benchmark")
-    obs = store.get_glyph_observations("be_vietnam_pro", "regular", 65)
+    import io
+    from PIL import Image
+
+    store_dir = Path("observations/benchmark")
+    if not (store_dir / "index.sqlite3").exists():
+        store_dir = tmp_path / "obs_store"
+        store = ObservationStore(store_dir)
+        # Create a sample observation
+        img = Image.new("L", (128, 128), 255)
+        arr = np.ones((128, 128), dtype=np.uint8) * 255
+        arr[25:100, 25:100] = 0
+        img = Image.fromarray(arr)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        png_bytes = buf.getvalue()
+
+        metrics = DirectMetrics(
+            code_point=65,
+            character="A",
+            font_size_px=200.0,
+            raw_advance_width=147.2,
+            raw_actual_left=8.0,
+            raw_actual_right=139.0,
+            raw_actual_ascent=148.0,
+            raw_actual_descent=0.0,
+            raw_font_ascent=148.0,
+            raw_font_descent=0.0,
+            advance_width_upem=736.0,
+            lsb_upem=40.0,
+            rsb_upem=41.0,
+            ascent_upem=740.0,
+            descent_upem=0.0,
+            bbox_width_upem=655.0,
+            bbox_height_upem=740.0,
+        )
+        store.save_glyph_observation(
+            reference_id="font_a",
+            style_id="reg",
+            code_point=65,
+            resolution=128,
+            subpixel_offset=(0.0, 0.0),
+            png_bytes=png_bytes,
+            metrics=metrics,
+        )
+        obs = store.get_glyph_observations("font_a", "reg", 65)
+    else:
+        store = ObservationStore(store_dir)
+        obs = store.get_glyph_observations("be_vietnam_pro", "regular", 65)
+
     assert obs is not None
     assert len(obs) > 0
 
