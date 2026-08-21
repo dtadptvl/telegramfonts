@@ -15,6 +15,7 @@ dependencies = [
     "fonttools>=4.50.0",
     "brotli>=1.1.0",
     "pillow>=10.0.0",
+    "websockets>=13.0",
 ]
 
 [project.optional-dependencies]
