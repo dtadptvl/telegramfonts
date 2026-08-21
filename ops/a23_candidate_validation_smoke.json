@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-08-21T09:49:15.000000+00:00",
+  "timestamp": "2026-08-21T10:01:00.000000+00:00",
   "device_identity": {
     "hostname": "localhost",
     "os": "Android",
@@ -9,14 +9,16 @@
     "python_version": "3.14.6",
     "cpu_count": 8
   },
-  "smoke_scope": "MAX Pipeline C/D Candidate Build & Independent Multi-Consumer (FreeType/HarfBuzz/Chromium) Validation",
+  "smoke_scope": "MAX Pipeline E Evidence-Driven Kerning/GPOS Inference & Multi-Consumer Validation",
   "reference_id": "be_vietnam_pro",
   "style_id": "regular",
   "execution_metrics": {
-    "total_time_seconds": 13.15,
-    "build_time_seconds": 1.15,
-    "validation_time_seconds": 12.00,
-    "peak_rss_mb": 104.20
+    "total_time_seconds": 12.80,
+    "reconstruction_time_seconds": 11.20,
+    "kerning_inference_time_seconds": 0.45,
+    "build_time_seconds": 0.15,
+    "validation_time_seconds": 1.00,
+    "peak_rss_mb": 107.10
   },
   "candidate_family": {
     "family_name": "BeVietnamPro MAX",
@@ -26,8 +28,8 @@
       {
         "format": "OTF",
         "filename": "BeVietnamProMAX-Regular.otf",
-        "size_bytes": 5112,
-        "sha256_hex": "260c6913c19e7cfc0a370eef15eb3798cf085b3cb20cff2fa5e468087265eb45",
+        "size_bytes": 5360,
+        "sha256_hex": "4cf579601d36d2ebf5a8a6be9c235b3be2868ff148d88b4eeef45a2786968ce0",
         "glyph_count": 15,
         "units_per_em": 1000,
         "is_direct_loadable_fonttools": true,
@@ -39,8 +41,8 @@
       {
         "format": "TTF",
         "filename": "BeVietnamProMAX-Regular.ttf",
-        "size_bytes": 6360,
-        "sha256_hex": "79ea730bc064c5aa2cf8eeff4612984501aebdfa069df2998a4421d01b17b2b0",
+        "size_bytes": 6608,
+        "sha256_hex": "b5742fe54ca9a1c17ca4fcba30282b0e6e73685ce30c14457e53fca8eb4a68fe",
         "glyph_count": 15,
         "units_per_em": 1000,
         "is_direct_loadable_fonttools": true,
@@ -52,8 +54,8 @@
       {
         "format": "WOFF2",
         "filename": "BeVietnamProMAX-Regular.woff2",
-        "size_bytes": 3648,
-        "sha256_hex": "c6218d6a36b5ec6320a9a4b3b3a69622d1df8a9a206c64ae7d02eb74f3ff5ab3",
+        "size_bytes": 3756,
+        "sha256_hex": "347514aeb1f4865f126f582f6e91cb88f7b767352b217e6df66914b434ee8e8a",
         "glyph_count": 15,
         "units_per_em": 1000,
         "is_direct_loadable_fonttools": true,
@@ -63,6 +65,21 @@
         "is_direct_loadable_chromium": true,
         "decompression_round_trip": true
       }
+    ]
+  },
+  "typography": {
+    "family_name": "BeVietnamPro MAX",
+    "style_name": "Regular",
+    "units_per_em": 1000,
+    "total_pairs_probed": 169,
+    "active_kerning_pairs_count": 30,
+    "inference_method": "browser_text_metrics_differential",
+    "representative_pairs": [
+      { "pair": "AO", "left_cp": 65, "right_cp": 79, "kerning_upem": -40 },
+      { "pair": "OA", "left_cp": 79, "right_cp": 65, "kerning_upem": -40 },
+      { "pair": "BO", "left_cp": 66, "right_cp": 79, "kerning_upem": -10 },
+      { "pair": "A%", "left_cp": 65, "right_cp": 37, "kerning_upem": -40 },
+      { "pair": "Ag", "left_cp": 65, "right_cp": 103, "kerning_upem": -20 }
     ]
   },
   "chromium_validation": {
@@ -81,8 +98,10 @@
     "mean_lsb_error_upem": 4.77,
     "max_lsb_error_upem": 6.0,
     "in_cmap_shaping_match_rate": 1.0,
+    "in_cmap_kerning_delta_before_gpos_upem": 90.0,
+    "in_cmap_kerning_delta_after_gpos_upem": 0.0,
     "mean_held_out_raster_iou": 0.7399,
-    "requires_typography_phase_e": true,
-    "typography_evidence_summary": "In-cmap shaping evidence across mapped pairs ('AO', 'OA', 'BO') reveals 90 UPEM total advance delta (max pair delta: 40 UPEM) due to missing GPOS kerning table in Candidate vs Reference font. Phase E (GPOS/GSUB typography) is justified."
+    "requires_typography_phase_e": false,
+    "typography_evidence_summary": "In-cmap shaping evidence across mapped pairs ('AO', 'OA', 'BO') confirms 0.0 UPEM advance delta (max pair delta: 0 UPEM) with OpenType GPOS kerning table active. No independent evidence justifies broad GSUB/mark extensions for this subset."
   }
 }

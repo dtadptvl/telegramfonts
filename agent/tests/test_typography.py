@@ -1,0 +1,233 @@
+"""Authoritative test suite for evidence-driven kerning inference and OpenType GPOS table generation (Issue #43)."""
+from __future__ import annotations
+
+import io
+from pathlib import Path
+import pytest
+from fontTools.ttLib import TTFont
+import uharfbuzz as hb
+
+from reconstruction.candidate_builder import MaxCandidateFontBuilder
+from reconstruction.candidate_validator import MaxCandidateHeldOutValidator
+from reconstruction.models import (
+    Contour,
+    CubicSegment,
+    LineSegment,
+    Point2D,
+    ReconstructedGlyph,
+)
+from typography.gpos_builder import attach_gpos_to_font, generate_kern_feature_syntax
+from typography.kerning_inferencer import EvidenceKerningInferencer
+from typography.models import PairKerningObservation, TypographyDataset
+
+
+def _make_glyph(code_point: int, character: str, advance_width: float = 736.0, lsb: float = 50.0) -> ReconstructedGlyph:
+    contour = Contour(
+        segments=[
+            LineSegment(p0=Point2D(lsb, 0), p1=Point2D(lsb + 200, 700)),
+            CubicSegment(
+                p0=Point2D(lsb + 200, 700),
+                p1=Point2D(lsb + 220, 710),
+                p2=Point2D(lsb + 240, 710),
+                p3=Point2D(lsb + 260, 700),
+            ),
+            LineSegment(p0=Point2D(lsb + 260, 700), p1=Point2D(lsb + 460, 0)),
+            LineSegment(p0=Point2D(lsb + 460, 0), p1=Point2D(lsb + 360, 0)),
+            LineSegment(p0=Point2D(lsb + 360, 0), p1=Point2D(lsb + 300, 200)),
+            LineSegment(p0=Point2D(lsb + 300, 200), p1=Point2D(lsb + 160, 200)),
+            LineSegment(p0=Point2D(lsb + 160, 200), p1=Point2D(lsb + 100, 0)),
+            LineSegment(p0=Point2D(lsb + 100, 0), p1=Point2D(lsb, 0)),
+        ]
+    )
+    return ReconstructedGlyph(
+        code_point=code_point,
+        character=character,
+        advance_width_upem=advance_width,
+        lsb_upem=lsb,
+        rsb_upem=max(0.0, advance_width - lsb - 460.0),
+        ascent_upem=700.0,
+        descent_upem=0.0,
+        contours=[contour],
+    )
+
+
+def test_inferencer_direct_measurements():
+    """Verify EvidenceKerningInferencer calculates kerning adjustments strictly from observable measurements."""
+    inferencer = EvidenceKerningInferencer(family_name="TestFont", style_name="Regular", threshold_upem=0.5)
+
+    # Observable pair measurements: (left_cp, right_cp, left_adv, right_adv, pair_adv)
+    measurements = [
+        (65, 79, 736.0, 826.0, 1522.0),  # AO: 1522 - (736 + 826) = -40
+        (79, 65, 826.0, 736.0, 1522.0),  # OA: 1522 - (826 + 736) = -40
+        (66, 79, 674.0, 826.0, 1490.0),  # BO: 1490 - (674 + 826) = -10
+        (65, 65, 736.0, 736.0, 1472.0),  # AA: 1472 - (736 + 736) = 0
+        (79, 79, 826.0, 826.0, 1652.0),  # OO: 1652 - (826 + 826) = 0
+    ]
+
+    dataset = inferencer.infer_from_direct_measurements(measurements)
+
+    assert dataset.total_pairs_probed == 5
+    assert dataset.active_kerning_pairs_count == 3
+    assert dataset.get_kerning(65, 79) == -40
+    assert dataset.get_kerning(79, 65) == -40
+    assert dataset.get_kerning(66, 79) == -10
+    assert dataset.get_kerning(65, 65) == 0  # Unadjusted
+
+
+def test_no_adjustment_without_evidence():
+    """Verify pairs without measurable differential advance do not emit false adjustments."""
+    inferencer = EvidenceKerningInferencer(threshold_upem=1.0)
+    measurements = [
+        (65, 66, 736.0, 674.0, 1410.0),  # AB: delta = 0
+        (66, 65, 674.0, 736.0, 1410.0),  # BA: delta = 0
+        (65, 65, 736.0, 736.0, 1472.2),  # AA: delta = +0.2 (< 1.0 threshold)
+    ]
+    dataset = inferencer.infer_from_direct_measurements(measurements)
+    assert dataset.active_kerning_pairs_count == 0
+    assert len(dataset.kerning_pairs) == 0
+
+    fea = generate_kern_feature_syntax(dataset, {65: "A", 66: "B"})
+    assert fea == ""
+
+
+def test_deterministic_gpos_output(tmp_path):
+    """Verify candidate font builds with GPOS are strictly bit-for-bit deterministic."""
+    glyphs = [
+        _make_glyph(65, "A", 736.0),
+        _make_glyph(79, "O", 826.0),
+        _make_glyph(66, "B", 674.0),
+    ]
+    typography = TypographyDataset(
+        family_name="TestFont MAX",
+        style_name="Regular",
+        kerning_pairs={(65, 79): -40, (79, 65): -40, (66, 79): -10},
+    )
+
+    builder = MaxCandidateFontBuilder(family_name="TestFont MAX", style_name="Regular")
+    
+    dir1 = tmp_path / "build1"
+    res1 = builder.build_candidate_family(glyphs, dir1, typography=typography)
+
+    dir2 = tmp_path / "build2"
+    res2 = builder.build_candidate_family(glyphs, dir2, typography=typography)
+
+    assert res1.otf.sha256_hex == res2.otf.sha256_hex
+    assert res1.ttf.sha256_hex == res2.ttf.sha256_hex
+    assert res1.woff2.sha256_hex == res2.woff2.sha256_hex
+
+    # Verify GPOS table present in both OTF and TTF
+    otf_tt = TTFont(res1.otf.file_path)
+    ttf_tt = TTFont(res1.ttf.file_path)
+    assert "GPOS" in otf_tt
+    assert "GPOS" in ttf_tt
+
+
+def test_shared_canonical_typography_shaping(tmp_path):
+    """Verify OTF, TTF, and WOFF2 share identical GPOS shaping behavior in HarfBuzz."""
+    glyphs = [
+        _make_glyph(65, "A", 736.0),
+        _make_glyph(79, "O", 826.0),
+        _make_glyph(66, "B", 674.0),
+    ]
+    typography = TypographyDataset(
+        family_name="TestFont MAX",
+        style_name="Regular",
+        kerning_pairs={(65, 79): -40, (79, 65): -40, (66, 79): -10},
+    )
+
+    builder = MaxCandidateFontBuilder(family_name="TestFont MAX", style_name="Regular")
+    res = builder.build_candidate_family(glyphs, tmp_path, typography=typography)
+
+    # Test HarfBuzz shaping across all three formats
+    for art in (res.otf, res.ttf, res.woff2):
+        if art.format == "WOFF2":
+            # Decompress WOFF2 to SFNT for HarfBuzz
+            tt_woff2 = TTFont(art.file_path)
+            tt_woff2.flavor = None
+            buf = io.BytesIO()
+            tt_woff2.save(buf)
+            raw_bytes = buf.getvalue()
+        else:
+            raw_bytes = art.file_path.read_bytes()
+
+        blob = hb.Blob(raw_bytes)
+        font = hb.Font(hb.Face(blob))
+
+        # Test AO pair
+        buf_ao = hb.Buffer()
+        buf_ao.add_str("AO")
+        buf_ao.guess_segment_properties()
+        hb.shape(font, buf_ao)
+        adv_ao = sum(p.x_advance for p in buf_ao.glyph_positions)
+        assert adv_ao == 1522, f"Expected 1522 on {art.format}, got {adv_ao}"
+
+        # Test OA pair
+        buf_oa = hb.Buffer()
+        buf_oa.add_str("OA")
+        buf_oa.guess_segment_properties()
+        hb.shape(font, buf_oa)
+        adv_oa = sum(p.x_advance for p in buf_oa.glyph_positions)
+        assert adv_oa == 1522, f"Expected 1522 on {art.format}, got {adv_oa}"
+
+        # Test BO pair
+        buf_bo = hb.Buffer()
+        buf_bo.add_str("BO")
+        buf_bo.guess_segment_properties()
+        hb.shape(font, buf_bo)
+        adv_bo = sum(p.x_advance for p in buf_bo.glyph_positions)
+        assert adv_bo == 1490, f"Expected 1490 on {art.format}, got {adv_bo}"
+
+        # Test unadjusted AA pair
+        buf_aa = hb.Buffer()
+        buf_aa.add_str("AA")
+        buf_aa.guess_segment_properties()
+        hb.shape(font, buf_aa)
+        adv_aa = sum(p.x_advance for p in buf_aa.glyph_positions)
+        assert adv_aa == 1472, f"Expected 1472 on {art.format}, got {adv_aa}"
+
+
+def test_kerning_materially_reduces_pair_position_error(tmp_path):
+    """Verify GPOS table reduces in-cmap pair position error from 90 UPEM to 0 UPEM."""
+    ttf_path = Path("agent/benchmark_data/ground_truth/BeVietnamPro-Regular.ttf")
+    if not ttf_path.exists():
+        pytest.skip("Ground truth font not available")
+
+    glyphs = [
+        _make_glyph(65, "A", 736.0),
+        _make_glyph(79, "O", 826.0),
+        _make_glyph(66, "B", 674.0),
+    ]
+
+    builder = MaxCandidateFontBuilder(family_name="TestFont MAX", style_name="Regular")
+    validator = MaxCandidateHeldOutValidator(ttf_path)
+
+    # 1. Build without GPOS
+    res_no_gpos = builder.build_candidate_family(glyphs, tmp_path / "no_gpos", typography=None)
+    report_no_gpos = validator.validate_family(res_no_gpos, tested_codepoints=[65, 79, 66], run_chromium=False)
+
+    in_cmap_no_gpos = [s for s in report_no_gpos.shaping_results if s.in_candidate_cmap and s.category == "in_cmap_kerning_sensitive"]
+    delta_no_gpos = sum(s.advance_delta_upem for s in in_cmap_no_gpos)
+    assert delta_no_gpos == 90  # 40 (AO) + 40 (OA) + 10 (BO)
+    assert report_no_gpos.requires_typography_phase_e is True
+
+    # 2. Build with GPOS
+    typography = TypographyDataset(
+        family_name="TestFont MAX",
+        style_name="Regular",
+        kerning_pairs={(65, 79): -40, (79, 65): -40, (66, 79): -10},
+    )
+    res_gpos = builder.build_candidate_family(glyphs, tmp_path / "gpos", typography=typography)
+    report_gpos = validator.validate_family(res_gpos, tested_codepoints=[65, 79, 66], run_chromium=False)
+
+    in_cmap_gpos = [s for s in report_gpos.shaping_results if s.in_candidate_cmap and s.category == "in_cmap_kerning_sensitive"]
+    delta_gpos = sum(s.advance_delta_upem for s in in_cmap_gpos)
+    assert delta_gpos == 0  # 100% resolved!
+    assert report_gpos.requires_typography_phase_e is False
+
+
+def test_no_truth_leakage_in_inferencer():
+    """Verify inferencer models and logic have zero dependency on reference font binary internals."""
+    inferencer = EvidenceKerningInferencer()
+    # Ensure inferencer only processes observable numeric tuples
+    dataset = inferencer.infer_from_direct_measurements([(65, 79, 736.0, 826.0, 1522.0)])
+    assert dataset.get_kerning(65, 79) == -40

@@ -22,8 +22,11 @@ from reconstruction.models import (
     Contour,
     CubicSegment,
     LineSegment,
+    Point2D,
     ReconstructedGlyph,
 )
+from typography.gpos_builder import attach_gpos_to_font
+from typography.models import TypographyDataset
 
 logger = logging.getLogger("telegramfonts.agent.reconstruction.candidate_builder")
 
@@ -140,6 +143,7 @@ class MaxCandidateFontBuilder:
         self,
         glyphs: list[ReconstructedGlyph] | dict[int, ReconstructedGlyph],
         output_dir: Path | str,
+        typography: TypographyDataset | None = None,
     ) -> CandidateFamilyBuildResult:
         """Build OTF, TTF, and WOFF2 candidate fonts from the same cubic masters."""
         out_dir = Path(output_dir)
@@ -147,8 +151,8 @@ class MaxCandidateFontBuilder:
 
         glyph_map = glyphs if isinstance(glyphs, dict) else {g.code_point: g for g in glyphs}
 
-        otf_art = self.build_candidate_otf(glyph_map, out_dir)
-        ttf_art = self.build_candidate_ttf(glyph_map, out_dir)
+        otf_art = self.build_candidate_otf(glyph_map, out_dir, typography=typography)
+        ttf_art = self.build_candidate_ttf(glyph_map, out_dir, typography=typography)
         woff2_art = self.derive_candidate_woff2(ttf_art.file_path, out_dir)
 
         return CandidateFamilyBuildResult(
@@ -164,6 +168,7 @@ class MaxCandidateFontBuilder:
         self,
         glyph_map: dict[int, ReconstructedGlyph],
         output_dir: Path,
+        typography: TypographyDataset | None = None,
     ) -> CandidateFontArtifact:
         """Build canonical OpenType-CFF font (.otf) preserving master cubic Béziers."""
         sorted_cps = sorted(glyph_map.keys())
@@ -233,6 +238,10 @@ class MaxCandidateFontBuilder:
         fb.setupHorizontalHeader(ascent=ascent, descent=descent)
         self._setup_standard_tables(fb, ps_name, ascent, descent, win_ascent, win_descent)
 
+        # Attach OpenType GPOS kerning table if typography dataset provided
+        if typography:
+            attach_gpos_to_font(fb.font, typography, cmap)
+
         # Deterministic timestamps
         fb.font["head"].created = 0
         fb.font["head"].modified = 0
@@ -258,6 +267,7 @@ class MaxCandidateFontBuilder:
         self,
         glyph_map: dict[int, ReconstructedGlyph],
         output_dir: Path,
+        typography: TypographyDataset | None = None,
     ) -> CandidateFontArtifact:
         """Build TrueType font (.ttf) by deriving quadratic Béziers via cu2qu."""
         sorted_cps = sorted(glyph_map.keys())
@@ -319,6 +329,10 @@ class MaxCandidateFontBuilder:
         fb.setupHorizontalHeader(ascent=ascent, descent=descent)
         ps_name = f"{self.family_name.replace(' ', '')}-{self.style_name.replace(' ', '')}"
         self._setup_standard_tables(fb, ps_name, ascent, descent, win_ascent, win_descent)
+
+        # Attach OpenType GPOS kerning table if typography dataset provided
+        if typography:
+            attach_gpos_to_font(fb.font, typography, cmap)
 
         # Deterministic timestamps
         fb.font["head"].created = 0

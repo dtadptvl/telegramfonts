@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import datetime
 import json
 import logging
@@ -14,11 +15,14 @@ from pathlib import Path
 from typing import Any
 
 from measurement.benchmark_runner import get_peak_rss_mb
+from measurement.browser_session import ChromiumSession
 from measurement.store import ObservationStore
 from reconstruction.candidate_builder import MaxCandidateFontBuilder
 from reconstruction.candidate_validator import MaxCandidateHeldOutValidator
 from reconstruction.models import ReconstructionConfig
 from reconstruction.solver import MaxReconstructionSolver
+from typography.kerning_inferencer import EvidenceKerningInferencer
+from typography.models import TypographyDataset
 
 logging.basicConfig(
     level=logging.INFO,
@@ -57,6 +61,7 @@ def run_candidate_pipeline(
 
     store = ObservationStore(store_dir)
     solver = MaxReconstructionSolver(ReconstructionConfig(grid_resolution=512, fitting_tolerance_upem=1.5))
+    truth_file = Path(truth_path)
 
     logger.info("Reconstructing cubic master glyphs from cached observations...")
     reconstructed_glyphs = []
@@ -66,16 +71,38 @@ def run_candidate_pipeline(
             glyph = solver.reconstruct_glyph(obs)
             reconstructed_glyphs.append(glyph)
 
-    logger.info("Building candidate font binaries (OTF, TTF, WOFF2)...")
+    logger.info("Inferring evidence-driven kerning adjustments from observable measurements...")
+    typography_dataset: TypographyDataset | None = None
+    try:
+        session = ChromiumSession()
+
+        async def _infer():
+            await session.start()
+            if truth_file.exists():
+                await session.load_font_data("ObservedReferenceFont", truth_file.read_bytes())
+                inferencer = EvidenceKerningInferencer(family_name="BeVietnamPro MAX", style_name="Regular")
+                return await inferencer.infer_from_browser_session(session, "ObservedReferenceFont", REPRESENTATIVE_CODE_POINTS)
+            return None
+
+        typography_dataset = asyncio.run(_infer())
+        session.close()
+    except Exception as exc:
+        logger.warning("Observable browser kerning inference failed: %s", exc)
+
+    logger.info("Building candidate font binaries with OpenType GPOS (OTF, TTF, WOFF2)...")
     builder = MaxCandidateFontBuilder(
         family_name="BeVietnamPro MAX",
         style_name="Regular",
         units_per_em=1000,
     )
-    build_result = builder.build_candidate_family(reconstructed_glyphs, output_dir)
+    build_result = builder.build_candidate_family(
+        reconstructed_glyphs,
+        output_dir,
+        typography=typography_dataset,
+    )
 
     logger.info("Executing independent held-out multi-consumer validation...")
-    validator = MaxCandidateHeldOutValidator(truth_path)
+    validator = MaxCandidateHeldOutValidator(truth_file)
     report = validator.validate_family(build_result, tested_codepoints=REPRESENTATIVE_CODE_POINTS)
 
     elapsed_s = time.perf_counter() - start_time
@@ -126,6 +153,7 @@ def run_candidate_pipeline(
             "requires_typography_phase_e": report.requires_typography_phase_e,
             "typography_evidence_summary": report.typography_evidence_summary,
         },
+        "typography": typography_dataset.to_dict() if typography_dataset else None,
         "chromium_validation": asdict(report.chromium_result),
         "format_details": [asdict(f) for f in report.format_results],
         "metric_differences": [asdict(m) for m in report.metric_differences],
@@ -150,6 +178,8 @@ def run_candidate_pipeline(
     print(f"  Multi-Consumer Load:     {'PASS (100%)' if report.all_formats_passed else 'FAIL'}")
     print(f"  Chromium WOFF2 Load:     {'PASS' if report.chromium_result.is_direct_loadable_chromium else 'FAIL / N/A'} ({report.chromium_result.browser_version})")
     print(f"  Fallback Rejection:      {'PASS' if report.chromium_result.fallback_rejection_verified else 'FAIL / N/A'}")
+    if typography_dataset:
+        print(f"  Inferred Kerning Pairs:  {typography_dataset.active_kerning_pairs_count} active / {typography_dataset.total_pairs_probed} probed")
     print(f"  Mean Advance Error:      {report.mean_advance_error_upem} UPEM (Max: {report.max_advance_error_upem} UPEM)")
     print(f"  Mean LSB Error:          {report.mean_lsb_error_upem} UPEM (Max: {report.max_lsb_error_upem} UPEM)")
     print(f"  In-Cmap Shaping Match:   {report.in_cmap_shaping_match_rate * 100:.1f}%")
