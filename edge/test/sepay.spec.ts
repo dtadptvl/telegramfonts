@@ -280,7 +280,7 @@ describe('Phase 3: SePay Verified Payment & Transactional Outbox', () => {
 
       expect(res.status).toBe(200);
       const json = await res.json();
-      expect(json).toEqual({ status: 'ignored_invalid_json' });
+      expect(json).toEqual({ success: true, status: 'ignored_invalid_json' });
     });
 
     it('handles authenticated wrong-typed payloads gracefully with HTTP 200 and zero mutation (Gap 1)', async () => {
@@ -316,7 +316,8 @@ describe('Phase 3: SePay Verified Payment & Transactional Outbox', () => {
         await waitOnExecutionContext(ctx);
 
         expect(res.status).toBe(200);
-        const json = (await res.json()) as { status: string };
+        const json = (await res.json()) as { success: boolean; status: string };
+        expect(json.success).toBe(true);
         expect(json.status).toMatch(/^ignored_/);
       }
     });
@@ -348,7 +349,7 @@ describe('Phase 3: SePay Verified Payment & Transactional Outbox', () => {
       await waitOnExecutionContext(ctxMissing);
       expect(resMissing.status).toBe(200);
       const jsonMissing = await resMissing.json();
-      expect(jsonMissing).toEqual({ status: 'ignored_unmatched', reason: 'invalid_or_missing_transfer_type' });
+      expect(jsonMissing).toEqual({ success: true, status: 'ignored_unmatched', reason: 'invalid_or_missing_transfer_type' });
 
       // 2. Outbound transfer
       const bodyOut = JSON.stringify({
@@ -375,7 +376,7 @@ describe('Phase 3: SePay Verified Payment & Transactional Outbox', () => {
       await waitOnExecutionContext(ctxOut);
       expect(resOut.status).toBe(200);
       const jsonOut = await resOut.json();
-      expect(jsonOut).toEqual({ status: 'ignored_unmatched', reason: 'invalid_or_missing_transfer_type' });
+      expect(jsonOut).toEqual({ success: true, status: 'ignored_unmatched', reason: 'invalid_or_missing_transfer_type' });
     });
 
     it('ignores missing payload accountNumber without mutating DB', async () => {
@@ -404,7 +405,7 @@ describe('Phase 3: SePay Verified Payment & Transactional Outbox', () => {
 
       expect(res.status).toBe(200);
       const json = await res.json();
-      expect(json).toEqual({ status: 'ignored_unmatched', reason: 'missing_account_number' });
+      expect(json).toEqual({ success: true, status: 'ignored_unmatched', reason: 'missing_account_number' });
     });
 
     it('ignores wrong recipient account number without mutating DB', async () => {
@@ -434,18 +435,18 @@ describe('Phase 3: SePay Verified Payment & Transactional Outbox', () => {
 
       expect(res.status).toBe(200);
       const json = await res.json();
-      expect(json).toEqual({ status: 'ignored_unmatched', reason: 'account_number_mismatch' });
+      expect(json).toEqual({ success: true, status: 'ignored_unmatched', reason: 'account_number_mismatch' });
     });
 
-    it('ignores missing payload.code without falling back to content/description parsing', async () => {
+    it('ignores missing payload.code when content/description has no valid payment code candidate', async () => {
       const timestamp = Math.floor(Date.now() / 1000);
       const body = JSON.stringify({
         id: 1005,
         transferType: 'in',
         transferAmount: 50000,
         accountNumber: BANK_ACCOUNT,
-        content: 'Chuyen tien mua font TF123456',
-        description: 'TF123456',
+        content: 'Chuyen tien mua font khong co ma',
+        description: 'Chuyen tien mua font',
         // missing payload.code
       });
       const signature = await generateSePaySignature(SEPAY_SECRET, timestamp, body);
@@ -466,7 +467,162 @@ describe('Phase 3: SePay Verified Payment & Transactional Outbox', () => {
 
       expect(res.status).toBe(200);
       const json = await res.json();
-      expect(json).toEqual({ status: 'ignored_unmatched', reason: 'missing_payment_code' });
+      expect(json).toEqual({ success: true, status: 'ignored_unmatched', reason: 'missing_payment_code' });
+    });
+
+    it('ignores missing payload.code when content/description contains multiple ambiguous candidates', async () => {
+      const timestamp = Math.floor(Date.now() / 1000);
+      const body = JSON.stringify({
+        id: 1006,
+        transferType: 'in',
+        transferAmount: 50000,
+        accountNumber: BANK_ACCOUNT,
+        content: 'Chuyen tien TF234567 va TF89ABCD',
+        // missing payload.code
+      });
+      const signature = await generateSePaySignature(SEPAY_SECRET, timestamp, body);
+
+      const req = new Request('http://example.com/webhooks/sepay', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-SePay-Signature': `sha256=${signature}`,
+          'X-SePay-Timestamp': String(timestamp),
+        },
+        body,
+      });
+
+      const ctx = createExecutionContext();
+      const res = await worker.fetch(req, testEnv, ctx);
+      await waitOnExecutionContext(ctx);
+
+      expect(res.status).toBe(200);
+      const json = await res.json();
+      expect(json).toEqual({ success: true, status: 'ignored_unmatched', reason: 'ambiguous_payment_code' });
+    });
+
+    it('processes verified payment via fallback extraction when payload.code is missing but exactly one valid candidate exists in content', async () => {
+      const catalogService = new CatalogService(env.DB);
+      const catalogId = await catalogService.persistCatalogResult(sampleCatalog);
+      const sessionService = new SessionService(env.DB);
+      const orderService = new OrderService(env.DB);
+
+      await sessionService.upsertTelegramUser({ id: 91199, is_bot: false, first_name: 'FallbackUser' });
+      await sessionService.getOrCreateSession('91199', '91199');
+      await sessionService.updateSessionCatalog('91199', catalogId, 'SELECTING_STYLES');
+      const s1 = await sessionService.getSessionByUserId('91199');
+      await sessionService.setAllStyles('91199', s1!.workflow_token, ['rf_regular'], s1!.version);
+      const s2 = await sessionService.getSessionByUserId('91199');
+      await sessionService.transitionStatus('91199', s2!.workflow_token, 'SELECTING_STYLES', 'CONFIRMING', s2!.version);
+
+      const s3 = await sessionService.getSessionByUserId('91199');
+      const catalog = await catalogService.getCatalogById(catalogId);
+      const orderRes = await orderService.createOrderFromSession(s3!, catalog!);
+      const paymentCode = orderRes.paymentCode!;
+      expect(orderRes.totalAmount).toBe(50000);
+
+      const timestamp = Math.floor(Date.now() / 1000);
+      const body = JSON.stringify({
+        id: 7788991,
+        transferType: 'in',
+        transferAmount: 50000,
+        accountNumber: BANK_ACCOUNT,
+        // payload.code is intentionally null/missing
+        code: null,
+        content: `Thanh toan don hang ${paymentCode} tu MBBank`,
+      });
+      const signature = await generateSePaySignature(SEPAY_SECRET, timestamp, body);
+
+      const req = new Request('http://example.com/webhooks/sepay', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-SePay-Signature': `sha256=${signature}`,
+          'X-SePay-Timestamp': String(timestamp),
+        },
+        body,
+      });
+
+      const ctx = createExecutionContext();
+      const res = await worker.fetch(req, testEnv, ctx);
+      await waitOnExecutionContext(ctx);
+
+      expect(res.status).toBe(200);
+      const json = await res.json();
+      expect(json).toEqual({ success: true, status: 'processed', order_id: orderRes.orderId });
+
+      // Verify order transitioned to PAID in D1
+      const orderInDb = await orderService.getOrderById(orderRes.orderId);
+      expect(orderInDb?.status).toBe('PAID');
+
+      // Replay of same transaction id with fallback extraction is idempotent
+      const reqReplay = new Request('http://example.com/webhooks/sepay', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-SePay-Signature': `sha256=${signature}`,
+          'X-SePay-Timestamp': String(timestamp),
+        },
+        body,
+      });
+      const ctxReplay = createExecutionContext();
+      const resReplay = await worker.fetch(reqReplay, testEnv, ctxReplay);
+      await waitOnExecutionContext(ctxReplay);
+      expect(resReplay.status).toBe(200);
+      const jsonReplay = await resReplay.json();
+      expect(jsonReplay).toEqual({ success: true, status: 'duplicate_acknowledged', order_id: orderRes.orderId });
+    });
+
+    it('rejects fallback extracted payment code when amount does not match order total', async () => {
+      const catalogService = new CatalogService(env.DB);
+      const catalogId = await catalogService.persistCatalogResult(sampleCatalog);
+      const sessionService = new SessionService(env.DB);
+      const orderService = new OrderService(env.DB);
+
+      await sessionService.upsertTelegramUser({ id: 91198, is_bot: false, first_name: 'AmountMismatchUser' });
+      await sessionService.getOrCreateSession('91198', '91198');
+      await sessionService.updateSessionCatalog('91198', catalogId, 'SELECTING_STYLES');
+      const s1 = await sessionService.getSessionByUserId('91198');
+      await sessionService.setAllStyles('91198', s1!.workflow_token, ['rf_regular'], s1!.version);
+      const s2 = await sessionService.getSessionByUserId('91198');
+      await sessionService.transitionStatus('91198', s2!.workflow_token, 'SELECTING_STYLES', 'CONFIRMING', s2!.version);
+
+      const s3 = await sessionService.getSessionByUserId('91198');
+      const catalog = await catalogService.getCatalogById(catalogId);
+      const orderRes = await orderService.createOrderFromSession(s3!, catalog!);
+      const paymentCode = orderRes.paymentCode!;
+
+      const timestamp = Math.floor(Date.now() / 1000);
+      const body = JSON.stringify({
+        id: 7788992,
+        transferType: 'in',
+        transferAmount: 10000, // order is 50000
+        accountNumber: BANK_ACCOUNT,
+        content: `Thanh toan ${paymentCode}`,
+      });
+      const signature = await generateSePaySignature(SEPAY_SECRET, timestamp, body);
+
+      const req = new Request('http://example.com/webhooks/sepay', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-SePay-Signature': `sha256=${signature}`,
+          'X-SePay-Timestamp': String(timestamp),
+        },
+        body,
+      });
+
+      const ctx = createExecutionContext();
+      const res = await worker.fetch(req, testEnv, ctx);
+      await waitOnExecutionContext(ctx);
+
+      expect(res.status).toBe(200);
+      const json = await res.json();
+      expect(json).toEqual({ success: true, status: 'ignored_unmatched', reason: 'amount_mismatch' });
+
+      // Order remains AWAITING_PAYMENT
+      const orderInDb = await orderService.getOrderById(orderRes.orderId);
+      expect(orderInDb?.status).toBe('AWAITING_PAYMENT');
     });
   });
 
