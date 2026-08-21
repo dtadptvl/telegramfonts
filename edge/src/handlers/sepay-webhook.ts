@@ -117,19 +117,55 @@ export async function handleSePayWebhook(
     );
   }
 
+const PAYMENT_CODE_REGEX = /\b(TF[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{6})\b/gi;
+
+function resolvePaymentCode(payload: SePayWebhookPayload): { code: string | null; error?: string } {
+  // 1. Direct provider-extracted code
+  if (typeof payload.code === 'string' && payload.code.trim()) {
+    return { code: payload.code.trim().toUpperCase() };
+  }
+
+  // 2. Fail-closed fallback: search signed content & description for canonical app payment code
+  const candidates = new Set<string>();
+  const textToSearch = [
+    typeof payload.content === 'string' ? payload.content : '',
+    typeof payload.description === 'string' ? payload.description : '',
+  ].join(' ');
+
+  if (textToSearch.trim()) {
+    const matches = textToSearch.match(PAYMENT_CODE_REGEX);
+    if (matches) {
+      for (const m of matches) {
+        candidates.add(m.trim().toUpperCase());
+      }
+    }
+  }
+
+  if (candidates.size === 1) {
+    const [singleCode] = Array.from(candidates);
+    return { code: singleCode };
+  }
+
+  if (candidates.size > 1) {
+    return { code: null, error: 'ambiguous_payment_code' };
+  }
+
+  return { code: null, error: 'missing_payment_code' };
+}
+
   // 3. Parse and strictly runtime-validate JSON payload (BLOCK 1 from rereview)
   let payload: SePayWebhookPayload;
   try {
     payload = JSON.parse(rawBody) as SePayWebhookPayload;
   } catch {
-    return new Response(JSON.stringify({ status: 'ignored_invalid_json' }), {
+    return new Response(JSON.stringify({ success: true, status: 'ignored_invalid_json' }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     });
   }
 
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-    return new Response(JSON.stringify({ status: 'ignored_invalid_payload' }), {
+    return new Response(JSON.stringify({ success: true, status: 'ignored_invalid_payload' }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     });
@@ -143,7 +179,7 @@ export async function handleSePayWebhook(
     transactionId = payload.id.trim();
   } else {
     return new Response(
-      JSON.stringify({ status: 'ignored_invalid_payload', reason: 'invalid_provider_id' }),
+      JSON.stringify({ success: true, status: 'ignored_invalid_payload', reason: 'invalid_provider_id' }),
       {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
@@ -158,7 +194,7 @@ export async function handleSePayWebhook(
     payload.transferType.trim().toLowerCase() !== 'in'
   ) {
     return new Response(
-      JSON.stringify({ status: 'ignored_unmatched', reason: 'invalid_or_missing_transfer_type' }),
+      JSON.stringify({ success: true, status: 'ignored_unmatched', reason: 'invalid_or_missing_transfer_type' }),
       {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
@@ -172,7 +208,7 @@ export async function handleSePayWebhook(
     !payload.accountNumber.trim()
   ) {
     return new Response(
-      JSON.stringify({ status: 'ignored_unmatched', reason: 'missing_account_number' }),
+      JSON.stringify({ success: true, status: 'ignored_unmatched', reason: 'missing_account_number' }),
       {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
@@ -182,7 +218,7 @@ export async function handleSePayWebhook(
 
   if (payload.accountNumber.trim() !== env.BANK_ACCOUNT_NUMBER.trim()) {
     return new Response(
-      JSON.stringify({ status: 'ignored_unmatched', reason: 'account_number_mismatch' }),
+      JSON.stringify({ success: true, status: 'ignored_unmatched', reason: 'account_number_mismatch' }),
       {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
@@ -190,21 +226,17 @@ export async function handleSePayWebhook(
     );
   }
 
-  // C. code must be non-empty string in payload.code (Issue #8 contract: no content/description fallback)
-  if (
-    typeof payload.code !== 'string' ||
-    !payload.code.trim()
-  ) {
+  // C. code must be resolved either from payload.code or unique fallback from signed content/description
+  const { code: paymentCode, error: codeError } = resolvePaymentCode(payload);
+  if (!paymentCode) {
     return new Response(
-      JSON.stringify({ status: 'ignored_unmatched', reason: 'missing_payment_code' }),
+      JSON.stringify({ success: true, status: 'ignored_unmatched', reason: codeError || 'missing_payment_code' }),
       {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
       }
     );
   }
-
-  const paymentCode = payload.code.trim().toUpperCase();
 
   // D. transferAmount must be positive number
   if (
@@ -213,7 +245,7 @@ export async function handleSePayWebhook(
     payload.transferAmount <= 0
   ) {
     return new Response(
-      JSON.stringify({ status: 'ignored_unmatched', reason: 'invalid_transfer_amount' }),
+      JSON.stringify({ success: true, status: 'ignored_unmatched', reason: 'invalid_transfer_amount' }),
       {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
@@ -227,7 +259,7 @@ export async function handleSePayWebhook(
   const order = await orderService.getOrderByPaymentCode(paymentCode);
   if (!order) {
     return new Response(
-      JSON.stringify({ status: 'ignored_unmatched', reason: 'order_not_found' }),
+      JSON.stringify({ success: true, status: 'ignored_unmatched', reason: 'order_not_found' }),
       {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
@@ -238,7 +270,7 @@ export async function handleSePayWebhook(
   // E. Order currency must be VND
   if (order.currency !== 'VND') {
     return new Response(
-      JSON.stringify({ status: 'ignored_unmatched', reason: 'unsupported_currency' }),
+      JSON.stringify({ success: true, status: 'ignored_unmatched', reason: 'unsupported_currency' }),
       {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
@@ -249,7 +281,7 @@ export async function handleSePayWebhook(
   // F. Transfer amount must match order total_amount
   if (payload.transferAmount !== order.total_amount) {
     return new Response(
-      JSON.stringify({ status: 'ignored_unmatched', reason: 'amount_mismatch' }),
+      JSON.stringify({ success: true, status: 'ignored_unmatched', reason: 'amount_mismatch' }),
       {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
@@ -307,7 +339,7 @@ export async function handleSePayWebhook(
     }
 
     return new Response(
-      JSON.stringify({ status: 'ignored_unmatched', reason: 'order_not_awaiting_payment' }),
+      JSON.stringify({ success: true, status: 'ignored_unmatched', reason: 'order_not_awaiting_payment' }),
       {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
