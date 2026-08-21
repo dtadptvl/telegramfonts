@@ -2,6 +2,7 @@ import type {
   SendMessageParams,
   EditMessageTextParams,
   AnswerCallbackQueryParams,
+  SendDocumentParams,
 } from '../types/telegram';
 
 export class TelegramApiError extends Error {
@@ -129,4 +130,43 @@ export class TelegramClient {
     const data = (await res.json()) as { ok: boolean; result?: boolean };
     return Boolean(data.result ?? data.ok);
   }
+
+  async sendDocument(params: SendDocumentParams): Promise<{ message_id?: number }> {
+    const formData = new FormData();
+    formData.append('chat_id', params.chat_id.toString());
+    const blob =
+      params.document instanceof Blob
+        ? params.document
+        : new Blob([params.document], { type: 'application/zip' });
+    formData.append('document', blob, params.filename);
+    if (params.caption) {
+      formData.append('caption', params.caption);
+      formData.append('parse_mode', params.parse_mode || 'HTML');
+    }
+
+    const res = await fetch(`${this.baseUrl}/sendDocument`, {
+      method: 'POST',
+      body: formData,
+    });
+
+    if (!res.ok) {
+      let description: string | undefined;
+      try {
+        const errorBody = (await res.json()) as { description?: string };
+        description = errorBody?.description;
+      } catch {
+        // Ignore JSON parse errors on non-2xx
+      }
+
+      throw new TelegramApiError(
+        res.status,
+        `Telegram sendDocument failed with HTTP status ${res.status}`,
+        description
+      );
+    }
+
+    const data = (await res.json()) as { ok: boolean; result?: { message_id?: number } };
+    return data.result || {};
+  }
 }
+

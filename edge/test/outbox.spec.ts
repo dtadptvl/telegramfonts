@@ -330,22 +330,37 @@ describe('Phase 4: Transactional Outbox Dispatcher', () => {
         .bind(eventId, orderId, JSON.stringify({ order_id: orderId }), now)
         .run();
 
+      // Insert fulfillment_receipts and R2 artifact for delivery
+      const artifactKey = `artifacts/${orderId}/bundle.zip`;
+      const dummyZip = new TextEncoder().encode('PK\x05\x06dummy_zip_content');
+      const shaBuf = await crypto.subtle.digest('SHA-256', dummyZip);
+      const shaHex = Array.from(new Uint8Array(shaBuf))
+        .map((b) => b.toString(16).padStart(2, '0'))
+        .join('');
+
+      await env.DB.prepare(
+        `INSERT INTO fulfillment_receipts (job_id, order_id, artifact_key, artifact_size_bytes, artifact_sha256, completed_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      )
+        .bind(`job_${orderId}`, orderId, artifactKey, dummyZip.byteLength, shaHex, now, now)
+        .run();
+
+      await env.ARTIFACTS_BUCKET.put(artifactKey, dummyZip);
+
       const customEnv: Env = {
         ...(env as unknown as Env),
         TELEGRAM_BOT_TOKEN: 'fake_bot_token',
-        DOWNLOAD_SIGNING_SECRET: 'test_signing_secret_999',
-        DOWNLOAD_URL_TTL_SECONDS: '86400',
-        BASE_URL: 'https://telefont.example.com',
+        ARTIFACTS_BUCKET: env.ARTIFACTS_BUCKET,
       };
 
       // Mock Telegram fetch
-      const fetchCalls: Array<{ url: string; body: any }> = [];
+      const fetchCalls: Array<{ url: string; formData: FormData }> = [];
       const originalFetch = globalThis.fetch;
       globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = typeof input === 'string' ? input : input.toString();
         if (url.includes('api.telegram.org')) {
-          const body = init?.body ? JSON.parse(init.body as string) : {};
-          fetchCalls.push({ url, body });
+          const formData = init?.body instanceof FormData ? init.body : new FormData();
+          fetchCalls.push({ url, formData });
           return new Response(JSON.stringify({ ok: true, result: { message_id: 123 } }), {
             status: 200,
             headers: { 'Content-Type': 'application/json' },
@@ -364,14 +379,11 @@ describe('Phase 4: Transactional Outbox Dispatcher', () => {
         // Queue was NOT called for DELIVERY_READY
         expect(queueSentMessages.length).toBe(0);
 
-        // Telegram was called with signed download URL button
+        // Telegram was called with sendDocument
         expect(fetchCalls.length).toBe(1);
-        expect(String(fetchCalls[0].body.chat_id)).toBe('987654321');
-        const inlineButton = fetchCalls[0].body.reply_markup.inline_keyboard[0][0];
-        expect(inlineButton.text).toContain('Download');
-        expect(inlineButton.url).toContain('https://telefont.example.com/downloads/');
-        expect(inlineButton.url).toContain(`/${orderId}?expires=`);
-        expect(inlineButton.url).toContain('&sig=');
+        expect(fetchCalls[0].url).toContain('/sendDocument');
+        expect(fetchCalls[0].formData.get('chat_id')).toBe('987654321');
+        expect(fetchCalls[0].formData.get('document')).toBeDefined();
 
         // Outbox event marked SENT
         const row = await env.DB.prepare('SELECT status, dispatched_at FROM outbox_events WHERE id = ?')
@@ -384,14 +396,14 @@ describe('Phase 4: Transactional Outbox Dispatcher', () => {
       }
     });
 
-    it('fails closed and keeps DELIVERY_READY recoverable PENDING when BASE_URL is missing or insecure', async () => {
+    it('fails closed and keeps DELIVERY_READY recoverable PENDING when ARTIFACTS_BUCKET is missing', async () => {
       const mockQueue = {
         send: async () => {},
         sendBatch: async () => {},
       } as unknown as Queue<unknown>;
 
-      const orderId = `ord_del_insecure_${crypto.randomUUID().replace(/-/g, '')}`;
-      const userId = `user_del_insecure_${crypto.randomUUID()}`;
+      const orderId = `ord_del_missing_bucket_${crypto.randomUUID().replace(/-/g, '')}`;
+      const userId = `user_del_missing_bucket_${crypto.randomUUID()}`;
       const now = Date.now();
 
       await env.DB.prepare(
@@ -425,15 +437,13 @@ describe('Phase 4: Transactional Outbox Dispatcher', () => {
         .bind(eventId, orderId, JSON.stringify({ order_id: orderId }), now)
         .run();
 
-      // Insecure HTTP BASE_URL
-      const insecureEnv: Env = {
+      const missingBucketEnv: Env = {
         ...(env as unknown as Env),
         TELEGRAM_BOT_TOKEN: 'fake_bot_token',
-        DOWNLOAD_SIGNING_SECRET: 'test_signing_secret_999',
-        BASE_URL: 'http://insecure.example.com',
+        ARTIFACTS_BUCKET: undefined as unknown as R2Bucket,
       };
 
-      const outboxService = new OutboxService(env.DB, mockQueue, insecureEnv);
+      const outboxService = new OutboxService(env.DB, mockQueue, missingBucketEnv);
       const result = await outboxService.dispatchPendingEvents({ batchSize: 10 });
 
       expect(result.dispatchedCount).toBe(0);
