@@ -9,10 +9,11 @@ from typing import Any
 
 @dataclass(frozen=True)
 class ObservationConfig:
-    """Immutable configuration for multi-resolution raster and subpixel phase observations."""
+    """Immutable configuration for multi-resolution raster and adaptive subpixel phase observations."""
 
     resolutions: tuple[int, ...] = (128, 256, 512)
-    subpixel_phases: tuple[tuple[float, float], ...] = (
+    base_subpixel_phases: tuple[tuple[float, float], ...] = ((0.0, 0.0),)
+    expanded_subpixel_phases: tuple[tuple[float, float], ...] = (
         (0.0, 0.0),
         (0.25, 0.0),
         (0.5, 0.0),
@@ -21,17 +22,28 @@ class ObservationConfig:
         (0.0, 0.5),
         (0.0, 0.75),
     )
+    adaptive_expansion_threshold: float = 0.05
     font_size_px: float = 200.0
     upem: int = 1000
     timeout_seconds: float = 10.0
     max_retries: int = 3
-    config_version: str = "1.0.0"
+    config_version: str = "1.1.0"
+
+    def get_phases_for_metrics(self, metrics: DirectMetrics) -> tuple[tuple[float, float], ...]:
+        """Determine adaptive subpixel phases based on fractional metric uncertainty/boundary alignment."""
+        adv_frac = abs(metrics.raw_advance_width - round(metrics.raw_advance_width))
+        left_frac = abs(metrics.raw_actual_left - round(metrics.raw_actual_left))
+        if adv_frac >= self.adaptive_expansion_threshold or left_frac >= self.adaptive_expansion_threshold:
+            return self.expanded_subpixel_phases
+        return self.base_subpixel_phases
 
     def compute_hash(self) -> str:
         """Calculate deterministic SHA-256 hash digest of this configuration."""
         raw_dict = {
             "resolutions": list(self.resolutions),
-            "subpixel_phases": [list(p) for p in self.subpixel_phases],
+            "base_subpixel_phases": [list(p) for p in self.base_subpixel_phases],
+            "expanded_subpixel_phases": [list(p) for p in self.expanded_subpixel_phases],
+            "adaptive_expansion_threshold": self.adaptive_expansion_threshold,
             "font_size_px": self.font_size_px,
             "upem": self.upem,
             "timeout_seconds": self.timeout_seconds,

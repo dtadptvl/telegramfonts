@@ -72,6 +72,7 @@ class ChromiumSession:
         self.read_task: asyncio.Task[None] | None = None
         self.browser_version: str = "unknown"
         self._loaded_fonts: set[str] = set()
+        self._loaded_font_blobs: dict[str, bytes] = {}
 
     async def start(self) -> None:
         """Launch headless Chromium subprocess and initialize CDP WebSocket session."""
@@ -108,7 +109,6 @@ class ChromiumSession:
         # Wait for CDP HTTP endpoint readiness
         http_url = f"http://127.0.0.1:{target_port}"
         page_ws_url: str | None = None
-        start_time = asyncio.get_event_loop().time()
 
         for _ in range(30):
             try:
@@ -138,6 +138,12 @@ class ChromiumSession:
         await self.send_command("Page.enable")
         await self.send_command("Runtime.enable")
         logger.info(f"Persistent Chromium session ready: {self.browser_version}")
+
+        # Restore any previously registered font faces into the fresh document context
+        if self._loaded_font_blobs:
+            for family_name, blob in list(self._loaded_font_blobs.items()):
+                await self._inject_font_face(family_name, blob)
+            logger.info(f"Restored {len(self._loaded_font_blobs)} font faces after session start/recovery")
 
     async def _reader_loop(self) -> None:
         """Background reader routing incoming CDP message payloads to waiting futures."""
@@ -207,8 +213,8 @@ class ChromiumSession:
             raise RuntimeError(f"JS_EVALUATION_EXCEPTION: {res['exceptionDetails']}")
         return result_obj.get("value")
 
-    async def load_font_data(self, font_family: str, font_bytes: bytes) -> None:
-        """Inject an in-memory font file via FontFace API and wait for document.fonts to be ready."""
+    async def _inject_font_face(self, font_family: str, font_bytes: bytes) -> None:
+        """Internal helper to inject a font face and await document.fonts.ready."""
         b64_font = base64.b64encode(font_bytes).decode("ascii")
         js_inject = f"""
         (async () => {{
@@ -220,9 +226,54 @@ class ChromiumSession:
             return true;
         }})()
         """
-        await self.evaluate_script(js_inject)
+        res = await self.evaluate_script(js_inject)
+        if not res:
+            raise RuntimeError(f"FONT_FACE_INJECTION_FAILED: {font_family}")
         self._loaded_fonts.add(font_family)
+
+    async def load_font_data(self, font_family: str, font_bytes: bytes) -> None:
+        """Inject an in-memory font file via FontFace API and record blob for persistent recovery."""
+        self._loaded_font_blobs[font_family] = font_bytes
+        await self._inject_font_face(font_family, font_bytes)
         logger.info(f"Loaded font face into Chromium: {font_family}")
+
+    async def is_glyph_supported_in_font(self, font_family: str, code_point: int) -> bool:
+        """Verify whether a character is natively supported in the target font vs falling back to system fonts."""
+        js_check = f"""
+        (() => {{
+            const char = String.fromCodePoint({code_point});
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            
+            ctx.font = '100px "{font_family}", monospace';
+            const m_target = ctx.measureText(char);
+            
+            ctx.font = '100px monospace';
+            const m_mono = ctx.measureText(char);
+            
+            ctx.font = '100px serif';
+            const m_serif = ctx.measureText(char);
+            
+            const isMonoMatch = Math.abs(m_target.width - m_mono.width) < 0.001 &&
+                                Math.abs(m_target.actualBoundingBoxRight - m_mono.actualBoundingBoxRight) < 0.001 &&
+                                Math.abs(m_target.actualBoundingBoxAscent - m_mono.actualBoundingBoxAscent) < 0.001;
+            
+            const isSerifMatch = Math.abs(m_target.width - m_serif.width) < 0.001 &&
+                                 Math.abs(m_target.actualBoundingBoxRight - m_serif.actualBoundingBoxRight) < 0.001 &&
+                                 Math.abs(m_target.actualBoundingBoxAscent - m_serif.actualBoundingBoxAscent) < 0.001;
+
+            const hasInk = (m_target.actualBoundingBoxRight - m_target.actualBoundingBoxLeft) > 0.01 ||
+                           (m_target.actualBoundingBoxAscent + m_target.actualBoundingBoxDescent) > 0.01 ||
+                           char === ' ' || char === '\\u00A0';
+
+            return !isMonoMatch && !isSerifMatch && hasInk;
+        }})()
+        """
+        try:
+            res = await self.evaluate_script(js_check)
+            return bool(res)
+        except Exception:
+            return False
 
     async def measure_glyph_direct(
         self,
@@ -324,10 +375,10 @@ class ChromiumSession:
     async def restart(self) -> None:
         """Gracefully restart Chromium process on unexpected termination or timeout."""
         logger.warning("Restarting persistent Chromium session...")
-        self.close()
+        self.close(clear_fonts=False)
         await self.start()
 
-    def close(self) -> None:
+    def close(self, clear_fonts: bool = True) -> None:
         """Clean up background tasks, WebSocket, and child Chromium process."""
         if self.read_task and not self.read_task.done():
             self.read_task.cancel()
@@ -359,4 +410,6 @@ class ChromiumSession:
             self.user_data_dir = None
 
         self._loaded_fonts.clear()
+        if clear_fonts:
+            self._loaded_font_blobs.clear()
         logger.info("Chromium session closed")

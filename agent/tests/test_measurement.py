@@ -185,3 +185,96 @@ def test_ground_truth_metrics_loader():
     assert 65 in truth
     assert 0x0110 in truth
     assert truth[65]["advance_width_upem"] > 0
+
+
+def test_adaptive_subpixel_schedule_rules():
+    config = ObservationConfig(
+        base_subpixel_phases=((0.0, 0.0),),
+        expanded_subpixel_phases=((0.0, 0.0), (0.25, 0.0), (0.5, 0.0), (0.75, 0.0)),
+        adaptive_expansion_threshold=0.05,
+    )
+
+    # 1. Clean integer metrics (no fractional subpixel uncertainty) -> base schedule
+    integer_metrics = DirectMetrics(
+        code_point=32,
+        character=" ",
+        font_size_px=200.0,
+        raw_advance_width=50.0,
+        raw_actual_left=0.0,
+        raw_actual_right=50.0,
+        raw_actual_ascent=0.0,
+        raw_actual_descent=0.0,
+        raw_font_ascent=160.0,
+        raw_font_descent=40.0,
+        advance_width_upem=250.0,
+        lsb_upem=0.0,
+        rsb_upem=0.0,
+        ascent_upem=0.0,
+        descent_upem=0.0,
+        bbox_width_upem=250.0,
+        bbox_height_upem=0.0,
+    )
+    assert config.get_phases_for_metrics(integer_metrics) == ((0.0, 0.0),)
+
+    # 2. Fractional metrics with subpixel offset (e.g. 73.6px advance width) -> expanded schedule
+    fractional_metrics = DirectMetrics(
+        code_point=65,
+        character="A",
+        font_size_px=200.0,
+        raw_advance_width=73.6,
+        raw_actual_left=-4.2,
+        raw_actual_right=70.1,
+        raw_actual_ascent=140.0,
+        raw_actual_descent=0.0,
+        raw_font_ascent=160.0,
+        raw_font_descent=40.0,
+        advance_width_upem=368.0,
+        lsb_upem=-21.0,
+        rsb_upem=17.5,
+        ascent_upem=700.0,
+        descent_upem=0.0,
+        bbox_width_upem=371.5,
+        bbox_height_upem=700.0,
+    )
+    assert config.get_phases_for_metrics(fractional_metrics) == (
+        (0.0, 0.0),
+        (0.25, 0.0),
+        (0.5, 0.0),
+        (0.75, 0.0),
+    )
+
+
+@pytest.mark.asyncio
+async def test_browser_session_font_restoration_and_fallback_rejection():
+    from measurement.browser_session import ChromiumSession, find_chromium_executable
+
+    try:
+        find_chromium_executable()
+    except Exception:
+        pytest.skip("Chromium executable not available on host")
+
+    font_path = Path("agent/benchmark_data/ground_truth/BeVietnamPro-Regular.ttf")
+    if not font_path.exists():
+        pytest.skip("Benchmark font not downloaded")
+
+    session = ChromiumSession(timeout_seconds=10.0)
+    try:
+        await session.start()
+        font_bytes = font_path.read_bytes()
+        await session.load_font_data("BeVietnamTestFont", font_bytes)
+
+        # 1. Verify target font glyph support detection vs fallback
+        assert await session.is_glyph_supported_in_font("BeVietnamTestFont", ord("A")) is True
+        assert await session.is_glyph_supported_in_font("BeVietnamTestFont", ord("ơ")) is True
+        assert await session.is_glyph_supported_in_font("BeVietnamTestFont", ord("đ")) is True
+        # Unsupported scripts must be rejected and not accepted as fallback
+        assert await session.is_glyph_supported_in_font("BeVietnamTestFont", ord("你")) is False
+        assert await session.is_glyph_supported_in_font("BeVietnamTestFont", ord("ع")) is False
+
+        # 2. Force session restart and verify loaded font is durably restored
+        await session.restart()
+        assert "BeVietnamTestFont" in session._loaded_font_blobs
+        assert await session.is_glyph_supported_in_font("BeVietnamTestFont", ord("A")) is True
+    finally:
+        session.close()
+
