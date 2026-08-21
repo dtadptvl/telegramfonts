@@ -9,6 +9,7 @@ from reconstruction.candidate_builder import (
     get_glyph_name_for_codepoint,
 )
 from reconstruction.candidate_validator import (
+    ChromiumValidationResult,
     FormatValidationResult,
     HeldOutValidationReport,
     MaxCandidateHeldOutValidator,
@@ -52,6 +53,7 @@ __all__ = [
     "draw_reconstructed_glyph_to_pen",
     "get_glyph_name_for_codepoint",
     "FormatValidationResult",
+    "ChromiumValidationResult",
     "MetricDifferenceResult",
     "ShapingTestResult",
     "RasterComparisonResult",

@@ -121,11 +121,12 @@ def run_candidate_pipeline(
             "max_advance_error_upem": report.max_advance_error_upem,
             "mean_lsb_error_upem": report.mean_lsb_error_upem,
             "max_lsb_error_upem": report.max_lsb_error_upem,
-            "shaping_sequence_match_rate": report.shaping_sequence_match_rate,
+            "in_cmap_shaping_match_rate": report.in_cmap_shaping_match_rate,
             "mean_held_out_raster_iou": report.mean_held_out_raster_iou,
             "requires_typography_phase_e": report.requires_typography_phase_e,
             "typography_evidence_summary": report.typography_evidence_summary,
         },
+        "chromium_validation": asdict(report.chromium_result),
         "format_details": [asdict(f) for f in report.format_results],
         "metric_differences": [asdict(m) for m in report.metric_differences],
         "shaping_results": [asdict(s) for s in report.shaping_results],
@@ -147,9 +148,11 @@ def run_candidate_pipeline(
     print(f"  WOFF2 Candidate:         {build_result.woff2.size_bytes} bytes ({build_result.woff2.filename})")
     print("-" * 80)
     print(f"  Multi-Consumer Load:     {'PASS (100%)' if report.all_formats_passed else 'FAIL'}")
+    print(f"  Chromium WOFF2 Load:     {'PASS' if report.chromium_result.is_direct_loadable_chromium else 'FAIL / N/A'} ({report.chromium_result.browser_version})")
+    print(f"  Fallback Rejection:      {'PASS' if report.chromium_result.fallback_rejection_verified else 'FAIL / N/A'}")
     print(f"  Mean Advance Error:      {report.mean_advance_error_upem} UPEM (Max: {report.max_advance_error_upem} UPEM)")
     print(f"  Mean LSB Error:          {report.mean_lsb_error_upem} UPEM (Max: {report.max_lsb_error_upem} UPEM)")
-    print(f"  Shaping Match Rate:      {report.shaping_sequence_match_rate * 100:.1f}%")
+    print(f"  In-Cmap Shaping Match:   {report.in_cmap_shaping_match_rate * 100:.1f}%")
     print(f"  Held-Out Raster IoU:     {report.mean_held_out_raster_iou * 100:.1f}%")
     print(f"  Requires Typography:     {report.requires_typography_phase_e}")
     print(f"  Typography Assessment:   {report.typography_evidence_summary}")
