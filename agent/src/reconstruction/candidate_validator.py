@@ -9,8 +9,9 @@ from __future__ import annotations
 import asyncio
 import datetime
 import io
+import json
 import logging
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +28,7 @@ logger = logging.getLogger("telegramfonts.agent.reconstruction.candidate_validat
 
 @dataclass(frozen=True)
 class MetricDifferenceResult:
-    """Quantitative comparison of glyph metrics between candidate and reference."""
+    """Discrepancy in single-glyph direct metrics between candidate and reference."""
     code_point: int
     character: str
     candidate_advance_upem: float
@@ -40,7 +41,7 @@ class MetricDifferenceResult:
 
 @dataclass(frozen=True)
 class ShapingTestResult:
-    """HarfBuzz text shaping comparison between candidate and reference."""
+    """HarfBuzz text shaping test on held-out text sequences."""
     text: str
     category: str
     in_candidate_cmap: bool
@@ -67,6 +68,20 @@ class RasterComparisonResult:
 
 
 @dataclass(frozen=True)
+class ChromiumPairMetricResult:
+    """Pair advance measurement and GPOS delta evaluation in Chromium."""
+    pair: str
+    category: str
+    baseline_single_sum_upem: float
+    candidate_pair_advance_upem: float
+    gpos_applied_adjustment_upem: float
+    reference_pair_advance_upem: float
+    baseline_error_upem: float
+    gpos_candidate_error_upem: float
+    material_improvement: bool
+
+
+@dataclass(frozen=True)
 class ChromiumValidationResult:
     """Independent validation in headless Chromium browser session."""
     is_available: bool
@@ -75,7 +90,10 @@ class ChromiumValidationResult:
     fallback_rejection_verified: bool
     measured_glyph_count: int
     mean_chromium_advance_error_upem: float
-    rendered_canvas_valid: bool
+    pair_metrics: list[ChromiumPairMetricResult] = field(default_factory=list)
+    fit_pairs_material_improvement: bool = True
+    held_out_pairs_non_regression: bool = True
+    rendered_canvas_valid: bool = True
     error_message: str | None = None
 
 
@@ -526,7 +544,103 @@ class MaxCandidateHeldOutValidator:
                     ref_adv = self.ref_face.glyph.advance.x / 64.0
                     adv_deltas.append(abs(m.advance_width_upem - ref_adv))
 
-                # 3. Canvas Text Rendering
+                # 3. Direct Chromium Pair TextMetrics for Fit and Distinct Held-Out Pairs
+                from typography.models import BOUNDED_FIT_PAIRS, SEPARATE_HELD_OUT_IN_CMAP_PAIRS
+
+                cand_tt = TTFont(io.BytesIO(woff2_bytes))
+                cand_cmap = set(cand_tt.getBestCmap().keys()) if cand_tt.getBestCmap() else set()
+
+                fit_test_pairs = [
+                    (chr(l) + chr(r), "fit_pair")
+                    for l, r in BOUNDED_FIT_PAIRS
+                    if l in cand_cmap and r in cand_cmap
+                ]
+                held_out_test_pairs = [
+                    (p_str, "held_out_pair")
+                    for p_str, l, r in SEPARATE_HELD_OUT_IN_CMAP_PAIRS
+                    if l in cand_cmap and r in cand_cmap
+                ]
+                pair_eval_list = fit_test_pairs + held_out_test_pairs
+
+                # JavaScript batch measureText evaluation in Chromium Canvas 2D
+                pairs_json = json.dumps([p for p, _ in pair_eval_list])
+                js_pair_metrics = f"""
+                (() => {{
+                    const canvas = document.createElement('canvas');
+                    const ctx = canvas.getContext('2d', {{ willReadFrequently: true }});
+                    ctx.font = '200px "CandidateMAXWOFF2"';
+                    
+                    const pairs = {pairs_json};
+                    const single_widths = {{}};
+                    for (const p of pairs) {{
+                        const c0 = p[0];
+                        const c1 = p.slice(c0.length);
+                        if (single_widths[c0] === undefined) {{
+                            single_widths[c0] = (ctx.measureText(c0).width / 200.0) * 1000;
+                        }}
+                        if (single_widths[c1] === undefined) {{
+                            single_widths[c1] = (ctx.measureText(c1).width / 200.0) * 1000;
+                        }}
+                    }}
+
+                    const results = [];
+                    for (const p of pairs) {{
+                        const c0 = p[0];
+                        const c1 = p.slice(c0.length);
+                        const pair_w = (ctx.measureText(p).width / 200.0) * 1000;
+                        const c0_w = single_widths[c0];
+                        const c1_w = single_widths[c1];
+                        results.push({{
+                            pair: p,
+                            single_sum_upem: c0_w + c1_w,
+                            candidate_pair_upem: pair_w,
+                            gpos_adj_upem: pair_w - (c0_w + c1_w)
+                        }});
+                    }}
+                    return results;
+                }})()
+                """
+                raw_pair_results = await session.evaluate_script(js_pair_metrics)
+                
+                pair_metric_results: list[ChromiumPairMetricResult] = []
+                for (pair_str, cat), item in zip(pair_eval_list, raw_pair_results):
+                    # Measure reference font pair advance via evaluator HarfBuzz font
+                    buf_ref = hb.Buffer()
+                    buf_ref.add_str(pair_str)
+                    buf_ref.guess_segment_properties()
+                    hb.shape(self.ref_hb_font, buf_ref)
+                    ref_pair_adv = float(sum(p.x_advance for p in buf_ref.glyph_positions))
+
+                    single_sum = float(item["single_sum_upem"])
+                    cand_pair_adv = float(item["candidate_pair_upem"])
+                    gpos_adj = float(item["gpos_adj_upem"])
+
+                    baseline_err = abs(single_sum - ref_pair_adv)
+                    cand_err = abs(cand_pair_adv - ref_pair_adv)
+
+                    mat_improvement = bool(cand_err < baseline_err) or (baseline_err == 0 and cand_err == 0)
+
+                    pair_metric_results.append(
+                        ChromiumPairMetricResult(
+                            pair=pair_str,
+                            category=cat,
+                            baseline_single_sum_upem=round(single_sum, 2),
+                            candidate_pair_advance_upem=round(cand_pair_adv, 2),
+                            gpos_applied_adjustment_upem=round(gpos_adj, 2),
+                            reference_pair_advance_upem=round(ref_pair_adv, 2),
+                            baseline_error_upem=round(baseline_err, 2),
+                            gpos_candidate_error_upem=round(cand_err, 2),
+                            material_improvement=mat_improvement,
+                        )
+                    )
+
+                fit_improvements = [m for m in pair_metric_results if m.category == "fit_pair" and m.baseline_error_upem > 0]
+                fit_ok = all(m.gpos_candidate_error_upem == 0 for m in fit_improvements) if fit_improvements else True
+
+                held_out_metrics = [m for m in pair_metric_results if m.category == "held_out_pair"]
+                held_out_ok = all(m.gpos_candidate_error_upem <= m.baseline_error_upem for m in held_out_metrics)
+
+                # 4. Canvas Text Rendering
                 js_render = """
                 (() => {
                     const canvas = document.createElement('canvas');
@@ -550,6 +664,9 @@ class MaxCandidateHeldOutValidator:
                     fallback_rejection_verified=fallback_ok,
                     measured_glyph_count=len(adv_deltas),
                     mean_chromium_advance_error_upem=round(mean_adv_err, 2),
+                    pair_metrics=pair_metric_results,
+                    fit_pairs_material_improvement=fit_ok,
+                    held_out_pairs_non_regression=held_out_ok,
                     rendered_canvas_valid=canvas_ok,
                 )
             except Exception as e:

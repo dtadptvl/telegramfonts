@@ -253,8 +253,9 @@ def test_no_truth_binary_leakage_in_runner_and_inferencer(tmp_path):
         left_advance_upem=736.0,
         right_advance_upem=826.0,
         pair_advance_upem=1522.0,
-        inferred_kerning_upem=-40,
+        inferred_kerning_upem=0,  # Store 0: inferencer MUST derive -40 dynamically from raw advances!
         confidence=1.0,
+        provenance="authorized_browser_canvas_measurements",
     )
 
     inferencer = EvidenceKerningInferencer(family_name="TestFont MAX", style_name="Regular")
@@ -263,7 +264,51 @@ def test_no_truth_binary_leakage_in_runner_and_inferencer(tmp_path):
     assert dataset.total_pairs_probed == 1
     assert dataset.active_kerning_pairs_count == 1
     assert dataset.get_kerning(65, 79) == -40
-    assert dataset.inference_method == "observation_store_cached_measurements"
+    assert dataset.inference_method == "observation_store_differential_derivation"
+    assert dataset.observations[0].provenance == "authorized_browser_canvas_measurements"
+
+
+def test_infer_from_store_derives_adjustments_dynamically_from_raw_advances(tmp_path):
+    """Verify infer_from_store recomputes adjustments from raw advances rather than blindly trusting stored answers."""
+    from measurement.store import ObservationStore
+
+    store = ObservationStore(tmp_path / "obs_store")
+    # Feed raw measurements for AO (delta = -40) and BO (delta = -10) with inverted/bogus stored answers
+    store.save_pair_observation(
+        reference_id="font_a",
+        style_id="reg",
+        left_cp=65,
+        right_cp=79,
+        left_char="A",
+        right_char="O",
+        left_advance_upem=736.0,
+        right_advance_upem=826.0,
+        pair_advance_upem=1522.0,
+        inferred_kerning_upem=999,  # Bogus stored answer
+        confidence=0.95,
+        provenance="authorized_browser_canvas_measurements",
+    )
+    store.save_pair_observation(
+        reference_id="font_a",
+        style_id="reg",
+        left_cp=66,
+        right_cp=79,
+        left_char="B",
+        right_char="O",
+        left_advance_upem=674.0,
+        right_advance_upem=826.0,
+        pair_advance_upem=1490.0,
+        inferred_kerning_upem=-999,  # Bogus stored answer
+        confidence=0.95,
+        provenance="authorized_browser_canvas_measurements",
+    )
+
+    inferencer = EvidenceKerningInferencer(family_name="TestFont MAX", style_name="Regular")
+    dataset = inferencer.infer_from_store(store, "font_a", "reg")
+
+    # Dynamic derivation must ignore 999/-999 and derive -40 and -10 strictly from raw advances!
+    assert dataset.get_kerning(65, 79) == -40
+    assert dataset.get_kerning(66, 79) == -10
 
 
 def test_held_out_in_cmap_validation_is_distinct_from_fit_set():
@@ -275,4 +320,42 @@ def test_held_out_in_cmap_validation_is_distinct_from_fit_set():
     assert "in_cmap_held_out_pair" in categories
     assert "in_cmap_latin_subset" in categories
     assert "in_cmap_vietnamese_subset" in categories
+
+
+def test_chromium_pair_text_metrics_structure(tmp_path):
+    """Verify ChromiumValidationResult contains structured before/after pair TextMetrics."""
+    ttf_path = Path("agent/benchmark_data/ground_truth/BeVietnamPro-Regular.ttf")
+    if not ttf_path.exists():
+        pytest.skip("Ground truth font not available")
+
+    glyphs = [
+        _make_glyph(65, "A", 736.0),
+        _make_glyph(79, "O", 826.0),
+        _make_glyph(66, "B", 674.0),
+    ]
+
+    typography = TypographyDataset(
+        family_name="TestFont MAX",
+        style_name="Regular",
+        kerning_pairs={(65, 79): -40, (66, 79): -10},
+    )
+
+    builder = MaxCandidateFontBuilder(family_name="TestFont MAX", style_name="Regular")
+    res = builder.build_candidate_family(glyphs, tmp_path / "cand", typography=typography)
+
+    validator = MaxCandidateHeldOutValidator(ttf_path)
+    report = validator.validate_family(res, tested_codepoints=[65, 79, 66], run_chromium=True)
+
+    chrom = report.chromium_result
+    assert chrom.is_available is True
+    assert chrom.fit_pairs_material_improvement is True
+    assert chrom.held_out_pairs_non_regression is True
+    assert len(chrom.pair_metrics) > 0
+
+    ao_metric = next((m for m in chrom.pair_metrics if m.pair == "AO"), None)
+    assert ao_metric is not None
+    assert ao_metric.baseline_error_upem == 40.0
+    assert ao_metric.gpos_candidate_error_upem == 0.0
+    assert ao_metric.material_improvement is True
+
 

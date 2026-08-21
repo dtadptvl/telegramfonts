@@ -113,11 +113,20 @@ class ObservationStore:
                     pair_advance_upem REAL NOT NULL,
                     inferred_kerning_upem INTEGER NOT NULL,
                     confidence REAL NOT NULL,
+                    provenance TEXT NOT NULL DEFAULT 'authorized_browser_canvas_measurement',
                     created_at TEXT NOT NULL,
                     PRIMARY KEY (reference_id, style_id, left_cp, right_cp)
                 )
                 """
             )
+            # Automatic schema migration for existing databases
+            try:
+                conn.execute(
+                    "ALTER TABLE pair_observations ADD COLUMN provenance TEXT NOT NULL DEFAULT 'authorized_browser_canvas_measurement'"
+                )
+            except sqlite3.OperationalError:
+                pass
+
             conn.commit()
 
     def has_observation(self, cache_key: str) -> bool:
@@ -362,8 +371,9 @@ class ObservationStore:
         left_advance_upem: float,
         right_advance_upem: float,
         pair_advance_upem: float,
-        inferred_kerning_upem: int,
+        inferred_kerning_upem: int = 0,
         confidence: float = 1.0,
+        provenance: str = "authorized_browser_canvas_measurement",
         created_at: str | None = None,
     ) -> None:
         """Persist an observable pair advance measurement into index."""
@@ -374,8 +384,8 @@ class ObservationStore:
                 INSERT OR REPLACE INTO pair_observations (
                     reference_id, style_id, left_cp, right_cp, left_char, right_char,
                     left_advance_upem, right_advance_upem, pair_advance_upem,
-                    inferred_kerning_upem, confidence, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    inferred_kerning_upem, confidence, provenance, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     reference_id,
@@ -389,6 +399,7 @@ class ObservationStore:
                     pair_advance_upem,
                     inferred_kerning_upem,
                     confidence,
+                    provenance,
                     ts,
                 ),
             )

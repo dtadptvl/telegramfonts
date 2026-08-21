@@ -37,7 +37,7 @@ class EvidenceKerningInferencer:
         reference_id: str,
         style_id: str,
     ) -> TypographyDataset:
-        """Infer canonical typography dataset strictly from persistent observation store."""
+        """Infer canonical typography dataset strictly from persistent observation store by recomputing adjustments from raw measurements."""
         raw_rows = store.get_pair_observations(reference_id, style_id)
         observations: list[PairKerningObservation] = []
         kerning_pairs: dict[tuple[int, int], int] = {}
@@ -50,8 +50,11 @@ class EvidenceKerningInferencer:
             left_adv = float(row["left_advance_upem"])
             right_adv = float(row["right_advance_upem"])
             pair_adv = float(row["pair_advance_upem"])
-            inferred_kern = int(row["inferred_kerning_upem"])
-            is_applied = inferred_kern != 0
+
+            # Recompute differential adjustment dynamically from raw observable advances (never trust stored answer!)
+            raw_delta = pair_adv - (left_adv + right_adv)
+            inferred_kern = int(round(raw_delta))
+            is_applied = abs(raw_delta) >= self.threshold_upem and inferred_kern != 0
 
             obs = PairKerningObservation(
                 left_cp=left_cp,
@@ -61,9 +64,10 @@ class EvidenceKerningInferencer:
                 left_advance_upem=round(left_adv, 2),
                 right_advance_upem=round(right_adv, 2),
                 measured_pair_advance_upem=round(pair_adv, 2),
-                inferred_kerning_upem=inferred_kern,
+                inferred_kerning_upem=inferred_kern if is_applied else 0,
                 is_kerning_applied=is_applied,
                 confidence=float(row.get("confidence", 1.0)),
+                provenance=str(row.get("provenance", "authorized_browser_canvas_measurement")),
             )
             observations.append(obs)
 
@@ -78,7 +82,7 @@ class EvidenceKerningInferencer:
             observations=observations,
             total_pairs_probed=len(raw_rows),
             active_kerning_pairs_count=len(kerning_pairs),
-            inference_method="observation_store_cached_measurements",
+            inference_method="observation_store_differential_derivation",
             created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
         )
 

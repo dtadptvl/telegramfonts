@@ -46,6 +46,7 @@ class PairKerningObservation:
     inferred_kerning_upem: int
     is_kerning_applied: bool
     confidence: float = 1.0
+    provenance: str = "authorized_browser_canvas_measurement"
 
     @property
     def raw_delta_upem(self) -> float:

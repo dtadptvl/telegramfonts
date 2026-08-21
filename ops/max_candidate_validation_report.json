@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-08-21T10:13:56.628847+00:00",
+  "timestamp": "2026-08-21T10:35:03.702544+00:00",
   "device_identity": {
     "hostname": "DESKTOP-1GIB12N",
     "os": "Windows",
@@ -11,8 +11,8 @@
   },
   "reference_id": "be_vietnam_pro",
   "style_id": "regular",
-  "total_time_seconds": 13.27,
-  "peak_rss_mb": 106.63,
+  "total_time_seconds": 13.48,
+  "peak_rss_mb": 106.9,
   "candidate_family": {
     "family_name": "BeVietnamPro MAX",
     "style_name": "Regular",
@@ -40,8 +40,8 @@
         "format": "WOFF2",
         "filename": "BeVietnamProMAX-Regular.woff2",
         "file_path": "build\\candidate_fonts\\BeVietnamProMAX-Regular.woff2",
-        "size_bytes": 3704,
-        "sha256_hex": "556e803add5e2dc3952ac55f5b22e7d2de9cd96552eef138e9b6d02cb66e850a",
+        "size_bytes": 3712,
+        "sha256_hex": "5eed047f191f4868187be84dfb06e1478ae41ddabc68c706a91d881980b19584",
         "glyph_count": 15,
         "units_per_em": 1000
       }
@@ -117,8 +117,8 @@
     ],
     "total_pairs_probed": 12,
     "active_kerning_pairs_count": 7,
-    "inference_method": "observation_store_cached_measurements",
-    "created_at": "2026-08-21T10:13:56.296043+00:00"
+    "inference_method": "observation_store_differential_derivation",
+    "created_at": "2026-08-21T10:35:03.369653+00:00"
   },
   "chromium_validation": {
     "is_available": true,
@@ -127,6 +127,186 @@
     "fallback_rejection_verified": true,
     "measured_glyph_count": 13,
     "mean_chromium_advance_error_upem": 0.0,
+    "pair_metrics": [
+      {
+        "pair": "AO",
+        "category": "fit_pair",
+        "baseline_single_sum_upem": 1562.0,
+        "candidate_pair_advance_upem": 1522.0,
+        "gpos_applied_adjustment_upem": -40.0,
+        "reference_pair_advance_upem": 1522.0,
+        "baseline_error_upem": 40.0,
+        "gpos_candidate_error_upem": 0.0,
+        "material_improvement": true
+      },
+      {
+        "pair": "BO",
+        "category": "fit_pair",
+        "baseline_single_sum_upem": 1500.0,
+        "candidate_pair_advance_upem": 1490.0,
+        "gpos_applied_adjustment_upem": -10.0,
+        "reference_pair_advance_upem": 1490.0,
+        "baseline_error_upem": 10.0,
+        "gpos_candidate_error_upem": 0.0,
+        "material_improvement": true
+      },
+      {
+        "pair": "A%",
+        "category": "fit_pair",
+        "baseline_single_sum_upem": 1585.0,
+        "candidate_pair_advance_upem": 1545.0,
+        "gpos_applied_adjustment_upem": -40.0,
+        "reference_pair_advance_upem": 1545.0,
+        "baseline_error_upem": 40.0,
+        "gpos_candidate_error_upem": 0.0,
+        "material_improvement": true
+      },
+      {
+        "pair": "Ag",
+        "category": "fit_pair",
+        "baseline_single_sum_upem": 1379.0,
+        "candidate_pair_advance_upem": 1359.0,
+        "gpos_applied_adjustment_upem": -20.0,
+        "reference_pair_advance_upem": 1359.0,
+        "baseline_error_upem": 20.0,
+        "gpos_candidate_error_upem": 0.0,
+        "material_improvement": true
+      },
+      {
+        "pair": "Aơ",
+        "category": "fit_pair",
+        "baseline_single_sum_upem": 1378.0,
+        "candidate_pair_advance_upem": 1358.0,
+        "gpos_applied_adjustment_upem": -20.0,
+        "reference_pair_advance_upem": 1358.0,
+        "baseline_error_upem": 20.0,
+        "gpos_candidate_error_upem": 0.0,
+        "material_improvement": true
+      },
+      {
+        "pair": "ĐA",
+        "category": "fit_pair",
+        "baseline_single_sum_upem": 1524.0,
+        "candidate_pair_advance_upem": 1484.0,
+        "gpos_applied_adjustment_upem": -40.0,
+        "reference_pair_advance_upem": 1484.0,
+        "baseline_error_upem": 40.0,
+        "gpos_candidate_error_upem": 0.0,
+        "material_improvement": true
+      },
+      {
+        "pair": "gắ",
+        "category": "fit_pair",
+        "baseline_single_sum_upem": 1296.0,
+        "candidate_pair_advance_upem": 1276.0,
+        "gpos_applied_adjustment_upem": -20.0,
+        "reference_pair_advance_upem": 1276.0,
+        "baseline_error_upem": 20.0,
+        "gpos_candidate_error_upem": 0.0,
+        "material_improvement": true
+      },
+      {
+        "pair": "AA",
+        "category": "fit_pair",
+        "baseline_single_sum_upem": 1472.0,
+        "candidate_pair_advance_upem": 1472.0,
+        "gpos_applied_adjustment_upem": 0.0,
+        "reference_pair_advance_upem": 1472.0,
+        "baseline_error_upem": 0.0,
+        "gpos_candidate_error_upem": 0.0,
+        "material_improvement": false
+      },
+      {
+        "pair": "OO",
+        "category": "fit_pair",
+        "baseline_single_sum_upem": 1652.0,
+        "candidate_pair_advance_upem": 1652.0,
+        "gpos_applied_adjustment_upem": 0.0,
+        "reference_pair_advance_upem": 1652.0,
+        "baseline_error_upem": 0.0,
+        "gpos_candidate_error_upem": 0.0,
+        "material_improvement": false
+      },
+      {
+        "pair": "8A",
+        "category": "fit_pair",
+        "baseline_single_sum_upem": 1370.0,
+        "candidate_pair_advance_upem": 1370.0,
+        "gpos_applied_adjustment_upem": 0.0,
+        "reference_pair_advance_upem": 1370.0,
+        "baseline_error_upem": 0.0,
+        "gpos_candidate_error_upem": 0.0,
+        "material_improvement": true
+      },
+      {
+        "pair": "gm",
+        "category": "fit_pair",
+        "baseline_single_sum_upem": 1536.0,
+        "candidate_pair_advance_upem": 1536.0,
+        "gpos_applied_adjustment_upem": 0.0,
+        "reference_pair_advance_upem": 1536.0,
+        "baseline_error_upem": 0.0,
+        "gpos_candidate_error_upem": 0.0,
+        "material_improvement": false
+      },
+      {
+        "pair": "ĐO",
+        "category": "fit_pair",
+        "baseline_single_sum_upem": 1614.0,
+        "candidate_pair_advance_upem": 1614.0,
+        "gpos_applied_adjustment_upem": -0.0,
+        "reference_pair_advance_upem": 1614.0,
+        "baseline_error_upem": 0.0,
+        "gpos_candidate_error_upem": 0.0,
+        "material_improvement": false
+      },
+      {
+        "pair": "OA",
+        "category": "held_out_pair",
+        "baseline_single_sum_upem": 1562.0,
+        "candidate_pair_advance_upem": 1562.0,
+        "gpos_applied_adjustment_upem": 0.0,
+        "reference_pair_advance_upem": 1522.0,
+        "baseline_error_upem": 40.0,
+        "gpos_candidate_error_upem": 40.0,
+        "material_improvement": false
+      },
+      {
+        "pair": "OĐ",
+        "category": "held_out_pair",
+        "baseline_single_sum_upem": 1614.0,
+        "candidate_pair_advance_upem": 1614.0,
+        "gpos_applied_adjustment_upem": -0.0,
+        "reference_pair_advance_upem": 1614.0,
+        "baseline_error_upem": 0.0,
+        "gpos_candidate_error_upem": 0.0,
+        "material_improvement": false
+      },
+      {
+        "pair": "ơA",
+        "category": "held_out_pair",
+        "baseline_single_sum_upem": 1378.0,
+        "candidate_pair_advance_upem": 1378.0,
+        "gpos_applied_adjustment_upem": -0.0,
+        "reference_pair_advance_upem": 1378.0,
+        "baseline_error_upem": 0.0,
+        "gpos_candidate_error_upem": 0.0,
+        "material_improvement": false
+      },
+      {
+        "pair": "mơ",
+        "category": "held_out_pair",
+        "baseline_single_sum_upem": 1535.0,
+        "candidate_pair_advance_upem": 1535.0,
+        "gpos_applied_adjustment_upem": 0.0,
+        "reference_pair_advance_upem": 1535.0,
+        "baseline_error_upem": 0.0,
+        "gpos_candidate_error_upem": 0.0,
+        "material_improvement": true
+      }
+    ],
+    "fit_pairs_material_improvement": true,
+    "held_out_pairs_non_regression": true,
     "rendered_canvas_valid": true,
     "error_message": null
   },
@@ -168,8 +348,8 @@
     {
       "format": "WOFF2",
       "file_path": "build\\candidate_fonts\\BeVietnamProMAX-Regular.woff2",
-      "size_bytes": 3704,
-      "sha256_hex": "556e803add5e2dc3952ac55f5b22e7d2de9cd96552eef138e9b6d02cb66e850a",
+      "size_bytes": 3712,
+      "sha256_hex": "5eed047f191f4868187be84dfb06e1478ae41ddabc68c706a91d881980b19584",
       "is_direct_loadable_fonttools": true,
       "is_direct_loadable_freetype": false,
       "is_roundtrip_loadable_freetype": true,

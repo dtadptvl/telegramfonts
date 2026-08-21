@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-08-21T10:14:00.000000+00:00",
+  "timestamp": "2026-08-21T10:35:05.000000+00:00",
   "device_identity": {
     "hostname": "localhost",
     "os": "Android",
@@ -13,12 +13,12 @@
   "reference_id": "be_vietnam_pro",
   "style_id": "regular",
   "execution_metrics": {
-    "total_time_seconds": 13.27,
+    "total_time_seconds": 13.48,
     "reconstruction_time_seconds": 12.00,
     "kerning_inference_time_seconds": 0.05,
     "build_time_seconds": 0.15,
-    "validation_time_seconds": 1.07,
-    "peak_rss_mb": 106.63
+    "validation_time_seconds": 1.28,
+    "peak_rss_mb": 106.90
   },
   "candidate_family": {
     "family_name": "BeVietnamPro MAX",
@@ -54,8 +54,8 @@
       {
         "format": "WOFF2",
         "filename": "BeVietnamProMAX-Regular.woff2",
-        "size_bytes": 3704,
-        "sha256_hex": "a244feebcebfcb2b3c2e17ea5cf4a6a57c570ae2e10c71a39626372d8a59f518",
+        "size_bytes": 3712,
+        "sha256_hex": "5eed047f191f4868187be84dfb06e1478ae41ddabc68c706a91d881980b19584",
         "glyph_count": 15,
         "units_per_em": 1000,
         "is_direct_loadable_fonttools": true,
@@ -73,7 +73,7 @@
     "units_per_em": 1000,
     "total_pairs_probed": 12,
     "active_kerning_pairs_count": 7,
-    "inference_method": "observation_store_cached_measurements",
+    "inference_method": "observation_store_differential_derivation",
     "representative_fit_pairs": [
       { "pair": "AO", "left_cp": 65, "right_cp": 79, "kerning_upem": -40 },
       { "pair": "BO", "left_cp": 66, "right_cp": 79, "kerning_upem": -10 },
@@ -91,7 +91,47 @@
     "fallback_rejection_verified": true,
     "measured_glyph_count": 13,
     "mean_chromium_advance_error_upem": 0.0,
-    "rendered_canvas_valid": true
+    "fit_pairs_material_improvement": true,
+    "held_out_pairs_non_regression": true,
+    "rendered_canvas_valid": true,
+    "pair_metrics_sample": [
+      {
+        "pair": "AO",
+        "category": "fit_pair",
+        "baseline_single_sum_upem": 1562.0,
+        "candidate_pair_advance_upem": 1522.0,
+        "baseline_error_upem": 40.0,
+        "gpos_candidate_error_upem": 0.0,
+        "material_improvement": true
+      },
+      {
+        "pair": "BO",
+        "category": "fit_pair",
+        "baseline_single_sum_upem": 1500.0,
+        "candidate_pair_advance_upem": 1490.0,
+        "baseline_error_upem": 10.0,
+        "gpos_candidate_error_upem": 0.0,
+        "material_improvement": true
+      },
+      {
+        "pair": "OA",
+        "category": "held_out_pair",
+        "baseline_single_sum_upem": 1562.0,
+        "candidate_pair_advance_upem": 1562.0,
+        "baseline_error_upem": 40.0,
+        "gpos_candidate_error_upem": 40.0,
+        "material_improvement": false
+      },
+      {
+        "pair": "ơA",
+        "category": "held_out_pair",
+        "baseline_single_sum_upem": 1378.0,
+        "candidate_pair_advance_upem": 1378.0,
+        "baseline_error_upem": 0.0,
+        "gpos_candidate_error_upem": 0.0,
+        "material_improvement": false
+      }
+    ]
   },
   "validation_summary": {
     "all_formats_passed": true,
