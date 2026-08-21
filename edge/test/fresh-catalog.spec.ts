@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { env } from 'cloudflare:test';
 import worker from '../src/index';
+import type { TelegramUpdate } from '../src/types/telegram';
 
 describe('Phase 7: Fresh-Catalog E2E Resolution & Scheduled Cron Delivery', () => {
   const nodeSecret = 'test_internal_node_secret_32bytes_12345';
@@ -139,6 +140,171 @@ describe('Phase 7: Fresh-Catalog E2E Resolution & Scheduled Cron Delivery', () =
         .first<{ status: string; catalog_id: string }>();
       expect(updatedSession?.status).toBe('SELECTING_STYLES');
       expect(updatedSession?.catalog_id).toBe(catalogRecord?.id);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('async catalog completion delivers style menu with active post-update token; first click succeeds and old token is rejected (Issue #28 regression)', async () => {
+    const userId = 8877661;
+    const chatId = 8877661;
+    const updateId = 998802;
+
+    let capturedSendMessagePayload: { chat_id?: number; text?: string; reply_markup?: any } = {};
+    let lastAnswerCallbackText = '';
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (info, init) => {
+      const urlStr = typeof info === 'string' ? info : info instanceof Request ? info.url : info.toString();
+      if (urlStr.includes('/sendMessage') && init?.body) {
+        capturedSendMessagePayload = JSON.parse(init.body as string);
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            result: { message_id: 5599, chat: { id: chatId }, text: 'Style Selection' },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (urlStr.includes('/answerCallbackQuery') && init?.body) {
+        const body = JSON.parse(init.body as string);
+        lastAnswerCallbackText = body.text || '';
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      if (urlStr.includes('/editMessageText')) {
+        return new Response(JSON.stringify({ ok: true, result: { message_id: 5599 } }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    try {
+      // 1. User sends fresh MyFonts URL
+      const webhookPayload = {
+        update_id: updateId,
+        message: {
+          message_id: 201,
+          from: { id: userId, is_bot: false, first_name: 'RegressionUser' },
+          chat: { id: chatId, type: 'private' },
+          date: Math.floor(Date.now() / 1000),
+          text: 'https://www.myfonts.com/collections/regression-font-test',
+        },
+      };
+
+      const webhookReq = new Request('https://worker.local/webhooks/telegram', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Telegram-Bot-Api-Secret-Token': 'secret_webhook_token_hex',
+        },
+        body: JSON.stringify(webhookPayload),
+      });
+
+      const webhookResp = await worker.fetch(webhookReq, env, {} as ExecutionContext);
+      expect(webhookResp.status).toBe(200);
+
+      // Read pre-update token while AWAITING_CATALOG
+      const preUpdateSession = await env.DB
+        .prepare('SELECT workflow_token FROM telegram_sessions WHERE user_id = ?')
+        .bind(String(userId))
+        .first<{ workflow_token: string }>();
+      const preUpdateToken = preUpdateSession!.workflow_token;
+
+      // 2. A23 completes catalog request
+      const pendingReq = await env.DB
+        .prepare("SELECT id, canonical_key, source_url FROM catalog_requests WHERE user_id = ? AND status = 'PENDING'")
+        .bind(String(userId))
+        .first<{ id: string; canonical_key: string; source_url: string }>();
+
+      const completePayload = {
+        canonical_key: pendingReq?.canonical_key,
+        source_url: pendingReq?.source_url,
+        family_name: 'Regression Font',
+        foundry: 'Test Foundry',
+        styles: [
+          { id: 'regular', display_name: 'Regular', price: 50000 },
+          { id: 'bold', display_name: 'Bold', price: 50000 },
+        ],
+      };
+
+      const postCompleteReq = new Request(
+        `https://worker.local/internal/catalog-requests/${pendingReq?.id}/complete`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${nodeSecret}`,
+          },
+          body: JSON.stringify(completePayload),
+        }
+      );
+      const completeResp = await worker.fetch(postCompleteReq, env, {} as ExecutionContext);
+      expect(completeResp.status).toBe(200);
+
+      // 3. Inspect delivered menu's callback data
+      const postUpdateSession = await env.DB
+        .prepare('SELECT workflow_token, status FROM telegram_sessions WHERE user_id = ?')
+        .bind(String(userId))
+        .first<{ workflow_token: string; status: string }>();
+      const postUpdateToken = postUpdateSession!.workflow_token;
+      expect(postUpdateToken).not.toBe(preUpdateToken);
+
+      // Verify the inline keyboard in sendMessage was built using postUpdateToken, not preUpdateToken
+      const inlineKeyboard = capturedSendMessagePayload.reply_markup?.inline_keyboard;
+      expect(inlineKeyboard).toBeDefined();
+      const firstStyleButton = inlineKeyboard[0][0];
+      expect(firstStyleButton.callback_data).toBe(`st:t:${postUpdateToken}:0`);
+
+      // 4. First click with delivered button callback succeeds immediately
+      const clickUpdate: TelegramUpdate = {
+        update_id: updateId + 1,
+        callback_query: {
+          id: 'cb_click_1',
+          from: { id: userId, is_bot: false, first_name: 'RegressionUser' },
+          data: firstStyleButton.callback_data,
+        },
+      };
+
+      const clickReq = new Request('https://worker.local/webhooks/telegram', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Telegram-Bot-Api-Secret-Token': 'secret_webhook_token_hex',
+        },
+        body: JSON.stringify(clickUpdate),
+      });
+
+      const clickResp = await worker.fetch(clickReq, env, {} as ExecutionContext);
+      expect(clickResp.status).toBe(200);
+
+      // Verify style 0 ('regular') was selected and NO expired warning was sent
+      const sessionAfterClick = await env.DB
+        .prepare('SELECT selected_styles FROM telegram_sessions WHERE user_id = ?')
+        .bind(String(userId))
+        .first<{ selected_styles: string }>();
+      expect(JSON.parse(sessionAfterClick!.selected_styles)).toEqual(['regular']);
+      expect(lastAnswerCallbackText).not.toContain('expired');
+
+      // 5. Clicking with stale pre-update token is rejected as expired
+      const staleClickUpdate: TelegramUpdate = {
+        update_id: updateId + 2,
+        callback_query: {
+          id: 'cb_click_stale',
+          from: { id: userId, is_bot: false, first_name: 'RegressionUser' },
+          data: `st:t:${preUpdateToken}:0`,
+        },
+      };
+
+      const staleReq = new Request('https://worker.local/webhooks/telegram', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Telegram-Bot-Api-Secret-Token': 'secret_webhook_token_hex',
+        },
+        body: JSON.stringify(staleClickUpdate),
+      });
+
+      const staleResp = await worker.fetch(staleReq, env, {} as ExecutionContext);
+      expect(staleResp.status).toBe(200);
+      expect(lastAnswerCallbackText).toContain('This menu is expired');
     } finally {
       fetchSpy.mockRestore();
     }

@@ -242,22 +242,27 @@ export async function handleInternalCatalog(
           'SELECTING_STYLES'
         );
 
-        // Render and send the interactive style selection message to user
+        const updatedSession = await sessionService.getSessionByUserId(userSession.user_id);
+        if (!updatedSession) {
+          continue;
+        }
+
+        // Render and send the interactive style selection message to user with active post-update token
         const { text: msgText, replyMarkup } = renderStyleSelection(
           catalog,
           [],
-          userSession.workflow_token
+          updatedSession.workflow_token
         );
 
         try {
           const sent = await tg.sendMessage({
-            chat_id: userSession.chat_id,
+            chat_id: updatedSession.chat_id,
             text: msgText,
             reply_markup: replyMarkup,
           });
 
           if (sent.message_id) {
-            await sessionService.setStatusUnconditional(userSession.user_id, 'SELECTING_STYLES', sent.message_id);
+            await sessionService.setStatusUnconditional(updatedSession.user_id, 'SELECTING_STYLES', sent.message_id);
           }
         } catch {
           // Log or tolerate telegram transport hiccups
