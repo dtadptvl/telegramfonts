@@ -117,8 +117,21 @@ def run_benchmark(
     base_summary = summarize(baseline_scores)
     max_b_summary = summarize(max_b_scores)
 
+    import platform
+
+    device_identity = {
+        "hostname": platform.node(),
+        "os": platform.system(),
+        "os_release": platform.release(),
+        "architecture": platform.machine(),
+        "processor": platform.processor(),
+        "python_version": platform.python_version(),
+        "cpu_count": os.cpu_count(),
+    }
+
     report = {
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "device_identity": device_identity,
         "reference_id": reference_id,
         "style_id": style_id,
         "representative_glyph_count": len(test_cps),
