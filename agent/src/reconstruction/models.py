@@ -245,6 +245,8 @@ class ReconstructionConfig:
     corner_threshold_degrees: float = 120.0
     min_contour_area_upem: float = 15.0
     smooth_iterations: int = 1
+    enable_geometry_optimization: bool = True
+    max_optimization_nudge_upem: float = 3.0
 
 
 @dataclass

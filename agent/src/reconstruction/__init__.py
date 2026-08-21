@@ -18,6 +18,7 @@ from reconstruction.candidate_validator import (
     ShapingTestResult,
 )
 from reconstruction.evaluator import GroundTruthGeometryEvaluator
+from reconstruction.geometry_optimizer import MaxGeometryOptimizer
 from reconstruction.models import (
     Contour,
     CubicSegment,
@@ -46,6 +47,7 @@ __all__ = [
     "SchneiderFitter",
     "SingleObservationBaselineReconstructor",
     "MaxReconstructionSolver",
+    "MaxGeometryOptimizer",
     "GroundTruthGeometryEvaluator",
     "CandidateFontArtifact",
     "CandidateFamilyBuildResult",

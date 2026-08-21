@@ -65,15 +65,9 @@ def fuse_observation_sdfs(
     # Canonical design space bounds
     m = observations[0][0].metrics
     x_min = float(m.lsb_upem)
-    x_max = float(m.lsb_upem + max(m.bbox_width_upem, m.advance_width_upem * 0.8))
-    y_min = float(-m.descent_upem)
-    y_max = float(m.ascent_upem)
-
-    # Ensure valid positive bounds
-    if x_max <= x_min:
-        x_max = x_min + 500.0
-    if y_max <= y_min:
-        y_max = y_min + 1000.0
+    x_max = float(m.lsb_upem + max(m.bbox_width_upem, 10.0))
+    y_min = float(m.descent_upem)
+    y_max = float(max(m.ascent_upem, y_min + 10.0))
 
     x_coords = np.linspace(x_min - config.sdf_pad_upem, x_max + config.sdf_pad_upem, config.grid_resolution, dtype=np.float32)
     y_coords = np.linspace(y_min - config.sdf_pad_upem, y_max + config.sdf_pad_upem, config.grid_resolution, dtype=np.float32)

@@ -1,12 +1,14 @@
-"""Authoritative MAX Pipeline B Master Outline Reconstruction Solver."""
+"""Authoritative MAX Pipeline B & F Master Outline Reconstruction Solver."""
 from __future__ import annotations
 
+import dataclasses
 import logging
 import time
 from typing import Any
 
 from measurement.models import ObservationRecord
 from reconstruction.bezier_fitter import SchneiderFitter
+from reconstruction.geometry_optimizer import MaxGeometryOptimizer
 from reconstruction.models import (
     Contour,
     Point2D,
@@ -75,9 +77,7 @@ class MaxReconstructionSolver:
             if contour.segments:
                 fitted_contours.append(contour)
 
-        elapsed_ms = (time.perf_counter() - start_time) * 1000.0
-
-        return ReconstructedGlyph(
+        initial_glyph = ReconstructedGlyph(
             code_point=code_point,
             character=metrics.character,
             advance_width_upem=metrics.advance_width_upem,
@@ -87,5 +87,23 @@ class MaxReconstructionSolver:
             descent_upem=metrics.descent_upem,
             contours=fitted_contours,
             bounding_box_upem=bbox_upem,
-            reconstruction_time_ms=elapsed_ms,
+            reconstruction_time_ms=0.0,
         )
+
+        # Step 5: Bounded Local Geometry Optimization (MAX Pipeline F)
+        if self.config.enable_geometry_optimization:
+            optimizer = MaxGeometryOptimizer(
+                config=self.config,
+                max_nudge_upem=self.config.max_optimization_nudge_upem,
+            )
+            final_glyph = optimizer.optimize_glyph(
+                glyph=initial_glyph,
+                fused_sdf=fused_sdf,
+                x_coords=x_coords,
+                y_coords=y_coords,
+            )
+        else:
+            final_glyph = initial_glyph
+
+        elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+        return dataclasses.replace(final_glyph, reconstruction_time_ms=elapsed_ms)

@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-08-21T13:56:47.930598+00:00",
+  "timestamp": "2026-08-21T14:21:06.138930+00:00",
   "device_identity": {
     "hostname": "DESKTOP-1GIB12N",
     "os": "Windows",
@@ -11,8 +11,8 @@
   },
   "reference_id": "be_vietnam_pro",
   "style_id": "regular",
-  "total_time_seconds": 13.53,
-  "peak_rss_mb": 107.46,
+  "total_time_seconds": 15.05,
+  "peak_rss_mb": 117.02,
   "candidate_family": {
     "family_name": "BeVietnamPro MAX",
     "style_name": "Regular",
@@ -22,8 +22,8 @@
         "format": "OTF",
         "filename": "BeVietnamProMAX-Regular.otf",
         "file_path": "build\\candidate_fonts\\BeVietnamProMAX-Regular.otf",
-        "size_bytes": 5256,
-        "sha256_hex": "50c6c76559f24118628df982d785a0c542164dfc8a7d37ad8b1dd35676b587d5",
+        "size_bytes": 5240,
+        "sha256_hex": "171ab2e272c91fcd9f06a4ea24b838153b65d22e93ae2ee373071eb5fe13b35e",
         "glyph_count": 15,
         "units_per_em": 1000
       },
@@ -31,8 +31,8 @@
         "format": "TTF",
         "filename": "BeVietnamProMAX-Regular.ttf",
         "file_path": "build\\candidate_fonts\\BeVietnamProMAX-Regular.ttf",
-        "size_bytes": 6504,
-        "sha256_hex": "21c37285cdaa9f0f6c02769d14771fad9cf7527dcd7bc9c395a85d16c7e5cbea",
+        "size_bytes": 6472,
+        "sha256_hex": "017620876c4a24472c3d8116e00a1e542792317c628645dcff1e31efa33dd374",
         "glyph_count": 15,
         "units_per_em": 1000
       },
@@ -40,8 +40,8 @@
         "format": "WOFF2",
         "filename": "BeVietnamProMAX-Regular.woff2",
         "file_path": "build\\candidate_fonts\\BeVietnamProMAX-Regular.woff2",
-        "size_bytes": 3704,
-        "sha256_hex": "049ad1c50fedbee0072bfcf8d619cb88db82174722561a4f13f7a1300add2eee",
+        "size_bytes": 3708,
+        "sha256_hex": "46207c5742000a1fba7e7dc211e49acb88ea392c6f6cee5706cdaa8786560ed1",
         "glyph_count": 15,
         "units_per_em": 1000
       }
@@ -56,7 +56,7 @@
     "in_cmap_shaping_match_rate": 1.0,
     "fit_kerning_delta_upem": 0.0,
     "held_out_in_cmap_kerning_delta_upem": 40.0,
-    "mean_held_out_raster_iou": 0.7399,
+    "mean_held_out_raster_iou": 0.8036,
     "requires_typography_phase_e": false,
     "typography_evidence_summary": "In-cmap fit pairs confirm 0.0 UPEM advance delta with OpenType GPOS kerning active; separate held-out in-cmap pairs ('OA', 'OĐ', 'ơA', 'mơ') show no regressions (40 UPEM delta). No independent evidence justifies broad GSUB/mark extensions.",
     "typography_provenance": "chromium:Chrome/151.0.7922.140:canvas_text_metrics",
@@ -282,7 +282,7 @@
       }
     ],
     "inference_method": "observation_store_differential_derivation",
-    "created_at": "2026-08-21T13:56:47.521319+00:00"
+    "created_at": "2026-08-21T14:21:05.724306+00:00"
   },
   "chromium_validation": {
     "is_available": true,
@@ -478,8 +478,8 @@
     {
       "format": "OTF",
       "file_path": "build\\candidate_fonts\\BeVietnamProMAX-Regular.otf",
-      "size_bytes": 5256,
-      "sha256_hex": "50c6c76559f24118628df982d785a0c542164dfc8a7d37ad8b1dd35676b587d5",
+      "size_bytes": 5240,
+      "sha256_hex": "171ab2e272c91fcd9f06a4ea24b838153b65d22e93ae2ee373071eb5fe13b35e",
       "is_direct_loadable_fonttools": true,
       "is_direct_loadable_freetype": true,
       "is_roundtrip_loadable_freetype": true,
@@ -495,8 +495,8 @@
     {
       "format": "TTF",
       "file_path": "build\\candidate_fonts\\BeVietnamProMAX-Regular.ttf",
-      "size_bytes": 6504,
-      "sha256_hex": "21c37285cdaa9f0f6c02769d14771fad9cf7527dcd7bc9c395a85d16c7e5cbea",
+      "size_bytes": 6472,
+      "sha256_hex": "017620876c4a24472c3d8116e00a1e542792317c628645dcff1e31efa33dd374",
       "is_direct_loadable_fonttools": true,
       "is_direct_loadable_freetype": true,
       "is_roundtrip_loadable_freetype": true,
@@ -512,8 +512,8 @@
     {
       "format": "WOFF2",
       "file_path": "build\\candidate_fonts\\BeVietnamProMAX-Regular.woff2",
-      "size_bytes": 3704,
-      "sha256_hex": "049ad1c50fedbee0072bfcf8d619cb88db82174722561a4f13f7a1300add2eee",
+      "size_bytes": 3708,
+      "sha256_hex": "46207c5742000a1fba7e7dc211e49acb88ea392c6f6cee5706cdaa8786560ed1",
       "is_direct_loadable_fonttools": true,
       "is_direct_loadable_freetype": false,
       "is_roundtrip_loadable_freetype": true,
@@ -584,9 +584,9 @@
       "candidate_advance_upem": 849.0,
       "reference_advance_upem": 849.0,
       "advance_delta_upem": 0.0,
-      "candidate_lsb_upem": 55.0,
+      "candidate_lsb_upem": 56.0,
       "reference_lsb_upem": 60.0,
-      "lsb_delta_upem": 5.0
+      "lsb_delta_upem": 4.0
     },
     {
       "code_point": 103,
@@ -624,9 +624,9 @@
       "candidate_advance_upem": 576.0,
       "reference_advance_upem": 576.0,
       "advance_delta_upem": 0.0,
-      "candidate_lsb_upem": 66.0,
+      "candidate_lsb_upem": 64.0,
       "reference_lsb_upem": 70.0,
-      "lsb_delta_upem": 4.0
+      "lsb_delta_upem": 6.0
     },
     {
       "code_point": 7855,
@@ -644,9 +644,9 @@
       "candidate_advance_upem": 662.0,
       "reference_advance_upem": 662.0,
       "advance_delta_upem": 0.0,
-      "candidate_lsb_upem": 55.0,
+      "candidate_lsb_upem": 56.0,
       "reference_lsb_upem": 60.0,
-      "lsb_delta_upem": 5.0
+      "lsb_delta_upem": 4.0
     },
     {
       "code_point": 272,
@@ -1325,48 +1325,48 @@
       "code_point": 65,
       "character": "A",
       "render_size_px": 32,
-      "raster_iou": 0.7333333333333333,
-      "pixel_delta_count": 64,
+      "raster_iou": 0.7302904564315352,
+      "pixel_delta_count": 65,
       "render_error": null
     },
     {
       "code_point": 65,
       "character": "A",
       "render_size_px": 64,
-      "raster_iou": 0.8846611177170036,
-      "pixel_delta_count": 97,
+      "raster_iou": 0.8139013452914798,
+      "pixel_delta_count": 166,
       "render_error": null
     },
     {
       "code_point": 65,
       "character": "A",
       "render_size_px": 128,
-      "raster_iou": 0.9296272493573264,
-      "pixel_delta_count": 219,
+      "raster_iou": 0.9196542893725992,
+      "pixel_delta_count": 251,
       "render_error": null
     },
     {
       "code_point": 66,
       "character": "B",
       "render_size_px": 16,
-      "raster_iou": 0.9871794871794872,
-      "pixel_delta_count": 1,
+      "raster_iou": 0.9506172839506173,
+      "pixel_delta_count": 4,
       "render_error": null
     },
     {
       "code_point": 66,
       "character": "B",
       "render_size_px": 32,
-      "raster_iou": 0.8808664259927798,
-      "pixel_delta_count": 33,
+      "raster_iou": 0.8844765342960289,
+      "pixel_delta_count": 32,
       "render_error": null
     },
     {
       "code_point": 66,
       "character": "B",
       "render_size_px": 64,
-      "raster_iou": 0.9246031746031746,
-      "pixel_delta_count": 76,
+      "raster_iou": 0.837914691943128,
+      "pixel_delta_count": 171,
       "render_error": null
     },
     {
@@ -1389,152 +1389,152 @@
       "code_point": 79,
       "character": "O",
       "render_size_px": 32,
-      "raster_iou": 0.7547169811320755,
-      "pixel_delta_count": 65,
+      "raster_iou": 0.7443609022556391,
+      "pixel_delta_count": 68,
       "render_error": null
     },
     {
       "code_point": 79,
       "character": "O",
       "render_size_px": 64,
-      "raster_iou": 0.8137154554759468,
-      "pixel_delta_count": 182,
+      "raster_iou": 0.8728991596638656,
+      "pixel_delta_count": 121,
       "render_error": null
     },
     {
       "code_point": 79,
       "character": "O",
       "render_size_px": 128,
-      "raster_iou": 0.8800880088008801,
-      "pixel_delta_count": 436,
+      "raster_iou": 0.8912087912087913,
+      "pixel_delta_count": 396,
       "render_error": null
     },
     {
       "code_point": 56,
       "character": "8",
       "render_size_px": 16,
-      "raster_iou": 0.8947368421052632,
-      "pixel_delta_count": 8,
+      "raster_iou": 0.6551724137931034,
+      "pixel_delta_count": 30,
       "render_error": null
     },
     {
       "code_point": 56,
       "character": "8",
       "render_size_px": 32,
-      "raster_iou": 0.7127272727272728,
-      "pixel_delta_count": 79,
+      "raster_iou": 0.7003610108303249,
+      "pixel_delta_count": 83,
       "render_error": null
     },
     {
       "code_point": 56,
       "character": "8",
       "render_size_px": 64,
-      "raster_iou": 0.8002070393374742,
-      "pixel_delta_count": 193,
+      "raster_iou": 0.8819742489270386,
+      "pixel_delta_count": 110,
       "render_error": null
     },
     {
       "code_point": 56,
       "character": "8",
       "render_size_px": 128,
-      "raster_iou": 0.904264837458992,
+      "raster_iou": 0.9073690440958864,
+      "pixel_delta_count": 313,
+      "render_error": null
+    },
+    {
+      "code_point": 64,
+      "character": "@",
+      "render_size_px": 16,
+      "raster_iou": 0.6666666666666666,
+      "pixel_delta_count": 50,
+      "render_error": null
+    },
+    {
+      "code_point": 64,
+      "character": "@",
+      "render_size_px": 32,
+      "raster_iou": 0.652,
+      "pixel_delta_count": 174,
+      "render_error": null
+    },
+    {
+      "code_point": 64,
+      "character": "@",
+      "render_size_px": 64,
+      "raster_iou": 0.8639951426836673,
+      "pixel_delta_count": 224,
+      "render_error": null
+    },
+    {
+      "code_point": 64,
+      "character": "@",
+      "render_size_px": 128,
+      "raster_iou": 0.7435977514053717,
+      "pixel_delta_count": 1642,
+      "render_error": null
+    },
+    {
+      "code_point": 37,
+      "character": "%",
+      "render_size_px": 16,
+      "raster_iou": 0.45098039215686275,
+      "pixel_delta_count": 56,
+      "render_error": null
+    },
+    {
+      "code_point": 37,
+      "character": "%",
+      "render_size_px": 32,
+      "raster_iou": 0.5782312925170068,
+      "pixel_delta_count": 124,
+      "render_error": null
+    },
+    {
+      "code_point": 37,
+      "character": "%",
+      "render_size_px": 64,
+      "raster_iou": 0.8331550802139037,
+      "pixel_delta_count": 156,
+      "render_error": null
+    },
+    {
+      "code_point": 37,
+      "character": "%",
+      "render_size_px": 128,
+      "raster_iou": 0.9034005416792056,
       "pixel_delta_count": 321,
       "render_error": null
     },
     {
-      "code_point": 64,
-      "character": "@",
-      "render_size_px": 16,
-      "raster_iou": 0.5328947368421053,
-      "pixel_delta_count": 71,
-      "render_error": null
-    },
-    {
-      "code_point": 64,
-      "character": "@",
-      "render_size_px": 32,
-      "raster_iou": 0.39087301587301587,
-      "pixel_delta_count": 307,
-      "render_error": null
-    },
-    {
-      "code_point": 64,
-      "character": "@",
-      "render_size_px": 64,
-      "raster_iou": 0.30157170923379173,
-      "pixel_delta_count": 1422,
-      "render_error": null
-    },
-    {
-      "code_point": 64,
-      "character": "@",
-      "render_size_px": 128,
-      "raster_iou": 0.30357142857142855,
-      "pixel_delta_count": 5070,
-      "render_error": null
-    },
-    {
-      "code_point": 37,
-      "character": "%",
-      "render_size_px": 16,
-      "raster_iou": 0.6888888888888889,
-      "pixel_delta_count": 28,
-      "render_error": null
-    },
-    {
-      "code_point": 37,
-      "character": "%",
-      "render_size_px": 32,
-      "raster_iou": 0.6725978647686833,
-      "pixel_delta_count": 92,
-      "render_error": null
-    },
-    {
-      "code_point": 37,
-      "character": "%",
-      "render_size_px": 64,
-      "raster_iou": 0.7536082474226804,
-      "pixel_delta_count": 239,
-      "render_error": null
-    },
-    {
-      "code_point": 37,
-      "character": "%",
-      "render_size_px": 128,
-      "raster_iou": 0.8917464114832536,
-      "pixel_delta_count": 362,
-      "render_error": null
-    },
-    {
       "code_point": 103,
       "character": "g",
       "render_size_px": 16,
-      "raster_iou": 0.2708333333333333,
-      "pixel_delta_count": 70,
+      "raster_iou": 0.52,
+      "pixel_delta_count": 48,
       "render_error": null
     },
     {
       "code_point": 103,
       "character": "g",
       "render_size_px": 32,
-      "raster_iou": 0.23214285714285715,
-      "pixel_delta_count": 215,
+      "raster_iou": 0.7183098591549296,
+      "pixel_delta_count": 80,
       "render_error": null
     },
     {
       "code_point": 103,
       "character": "g",
       "render_size_px": 64,
-      "raster_iou": 0.22201492537313433,
-      "pixel_delta_count": 834,
+      "raster_iou": 0.8925964546402503,
+      "pixel_delta_count": 103,
       "render_error": null
     },
     {
       "code_point": 103,
       "character": "g",
       "render_size_px": 128,
-      "raster_iou": 0.22887673956262425,
-      "pixel_delta_count": 3103,
+      "raster_iou": 0.9242636746143057,
+      "pixel_delta_count": 270,
       "render_error": null
     },
     {
@@ -1557,176 +1557,176 @@
       "code_point": 109,
       "character": "m",
       "render_size_px": 64,
-      "raster_iou": 0.9238521836506159,
-      "pixel_delta_count": 68,
+      "raster_iou": 0.9249720044792833,
+      "pixel_delta_count": 67,
       "render_error": null
     },
     {
       "code_point": 109,
       "character": "m",
       "render_size_px": 128,
-      "raster_iou": 0.8955676988463873,
-      "pixel_delta_count": 344,
+      "raster_iou": 0.8953594176524113,
+      "pixel_delta_count": 345,
       "render_error": null
     },
     {
       "code_point": 417,
       "character": "ơ",
       "render_size_px": 16,
-      "raster_iou": 0.8524590163934426,
-      "pixel_delta_count": 9,
+      "raster_iou": 0.8253968253968254,
+      "pixel_delta_count": 11,
       "render_error": null
     },
     {
       "code_point": 417,
       "character": "ơ",
       "render_size_px": 32,
-      "raster_iou": 0.5646551724137931,
+      "raster_iou": 0.7548076923076923,
+      "pixel_delta_count": 51,
+      "render_error": null
+    },
+    {
+      "code_point": 417,
+      "character": "ơ",
+      "render_size_px": 64,
+      "raster_iou": 0.8573446327683616,
       "pixel_delta_count": 101,
       "render_error": null
     },
     {
       "code_point": 417,
       "character": "ơ",
-      "render_size_px": 64,
-      "raster_iou": 0.8601694915254238,
-      "pixel_delta_count": 99,
-      "render_error": null
-    },
-    {
-      "code_point": 417,
-      "character": "ơ",
       "render_size_px": 128,
-      "raster_iou": 0.8062209510189489,
-      "pixel_delta_count": 542,
+      "raster_iou": 0.7825026141512722,
+      "pixel_delta_count": 624,
       "render_error": null
     },
     {
       "code_point": 432,
       "character": "ư",
       "render_size_px": 16,
-      "raster_iou": 0.8163265306122449,
-      "pixel_delta_count": 9,
+      "raster_iou": 0.9791666666666666,
+      "pixel_delta_count": 1,
       "render_error": null
     },
     {
       "code_point": 432,
       "character": "ư",
       "render_size_px": 32,
-      "raster_iou": 0.8201058201058201,
-      "pixel_delta_count": 34,
+      "raster_iou": 0.8297872340425532,
+      "pixel_delta_count": 32,
       "render_error": null
     },
     {
       "code_point": 432,
       "character": "ư",
       "render_size_px": 64,
-      "raster_iou": 0.9633173843700159,
-      "pixel_delta_count": 23,
+      "raster_iou": 0.953968253968254,
+      "pixel_delta_count": 29,
       "render_error": null
     },
     {
       "code_point": 432,
       "character": "ư",
       "render_size_px": 128,
-      "raster_iou": 0.8927350427350428,
-      "pixel_delta_count": 251,
+      "raster_iou": 0.9071606994171524,
+      "pixel_delta_count": 223,
       "render_error": null
     },
     {
       "code_point": 7855,
       "character": "ắ",
       "render_size_px": 16,
-      "raster_iou": 0.735632183908046,
-      "pixel_delta_count": 23,
+      "raster_iou": 0.8674698795180723,
+      "pixel_delta_count": 11,
       "render_error": null
     },
     {
       "code_point": 7855,
       "character": "ắ",
       "render_size_px": 32,
-      "raster_iou": 0.876,
-      "pixel_delta_count": 31,
+      "raster_iou": 0.8735177865612648,
+      "pixel_delta_count": 32,
       "render_error": null
     },
     {
       "code_point": 7855,
       "character": "ắ",
       "render_size_px": 64,
-      "raster_iou": 0.8629550321199143,
-      "pixel_delta_count": 128,
+      "raster_iou": 0.8379237288135594,
+      "pixel_delta_count": 153,
       "render_error": null
     },
     {
       "code_point": 7855,
       "character": "ắ",
       "render_size_px": 128,
-      "raster_iou": 0.8580405598400457,
-      "pixel_delta_count": 497,
+      "raster_iou": 0.885160543824125,
+      "pixel_delta_count": 397,
       "render_error": null
     },
     {
       "code_point": 273,
       "character": "đ",
       "render_size_px": 16,
-      "raster_iou": 0.5104166666666666,
-      "pixel_delta_count": 47,
+      "raster_iou": 0.5,
+      "pixel_delta_count": 50,
       "render_error": null
     },
     {
       "code_point": 273,
       "character": "đ",
       "render_size_px": 32,
-      "raster_iou": 0.7211895910780669,
-      "pixel_delta_count": 75,
+      "raster_iou": 0.6920289855072463,
+      "pixel_delta_count": 85,
       "render_error": null
     },
     {
       "code_point": 273,
       "character": "đ",
       "render_size_px": 64,
-      "raster_iou": 0.8215811965811965,
-      "pixel_delta_count": 167,
+      "raster_iou": 0.8894967177242888,
+      "pixel_delta_count": 101,
       "render_error": null
     },
     {
       "code_point": 273,
       "character": "đ",
       "render_size_px": 128,
-      "raster_iou": 0.940403422982885,
-      "pixel_delta_count": 195,
+      "raster_iou": 0.935092508340916,
+      "pixel_delta_count": 214,
       "render_error": null
     },
     {
       "code_point": 272,
       "character": "Đ",
       "render_size_px": 16,
-      "raster_iou": 0.9487179487179487,
-      "pixel_delta_count": 4,
+      "raster_iou": 0.925,
+      "pixel_delta_count": 6,
       "render_error": null
     },
     {
       "code_point": 272,
       "character": "Đ",
       "render_size_px": 32,
-      "raster_iou": 0.6655948553054662,
-      "pixel_delta_count": 104,
+      "raster_iou": 0.6688102893890675,
+      "pixel_delta_count": 103,
       "render_error": null
     },
     {
       "code_point": 272,
       "character": "Đ",
       "render_size_px": 64,
-      "raster_iou": 0.9147058823529411,
-      "pixel_delta_count": 87,
+      "raster_iou": 0.8222637979420019,
+      "pixel_delta_count": 190,
       "render_error": null
     },
     {
       "code_point": 272,
       "character": "Đ",
       "render_size_px": 128,
-      "raster_iou": 0.8574724429633427,
-      "pixel_delta_count": 556,
+      "raster_iou": 0.8643060222279659,
+      "pixel_delta_count": 525,
       "render_error": null
     }
   ]
