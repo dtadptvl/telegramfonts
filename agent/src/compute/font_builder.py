@@ -5,11 +5,12 @@ import hashlib
 import io
 import logging
 from pathlib import Path
+import numpy as np
 from fontTools.fontBuilder import FontBuilder
 from fontTools.pens.t2CharStringPen import T2CharStringPen
 from fontTools.pens.ttGlyphPen import TTGlyphPen
 
-from compute.models import GeneratedFontFile, StyleSourceData
+from compute.models import GeneratedFontFile, GlyphContour, StyleSourceData
 
 logger = logging.getLogger("telegramfonts.agent.font_builder")
 
@@ -20,6 +21,39 @@ UNICODE_MAP = {
     "a": 0x61,
     "b": 0x62,
 }
+
+
+def polygon_signed_area(pts: np.ndarray | list[tuple[float, float]]) -> float:
+    """Calculate signed area of polygon using Shoelace formula."""
+    arr = np.asarray(pts, dtype=np.float32)
+    if len(arr) < 3:
+        return 0.0
+    x = arr[:, 0]
+    y = arr[:, 1]
+    return float(0.5 * np.sum(x * np.roll(y, -1) - np.roll(x, -1) * y))
+
+
+def ensure_winding_direction(
+    pts: np.ndarray | list[tuple[float, float]],
+    is_outer: bool = True,
+    is_ttf: bool = True,
+) -> list[tuple[float, float]]:
+    """Ensure contour points conform to TrueType (CW outer / CCW hole) or CFF (CCW outer / CW hole) winding."""
+    arr = np.asarray(pts, dtype=np.float32)
+    if len(arr) < 3:
+        return [(float(p[0]), float(p[1])) for p in arr]
+    area = polygon_signed_area(arr)
+    if is_ttf:
+        if is_outer and area > 0:
+            arr = arr[::-1]
+        elif not is_outer and area < 0:
+            arr = arr[::-1]
+    else:
+        if is_outer and area < 0:
+            arr = arr[::-1]
+        elif not is_outer and area > 0:
+            arr = arr[::-1]
+    return [(float(p[0]), float(p[1])) for p in arr]
 
 
 class FontBuilderService:
@@ -55,10 +89,19 @@ class FontBuilderService:
         glyph_order = list(style_source.glyphs.keys())
         if ".notdef" not in glyph_order:
             glyph_order.insert(0, ".notdef")
+        else:
+            glyph_order.remove(".notdef")
+            glyph_order.insert(0, ".notdef")
 
         cmap: dict[int, str] = {}
+        if style_source.cmap:
+            cmap.update(style_source.cmap)
+
         for g_name in glyph_order:
-            if g_name in UNICODE_MAP:
+            g_vec = style_source.glyphs.get(g_name)
+            if g_vec and g_vec.code_point > 0:
+                cmap[g_vec.code_point] = g_name
+            elif g_name in UNICODE_MAP and UNICODE_MAP[g_name] not in cmap:
                 cmap[UNICODE_MAP[g_name]] = g_name
 
         metrics_dict: dict[str, tuple[int, int]] = {}
@@ -83,10 +126,9 @@ class FontBuilderService:
             "psName": ps,
         }
 
-        # Determine fsSelection flags based on style name
         style_lower = style.lower()
-        is_italic = "italic" in style_lower or "oblique" in style_lower or "slanted" in style_lower
-        is_bold = "bold" in style_lower or style_source.weight_class >= 700
+        is_italic = "italic" in style_lower or "oblique" in style_lower or "slanted" in style_lower or style_source.is_italic
+        is_bold = "bold" in style_lower or "black" in style_lower or style_source.weight_class >= 700
         fs_selection = 0
         if is_italic:
             fs_selection |= 0x01
@@ -100,10 +142,11 @@ class FontBuilderService:
         win_ascent = max(ascent, abs(descent))
         win_descent = abs(descent)
 
-        # Build format-specific font representation (BLOCK G)
+        is_ttf = (clean_format != "OTF")
+
+        # Build format-specific font representation
         if clean_format == "OTF":
-            # Real OpenType font with PostScript CFF outlines (isTTF=False, magic=OTTO)
-            fb = FontBuilder(unitsPerEm=1024, isTTF=False)
+            fb = FontBuilder(unitsPerEm=1000, isTTF=False)
             fb.setupGlyphOrder(glyph_order)
             fb.setupCharacterMap(cmap)
 
@@ -112,13 +155,36 @@ class FontBuilderService:
                 g_vec = style_source.glyphs.get(g_name)
                 adv = metrics_dict[g_name][0]
                 pen = T2CharStringPen(adv, None)
-                if g_vec and g_vec.contours:
+
+                if g_name == ".notdef" and (not g_vec or not g_vec.contours):
+                    outer = [(50.0, 0.0), (50.0, float(ascent)), (450.0, float(ascent)), (450.0, 0.0)]
+                    inner = [(100.0, 50.0), (400.0, 50.0), (400.0, float(ascent - 50)), (100.0, float(ascent - 50))]
+                    outer = ensure_winding_direction(outer, is_outer=True, is_ttf=False)
+                    inner = ensure_winding_direction(inner, is_outer=False, is_ttf=False)
+                    pen.moveTo(outer[0])
+                    for pt in outer[1:]:
+                        pen.lineTo(pt)
+                    pen.closePath()
+                    pen.moveTo(inner[0])
+                    for pt in inner[1:]:
+                        pen.lineTo(pt)
+                    pen.closePath()
+                elif g_vec and g_vec.contours:
                     for contour in g_vec.contours:
-                        if len(contour) > 0:
-                            pen.moveTo(contour[0])
-                            for pt in contour[1:]:
+                        if isinstance(contour, GlyphContour):
+                            raw_pts, is_out = contour.points, contour.is_outer
+                        elif isinstance(contour, tuple) and len(contour) == 2 and isinstance(contour[1], bool):
+                            raw_pts, is_out = contour[0], contour[1]
+                        else:
+                            raw_pts, is_out = contour, True
+
+                        if len(raw_pts) >= 3:
+                            pts = ensure_winding_direction(raw_pts, is_outer=is_out, is_ttf=False)
+                            pen.moveTo(pts[0])
+                            for pt in pts[1:]:
                                 pen.lineTo(pt)
                             pen.closePath()
+
                 charstrings[g_name] = pen.getCharString()
 
             fb.setupCFF(
@@ -133,7 +199,7 @@ class FontBuilderService:
             fb.setupOS2(
                 sTypoAscender=ascent,
                 sTypoDescender=descent,
-                sTypoLineGap=200,
+                sTypoLineGap=0,
                 usWinAscent=win_ascent,
                 usWinDescent=win_descent,
                 sxHeight=500,
@@ -147,8 +213,7 @@ class FontBuilderService:
             fb.setupPost()
 
         else:
-            # TrueType outlines for TTF and WOFF2 (isTTF=True, magic=\x00\x01\x00\x00 or wOF2)
-            fb = FontBuilder(unitsPerEm=1024, isTTF=True)
+            fb = FontBuilder(unitsPerEm=1000, isTTF=True)
             fb.setupGlyphOrder(glyph_order)
             fb.setupCharacterMap(cmap)
 
@@ -156,13 +221,36 @@ class FontBuilderService:
             for g_name in glyph_order:
                 g_vec = style_source.glyphs.get(g_name)
                 pen = TTGlyphPen(None)
-                if g_vec and g_vec.contours:
+
+                if g_name == ".notdef" and (not g_vec or not g_vec.contours):
+                    outer = [(50.0, 0.0), (50.0, float(ascent)), (450.0, float(ascent)), (450.0, 0.0)]
+                    inner = [(100.0, 50.0), (400.0, 50.0), (400.0, float(ascent - 50)), (100.0, float(ascent - 50))]
+                    outer = ensure_winding_direction(outer, is_outer=True, is_ttf=True)
+                    inner = ensure_winding_direction(inner, is_outer=False, is_ttf=True)
+                    pen.moveTo(outer[0])
+                    for pt in outer[1:]:
+                        pen.lineTo(pt)
+                    pen.closePath()
+                    pen.moveTo(inner[0])
+                    for pt in inner[1:]:
+                        pen.lineTo(pt)
+                    pen.closePath()
+                elif g_vec and g_vec.contours:
                     for contour in g_vec.contours:
-                        if len(contour) > 0:
-                            pen.moveTo(contour[0])
-                            for pt in contour[1:]:
+                        if isinstance(contour, GlyphContour):
+                            raw_pts, is_out = contour.points, contour.is_outer
+                        elif isinstance(contour, tuple) and len(contour) == 2 and isinstance(contour[1], bool):
+                            raw_pts, is_out = contour[0], contour[1]
+                        else:
+                            raw_pts, is_out = contour, True
+
+                        if len(raw_pts) >= 3:
+                            pts = ensure_winding_direction(raw_pts, is_outer=is_out, is_ttf=True)
+                            pen.moveTo(pts[0])
+                            for pt in pts[1:]:
                                 pen.lineTo(pt)
                             pen.closePath()
+
                 glyphs_dict[g_name] = pen.glyph()
 
             fb.setupGlyf(glyphs_dict)
@@ -172,7 +260,7 @@ class FontBuilderService:
             fb.setupOS2(
                 sTypoAscender=ascent,
                 sTypoDescender=descent,
-                sTypoLineGap=200,
+                sTypoLineGap=0,
                 usWinAscent=win_ascent,
                 usWinDescent=win_descent,
                 sxHeight=500,

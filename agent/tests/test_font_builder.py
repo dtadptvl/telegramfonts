@@ -112,3 +112,66 @@ async def test_unsupported_format(tmp_path: Path):
 
     with pytest.raises(ValueError, match="UNSUPPORTED_FORMAT"):
         builder.build_font(payload.styles["regular"], "Roboto", "EXE", tmp_path)
+
+
+def test_polygon_signed_area_and_winding_direction():
+    from compute.font_builder import ensure_winding_direction, polygon_signed_area
+    import numpy as np
+
+    # CCW polygon (positive area in Cartesian coords)
+    ccw_poly = [(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)]
+    # CW polygon (negative area)
+    cw_poly = [(0.0, 0.0), (0.0, 100.0), (100.0, 100.0), (100.0, 0.0)]
+
+    area_ccw = polygon_signed_area(ccw_poly)
+    area_cw = polygon_signed_area(cw_poly)
+    assert area_ccw > 0
+    assert area_cw < 0
+
+    # TrueType: Outer must be CW (negative area), Hole must be CCW (positive area)
+    ttf_outer = ensure_winding_direction(ccw_poly, is_outer=True, is_ttf=True)
+    assert polygon_signed_area(ttf_outer) < 0
+
+    ttf_hole = ensure_winding_direction(cw_poly, is_outer=False, is_ttf=True)
+    assert polygon_signed_area(ttf_hole) > 0
+
+    # CFF / OTF: Outer must be CCW (positive area), Hole must be CW (negative area)
+    cff_outer = ensure_winding_direction(cw_poly, is_outer=True, is_ttf=False)
+    assert polygon_signed_area(cff_outer) > 0
+
+    cff_hole = ensure_winding_direction(ccw_poly, is_outer=False, is_ttf=False)
+    assert polygon_signed_area(cff_hole) < 0
+
+
+def test_font_builder_full_cmap_construction(tmp_path: Path):
+    from fontTools.ttLib import TTFont
+    from compute.models import GlyphContour, GlyphVector, StyleSourceData
+
+    builder = FontBuilderService()
+
+    # Create style source with custom glyphs and cmap (e.g. A, B, and Vietnamese character 'Đ' = 0x0110)
+    glyphs = {
+        ".notdef": GlyphVector(character=".notdef", code_point=0, contours=[]),
+        "uni0041": GlyphVector(character="uni0041", code_point=0x41, contours=[GlyphContour(points=[(10, 10), (10, 80), (80, 80), (80, 10)], is_outer=True)]),
+        "uni0042": GlyphVector(character="uni0042", code_point=0x42, contours=[GlyphContour(points=[(10, 10), (10, 80), (80, 80), (80, 10)], is_outer=True)]),
+        "uni0110": GlyphVector(character="uni0110", code_point=0x0110, contours=[GlyphContour(points=[(10, 10), (10, 80), (80, 80), (80, 10)], is_outer=True)]),
+    }
+    cmap = {0x41: "uni0041", 0x42: "uni0042", 0x0110: "uni0110"}
+
+    style_data = StyleSourceData(
+        style_id="reg",
+        style_name="Regular",
+        glyphs=glyphs,
+        cmap=cmap,
+    )
+
+    ttf_file = builder.build_font(style_data, "Custom Test", "TTF", tmp_path)
+    assert ttf_file.file_path.exists()
+
+    font = TTFont(ttf_file.file_path)
+    font_cmap = font.getBestCmap()
+    assert 0x41 in font_cmap
+    assert 0x42 in font_cmap
+    assert 0x0110 in font_cmap
+    assert font_cmap[0x0110] == "uni0110"
+

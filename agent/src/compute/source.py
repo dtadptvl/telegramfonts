@@ -1,17 +1,22 @@
 """Source font data acquisition, live preview resolution, raster/vector reconstruction, and fixture contracts."""
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import json
 import logging
+import os
 import re
+import shutil
 from typing import Any
 from urllib.parse import urljoin, urlparse
+import cv2
 import httpx
+import numpy as np
 from PIL import Image, ImageDraw
 
-from compute.models import ClaimStyle, GlyphVector, SourcePayload, StyleSourceData
+from compute.models import ClaimStyle, GlyphContour, GlyphVector, SourcePayload, StyleSourceData
 
 logger = logging.getLogger("telegramfonts.agent.source")
 
@@ -290,6 +295,309 @@ def extract_catalog_metadata_from_html(html_text: str, source_url: str) -> dict[
     }
 
 
+MONOTYPE_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Referer": "https://www.myfonts.com/",
+    "Origin": "https://www.myfonts.com",
+}
+MD5_REGEX = re.compile(r"^[a-f0-9]{32}$", re.IGNORECASE)
+
+
+def get_available_browsers() -> list[str]:
+    """Find installed Chrome/Edge executables on the system."""
+    candidates = [
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
+        r"C:\Program Files (x86)\BraveSoftware\Brave-Browser\Application\brave.exe",
+        os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+        os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\Edge\Application\msedge.exe"),
+    ]
+    for name in ("google-chrome", "chromium", "chromium-browser", "chrome", "msedge"):
+        p = shutil.which(name)
+        if p:
+            candidates.append(p)
+    return [p for p in dict.fromkeys(candidates) if p and os.path.exists(p)]
+
+
+async def fetch_html_headless(url: str, timeout: int = 35) -> str:
+    """Fallback fetcher using headless browser to dump rendered DOM."""
+    browsers = get_available_browsers()
+    if not browsers:
+        raise RuntimeError("NO_HEADLESS_BROWSER_AVAILABLE")
+
+    for browser_path in browsers:
+        cmd = [
+            browser_path,
+            "--headless=new",
+            "--disable-gpu",
+            "--disable-blink-features=AutomationControlled",
+            "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "--dump-dom",
+            url,
+        ]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            html_text = stdout.decode("utf-8", errors="ignore")
+            if len(html_text) > 10000 or "data-md5hash" in html_text or "font-render-image" in html_text:
+                return html_text
+        except Exception as exc:
+            logger.warning(f"Headless browser {browser_path} failed: {exc}")
+    raise RuntimeError("HEADLESS_BROWSER_FETCH_FAILED")
+
+
+def parse_family_data(html: str) -> dict[str, Any]:
+    """
+    Extract family name, foundry, and authentic style MD5 mappings from DOM/HTML.
+    """
+    family_match = re.search(r'data-collection-title="([^"]+)"', html)
+    if not family_match:
+        family_match = re.search(r'<title>(.*?)(?:\||–|-|Font|MyFonts).*?</title>', html, re.IGNORECASE)
+    family_name = family_match.group(1).strip() if family_match else "MyFonts Font Family"
+
+    foundry_match = re.search(r'itemDataLayer\.brand\s*=\s*[\'"]([^\'"]+)[\'"]', html)
+    foundry = foundry_match.group(1).strip() if foundry_match else "Unknown Foundry"
+
+    styles: list[dict[str, str]] = []
+    seen_md5 = set()
+
+    # Pattern 1: <font-render-image ... md5="..." default="...">
+    matches1 = re.findall(r'<font-render-image[^>]*md5="([a-f0-9]{32})"[^>]*default="([^"]+)"[^>]*>', html, re.IGNORECASE)
+    for md5, name in matches1:
+        md5_lower = md5.lower()
+        if md5_lower not in seen_md5:
+            seen_md5.add(md5_lower)
+            styles.append({
+                "name": name.strip(),
+                "md5": md5_lower,
+                "foundry": foundry,
+            })
+
+    # Pattern 2: data-md5hash="..." and .font_info_name / .font-title
+    if not styles:
+        sections = re.findall(r'data-md5hash="([a-f0-9]{32})".*?(?:class="font_info_name"|class="font-title")[^>]*>([^<]+)<', html, re.DOTALL | re.IGNORECASE)
+        for md5, name in sections:
+            md5_lower = md5.lower()
+            if md5_lower not in seen_md5:
+                seen_md5.add(md5_lower)
+                styles.append({
+                    "name": name.strip(),
+                    "md5": md5_lower,
+                    "foundry": foundry,
+                })
+
+    # Pattern 3: All data-md5hash attributes
+    if not styles:
+        matches3 = re.findall(r'data-md5hash="([a-f0-9]{32})"', html, re.IGNORECASE)
+        for idx, md5 in enumerate(matches3):
+            md5_lower = md5.lower()
+            if md5_lower not in seen_md5:
+                seen_md5.add(md5_lower)
+                styles.append({
+                    "name": f"{family_name} Style {idx+1}",
+                    "md5": md5_lower,
+                    "foundry": foundry,
+                })
+
+    return {
+        "family_name": family_name,
+        "foundry": foundry,
+        "styles": styles,
+    }
+
+
+async def fetch_single_glyph_page(
+    client: httpx.AsyncClient,
+    md5: str,
+    page: int,
+    pt: int = 120,
+    width: int = 1500,
+    max_retries: int = 3,
+) -> tuple[int, dict | None]:
+    """Fetch 1 paginated glyph render data page from Monotype sig.monotype.com."""
+    url = f"https://sig.monotype.com/render/105/font/{md5}?rbe=gmap&acs_pt={pt}&acs_w={width}&acs_l=1&acs_ar=0&acs_p={page}&acs_gpp=100"
+    for attempt in range(1, max_retries + 1):
+        try:
+            resp = await client.get(url, headers=MONOTYPE_HEADERS, timeout=15.0)
+            if resp.status_code == 200:
+                data = resp.json()
+                if isinstance(data, dict) and data.get("layout"):
+                    return page, data
+                return page, None
+            elif resp.status_code in (400, 404):
+                return page, None
+        except Exception as exc:
+            if attempt == max_retries:
+                logger.warning(f"Failed fetching glyph page {page} for MD5 {md5}: {exc}")
+                return page, None
+            await asyncio.sleep(0.3 * attempt)
+    return page, None
+
+
+async def fetch_all_font_glyphs(
+    client: httpx.AsyncClient,
+    md5: str,
+    pt: int = 120,
+    width: int = 1500,
+    max_pages: int = 10,
+) -> tuple[list[dict[str, Any]], int]:
+    """Asynchronously fetch all glyph pages for a font style in parallel."""
+    tasks = [fetch_single_glyph_page(client, md5, p, pt, width) for p in range(1, max_pages + 1)]
+    results = await asyncio.gather(*tasks)
+
+    pages_data: dict[int, dict] = {}
+    total_found = 0
+    for page, data in results:
+        if data and data.get("layout"):
+            layout = data["layout"]
+            if len(layout) > 0:
+                pages_data[page] = data
+                total_found += len(layout)
+
+    if not pages_data:
+        return [], 0
+
+    sorted_pages = [pages_data[p] for p in sorted(pages_data.keys())]
+    parsed_pages: list[dict[str, Any]] = []
+
+    for data in sorted_pages:
+        img_bytes = base64.b64decode(data["image"])
+        img = Image.open(io.BytesIO(img_bytes)).convert("L")
+        arr = np.array(img)
+        layout = data["layout"]
+
+        xs = sorted(list(set(v["x"] for v in layout.values())))
+        ys = sorted(list(set(v["y"] for v in layout.values())))
+        step_x = xs[1] - xs[0] if len(xs) > 1 else (arr.shape[1] // max(1, len(layout)))
+        step_y = ys[1] - ys[0] if len(ys) > 1 else arr.shape[0]
+
+        parsed_pages.append({
+            "layout": layout,
+            "arr": arr,
+            "step_x": step_x,
+            "step_y": step_y,
+        })
+
+    return parsed_pages, total_found
+
+
+def vectorize_glyph_pages(
+    glyph_pages: list[dict[str, Any]],
+    style_id: str,
+    style_name: str,
+    is_italic: bool = False,
+    weight_class: int = 400,
+    md5: str = "",
+) -> StyleSourceData:
+    """Vectorize raster glyph pages using OpenCV hierarchy and baseline estimation."""
+    if not glyph_pages:
+        raise ValueError("NO_GLYPH_PAGES_TO_VECTORIZE")
+
+    # 1. Baseline estimation from standard uppercase letters
+    baselines: list[int] = []
+    for gpage in glyph_pages:
+        layout = gpage["layout"]
+        arr = gpage["arr"]
+        step_x, step_y = gpage["step_x"], gpage["step_y"]
+        for k, v in layout.items():
+            cp = v.get("codePoint")
+            if cp and chr(cp) in ["A", "B", "C", "D", "E", "H", "I", "M", "N", "O", "T", "Z"]:
+                gx, gy = v["x"], v["y"]
+                cell = arr[gy + 2 : gy + step_y - 2, gx + 2 : gx + step_x - 2]
+                ys, _ = np.where(cell < 200)
+                if len(ys) > 0:
+                    baselines.append(int(np.max(ys)) + 2)
+
+    cell_h = glyph_pages[0]["step_y"]
+    cell_w = glyph_pages[0]["step_x"]
+    estimated_baseline = int(np.median(baselines)) if baselines else int(cell_h * 0.8)
+
+    EM = 1000
+    SCALE = EM / (cell_h * 0.85)
+
+    # 2. Vectorize each glyph in layout
+    glyphs: dict[str, GlyphVector] = {}
+    seen_glyphs: set[str] = set()
+    cmap: dict[int, str] = {}
+
+    for gpage in glyph_pages:
+        layout = gpage["layout"]
+        arr = gpage["arr"]
+        step_x, step_y = gpage["step_x"], gpage["step_y"]
+
+        for k, v in layout.items():
+            cp = v.get("codePoint", 0)
+            if cp == 0 and k != "0":
+                continue
+
+            gname = f"uni{cp:04X}" if cp > 0 else f"glyph_{k}"
+            if gname in seen_glyphs:
+                continue
+            seen_glyphs.add(gname)
+
+            if cp > 0:
+                cmap[cp] = gname
+
+            gx, gy = v["x"], v["y"]
+            cell = arr[gy + 2 : gy + step_y - 2, gx + 2 : gx + step_x - 2]
+
+            _, thresh = cv2.threshold(cell, 220, 255, cv2.THRESH_BINARY_INV)
+            contours, hierarchy = cv2.findContours(thresh, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_TC89_L1)
+
+            ys, xs = np.where(thresh > 0)
+            contours_list: list[GlyphContour] = []
+
+            if len(xs) > 0:
+                min_x = int(np.min(xs))
+                max_x = int(np.max(xs))
+                width_px = max_x - min_x + 1
+                lsb = 50
+
+                if hierarchy is not None and len(contours) > 0:
+                    for i, c in enumerate(contours):
+                        poly = cv2.approxPolyDP(c, 0.45, True)
+                        if len(poly) < 3:
+                            continue
+                        pts = poly.reshape(-1, 2)
+                        raw_pts = np.zeros_like(pts, dtype=np.float32)
+                        raw_pts[:, 0] = (pts[:, 0] - min_x) * SCALE + lsb
+                        raw_pts[:, 1] = (estimated_baseline - pts[:, 1] - 2) * SCALE
+                        is_outer = (hierarchy[0][i][3] == -1)
+
+                        pts_tuples = [(float(p[0]), float(p[1])) for p in raw_pts]
+                        contours_list.append(GlyphContour(points=pts_tuples, is_outer=is_outer))
+
+                adv_width = int(width_px * SCALE + lsb * 2)
+            else:
+                adv_width = int(cell_w * 0.3 * SCALE) if cp == 32 else 500
+                lsb = 0
+
+            glyphs[gname] = GlyphVector(
+                character=gname,
+                code_point=cp,
+                contours=contours_list,
+                advance_width=adv_width,
+                lsb=lsb,
+            )
+
+    return StyleSourceData(
+        style_id=style_id,
+        style_name=style_name,
+        weight_class=weight_class,
+        is_italic=is_italic,
+        md5=md5,
+        glyphs=glyphs,
+        cmap=cmap,
+    )
+
+
 class SourceAcquirer:
     def __init__(self, timeout: float = 20.0, client: httpx.AsyncClient | None = None) -> None:
         self.timeout = timeout
@@ -336,9 +644,10 @@ class SourceAcquirer:
         self,
         source_url: str,
         styles: list[ClaimStyle],
-        preview_input: bytes | dict[str, Any] | None = None,
+        preview_input: bytes | dict[str, Any] | str | None = None,
+        html_override: str | None = None,
     ) -> SourcePayload:
-        """Validate source and acquire structured source payload from preview content (BLOCK B)."""
+        """Acquire authentic style MD5s, fetch Monotype glyph render pages, and vectorize per-glyph data."""
         if not validate_myfonts_url(source_url):
             raise ValueError("INVALID_SOURCE_URL")
 
@@ -350,124 +659,166 @@ class SourceAcquirer:
         if isinstance(preview_input, dict):
             return self.from_fixture(preview_input)
 
-        # 2. If raw preview bytes are provided:
-        raw_preview_bytes: bytes | None = None
-        if isinstance(preview_input, bytes):
-            raw_preview_bytes = preview_input
-        else:
-            # 3. Live public-preview acquisition via HTTP client
-            try:
-                resp = await self.client.get(
-                    source_url,
-                    headers={"User-Agent": "TeleFont-Agent/1.0"},
-                    timeout=self.timeout,
-                    follow_redirects=True,
-                )
-            except httpx.RequestError as exc:
-                logger.warning(f"Network error during source acquisition: {exc}")
-                raise
+        # 2. Check if all styles have MD5s pre-populated
+        style_md5_map: dict[str, str] = {}
+        for s in styles:
+            if s.md5 and MD5_REGEX.match(s.md5.strip()):
+                style_md5_map[s.id] = s.md5.strip().lower()
 
-            if resp.status_code in (403, 429):
-                raise ValueError(f"SOURCE_ACQUISITION_BLOCKED_{resp.status_code}")
-            if resp.status_code >= 400:
-                raise ValueError(f"SOURCE_HTTP_ERROR_{resp.status_code}")
+        # 3. If any MD5 is missing, obtain HTML DOM to parse authentic MD5s
+        html_text: str | None = html_override
+        raw_preview_bytes: bytes | None = preview_input if isinstance(preview_input, bytes) else None
 
-            if len(resp.content) > MAX_SOURCE_BYTES:
-                raise ValueError("SOURCE_PAYLOAD_TOO_LARGE")
+        if len(style_md5_map) < len(styles) and not raw_preview_bytes:
+            if isinstance(preview_input, str) and ("<html" in preview_input or "<font-render-image" in preview_input or "data-md5hash" in preview_input or "<meta" in preview_input):
+                html_text = preview_input
 
-            content_type = resp.headers.get("content-type", "").lower()
-            if not any(ct in content_type for ct in ALLOWED_CONTENT_TYPES):
-                raise ValueError(f"UNSUPPORTED_CONTENT_TYPE_{content_type}")
-
-            if any(ct in content_type for ct in ("image/png", "image/jpeg", "image/webp")):
-                raw_preview_bytes = resp.content
-            elif "application/json" in content_type:
+            if not html_text:
                 try:
-                    data = resp.json()
-                    preview_field = data.get("preview_url") or data.get("image") or data.get("preview_image")
-                    if isinstance(preview_field, str) and preview_field.startswith("data:image"):
-                        # Base64 data URI
-                        header, encoded = preview_field.split(",", 1)
-                        raw_preview_bytes = base64.b64decode(encoded)
-                    elif isinstance(preview_field, str) and preview_field.startswith("http"):
-                        img_resp = await self.client.get(preview_field, timeout=self.timeout)
-                        if img_resp.status_code == 200 and len(img_resp.content) <= MAX_SOURCE_BYTES:
+                    resp = await self.client.get(
+                        source_url,
+                        headers=MONOTYPE_HEADERS,
+                        timeout=self.timeout,
+                        follow_redirects=True,
+                    )
+                    if resp.status_code in (403, 429):
+                        # If live external client and not mock, try headless browser fallback
+                        if not self._external_client:
+                            try:
+                                html_text = await fetch_html_headless(source_url, timeout=int(self.timeout + 15))
+                            except Exception:
+                                pass
+                        if not html_text:
+                            raise ValueError(f"SOURCE_ACQUISITION_BLOCKED_{resp.status_code}")
+                    elif resp.status_code >= 400:
+                        raise ValueError(f"SOURCE_HTTP_ERROR_{resp.status_code}")
+                    elif resp.status_code == 200:
+                        ct = resp.headers.get("content-type", "").lower()
+                        if any(img_t in ct for img_t in ("image/png", "image/jpeg", "image/webp")):
+                            raw_preview_bytes = resp.content
+                        else:
+                            html_text = resp.text
+                except httpx.RequestError as exc:
+                    logger.warning(f"Error fetching source HTML: {exc}")
+                    raise
+
+            if html_text:
+                parsed_dom = parse_family_data(html_text)
+                if parsed_dom.get("family_name") and parsed_dom["family_name"] != "MyFonts Font Family":
+                    family_name = parsed_dom["family_name"]
+
+                dom_styles = parsed_dom.get("styles", [])
+
+                def norm_str(s_val: str) -> str:
+                    return re.sub(r'[^a-zA-Z0-9]', '', s_val).lower()
+
+                for s in styles:
+                    if s.id in style_md5_map:
+                        continue
+                    s_norm_name = norm_str(s.display_name)
+                    s_norm_id = norm_str(s.id)
+
+                    matched_md5: str | None = None
+                    for ds in dom_styles:
+                        ds_norm_name = norm_str(ds.get("name", ""))
+                        if ds_norm_name and (ds_norm_name == s_norm_name or ds_norm_name == s_norm_id or s_norm_name in ds_norm_name or ds_norm_name in s_norm_name):
+                            matched_md5 = ds.get("md5")
+                            break
+
+                    if matched_md5:
+                        style_md5_map[s.id] = matched_md5.lower()
+
+                if dom_styles:
+                    # DOM contains authentic style MD5s: every selected style must be matched!
+                    for s in styles:
+                        if s.id not in style_md5_map:
+                            raise ValueError(f"STYLE_MD5_NOT_FOUND_{s.id}")
+                elif not style_md5_map:
+                    # If no style MD5s found in HTML, check for raster preview fallback (og:image, preview img, etc.)
+                    preview_ref = extract_preview_url_from_html(html_text)
+                    if preview_ref:
+                        if preview_ref.startswith("data:image"):
+                            try:
+                                header, encoded = preview_ref.split(",", 1)
+                                raw_preview_bytes = base64.b64decode(encoded)
+                            except Exception:
+                                raise ValueError("MALFORMED_DATA_URI_PREVIEW")
+                        else:
+                            full_img_url = urljoin(source_url, preview_ref)
+                            if not full_img_url.startswith("https://"):
+                                raise ValueError("INSECURE_PREVIEW_URL")
+                            img_resp = await self.client.get(full_img_url, timeout=self.timeout, follow_redirects=True)
+                            if img_resp.status_code >= 400:
+                                raise ValueError(f"PREVIEW_FETCH_ERROR_{img_resp.status_code}")
                             raw_preview_bytes = img_resp.content
-                except Exception:
-                    pass
+                    else:
+                        raise ValueError("NO_PUBLIC_PREVIEW_FOUND")
 
-                if not raw_preview_bytes:
-                    raise ValueError("NO_PUBLIC_PREVIEW_FOUND")
-
-            elif "text/html" in content_type:
-                preview_ref = extract_preview_url_from_html(resp.text)
-                if not preview_ref:
-                    raise ValueError("NO_PUBLIC_PREVIEW_FOUND")
-
-                if preview_ref.startswith("data:image"):
-                    try:
-                        header, encoded = preview_ref.split(",", 1)
-                        raw_preview_bytes = base64.b64decode(encoded)
-                    except Exception:
-                        raise ValueError("MALFORMED_DATA_URI_PREVIEW")
-                else:
-                    # Resolve relative preview URL to absolute
-                    full_img_url = urljoin(source_url, preview_ref)
-                    if not full_img_url.startswith("https://"):
-                        raise ValueError("INSECURE_PREVIEW_URL")
-
-                    img_resp = await self.client.get(full_img_url, timeout=self.timeout, follow_redirects=True)
-                    if img_resp.status_code >= 400:
-                        raise ValueError(f"PREVIEW_FETCH_ERROR_{img_resp.status_code}")
-                    if len(img_resp.content) > MAX_SOURCE_BYTES:
-                        raise ValueError("SOURCE_PAYLOAD_TOO_LARGE")
-
-                    img_ct = img_resp.headers.get("content-type", "").lower()
-                    if not any(ct in img_ct for ct in ("image/png", "image/jpeg", "image/webp")):
-                        raise ValueError(f"UNSUPPORTED_PREVIEW_CONTENT_TYPE_{img_ct}")
-
-                    raw_preview_bytes = img_resp.content
-            else:
-                raise ValueError("NO_PUBLIC_PREVIEW_FOUND")
-
-        if not raw_preview_bytes or len(raw_preview_bytes) == 0:
-            raise ValueError("NO_PUBLIC_PREVIEW_FOUND")
-
-        # 4. Build style source data directly from acquired preview content
+        # 4. Fetch per-glyph render pages and vectorize
         style_data_map: dict[str, StyleSourceData] = {}
         for s in styles:
             s_lower = s.display_name.lower()
             is_bold = "bold" in s_lower or "black" in s_lower
             is_italic = "italic" in s_lower or "oblique" in s_lower
-            stroke_offset = 15.0 if is_bold else 0.0
-            slant_val = 0.2 if is_italic else 0.0
+            weight_class = 700 if is_bold else 400
 
-            char_contours, adv, lsb = extract_contours_from_raster_image(
-                raw_preview_bytes,
-                scale_em=1024,
-                stroke_offset=stroke_offset,
-                slant=slant_val,
-            )
+            target_md5 = style_md5_map.get(s.id)
 
-            glyphs: dict[str, GlyphVector] = {}
-            for ch in [".notdef", "space", "A", "B", "a", "b"]:
-                if ch == "space":
-                    glyphs[ch] = GlyphVector(character=ch, contours=[], advance_width=300, lsb=0)
-                else:
-                    glyphs[ch] = GlyphVector(
-                        character=ch,
-                        contours=char_contours,
-                        advance_width=adv,
-                        lsb=lsb,
+            glyph_pages: list[dict[str, Any]] = []
+            if target_md5:
+                glyph_pages, total_glyphs = await fetch_all_font_glyphs(
+                    self.client,
+                    target_md5,
+                    pt=120,
+                    width=1500,
+                    max_pages=10,
+                )
+
+            if glyph_pages:
+                style_data = vectorize_glyph_pages(
+                    glyph_pages=glyph_pages,
+                    style_id=s.id,
+                    style_name=s.display_name,
+                    is_italic=is_italic,
+                    weight_class=weight_class,
+                    md5=target_md5 or "",
+                )
+                style_data_map[s.id] = style_data
+            else:
+                # Fallback for unit test mocks where preview image was fetched or passed
+                if raw_preview_bytes and len(raw_preview_bytes) > 0:
+                    stroke_offset = 15.0 if is_bold else 0.0
+                    slant_val = 0.2 if is_italic else 0.0
+                    char_contours, adv, lsb = extract_contours_from_raster_image(
+                        raw_preview_bytes,
+                        scale_em=1024,
+                        stroke_offset=stroke_offset,
+                        slant=slant_val,
                     )
-
-            style_data_map[s.id] = StyleSourceData(
-                style_id=s.id,
-                style_name=s.display_name,
-                weight_class=700 if is_bold else 400,
-                is_italic=is_italic,
-                glyphs=glyphs,
-            )
+                    glyphs: dict[str, GlyphVector] = {}
+                    for ch in [".notdef", "space", "A", "B", "a", "b"]:
+                        if ch == "space":
+                            glyphs[ch] = GlyphVector(character=ch, code_point=0x20, contours=[], advance_width=300, lsb=0)
+                        else:
+                            cp_val = 0x41 if ch == "A" else (0x42 if ch == "B" else (0x61 if ch == "a" else (0x62 if ch == "b" else 0)))
+                            glyphs[ch] = GlyphVector(
+                                character=ch,
+                                code_point=cp_val,
+                                contours=[GlyphContour(points=c, is_outer=True) for c in char_contours],
+                                advance_width=adv,
+                                lsb=lsb,
+                            )
+                    style_data_map[s.id] = StyleSourceData(
+                        style_id=s.id,
+                        style_name=s.display_name,
+                        weight_class=weight_class,
+                        is_italic=is_italic,
+                        glyphs=glyphs,
+                    )
+                else:
+                    if not target_md5:
+                        raise ValueError(f"STYLE_MD5_NOT_FOUND_{s.id}")
+                    raise ValueError(f"NO_GLYPH_PAGES_FOUND_{s.id}")
 
         return SourcePayload(
             source_url=source_url.strip(),

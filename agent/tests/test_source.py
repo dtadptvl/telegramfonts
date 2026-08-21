@@ -272,3 +272,128 @@ def test_extract_catalog_metadata_fails_closed_without_synthetic_styles():
     with pytest.raises(ValueError, match="NO_CATALOG_STYLES_FOUND"):
         extract_catalog_metadata_from_html(empty_styles_html, "https://www.myfonts.com/collections/empty-font")
 
+
+def test_parse_family_data_font_render_image_and_data_md5():
+    from compute.source import parse_family_data
+
+    html = """
+    <html>
+      <head><title>Neurath Mono | MyFonts</title></head>
+      <body>
+        <div data-collection-title="Neurath Mono">
+          <font-render-image md5="c06620f10c6884ed907d765208a9a23f" default="Regular"></font-render-image>
+          <font-render-image md5="709c75b9553adbb6dc13d3b9d28f5755" default="Bold"></font-render-image>
+        </div>
+      </body>
+    </html>
+    """
+    data = parse_family_data(html)
+    assert data["family_name"] == "Neurath Mono"
+    assert len(data["styles"]) == 2
+    assert data["styles"][0]["name"] == "Regular"
+    assert data["styles"][0]["md5"] == "c06620f10c6884ed907d765208a9a23f"
+    assert data["styles"][1]["name"] == "Bold"
+    assert data["styles"][1]["md5"] == "709c75b9553adbb6dc13d3b9d28f5755"
+
+
+def test_vectorize_glyph_pages_outer_and_inner_hole_contours():
+    import numpy as np
+    from compute.source import vectorize_glyph_pages
+
+    # Construct mock image array with outer box and inner cutout hole (e.g. letter 'O')
+    img_arr = np.ones((200, 200), dtype=np.uint8) * 255
+    # Outer black rectangle (40 to 160)
+    img_arr[40:160, 40:160] = 0
+    # Inner white cutout hole (70 to 130)
+    img_arr[70:130, 70:130] = 255
+
+    layout = {
+        "79": {
+            "codePoint": 79,  # 'O'
+            "x": 10,
+            "y": 10,
+        }
+    }
+    glyph_pages = [{
+        "layout": layout,
+        "arr": img_arr,
+        "step_x": 180,
+        "step_y": 180,
+    }]
+
+    style_data = vectorize_glyph_pages(glyph_pages, style_id="s1", style_name="Regular")
+    assert "uni004F" in style_data.glyphs
+    g_vec = style_data.glyphs["uni004F"]
+    assert g_vec.code_point == 79
+    # Must have both outer contour and inner hole contour
+    assert len(g_vec.contours) == 2
+    outer_count = sum(1 for c in g_vec.contours if c.is_outer)
+    inner_count = sum(1 for c in g_vec.contours if not c.is_outer)
+    assert outer_count == 1
+    assert inner_count == 1
+
+
+@pytest.mark.asyncio
+async def test_acquire_source_with_monotype_endpoint_mock():
+    import base64
+    import numpy as np
+    from PIL import Image
+
+    styles = [ClaimStyle(id="reg", display_name="Regular")]
+
+    # Create dummy glyph image
+    img = Image.new("L", (180, 180), color=255)
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([30, 30, 150, 150], fill=0)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    b64_img = base64.b64encode(buf.getvalue()).decode("ascii")
+
+    html = """
+    <html>
+      <body>
+        <font-render-image md5="c06620f10c6884ed907d765208a9a23f" default="Regular"></font-render-image>
+      </body>
+    </html>
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url_str = str(request.url)
+        if "sig.monotype.com/render/105/font/c06620f10c6884ed907d765208a9a23f" in url_str:
+            if "acs_p=1" in url_str:
+                return httpx.Response(200, json={
+                    "layout": {"0": {"codePoint": 65, "x": 0, "y": 0}},
+                    "image": b64_img,
+                })
+            return httpx.Response(200, json={"layout": {}, "image": ""})
+        if url_str == "https://www.myfonts.com/collections/custom-mono":
+            return httpx.Response(200, text=html, headers={"content-type": "text/html"})
+        return httpx.Response(404)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        acquirer = SourceAcquirer(client=http_client)
+        payload = await acquirer.acquire_source("https://www.myfonts.com/collections/custom-mono", styles)
+        assert "reg" in payload.styles
+        assert "uni0041" in payload.styles["reg"].glyphs
+        assert 65 in payload.styles["reg"].cmap
+
+
+@pytest.mark.asyncio
+async def test_acquire_source_fails_closed_when_style_md5_unmatched():
+    styles = [ClaimStyle(id="missing_style", display_name="Ultra Extrabold Italic")]
+    html = """
+    <html>
+      <body>
+        <font-render-image md5="c06620f10c6884ed907d765208a9a23f" default="Regular"></font-render-image>
+      </body>
+    </html>
+    """
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=html, headers={"content-type": "text/html"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        acquirer = SourceAcquirer(client=http_client)
+        with pytest.raises(ValueError, match="STYLE_MD5_NOT_FOUND"):
+            await acquirer.acquire_source("https://www.myfonts.com/collections/custom-mono", styles)
+
+

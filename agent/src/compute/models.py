@@ -9,12 +9,20 @@ from pathlib import Path
 class ClaimStyle:
     id: str
     display_name: str
+    md5: str | None = None
+
+
+@dataclass
+class GlyphContour:
+    points: list[tuple[float, float]]
+    is_outer: bool = True
 
 
 @dataclass
 class GlyphVector:
     character: str
-    contours: list[list[tuple[float, float]]]  # list of contours, each a list of (x, y) points
+    code_point: int = 0
+    contours: list[GlyphContour] | list[list[tuple[float, float]]] = field(default_factory=list)
     advance_width: int = 600
     lsb: int = 50
 
@@ -25,7 +33,9 @@ class StyleSourceData:
     style_name: str
     weight_class: int = 400
     is_italic: bool = False
+    md5: str = ""
     glyphs: dict[str, GlyphVector] = field(default_factory=dict)
+    cmap: dict[int, str] = field(default_factory=dict)
 
 
 @dataclass
