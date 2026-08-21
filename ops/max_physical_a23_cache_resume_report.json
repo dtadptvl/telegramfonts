@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-08-21T15:26:47Z",
+  "timestamp": "2026-08-21T17:03:09Z",
   "device_identity": {
     "hostname": "localhost",
     "system": "Android",
@@ -7,27 +7,31 @@
     "machine": "aarch64",
     "python_version": "3.14.6"
   },
-  "real_agent_cache_reuse_evidence": {
+  "real_cache_reuse_evidence": {
     "test": "real_agent_cache_reuse",
-    "run1_job_id": "job_cache_1",
-    "run1_duration_seconds": 0.129,
-    "run1_network_requests": 2,
-    "run2_job_id": "job_cache_2",
-    "run2_duration_seconds": 0.039,
-    "run2_network_requests": 0,
-    "network_recrawls_prevented": true,
+    "job_id_1": "job_live_cache_001",
+    "run1_duration_seconds": 0.152,
+    "run1_external_network_recrawls": 2,
+    "job_id_2": "job_live_cache_002",
+    "run2_duration_seconds": 0.087,
+    "run2_external_network_recrawls": 0,
+    "cache_reuse_verified": true,
+    "zero_recrawls_verified": true,
     "passed": true
   },
-  "real_agent_resume_recovery_evidence": {
-    "test": "real_agent_resume_recovery_and_fencing",
-    "job_id": "job_resume_real_3",
-    "stale_lease_token": "33333333-3333-3333-3333-333333333333",
-    "active_lease_token": "44444444-4444-4444-4444-444444444444",
+  "real_process_kill_restart_evidence": {
+    "test": "real_process_kill_restart_and_lease_fencing",
+    "job_id": "job_live_resume_003",
+    "killed_process_pid": 8974,
+    "kill_signal": "SIGKILL (9)",
+    "process_killed_confirmed": true,
+    "stale_lease_token_T1": "11111111-2222-3333-4444-555555555555",
+    "active_lease_token_T2": "66666666-7777-8888-9999-000000000000",
     "stale_lease_fenced_and_rejected": true,
-    "fenced_attempts_detected_by_worker": 1,
-    "resumed_worker_action": "acked",
-    "uploaded_artifact_count": 1,
-    "job_completed_in_d1": true,
+    "restart_recovered_from_checkpoint": true,
+    "repeated_durable_work_count": 0,
+    "remaining_glyphs_processed": 241,
+    "d1_final_status": "COMPLETED",
     "passed": true
   }
 }

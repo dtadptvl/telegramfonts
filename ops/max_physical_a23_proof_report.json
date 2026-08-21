@@ -59,12 +59,17 @@
   },
   "capacity_model": {
     "measured_full_style_cold_seconds": 1629.34,
-    "measured_steady_state_cached_seconds": 0.05,
+    "measured_physical_cached_packaging_ms": 34.69,
     "cold_reconstruction_capacity_styles_per_day_100pct_duty": 53,
     "cold_reconstruction_capacity_styles_per_day_25pct_duty": 13,
-    "cached_steady_state_capacity_styles_per_day_25pct_duty": 432000,
+    "cached_steady_state_capacity_styles_per_day_25pct_duty": 622669,
     "daily_download_target_min": 500,
     "daily_download_target_max": 1000,
-    "capacity_verdict": "PASS (Cached throughput >400,000 styles/day; single cold phone builds ~50-100 full styles/day passively with 0 recrawls)"
+    "workload_and_cache_hit_assumptions": {
+      "target_500_downloads_per_day": "At 98.0% cache hit rate (10 cold styles, 490 cached), compute duty is 4.53 h/day (18.9% duty cycle <= 25% budget -> PASS)",
+      "target_1000_downloads_per_day": "At 98.8% cache hit rate (12 cold styles, 988 cached), compute duty is 5.44 h/day (22.7% duty cycle <= 25% budget -> PASS)",
+      "single_node_cold_absorption_limit": "13 cold unseen styles/day max on single phone; queue throttling or node scaling applies if cold unseen styles exceed 13/day"
+    },
+    "capacity_verdict": "PASS (Physical A23 fulfills 500-1000 downloads/day under >=98% catalog cache hit rate within 25% duty cycle; single cold phone absorbs up to 13 unseen full styles/day)"
   }
 }
