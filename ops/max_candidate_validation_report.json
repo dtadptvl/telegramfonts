@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-08-21T10:35:03.702544+00:00",
+  "timestamp": "2026-08-21T13:20:54.494979+00:00",
   "device_identity": {
     "hostname": "DESKTOP-1GIB12N",
     "os": "Windows",
@@ -11,8 +11,8 @@
   },
   "reference_id": "be_vietnam_pro",
   "style_id": "regular",
-  "total_time_seconds": 13.48,
-  "peak_rss_mb": 106.9,
+  "total_time_seconds": 13.72,
+  "peak_rss_mb": 107.18,
   "candidate_family": {
     "family_name": "BeVietnamPro MAX",
     "style_name": "Regular",
@@ -41,7 +41,7 @@
         "filename": "BeVietnamProMAX-Regular.woff2",
         "file_path": "build\\candidate_fonts\\BeVietnamProMAX-Regular.woff2",
         "size_bytes": 3712,
-        "sha256_hex": "5eed047f191f4868187be84dfb06e1478ae41ddabc68c706a91d881980b19584",
+        "sha256_hex": "b97264e712198dfb595f146c3b9002a71fba71f0688ffc3cdd6ccd975a0605ce",
         "glyph_count": 15,
         "units_per_em": 1000
       }
@@ -118,7 +118,7 @@
     "total_pairs_probed": 12,
     "active_kerning_pairs_count": 7,
     "inference_method": "observation_store_differential_derivation",
-    "created_at": "2026-08-21T10:35:03.369653+00:00"
+    "created_at": "2026-08-21T13:20:54.147950+00:00"
   },
   "chromium_validation": {
     "is_available": true,
@@ -349,7 +349,7 @@
       "format": "WOFF2",
       "file_path": "build\\candidate_fonts\\BeVietnamProMAX-Regular.woff2",
       "size_bytes": 3712,
-      "sha256_hex": "5eed047f191f4868187be84dfb06e1478ae41ddabc68c706a91d881980b19584",
+      "sha256_hex": "b97264e712198dfb595f146c3b9002a71fba71f0688ffc3cdd6ccd975a0605ce",
       "is_direct_loadable_fonttools": true,
       "is_direct_loadable_freetype": false,
       "is_roundtrip_loadable_freetype": true,

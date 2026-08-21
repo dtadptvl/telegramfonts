@@ -91,9 +91,9 @@ class ChromiumValidationResult:
     measured_glyph_count: int
     mean_chromium_advance_error_upem: float
     pair_metrics: list[ChromiumPairMetricResult] = field(default_factory=list)
-    fit_pairs_material_improvement: bool = True
-    held_out_pairs_non_regression: bool = True
-    rendered_canvas_valid: bool = True
+    fit_pairs_material_improvement: bool = False
+    held_out_pairs_non_regression: bool = False
+    rendered_canvas_valid: bool = False
     error_message: str | None = None
 
 
@@ -378,6 +378,8 @@ class MaxCandidateHeldOutValidator:
                 chromium_res.is_available
                 and chromium_res.is_direct_loadable_chromium
                 and chromium_res.fallback_rejection_verified
+                and chromium_res.fit_pairs_material_improvement
+                and chromium_res.held_out_pairs_non_regression
                 and chromium_res.rendered_canvas_valid
             )
         )

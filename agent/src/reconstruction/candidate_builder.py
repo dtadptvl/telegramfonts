@@ -363,6 +363,9 @@ class MaxCandidateFontBuilder:
         """Derive compressed WOFF2 candidate font from validated SFNT binary."""
         font = TTFont(sfnt_path)
         font.flavor = "woff2"
+        if "head" in font:
+            font["head"].created = 0
+            font["head"].modified = 0
 
         ps_name = f"{self.family_name.replace(' ', '')}-{self.style_name.replace(' ', '')}"
         filename = f"{ps_name}.woff2"
