@@ -12,7 +12,7 @@ LEASE_SAFETY_MARGIN_SECONDS = 15
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=(".env", str(Path.home() / ".telefont.env")),
         env_file_encoding="utf-8",
         extra="ignore",
     )
