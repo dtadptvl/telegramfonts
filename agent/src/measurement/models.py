@@ -180,6 +180,10 @@ class BenchmarkResult:
     total_raster_observations: int
     coverage_count: int
     expected_coverage_count: int
+    missing_glyphs_count: int
+    extra_glyphs_count: int
+    coverage_precision: float
+    coverage_recall: float
     coverage_match_rate: float
     advance_width_mean_delta_upem: float
     advance_width_max_delta_upem: float
