@@ -275,7 +275,7 @@ class JobRunner:
                 lease_token=job.lease_token,
                 artifact_key=uploaded_parts[0]["artifact_key"],
                 sha256_hex=uploaded_parts[0]["artifact_sha256"],
-                size=sum(p["artifact_size_bytes"] for p in uploaded_parts),
+                size=uploaded_parts[0]["artifact_size_bytes"],
                 parts=uploaded_parts,
             )
 
