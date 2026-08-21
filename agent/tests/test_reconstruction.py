@@ -366,10 +366,107 @@ def test_candidate_builder_and_validator_e2e(tmp_path):
 
     # 6. Check HeldOutValidator Execution
     validator = MaxCandidateHeldOutValidator(ttf_path)
-    report = validator.validate_family(res, tested_codepoints=test_cps)
+    report = validator.validate_family(res, tested_codepoints=test_cps, run_chromium=False)
 
     assert report.all_formats_passed is True
     assert report.mean_advance_error_upem < 1.0  # Direct metrics propagation
+    assert report.in_cmap_shaping_match_rate == 1.0
     assert len(report.shaping_results) > 0
     assert len(report.raster_results) > 0
+
+
+def test_held_out_validator_no_fail_open_on_broken_consumer(tmp_path):
+    """Verify validator fails closed when a consumer throws an error during rasterization."""
+    from reconstruction.candidate_builder import MaxCandidateFontBuilder
+    from reconstruction.candidate_validator import MaxCandidateHeldOutValidator
+
+    store_dir = Path("observations/benchmark")
+    ttf_path = Path("agent/benchmark_data/ground_truth/BeVietnamPro-Regular.ttf")
+    if not store_dir.exists() or not ttf_path.exists():
+        pytest.skip("Benchmark observations or ground truth font not available")
+
+    store = ObservationStore(store_dir)
+    solver = MaxReconstructionSolver()
+    obs = store.get_glyph_observations("be_vietnam_pro", "regular", ord("A"))
+    glyph = solver.reconstruct_glyph(obs)
+
+    builder = MaxCandidateFontBuilder(family_name="TestFont MAX", style_name="Regular")
+    res = builder.build_candidate_family([glyph], tmp_path)
+
+    validator = MaxCandidateHeldOutValidator(ttf_path)
+    
+    # Mock FreeType load_char to raise exception on candidate face
+    class BrokenFace:
+        def set_pixel_sizes(self, w, h):
+            pass
+        def load_char(self, c, flags=0):
+            raise RuntimeError("FT_SIMULATED_RASTER_CORRUPTION")
+
+    iou, delta, err = validator._compute_freetype_raster_iou(BrokenFace(), validator.ref_face, "A", 32)
+    
+    # Must NOT fail open (must return iou=0.0 and explicit error, not iou=1.0)
+    assert iou == 0.0
+    assert delta == -1
+    assert err == "FT_SIMULATED_RASTER_CORRUPTION"
+
+
+def test_held_out_validator_missing_cmap_sequence_mismatch(tmp_path):
+    """Verify strings containing unmapped characters do not falsely report glyph sequence match."""
+    from reconstruction.candidate_builder import MaxCandidateFontBuilder
+    from reconstruction.candidate_validator import MaxCandidateHeldOutValidator
+
+    store_dir = Path("observations/benchmark")
+    ttf_path = Path("agent/benchmark_data/ground_truth/BeVietnamPro-Regular.ttf")
+    if not store_dir.exists() or not ttf_path.exists():
+        pytest.skip("Benchmark observations or ground truth font not available")
+
+    store = ObservationStore(store_dir)
+    solver = MaxReconstructionSolver()
+    # Candidate only contains 'A' and 'B'
+    glyphs = [
+        solver.reconstruct_glyph(store.get_glyph_observations("be_vietnam_pro", "regular", ord("A"))),
+        solver.reconstruct_glyph(store.get_glyph_observations("be_vietnam_pro", "regular", ord("B"))),
+    ]
+
+    builder = MaxCandidateFontBuilder(family_name="TestFont AB", style_name="Regular")
+    res = builder.build_candidate_family(glyphs, tmp_path)
+
+    validator = MaxCandidateHeldOutValidator(ttf_path)
+    report = validator.validate_family(res, tested_codepoints=[ord("A"), ord("B")], run_chromium=False)
+
+    # Missing cmap strings (e.g. "The quick brown fox" or "AVATAR") must NOT match sequence
+    out_of_cmap_results = [s for s in report.shaping_results if not s.in_candidate_cmap]
+    assert len(out_of_cmap_results) > 0
+    for s in out_of_cmap_results:
+        assert s.glyph_sequence_match is False
+        assert ".notdef" in s.candidate_glyph_names
+
+
+def test_held_out_validator_woff2_direct_and_roundtrip_semantics(tmp_path):
+    """Verify WOFF2 format validation properly distinguishes direct and round-trip capabilities."""
+    from reconstruction.candidate_builder import MaxCandidateFontBuilder
+    from reconstruction.candidate_validator import MaxCandidateHeldOutValidator
+
+    store_dir = Path("observations/benchmark")
+    ttf_path = Path("agent/benchmark_data/ground_truth/BeVietnamPro-Regular.ttf")
+    if not store_dir.exists() or not ttf_path.exists():
+        pytest.skip("Benchmark observations or ground truth font not available")
+
+    store = ObservationStore(store_dir)
+    solver = MaxReconstructionSolver()
+    glyph = solver.reconstruct_glyph(store.get_glyph_observations("be_vietnam_pro", "regular", ord("A")))
+
+    builder = MaxCandidateFontBuilder(family_name="TestFont WOFF2", style_name="Regular")
+    res = builder.build_candidate_family([glyph], tmp_path)
+
+    validator = MaxCandidateHeldOutValidator(ttf_path)
+    fmt_res = validator.validate_format_loadability(res.woff2, is_chromium_supported=True)
+
+    assert fmt_res.format == "WOFF2"
+    assert fmt_res.is_direct_loadable_fonttools is True
+    assert fmt_res.decompression_round_trip is True
+    assert fmt_res.is_roundtrip_loadable_freetype is True
+    assert fmt_res.is_direct_loadable_harfbuzz is True
+    assert fmt_res.is_direct_loadable_chromium is True
+
 

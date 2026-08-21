@@ -167,6 +167,8 @@ class MaxCandidateFontBuilder:
     ) -> CandidateFontArtifact:
         """Build canonical OpenType-CFF font (.otf) preserving master cubic Béziers."""
         sorted_cps = sorted(glyph_map.keys())
+        if 0x20 not in sorted_cps:
+            sorted_cps = [0x20] + sorted_cps
         glyph_order = [".notdef"] + [get_glyph_name_for_codepoint(cp) for cp in sorted_cps]
         cmap = {cp: get_glyph_name_for_codepoint(cp) for cp in sorted_cps}
 
@@ -176,7 +178,7 @@ class MaxCandidateFontBuilder:
         win_ascent = max(ascent, abs(descent))
         win_descent = abs(descent)
 
-        metrics_dict: dict[str, tuple[int, int]] = {".notdef": (500, 50)}
+        metrics_dict: dict[str, tuple[int, int]] = {".notdef": (500, 50), "space": (250, 0)}
         for cp, g in glyph_map.items():
             g_name = get_glyph_name_for_codepoint(cp)
             adv = int(round(g.advance_width_upem))
@@ -204,8 +206,15 @@ class MaxCandidateFontBuilder:
         notdef_pen.closePath()
         charstrings[".notdef"] = notdef_pen.getCharString()
 
-        # 2. Master cubic glyphs
+        # 2. space glyph (if not explicitly drawn)
+        if "space" not in charstrings:
+            space_pen = T2CharStringPen(metrics_dict["space"][0], None)
+            charstrings["space"] = space_pen.getCharString()
+
+        # 3. Master cubic glyphs
         for cp in sorted_cps:
+            if cp == 0x20 and cp not in glyph_map:
+                continue
             g = glyph_map[cp]
             g_name = get_glyph_name_for_codepoint(cp)
             adv = metrics_dict[g_name][0]
@@ -252,6 +261,8 @@ class MaxCandidateFontBuilder:
     ) -> CandidateFontArtifact:
         """Build TrueType font (.ttf) by deriving quadratic Béziers via cu2qu."""
         sorted_cps = sorted(glyph_map.keys())
+        if 0x20 not in sorted_cps:
+            sorted_cps = [0x20] + sorted_cps
         glyph_order = [".notdef"] + [get_glyph_name_for_codepoint(cp) for cp in sorted_cps]
         cmap = {cp: get_glyph_name_for_codepoint(cp) for cp in sorted_cps}
 
@@ -260,7 +271,7 @@ class MaxCandidateFontBuilder:
         win_ascent = max(ascent, abs(descent))
         win_descent = abs(descent)
 
-        metrics_dict: dict[str, tuple[int, int]] = {".notdef": (500, 50)}
+        metrics_dict: dict[str, tuple[int, int]] = {".notdef": (500, 50), "space": (250, 0)}
         for cp, g in glyph_map.items():
             g_name = get_glyph_name_for_codepoint(cp)
             adv = int(round(g.advance_width_upem))
@@ -287,8 +298,15 @@ class MaxCandidateFontBuilder:
         notdef_pen.closePath()
         glyphs_dict[".notdef"] = notdef_pen.glyph()
 
-        # 2. Master cubic to TrueType quadratic conversion via Cu2QuPen
+        # 2. space (empty glyph)
+        if "space" not in glyphs_dict:
+            space_pen = TTGlyphPen(None)
+            glyphs_dict["space"] = space_pen.glyph()
+
+        # 3. Master cubic to TrueType quadratic conversion via Cu2QuPen
         for cp in sorted_cps:
+            if cp == 0x20 and cp not in glyph_map:
+                continue
             g = glyph_map[cp]
             g_name = get_glyph_name_for_codepoint(cp)
             tt_pen = TTGlyphPen(None)

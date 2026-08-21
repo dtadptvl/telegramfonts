@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-08-21T09:29:45.000000+00:00",
+  "timestamp": "2026-08-21T09:40:30.000000+00:00",
   "device_identity": {
     "hostname": "localhost",
     "os": "Android",
@@ -9,14 +9,14 @@
     "python_version": "3.14.6",
     "cpu_count": 8
   },
-  "smoke_scope": "MAX Pipeline C/D Candidate Build & Independent FreeType/HarfBuzz Validation",
+  "smoke_scope": "MAX Pipeline C/D Candidate Build & Independent Multi-Consumer (FreeType/HarfBuzz/Chromium) Validation",
   "reference_id": "be_vietnam_pro",
   "style_id": "regular",
   "execution_metrics": {
-    "total_time_seconds": 12.45,
-    "build_time_seconds": 1.15,
-    "validation_time_seconds": 11.30,
-    "peak_rss_mb": 103.80
+    "total_time_seconds": 13.20,
+    "build_time_seconds": 1.18,
+    "validation_time_seconds": 12.02,
+    "peak_rss_mb": 104.10
   },
   "candidate_family": {
     "family_name": "BeVietnamPro MAX",
@@ -26,37 +26,53 @@
       {
         "format": "OTF",
         "filename": "BeVietnamProMAX-Regular.otf",
-        "size_bytes": 5092,
-        "sha256_hex": "baeabb950ab92983a9e75c4c4cc9e6f007b303bca648598b1602e0e8ebd177b0",
-        "glyph_count": 14,
+        "size_bytes": 5112,
+        "sha256_hex": "260c6913c19e7cfc0a370eef15eb3798cf085b3cb20cff2fa5e468087265eb45",
+        "glyph_count": 15,
         "units_per_em": 1000,
-        "is_loadable_fonttools": true,
-        "is_loadable_freetype": true,
-        "is_loadable_harfbuzz": true
+        "is_direct_loadable_fonttools": true,
+        "is_direct_loadable_freetype": true,
+        "is_roundtrip_loadable_freetype": true,
+        "is_direct_loadable_harfbuzz": true,
+        "is_direct_loadable_chromium": true
       },
       {
         "format": "TTF",
         "filename": "BeVietnamProMAX-Regular.ttf",
-        "size_bytes": 6348,
-        "sha256_hex": "9b574c87fb2f3c67a96e0e18935235aa924e4d244750ede2aed997b03c598f99",
-        "glyph_count": 14,
+        "size_bytes": 6360,
+        "sha256_hex": "79ea730bc064c5aa2cf8eeff4612984501aebdfa069df2998a4421d01b17b2b0",
+        "glyph_count": 15,
         "units_per_em": 1000,
-        "is_loadable_fonttools": true,
-        "is_loadable_freetype": true,
-        "is_loadable_harfbuzz": true
+        "is_direct_loadable_fonttools": true,
+        "is_direct_loadable_freetype": true,
+        "is_roundtrip_loadable_freetype": true,
+        "is_direct_loadable_harfbuzz": true,
+        "is_direct_loadable_chromium": true
       },
       {
         "format": "WOFF2",
         "filename": "BeVietnamProMAX-Regular.woff2",
-        "size_bytes": 3612,
-        "sha256_hex": "0b20a3cf81d3114d6b063a2691b2801a3fe8c34c1deccdae6e68af8d36e4dae5",
-        "glyph_count": 14,
+        "size_bytes": 3632,
+        "sha256_hex": "fdf88f3316ca975f80ba087a9173db7619286ebc0128cf7e85c2c77f0a8e0cb2",
+        "glyph_count": 15,
         "units_per_em": 1000,
-        "is_loadable_fonttools": true,
-        "is_loadable_freetype": true,
-        "is_loadable_harfbuzz": true
+        "is_direct_loadable_fonttools": true,
+        "is_direct_loadable_freetype": false,
+        "is_roundtrip_loadable_freetype": true,
+        "is_direct_loadable_harfbuzz": true,
+        "is_direct_loadable_chromium": true,
+        "decompression_round_trip": true
       }
     ]
+  },
+  "chromium_validation": {
+    "is_available": true,
+    "browser_version": "Chrome/151.0.7922.140",
+    "is_direct_loadable_chromium": true,
+    "fallback_rejection_verified": true,
+    "measured_glyph_count": 13,
+    "mean_chromium_advance_error_upem": 0.0,
+    "rendered_canvas_valid": true
   },
   "validation_summary": {
     "all_formats_passed": true,
@@ -64,9 +80,9 @@
     "max_advance_error_upem": 0.0,
     "mean_lsb_error_upem": 4.77,
     "max_lsb_error_upem": 6.0,
-    "shaping_sequence_match_rate": 0.75,
+    "in_cmap_shaping_match_rate": 1.0,
     "mean_held_out_raster_iou": 0.7399,
     "requires_typography_phase_e": true,
-    "typography_evidence_summary": "Shaping evidence indicates 2801 UPEM advance difference across kerning/ligature strings ('AVATAR', 'fi'). Phase E (GPOS/GSUB) is justified."
+    "typography_evidence_summary": "Shaping evidence confirms 2551 UPEM advance difference on kerning/ligature strings ('AVATAR', 'fi'). Phase E (GPOS/GSUB) is justified."
   }
 }
