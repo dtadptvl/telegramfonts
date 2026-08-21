@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime
+import hashlib
 import json
 import logging
 from typing import Any, Iterable
@@ -36,11 +37,14 @@ class EvidenceKerningInferencer:
         store: Any,
         reference_id: str,
         style_id: str,
+        require_provenance: bool = True,
     ) -> TypographyDataset:
         """Infer canonical typography dataset strictly from persistent observation store by recomputing adjustments from raw measurements."""
         raw_rows = store.get_pair_observations(reference_id, style_id)
         observations: list[PairKerningObservation] = []
         kerning_pairs: dict[tuple[int, int], int] = {}
+        provenances: set[str] = set()
+        valid_pairs_seen: set[tuple[int, int]] = set()
 
         for row in raw_rows:
             left_cp = int(row["left_cp"])
@@ -50,6 +54,18 @@ class EvidenceKerningInferencer:
             left_adv = float(row["left_advance_upem"])
             right_adv = float(row["right_advance_upem"])
             pair_adv = float(row["pair_advance_upem"])
+            prov = str(row.get("provenance", "untrusted"))
+
+            if require_provenance:
+                # Fail-closed: verify explicit Chromium Canvas acquisition provenance
+                if not (prov.startswith("chromium:") and prov.endswith(":canvas_text_metrics")):
+                    raise ValueError(
+                        f"Fail-closed: row pair ({left_cp}, {right_cp}) has untrusted or missing Chromium provenance: '{prov}'. "
+                        "Only authentic Chromium Canvas acquisition provenance ('chromium:<version>:canvas_text_metrics') is accepted."
+                    )
+
+            provenances.add(prov)
+            valid_pairs_seen.add((left_cp, right_cp))
 
             # Recompute differential adjustment dynamically from raw observable advances (never trust stored answer!)
             raw_delta = pair_adv - (left_adv + right_adv)
@@ -67,12 +83,39 @@ class EvidenceKerningInferencer:
                 inferred_kerning_upem=inferred_kern if is_applied else 0,
                 is_kerning_applied=is_applied,
                 confidence=float(row.get("confidence", 1.0)),
-                provenance=str(row.get("provenance", "authorized_browser_canvas_measurement")),
+                provenance=prov,
             )
             observations.append(obs)
 
             if is_applied:
                 kerning_pairs[(left_cp, right_cp)] = inferred_kern
+
+        if require_provenance:
+            expected_fit_pairs = set(BOUNDED_FIT_PAIRS)
+            missing = expected_fit_pairs - valid_pairs_seen
+            if missing:
+                raise ValueError(
+                    f"Fail-closed: observation store missing {len(missing)} bounded fit pairs: {missing}. "
+                    f"Expected all {len(expected_fit_pairs)} bounded fit pairs with authentic Chromium acquisition provenance."
+                )
+
+        # Compute deterministic SHA256 digest over canonical sorted observations
+        canonical_rows_repr = json.dumps(
+            [
+                {
+                    "l": obs.left_cp,
+                    "r": obs.right_cp,
+                    "la": obs.left_advance_upem,
+                    "ra": obs.right_advance_upem,
+                    "pa": obs.measured_pair_advance_upem,
+                    "prov": obs.provenance,
+                }
+                for obs in sorted(observations, key=lambda x: (x.left_cp, x.right_cp))
+            ],
+            sort_keys=True,
+        )
+        fit_rows_sha256 = hashlib.sha256(canonical_rows_repr.encode("utf-8")).hexdigest()
+        common_provenance = list(provenances)[0] if len(provenances) == 1 else ",".join(sorted(provenances))
 
         return TypographyDataset(
             family_name=self.family_name,
@@ -82,6 +125,9 @@ class EvidenceKerningInferencer:
             observations=observations,
             total_pairs_probed=len(raw_rows),
             active_kerning_pairs_count=len(kerning_pairs),
+            provenance=common_provenance,
+            fit_rows_count=len(observations),
+            fit_rows_sha256=fit_rows_sha256,
             inference_method="observation_store_differential_derivation",
             created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
         )

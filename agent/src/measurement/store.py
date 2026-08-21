@@ -113,7 +113,7 @@ class ObservationStore:
                     pair_advance_upem REAL NOT NULL,
                     inferred_kerning_upem INTEGER NOT NULL,
                     confidence REAL NOT NULL,
-                    provenance TEXT NOT NULL DEFAULT 'authorized_browser_canvas_measurement',
+                    provenance TEXT NOT NULL DEFAULT 'untrusted',
                     created_at TEXT NOT NULL,
                     PRIMARY KEY (reference_id, style_id, left_cp, right_cp)
                 )
@@ -122,7 +122,7 @@ class ObservationStore:
             # Automatic schema migration for existing databases
             try:
                 conn.execute(
-                    "ALTER TABLE pair_observations ADD COLUMN provenance TEXT NOT NULL DEFAULT 'authorized_browser_canvas_measurement'"
+                    "ALTER TABLE pair_observations ADD COLUMN provenance TEXT NOT NULL DEFAULT 'untrusted'"
                 )
             except sqlite3.OperationalError:
                 pass
@@ -373,7 +373,7 @@ class ObservationStore:
         pair_advance_upem: float,
         inferred_kerning_upem: int = 0,
         confidence: float = 1.0,
-        provenance: str = "authorized_browser_canvas_measurement",
+        provenance: str = "untrusted",
         created_at: str | None = None,
     ) -> None:
         """Persist an observable pair advance measurement into index."""
