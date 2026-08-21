@@ -1,17 +1,40 @@
-"""Font output validation using FontTools with strict format-distinct checking."""
+"""Font output validation using FontTools with strict format-distinct checking and independent loadability verification."""
 from __future__ import annotations
 
+import ctypes
+import io
 import logging
+import sys
+import tempfile
 from pathlib import Path
 from fontTools.ttLib import TTFont
 
 logger = logging.getLogger("telegramfonts.agent.validator")
 
-REQUIRED_COMMON_TABLES = {"head", "maxp", "name", "OS/2", "cmap"}
+REQUIRED_COMMON_TABLES = {"head", "hhea", "maxp", "name", "OS/2", "cmap", "post"}
+REQUIRED_NAME_IDS = {1, 2, 3, 4, 6}  # family, subfamily, uniqueID, full name, PostScript name
+
+
+def _verify_independent_gdi_load(font_path: Path) -> bool:
+    """Non-persistent font load verification via Windows GDI AddFontResourceExW (FR_PRIVATE)."""
+    if sys.platform != "win32":
+        return True
+
+    try:
+        gdi32 = ctypes.windll.gdi32
+        FR_PRIVATE = 0x10
+        res = gdi32.AddFontResourceExW(str(font_path.resolve()), FR_PRIVATE, 0)
+        if res > 0:
+            gdi32.RemoveFontResourceExW(str(font_path.resolve()), FR_PRIVATE, 0)
+            return True
+        return False
+    except Exception as exc:
+        logger.warning(f"GDI independent font check error: {exc}")
+        return True
 
 
 def validate_font_file(file_path: Path, expected_format: str) -> bool:
-    """Validate font file integrity, table structure, glyph counts, and format-distinct signatures."""
+    """Validate font file integrity, table structure, glyph counts, metrics, and format-distinct signatures."""
     if not file_path.exists() or file_path.stat().st_size == 0:
         return False
 
@@ -60,6 +83,53 @@ def validate_font_file(file_path: Path, expected_format: str) -> bool:
         glyph_order = font.getGlyphOrder()
         if len(glyph_order) < 2:
             return False
+
+        # Validate name table has required standard NameIDs
+        present_name_ids = {n.nameID for n in font["name"].names}
+        if not REQUIRED_NAME_IDS.issubset(present_name_ids):
+            return False
+
+        # Validate OS/2 table metrics required for installable fonts
+        os2 = font["OS/2"]
+        if (
+            os2.usWinAscent <= 0
+            or os2.usWinDescent <= 0
+            or os2.sTypoAscender == 0
+            or os2.usWeightClass <= 0
+        ):
+            return False
+
+        # Validate cmap table has character mappings
+        cmap_tables = [t for t in font["cmap"].tables if getattr(t, "cmap", None)]
+        if not cmap_tables or all(len(t.cmap) == 0 for t in cmap_tables):
+            return False
+
+        # 2. Independent consumer / GDI load check
+        if expected_fmt in ("TTF", "OTF"):
+            if not _verify_independent_gdi_load(file_path):
+                return False
+        elif expected_fmt == "WOFF2":
+            # For WOFF2, verify decompressibility to valid SFNT and test load
+            decompressed_font = TTFont(io.BytesIO(raw_bytes))
+            decompressed_font.flavor = None
+            decompressed_buf = io.BytesIO()
+            decompressed_font.save(decompressed_buf)
+            decompressed_bytes = decompressed_buf.getvalue()
+            if not (decompressed_bytes.startswith(b"\x00\x01\x00\x00") or decompressed_bytes.startswith(b"OTTO")):
+                return False
+
+            if sys.platform == "win32":
+                with tempfile.NamedTemporaryFile(suffix=".ttf", delete=False) as tmp_ttf:
+                    tmp_ttf_path = Path(tmp_ttf.name)
+                    tmp_ttf.write(decompressed_bytes)
+                try:
+                    if not _verify_independent_gdi_load(tmp_ttf_path):
+                        return False
+                finally:
+                    try:
+                        tmp_ttf_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
 
         font.close()
         return True
