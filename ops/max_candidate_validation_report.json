@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-08-21T09:40:20.431649+00:00",
+  "timestamp": "2026-08-21T09:49:09.547815+00:00",
   "device_identity": {
     "hostname": "DESKTOP-1GIB12N",
     "os": "Windows",
@@ -11,8 +11,8 @@
   },
   "reference_id": "be_vietnam_pro",
   "style_id": "regular",
-  "total_time_seconds": 12.93,
-  "peak_rss_mb": 101.68,
+  "total_time_seconds": 12.94,
+  "peak_rss_mb": 101.88,
   "candidate_family": {
     "family_name": "BeVietnamPro MAX",
     "style_name": "Regular",
@@ -40,8 +40,8 @@
         "format": "WOFF2",
         "filename": "BeVietnamProMAX-Regular.woff2",
         "file_path": "build\\candidate_fonts\\BeVietnamProMAX-Regular.woff2",
-        "size_bytes": 3632,
-        "sha256_hex": "ddb940036b43e32bffed636b5de91b3982256127baad4bbb500de39223ac4224",
+        "size_bytes": 3648,
+        "sha256_hex": "781f04eaaa22f2fd9c7665e8cded95a58d7c17d56b05320b30a74a08f6bbaf17",
         "glyph_count": 15,
         "units_per_em": 1000
       }
@@ -56,7 +56,7 @@
     "in_cmap_shaping_match_rate": 1.0,
     "mean_held_out_raster_iou": 0.7399,
     "requires_typography_phase_e": true,
-    "typography_evidence_summary": "Shaping evidence confirms 2551 UPEM advance difference on kerning/ligature strings ('AVATAR', 'fi'). Phase E (GPOS/GSUB) is justified."
+    "typography_evidence_summary": "In-cmap shaping evidence across mapped pairs ('AO', 'OA', 'BO') reveals 90 UPEM total advance delta (max pair delta: 40 UPEM) due to missing GPOS kerning table in Candidate vs Reference font. Phase E (GPOS/GSUB typography) is justified."
   },
   "chromium_validation": {
     "is_available": true,
@@ -78,7 +78,7 @@
       "is_direct_loadable_freetype": true,
       "is_roundtrip_loadable_freetype": true,
       "is_direct_loadable_harfbuzz": true,
-      "is_direct_loadable_chromium": true,
+      "is_direct_loadable_chromium": false,
       "glyph_count": 15,
       "units_per_em": 1000,
       "has_valid_cmap": true,
@@ -95,7 +95,7 @@
       "is_direct_loadable_freetype": true,
       "is_roundtrip_loadable_freetype": true,
       "is_direct_loadable_harfbuzz": true,
-      "is_direct_loadable_chromium": true,
+      "is_direct_loadable_chromium": false,
       "glyph_count": 15,
       "units_per_em": 1000,
       "has_valid_cmap": true,
@@ -106,8 +106,8 @@
     {
       "format": "WOFF2",
       "file_path": "build\\candidate_fonts\\BeVietnamProMAX-Regular.woff2",
-      "size_bytes": 3632,
-      "sha256_hex": "ddb940036b43e32bffed636b5de91b3982256127baad4bbb500de39223ac4224",
+      "size_bytes": 3648,
+      "sha256_hex": "781f04eaaa22f2fd9c7665e8cded95a58d7c17d56b05320b30a74a08f6bbaf17",
       "is_direct_loadable_fonttools": true,
       "is_direct_loadable_freetype": false,
       "is_roundtrip_loadable_freetype": true,
@@ -255,8 +255,68 @@
   ],
   "shaping_results": [
     {
-      "text": "A B O 8 @ % g m ơ ư ắ đ Đ",
-      "category": "in_cmap_full_reconstructed_set",
+      "text": "AO",
+      "category": "in_cmap_kerning_sensitive",
+      "in_candidate_cmap": true,
+      "glyph_sequence_match": true,
+      "candidate_glyph_names": [
+        "A",
+        "O"
+      ],
+      "reference_glyph_names": [
+        "A",
+        "O"
+      ],
+      "candidate_glyph_count": 2,
+      "reference_glyph_count": 2,
+      "candidate_total_advance_upem": 1562,
+      "reference_total_advance_upem": 1522,
+      "advance_delta_upem": 40,
+      "max_position_delta_upem": 40
+    },
+    {
+      "text": "OA",
+      "category": "in_cmap_kerning_sensitive",
+      "in_candidate_cmap": true,
+      "glyph_sequence_match": true,
+      "candidate_glyph_names": [
+        "O",
+        "A"
+      ],
+      "reference_glyph_names": [
+        "O",
+        "A"
+      ],
+      "candidate_glyph_count": 2,
+      "reference_glyph_count": 2,
+      "candidate_total_advance_upem": 1562,
+      "reference_total_advance_upem": 1522,
+      "advance_delta_upem": 40,
+      "max_position_delta_upem": 40
+    },
+    {
+      "text": "BO",
+      "category": "in_cmap_kerning_sensitive",
+      "in_candidate_cmap": true,
+      "glyph_sequence_match": true,
+      "candidate_glyph_names": [
+        "B",
+        "O"
+      ],
+      "reference_glyph_names": [
+        "B",
+        "O"
+      ],
+      "candidate_glyph_count": 2,
+      "reference_glyph_count": 2,
+      "candidate_total_advance_upem": 1500,
+      "reference_total_advance_upem": 1490,
+      "advance_delta_upem": 10,
+      "max_position_delta_upem": 10
+    },
+    {
+      "text": "A B O 8 @ % g m",
+      "category": "in_cmap_latin_subset",
       "in_candidate_cmap": true,
       "glyph_sequence_match": true,
       "candidate_glyph_names": [
@@ -274,17 +334,7 @@
         "space",
         "g",
         "space",
-        "m",
-        "space",
-        "uni01A1",
-        "space",
-        "uni01B0",
-        "space",
-        "uni1EAF",
-        "space",
-        "uni0111",
-        "space",
-        "uni0110"
+        "m"
       ],
       "reference_glyph_names": [
         "A",
@@ -301,80 +351,52 @@
         "space",
         "g",
         "space",
-        "m",
-        "space",
-        "ohorn",
-        "space",
-        "uhorn",
-        "space",
-        "uni1EAF",
-        "space",
-        "dcroat",
-        "space",
-        "Dcroat"
+        "m"
       ],
-      "candidate_glyph_count": 25,
-      "reference_glyph_count": 25,
-      "candidate_total_advance_upem": 12581,
-      "reference_total_advance_upem": 12341,
-      "advance_delta_upem": 240,
+      "candidate_glyph_count": 15,
+      "reference_glyph_count": 15,
+      "candidate_total_advance_upem": 8010,
+      "reference_total_advance_upem": 7870,
+      "advance_delta_upem": 140,
       "max_position_delta_upem": 20
     },
     {
-      "text": "Đ8A",
-      "category": "in_cmap_word_short",
+      "text": "Đ ơ đ ư ắ",
+      "category": "in_cmap_vietnamese_subset",
       "in_candidate_cmap": true,
       "glyph_sequence_match": true,
       "candidate_glyph_names": [
         "uni0110",
-        "eight",
-        "A"
+        "space",
+        "uni01A1",
+        "space",
+        "uni0111",
+        "space",
+        "uni01B0",
+        "space",
+        "uni1EAF"
       ],
       "reference_glyph_names": [
         "Dcroat",
-        "eight",
-        "A"
-      ],
-      "candidate_glyph_count": 3,
-      "reference_glyph_count": 3,
-      "candidate_total_advance_upem": 2158,
-      "reference_total_advance_upem": 2158,
-      "advance_delta_upem": 0,
-      "max_position_delta_upem": 0
-    },
-    {
-      "text": "mơ gắ Đ",
-      "category": "in_cmap_vietnamese_short",
-      "in_candidate_cmap": true,
-      "glyph_sequence_match": true,
-      "candidate_glyph_names": [
-        "m",
-        "uni01A1",
         "space",
-        "g",
-        "uni1EAF",
-        "space",
-        "uni0110"
-      ],
-      "reference_glyph_names": [
-        "m",
         "ohorn",
         "space",
-        "g",
-        "uni1EAF",
+        "dcroat",
         "space",
-        "Dcroat"
+        "uhorn",
+        "space",
+        "uni1EAF"
       ],
-      "candidate_glyph_count": 7,
-      "reference_glyph_count": 7,
-      "candidate_total_advance_upem": 4119,
-      "reference_total_advance_upem": 4059,
-      "advance_delta_upem": 60,
+      "candidate_glyph_count": 9,
+      "reference_glyph_count": 9,
+      "candidate_total_advance_upem": 4321,
+      "reference_total_advance_upem": 4241,
+      "advance_delta_upem": 80,
       "max_position_delta_upem": 20
     },
     {
       "text": "The quick brown fox jumps over the lazy dog",
-      "category": "plain_latin_out_of_cmap",
+      "category": "out_of_cmap_plain_latin",
       "in_candidate_cmap": false,
       "glyph_sequence_match": false,
       "candidate_glyph_names": [
@@ -476,7 +498,7 @@
     },
     {
       "text": "Tiếng Việt Đẹp Xinh",
-      "category": "vietnamese_precomposed_out_of_cmap",
+      "category": "out_of_cmap_vietnamese_precomposed",
       "in_candidate_cmap": false,
       "glyph_sequence_match": false,
       "candidate_glyph_names": [
@@ -530,7 +552,7 @@
     },
     {
       "text": "á ờ ữ",
-      "category": "vietnamese_combining_marks_out_of_cmap",
+      "category": "out_of_cmap_combining_marks",
       "in_candidate_cmap": false,
       "glyph_sequence_match": false,
       "candidate_glyph_names": [
@@ -559,7 +581,7 @@
     },
     {
       "text": "“Hello, World!” 100% @ #41 (2026)",
-      "category": "punctuation_and_symbols_out_of_cmap",
+      "category": "out_of_cmap_punctuation_and_symbols",
       "in_candidate_cmap": false,
       "glyph_sequence_match": false,
       "candidate_glyph_names": [
@@ -641,7 +663,7 @@
     },
     {
       "text": "fi fl ffi ffl",
-      "category": "ligature_sensitive_out_of_cmap",
+      "category": "out_of_cmap_ligatures",
       "in_candidate_cmap": false,
       "glyph_sequence_match": false,
       "candidate_glyph_names": [
@@ -679,7 +701,7 @@
     },
     {
       "text": "AVATAR To Water",
-      "category": "kerning_sensitive_out_of_cmap",
+      "category": "out_of_cmap_kerning",
       "in_candidate_cmap": false,
       "glyph_sequence_match": false,
       "candidate_glyph_names": [

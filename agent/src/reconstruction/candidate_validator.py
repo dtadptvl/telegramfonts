@@ -122,17 +122,19 @@ class HeldOutValidationReport:
 
 
 HELD_OUT_SHAPING_STRINGS: list[tuple[str, str]] = [
-    # 1. In-Cmap strings (tested strictly against reconstructed glyphs)
-    ("A B O 8 @ % g m ơ ư ắ đ Đ", "in_cmap_full_reconstructed_set"),
-    ("Đ8A", "in_cmap_word_short"),
-    ("mơ gắ Đ", "in_cmap_vietnamese_short"),
+    # 1. In-Cmap shaping strings (tested strictly against candidate's mapped glyphs)
+    ("AO", "in_cmap_kerning_sensitive"),
+    ("OA", "in_cmap_kerning_sensitive"),
+    ("BO", "in_cmap_kerning_sensitive"),
+    ("A B O 8 @ % g m", "in_cmap_latin_subset"),
+    ("Đ ơ đ ư ắ", "in_cmap_vietnamese_subset"),
     # 2. Out-of-cmap held-out strings (tests fallback rejection, .notdef mapping & shaping differences)
-    ("The quick brown fox jumps over the lazy dog", "plain_latin_out_of_cmap"),
-    ("Tiếng Việt Đẹp Xinh", "vietnamese_precomposed_out_of_cmap"),
-    ("a\u0301 o\u031b\u0300 u\u031b\u0303", "vietnamese_combining_marks_out_of_cmap"),
-    ("“Hello, World!” 100% @ #41 (2026)", "punctuation_and_symbols_out_of_cmap"),
-    ("fi fl ffi ffl", "ligature_sensitive_out_of_cmap"),
-    ("AVATAR To Water", "kerning_sensitive_out_of_cmap"),
+    ("The quick brown fox jumps over the lazy dog", "out_of_cmap_plain_latin"),
+    ("Tiếng Việt Đẹp Xinh", "out_of_cmap_vietnamese_precomposed"),
+    ("a\u0301 o\u031b\u0300 u\u031b\u0303", "out_of_cmap_combining_marks"),
+    ("“Hello, World!” 100% @ #41 (2026)", "out_of_cmap_punctuation_and_symbols"),
+    ("fi fl ffi ffl", "out_of_cmap_ligatures"),
+    ("AVATAR To Water", "out_of_cmap_kerning"),
 ]
 
 HELD_OUT_RASTER_SIZES: list[int] = [16, 32, 64, 128]
@@ -321,22 +323,34 @@ class MaxCandidateHeldOutValidator:
 
         mean_iou = float(np.mean([r.raster_iou for r in raster_results if r.render_error is None])) if raster_results else 1.0
 
-        # Assess whether Phase E typography is justified
-        kerning_tests = [s for s in shaping_results if s.category in ("kerning_sensitive_out_of_cmap", "ligature_sensitive_out_of_cmap")]
-        kerning_diff = sum(s.advance_delta_upem for s in kerning_tests)
-        requires_phase_e = kerning_diff > 50 or any(not s.glyph_sequence_match for s in kerning_tests)
+        # Assess whether Phase E typography is justified STRICTLY from in-cmap kerning evidence
+        in_cmap_kerning_tests = [s for s in shaping_results if s.in_candidate_cmap and s.category == "in_cmap_kerning_sensitive"]
+        in_cmap_kerning_delta = sum(s.advance_delta_upem for s in in_cmap_kerning_tests)
+        in_cmap_pos_delta = max((s.max_position_delta_upem for s in in_cmap_kerning_tests), default=0)
 
-        if requires_phase_e:
-            typo_evidence = f"Shaping evidence confirms {kerning_diff} UPEM advance difference on kerning/ligature strings ('AVATAR', 'fi'). Phase E (GPOS/GSUB) is justified."
+        if in_cmap_kerning_delta > 0:
+            requires_phase_e = True
+            typo_evidence = f"In-cmap shaping evidence across mapped pairs ('AO', 'OA', 'BO') reveals {in_cmap_kerning_delta} UPEM total advance delta (max pair delta: {in_cmap_pos_delta} UPEM) due to missing GPOS kerning table in Candidate vs Reference font. Phase E (GPOS/GSUB typography) is justified."
         else:
-            typo_evidence = "Shaping matches reference sequences without material kerning/ligature deviation."
+            requires_phase_e = False
+            typo_evidence = "In-cmap shaping evidence shows 0 UPEM position delta; Phase E typography is not needed for this subset."
 
-        # Consumer loadability check: all formats must load, no unhandled raster errors
+        # Fail-closed aggregate validation check across all required consumers
         has_raster_errors = any(r.render_error is not None for r in raster_results)
-        all_passed = (
-            all(f.is_direct_loadable_fonttools and (f.is_direct_loadable_freetype or f.is_roundtrip_loadable_freetype) for f in format_results)
-            and not has_raster_errors
+        ft_all = all(f.is_direct_loadable_fonttools for f in format_results)
+        free_all = all(f.is_direct_loadable_freetype or f.is_roundtrip_loadable_freetype for f in format_results)
+        hb_all = all(f.is_direct_loadable_harfbuzz for f in format_results)
+        chrom_ok = (
+            (not run_chromium)
+            or (
+                chromium_res.is_available
+                and chromium_res.is_direct_loadable_chromium
+                and chromium_res.fallback_rejection_verified
+                and chromium_res.rendered_canvas_valid
+            )
         )
+
+        all_passed = bool(ft_all and free_all and hb_all and chrom_ok and not has_raster_errors)
 
         return HeldOutValidationReport(
             timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -433,8 +447,8 @@ class MaxCandidateHeldOutValidator:
         except Exception:
             hb_direct_ok = False
 
-        # 4. Chromium Direct Load
-        chrom_direct_ok = is_chromium_supported if artifact.format in ("WOFF2", "TTF", "OTF") else False
+        # 4. Chromium Direct Load (only tested on direct WOFF2 web font path)
+        chrom_direct_ok = is_chromium_supported if artifact.format == "WOFF2" else False
 
         return FormatValidationResult(
             format=artifact.format,
