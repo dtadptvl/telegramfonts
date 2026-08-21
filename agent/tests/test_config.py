@@ -56,6 +56,11 @@ def test_settings_rejects_unsafe_and_near_margin_heartbeat_lease_relation(tmp_pa
         )
 
 
-def test_settings_missing_fields():
+def test_settings_missing_fields(monkeypatch):
+    monkeypatch.delenv("CF_ACCOUNT_ID", raising=False)
+    monkeypatch.delenv("CF_QUEUE_ID", raising=False)
+    monkeypatch.delenv("CF_QUEUES_TOKEN", raising=False)
+    monkeypatch.delenv("EDGE_BASE_URL", raising=False)
+    monkeypatch.delenv("A23_NODE_SECRET", raising=False)
     with pytest.raises(ValidationError):
-        Settings()
+        Settings(_env_file=None)
