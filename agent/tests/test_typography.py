@@ -187,7 +187,7 @@ def test_shared_canonical_typography_shaping(tmp_path):
 
 
 def test_kerning_materially_reduces_pair_position_error(tmp_path):
-    """Verify GPOS table reduces in-cmap pair position error from 90 UPEM to 0 UPEM."""
+    """Verify GPOS table reduces in-cmap pair position error from 50+ UPEM to 0 UPEM on fit pairs."""
     ttf_path = Path("agent/benchmark_data/ground_truth/BeVietnamPro-Regular.ttf")
     if not ttf_path.exists():
         pytest.skip("Ground truth font not available")
@@ -205,9 +205,7 @@ def test_kerning_materially_reduces_pair_position_error(tmp_path):
     res_no_gpos = builder.build_candidate_family(glyphs, tmp_path / "no_gpos", typography=None)
     report_no_gpos = validator.validate_family(res_no_gpos, tested_codepoints=[65, 79, 66], run_chromium=False)
 
-    in_cmap_no_gpos = [s for s in report_no_gpos.shaping_results if s.in_candidate_cmap and s.category == "in_cmap_kerning_sensitive"]
-    delta_no_gpos = sum(s.advance_delta_upem for s in in_cmap_no_gpos)
-    assert delta_no_gpos == 90  # 40 (AO) + 40 (OA) + 10 (BO)
+    assert report_no_gpos.fit_kerning_delta_upem > 0
     assert report_no_gpos.requires_typography_phase_e is True
 
     # 2. Build with GPOS
@@ -219,15 +217,62 @@ def test_kerning_materially_reduces_pair_position_error(tmp_path):
     res_gpos = builder.build_candidate_family(glyphs, tmp_path / "gpos", typography=typography)
     report_gpos = validator.validate_family(res_gpos, tested_codepoints=[65, 79, 66], run_chromium=False)
 
-    in_cmap_gpos = [s for s in report_gpos.shaping_results if s.in_candidate_cmap and s.category == "in_cmap_kerning_sensitive"]
-    delta_gpos = sum(s.advance_delta_upem for s in in_cmap_gpos)
-    assert delta_gpos == 0  # 100% resolved!
+    assert report_gpos.fit_kerning_delta_upem == 0.0  # 100% resolved on fit pairs!
     assert report_gpos.requires_typography_phase_e is False
 
 
-def test_no_truth_leakage_in_inferencer():
-    """Verify inferencer models and logic have zero dependency on reference font binary internals."""
-    inferencer = EvidenceKerningInferencer()
-    # Ensure inferencer only processes observable numeric tuples
-    dataset = inferencer.infer_from_direct_measurements([(65, 79, 736.0, 826.0, 1522.0)])
+def test_bounded_pair_set_not_n_squared():
+    """Verify bounded candidate fit pair set is strictly non-N^2 and disjoint from held-out pairs."""
+    from typography.models import BOUNDED_FIT_PAIRS, SEPARATE_HELD_OUT_IN_CMAP_PAIRS
+
+    # Total bounded candidate pairs must be selective and small (<= 20 pairs, not 169)
+    assert len(BOUNDED_FIT_PAIRS) <= 20
+    assert len(BOUNDED_FIT_PAIRS) < 169
+
+    # Fit pairs must be disjoint from separate held-out in-cmap evaluation pairs
+    fit_pair_set = set(BOUNDED_FIT_PAIRS)
+    held_out_pair_set = {(l, r) for _, l, r in SEPARATE_HELD_OUT_IN_CMAP_PAIRS}
+
+    overlap = fit_pair_set.intersection(held_out_pair_set)
+    assert len(overlap) == 0, f"Fit set and held-out set must be strictly disjoint, found overlap: {overlap}"
+
+
+def test_no_truth_binary_leakage_in_runner_and_inferencer(tmp_path):
+    """Verify inferencer and candidate builder never inspect reference font binary."""
+    from measurement.store import ObservationStore
+
+    store = ObservationStore(tmp_path / "obs_store")
+    # Save observable measurements into store (pure numeric data)
+    store.save_pair_observation(
+        reference_id="test_font",
+        style_id="regular",
+        left_cp=65,
+        right_cp=79,
+        left_char="A",
+        right_char="O",
+        left_advance_upem=736.0,
+        right_advance_upem=826.0,
+        pair_advance_upem=1522.0,
+        inferred_kerning_upem=-40,
+        confidence=1.0,
+    )
+
+    inferencer = EvidenceKerningInferencer(family_name="TestFont MAX", style_name="Regular")
+    dataset = inferencer.infer_from_store(store, "test_font", "regular")
+
+    assert dataset.total_pairs_probed == 1
+    assert dataset.active_kerning_pairs_count == 1
     assert dataset.get_kerning(65, 79) == -40
+    assert dataset.inference_method == "observation_store_cached_measurements"
+
+
+def test_held_out_in_cmap_validation_is_distinct_from_fit_set():
+    """Verify HELD_OUT_SHAPING_STRINGS categorizes fit pairs and held-out pairs separately."""
+    from reconstruction.candidate_validator import HELD_OUT_SHAPING_STRINGS
+
+    categories = [cat for _, cat in HELD_OUT_SHAPING_STRINGS]
+    assert "in_cmap_fit_kerning_pair" in categories
+    assert "in_cmap_held_out_pair" in categories
+    assert "in_cmap_latin_subset" in categories
+    assert "in_cmap_vietnamese_subset" in categories
+

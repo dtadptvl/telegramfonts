@@ -71,23 +71,22 @@ def run_candidate_pipeline(
             glyph = solver.reconstruct_glyph(obs)
             reconstructed_glyphs.append(glyph)
 
-    logger.info("Inferring evidence-driven kerning adjustments from observable measurements...")
-    typography_dataset: TypographyDataset | None = None
-    try:
-        session = ChromiumSession()
-
-        async def _infer():
-            await session.start()
-            if truth_file.exists():
-                await session.load_font_data("ObservedReferenceFont", truth_file.read_bytes())
-                inferencer = EvidenceKerningInferencer(family_name="BeVietnamPro MAX", style_name="Regular")
-                return await inferencer.infer_from_browser_session(session, "ObservedReferenceFont", REPRESENTATIVE_CODE_POINTS)
-            return None
-
-        typography_dataset = asyncio.run(_infer())
-        session.close()
-    except Exception as exc:
-        logger.warning("Observable browser kerning inference failed: %s", exc)
+    logger.info("Inferring evidence-driven kerning adjustments from observable store observations...")
+    inferencer = EvidenceKerningInferencer(
+        family_name="BeVietnamPro MAX",
+        style_name="Regular",
+        units_per_em=1000,
+    )
+    if store.has_pair_observations(reference_id, style_id):
+        typography_dataset = inferencer.infer_from_store(store, reference_id, style_id)
+        logger.info(
+            "Loaded %d active kerning pairs (from %d probed pairs) from store",
+            typography_dataset.active_kerning_pairs_count,
+            typography_dataset.total_pairs_probed,
+        )
+    else:
+        typography_dataset = None
+        logger.info("No cached pair observations found in store for %s/%s", reference_id, style_id)
 
     logger.info("Building candidate font binaries with OpenType GPOS (OTF, TTF, WOFF2)...")
     builder = MaxCandidateFontBuilder(
@@ -149,6 +148,8 @@ def run_candidate_pipeline(
             "mean_lsb_error_upem": report.mean_lsb_error_upem,
             "max_lsb_error_upem": report.max_lsb_error_upem,
             "in_cmap_shaping_match_rate": report.in_cmap_shaping_match_rate,
+            "fit_kerning_delta_upem": report.fit_kerning_delta_upem,
+            "held_out_in_cmap_kerning_delta_upem": report.held_out_in_cmap_kerning_delta_upem,
             "mean_held_out_raster_iou": report.mean_held_out_raster_iou,
             "requires_typography_phase_e": report.requires_typography_phase_e,
             "typography_evidence_summary": report.typography_evidence_summary,
@@ -182,6 +183,8 @@ def run_candidate_pipeline(
         print(f"  Inferred Kerning Pairs:  {typography_dataset.active_kerning_pairs_count} active / {typography_dataset.total_pairs_probed} probed")
     print(f"  Mean Advance Error:      {report.mean_advance_error_upem} UPEM (Max: {report.max_advance_error_upem} UPEM)")
     print(f"  Mean LSB Error:          {report.mean_lsb_error_upem} UPEM (Max: {report.max_lsb_error_upem} UPEM)")
+    print(f"  Fit Kerning Delta:       {report.fit_kerning_delta_upem} UPEM")
+    print(f"  Held-Out In-Cmap Delta:  {report.held_out_in_cmap_kerning_delta_upem} UPEM")
     print(f"  In-Cmap Shaping Match:   {report.in_cmap_shaping_match_rate * 100:.1f}%")
     print(f"  Held-Out Raster IoU:     {report.mean_held_out_raster_iou * 100:.1f}%")
     print(f"  Requires Typography:     {report.requires_typography_phase_e}")
@@ -194,6 +197,12 @@ def run_candidate_pipeline(
 
 
 def main() -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+
     parser = argparse.ArgumentParser(description="MAX Candidate Font Build & Held-Out Validation")
     parser.add_argument("--store-dir", default="observations/benchmark")
     parser.add_argument("--truth-path", default="agent/benchmark_data/ground_truth/BeVietnamPro-Regular.ttf")

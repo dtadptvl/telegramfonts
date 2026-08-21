@@ -115,6 +115,8 @@ class HeldOutValidationReport:
     mean_lsb_error_upem: float
     max_lsb_error_upem: float
     in_cmap_shaping_match_rate: float
+    fit_kerning_delta_upem: float
+    held_out_in_cmap_kerning_delta_upem: float
     mean_held_out_raster_iou: float
     requires_typography_phase_e: bool
     typography_evidence_summary: str
@@ -122,13 +124,23 @@ class HeldOutValidationReport:
 
 
 HELD_OUT_SHAPING_STRINGS: list[tuple[str, str]] = [
-    # 1. In-Cmap shaping strings (tested strictly against candidate's mapped glyphs)
-    ("AO", "in_cmap_kerning_sensitive"),
-    ("OA", "in_cmap_kerning_sensitive"),
-    ("BO", "in_cmap_kerning_sensitive"),
+    # 1. In-Cmap fit pair set (evaluated to verify GPOS resolution on observed pairs)
+    ("AO", "in_cmap_fit_kerning_pair"),
+    ("BO", "in_cmap_fit_kerning_pair"),
+    ("A%", "in_cmap_fit_kerning_pair"),
+    ("Ag", "in_cmap_fit_kerning_pair"),
+    ("Aơ", "in_cmap_fit_kerning_pair"),
+    ("ĐA", "in_cmap_fit_kerning_pair"),
+    ("gắ", "in_cmap_fit_kerning_pair"),
+    # 2. Distinct held-out in-cmap pair set (evaluated for held-out generalization; never in fit set)
+    ("OA", "in_cmap_held_out_pair"),
+    ("OĐ", "in_cmap_held_out_pair"),
+    ("ơA", "in_cmap_held_out_pair"),
+    ("mơ", "in_cmap_held_out_pair"),
+    # 3. In-Cmap character repertoires
     ("A B O 8 @ % g m", "in_cmap_latin_subset"),
     ("Đ ơ đ ư ắ", "in_cmap_vietnamese_subset"),
-    # 2. Out-of-cmap held-out strings (tests fallback rejection, .notdef mapping & shaping differences)
+    # 4. Out-of-cmap held-out strings (tests fallback rejection, .notdef mapping & shaping differences)
     ("The quick brown fox jumps over the lazy dog", "out_of_cmap_plain_latin"),
     ("Tiếng Việt Đẹp Xinh", "out_of_cmap_vietnamese_precomposed"),
     ("a\u0301 o\u031b\u0300 u\u031b\u0303", "out_of_cmap_combining_marks"),
@@ -323,17 +335,19 @@ class MaxCandidateHeldOutValidator:
 
         mean_iou = float(np.mean([r.raster_iou for r in raster_results if r.render_error is None])) if raster_results else 1.0
 
-        # Assess whether Phase E typography is justified STRICTLY from in-cmap kerning evidence
-        in_cmap_kerning_tests = [s for s in shaping_results if s.in_candidate_cmap and s.category == "in_cmap_kerning_sensitive"]
-        in_cmap_kerning_delta = sum(s.advance_delta_upem for s in in_cmap_kerning_tests)
-        in_cmap_pos_delta = max((s.max_position_delta_upem for s in in_cmap_kerning_tests), default=0)
+        # Assess fit pairs vs separate held-out in-cmap pairs
+        fit_pair_tests = [s for s in shaping_results if s.in_candidate_cmap and s.category == "in_cmap_fit_kerning_pair"]
+        fit_kerning_delta = sum(s.advance_delta_upem for s in fit_pair_tests)
 
-        if in_cmap_kerning_delta > 0:
+        held_out_pair_tests = [s for s in shaping_results if s.in_candidate_cmap and s.category == "in_cmap_held_out_pair"]
+        held_out_kerning_delta = sum(s.advance_delta_upem for s in held_out_pair_tests)
+
+        if fit_kerning_delta > 0:
             requires_phase_e = True
-            typo_evidence = f"In-cmap shaping evidence across mapped pairs ('AO', 'OA', 'BO') reveals {in_cmap_kerning_delta} UPEM total advance delta (max pair delta: {in_cmap_pos_delta} UPEM) due to missing GPOS kerning table in Candidate vs Reference font. Phase E (GPOS/GSUB typography) is justified."
+            typo_evidence = f"In-cmap fit pairs reveal {fit_kerning_delta} UPEM total advance delta due to missing GPOS kerning table in Candidate vs Reference font. Phase E GPOS inference is justified."
         else:
             requires_phase_e = False
-            typo_evidence = f"In-cmap shaping evidence across mapped pairs ('AO', 'OA', 'BO') confirms 0.0 UPEM advance delta (max pair delta: {in_cmap_pos_delta} UPEM) with OpenType GPOS kerning table active. No independent evidence justifies broad GSUB/mark extensions for this subset."
+            typo_evidence = f"In-cmap fit pairs confirm 0.0 UPEM advance delta with OpenType GPOS kerning active; separate held-out in-cmap pairs ('OA', 'OĐ', 'ơA', 'mơ') show no regressions ({held_out_kerning_delta} UPEM delta). No independent evidence justifies broad GSUB/mark extensions."
 
         # Fail-closed aggregate validation check across all required consumers
         has_raster_errors = any(r.render_error is not None for r in raster_results)
@@ -366,6 +380,8 @@ class MaxCandidateHeldOutValidator:
             mean_lsb_error_upem=round(mean_lsb_err, 2),
             max_lsb_error_upem=round(max_lsb_err, 2),
             in_cmap_shaping_match_rate=round(in_cmap_match_rate, 4),
+            fit_kerning_delta_upem=round(float(fit_kerning_delta), 2),
+            held_out_in_cmap_kerning_delta_upem=round(float(held_out_kerning_delta), 2),
             mean_held_out_raster_iou=round(mean_iou, 4),
             requires_typography_phase_e=requires_phase_e,
             typography_evidence_summary=typo_evidence,

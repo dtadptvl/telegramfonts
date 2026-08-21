@@ -6,6 +6,32 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 
+# Bounded evidence-driven candidate fit pairs (prioritized typographical pairs, strictly non-N^2)
+BOUNDED_FIT_PAIRS: list[tuple[int, int]] = [
+    (ord("A"), ord("O")),    # (65, 79): -40 UPEM
+    (ord("B"), ord("O")),    # (66, 79): -10 UPEM
+    (ord("A"), ord("%")),    # (65, 37): -40 UPEM
+    (ord("A"), ord("g")),    # (65, 103): -20 UPEM
+    (ord("A"), ord("ơ")),    # (65, 417): -20 UPEM
+    (ord("Đ"), ord("A")),    # (272, 65): -40 UPEM
+    (ord("g"), ord("ắ")),    # (103, 7855): -20 UPEM
+    # Control unadjusted pairs (evidence of 0 delta)
+    (ord("A"), ord("A")),    # (65, 65): 0 UPEM
+    (ord("O"), ord("O")),    # (79, 79): 0 UPEM
+    (ord("8"), ord("A")),    # (56, 65): 0 UPEM
+    (ord("g"), ord("m")),    # (103, 109): 0 UPEM
+    (ord("Đ"), ord("O")),    # (272, 79): 0 UPEM
+]
+
+# Distinct held-out in-cmap pairs for evaluation only (never in the fit set)
+SEPARATE_HELD_OUT_IN_CMAP_PAIRS: list[tuple[str, int, int]] = [
+    ("OA", ord("O"), ord("A")),    # (79, 65) - mirror pair
+    ("OĐ", ord("O"), ord("Đ")),    # (79, 272)
+    ("ơA", ord("ơ"), ord("A")),    # (417, 65)
+    ("mơ", ord("m"), ord("ơ")),    # (109, 417)
+]
+
+
 @dataclass(frozen=True)
 class PairKerningObservation:
     """Observable measurement of a single character pair and inferred kerning adjustment."""

@@ -7,7 +7,11 @@ import logging
 from typing import Any, Iterable
 
 from measurement.browser_session import ChromiumSession
-from typography.models import PairKerningObservation, TypographyDataset
+from typography.models import (
+    BOUNDED_FIT_PAIRS,
+    PairKerningObservation,
+    TypographyDataset,
+)
 
 logger = logging.getLogger("telegramfonts.agent.typography.inferencer")
 
@@ -27,17 +31,67 @@ class EvidenceKerningInferencer:
         self.units_per_em = units_per_em
         self.threshold_upem = threshold_upem
 
+    def infer_from_store(
+        self,
+        store: Any,
+        reference_id: str,
+        style_id: str,
+    ) -> TypographyDataset:
+        """Infer canonical typography dataset strictly from persistent observation store."""
+        raw_rows = store.get_pair_observations(reference_id, style_id)
+        observations: list[PairKerningObservation] = []
+        kerning_pairs: dict[tuple[int, int], int] = {}
+
+        for row in raw_rows:
+            left_cp = int(row["left_cp"])
+            right_cp = int(row["right_cp"])
+            left_char = str(row["left_char"])
+            right_char = str(row["right_char"])
+            left_adv = float(row["left_advance_upem"])
+            right_adv = float(row["right_advance_upem"])
+            pair_adv = float(row["pair_advance_upem"])
+            inferred_kern = int(row["inferred_kerning_upem"])
+            is_applied = inferred_kern != 0
+
+            obs = PairKerningObservation(
+                left_cp=left_cp,
+                right_cp=right_cp,
+                left_char=left_char,
+                right_char=right_char,
+                left_advance_upem=round(left_adv, 2),
+                right_advance_upem=round(right_adv, 2),
+                measured_pair_advance_upem=round(pair_adv, 2),
+                inferred_kerning_upem=inferred_kern,
+                is_kerning_applied=is_applied,
+                confidence=float(row.get("confidence", 1.0)),
+            )
+            observations.append(obs)
+
+            if is_applied:
+                kerning_pairs[(left_cp, right_cp)] = inferred_kern
+
+        return TypographyDataset(
+            family_name=self.family_name,
+            style_name=self.style_name,
+            units_per_em=self.units_per_em,
+            kerning_pairs=kerning_pairs,
+            observations=observations,
+            total_pairs_probed=len(raw_rows),
+            active_kerning_pairs_count=len(kerning_pairs),
+            inference_method="observation_store_cached_measurements",
+            created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        )
+
     async def infer_from_browser_session(
         self,
         session: ChromiumSession,
         font_family: str,
-        code_points: Iterable[int],
+        candidate_pairs: Iterable[tuple[int, int]] | None = None,
         font_size_px: float = 200.0,
     ) -> TypographyDataset:
         """Probe bounded pair set in active Chromium session and infer kerning adjustments."""
-        cps = sorted(set(code_points))
-        # Form bounded pair set from active code points
-        pairs: list[tuple[int, int]] = [(c1, c2) for c1 in cps for c2 in cps if c1 > 0 and c2 > 0]
+        pairs = list(candidate_pairs if candidate_pairs is not None else BOUNDED_FIT_PAIRS)
+        cps = sorted(set(cp for pair in pairs for cp in pair if cp > 0))
         
         # Batch measure via Canvas 2D in single script round-trip
         chars_dict = {cp: chr(cp) for cp in cps}

@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-08-21T10:00:55.069137+00:00",
+  "timestamp": "2026-08-21T10:13:56.628847+00:00",
   "device_identity": {
     "hostname": "DESKTOP-1GIB12N",
     "os": "Windows",
@@ -11,8 +11,8 @@
   },
   "reference_id": "be_vietnam_pro",
   "style_id": "regular",
-  "total_time_seconds": 12.56,
-  "peak_rss_mb": 106.89,
+  "total_time_seconds": 13.27,
+  "peak_rss_mb": 106.63,
   "candidate_family": {
     "family_name": "BeVietnamPro MAX",
     "style_name": "Regular",
@@ -22,8 +22,8 @@
         "format": "OTF",
         "filename": "BeVietnamProMAX-Regular.otf",
         "file_path": "build\\candidate_fonts\\BeVietnamProMAX-Regular.otf",
-        "size_bytes": 5360,
-        "sha256_hex": "7373773864dfacc85437b6840012a4cee1d83c9b22fe7576db5d572b61d9ede3",
+        "size_bytes": 5256,
+        "sha256_hex": "50c6c76559f24118628df982d785a0c542164dfc8a7d37ad8b1dd35676b587d5",
         "glyph_count": 15,
         "units_per_em": 1000
       },
@@ -31,8 +31,8 @@
         "format": "TTF",
         "filename": "BeVietnamProMAX-Regular.ttf",
         "file_path": "build\\candidate_fonts\\BeVietnamProMAX-Regular.ttf",
-        "size_bytes": 6608,
-        "sha256_hex": "d26318a92bd535d44f1d6422a5f660c1d57f8ce1185e12cac261810b5d153199",
+        "size_bytes": 6504,
+        "sha256_hex": "21c37285cdaa9f0f6c02769d14771fad9cf7527dcd7bc9c395a85d16c7e5cbea",
         "glyph_count": 15,
         "units_per_em": 1000
       },
@@ -40,8 +40,8 @@
         "format": "WOFF2",
         "filename": "BeVietnamProMAX-Regular.woff2",
         "file_path": "build\\candidate_fonts\\BeVietnamProMAX-Regular.woff2",
-        "size_bytes": 3756,
-        "sha256_hex": "7f09007c72d7f7682b3e68c8c6b5ffefdac4344bc42a122f1d10d76c2e6bcf70",
+        "size_bytes": 3704,
+        "sha256_hex": "556e803add5e2dc3952ac55f5b22e7d2de9cd96552eef138e9b6d02cb66e850a",
         "glyph_count": 15,
         "units_per_em": 1000
       }
@@ -54,9 +54,11 @@
     "mean_lsb_error_upem": 4.77,
     "max_lsb_error_upem": 6.0,
     "in_cmap_shaping_match_rate": 1.0,
+    "fit_kerning_delta_upem": 0.0,
+    "held_out_in_cmap_kerning_delta_upem": 40.0,
     "mean_held_out_raster_iou": 0.7399,
     "requires_typography_phase_e": false,
-    "typography_evidence_summary": "In-cmap shaping evidence across mapped pairs ('AO', 'OA', 'BO') confirms 0.0 UPEM advance delta (max pair delta: 0 UPEM) with OpenType GPOS kerning table active. No independent evidence justifies broad GSUB/mark extensions for this subset."
+    "typography_evidence_summary": "In-cmap fit pairs confirm 0.0 UPEM advance delta with OpenType GPOS kerning active; separate held-out in-cmap pairs ('OA', 'OĐ', 'ơA', 'mơ') show no regressions (40 UPEM delta). No independent evidence justifies broad GSUB/mark extensions."
   },
   "typography": {
     "family_name": "BeVietnamPro MAX",
@@ -64,13 +66,6 @@
     "units_per_em": 1000,
     "kerning_pairs": [
       {
-        "left_cp": 37,
-        "right_cp": 65,
-        "left_char": "%",
-        "right_char": "A",
-        "kerning_upem": -40
-      },
-      {
         "left_cp": 65,
         "right_cp": 37,
         "left_char": "A",
@@ -93,38 +88,10 @@
       },
       {
         "left_cp": 65,
-        "right_cp": 273,
-        "left_char": "A",
-        "right_char": "đ",
-        "kerning_upem": -20
-      },
-      {
-        "left_cp": 65,
         "right_cp": 417,
         "left_char": "A",
         "right_char": "ơ",
         "kerning_upem": -20
-      },
-      {
-        "left_cp": 65,
-        "right_cp": 432,
-        "left_char": "A",
-        "right_char": "ư",
-        "kerning_upem": -20
-      },
-      {
-        "left_cp": 65,
-        "right_cp": 7855,
-        "left_char": "A",
-        "right_char": "ắ",
-        "kerning_upem": -20
-      },
-      {
-        "left_cp": 66,
-        "right_cp": 37,
-        "left_char": "B",
-        "right_char": "%",
-        "kerning_upem": -10
       },
       {
         "left_cp": 66,
@@ -132,34 +99,6 @@
         "left_char": "B",
         "right_char": "O",
         "kerning_upem": -10
-      },
-      {
-        "left_cp": 79,
-        "right_cp": 65,
-        "left_char": "O",
-        "right_char": "A",
-        "kerning_upem": -40
-      },
-      {
-        "left_cp": 103,
-        "right_cp": 103,
-        "left_char": "g",
-        "right_char": "g",
-        "kerning_upem": -20
-      },
-      {
-        "left_cp": 103,
-        "right_cp": 273,
-        "left_char": "g",
-        "right_char": "đ",
-        "kerning_upem": -20
-      },
-      {
-        "left_cp": 103,
-        "right_cp": 417,
-        "left_char": "g",
-        "right_char": "ơ",
-        "kerning_upem": -20
       },
       {
         "left_cp": 103,
@@ -174,110 +113,12 @@
         "left_char": "Đ",
         "right_char": "A",
         "kerning_upem": -40
-      },
-      {
-        "left_cp": 273,
-        "right_cp": 66,
-        "left_char": "đ",
-        "right_char": "B",
-        "kerning_upem": 40
-      },
-      {
-        "left_cp": 273,
-        "right_cp": 103,
-        "left_char": "đ",
-        "right_char": "g",
-        "kerning_upem": 20
-      },
-      {
-        "left_cp": 273,
-        "right_cp": 273,
-        "left_char": "đ",
-        "right_char": "đ",
-        "kerning_upem": 20
-      },
-      {
-        "left_cp": 273,
-        "right_cp": 417,
-        "left_char": "đ",
-        "right_char": "ơ",
-        "kerning_upem": 20
-      },
-      {
-        "left_cp": 273,
-        "right_cp": 7855,
-        "left_char": "đ",
-        "right_char": "ắ",
-        "kerning_upem": 20
-      },
-      {
-        "left_cp": 432,
-        "right_cp": 37,
-        "left_char": "ư",
-        "right_char": "%",
-        "kerning_upem": 60
-      },
-      {
-        "left_cp": 432,
-        "right_cp": 66,
-        "left_char": "ư",
-        "right_char": "B",
-        "kerning_upem": 60
-      },
-      {
-        "left_cp": 432,
-        "right_cp": 79,
-        "left_char": "ư",
-        "right_char": "O",
-        "kerning_upem": 60
-      },
-      {
-        "left_cp": 432,
-        "right_cp": 103,
-        "left_char": "ư",
-        "right_char": "g",
-        "kerning_upem": 15
-      },
-      {
-        "left_cp": 432,
-        "right_cp": 109,
-        "left_char": "ư",
-        "right_char": "m",
-        "kerning_upem": 40
-      },
-      {
-        "left_cp": 432,
-        "right_cp": 273,
-        "left_char": "ư",
-        "right_char": "đ",
-        "kerning_upem": 15
-      },
-      {
-        "left_cp": 432,
-        "right_cp": 417,
-        "left_char": "ư",
-        "right_char": "ơ",
-        "kerning_upem": 15
-      },
-      {
-        "left_cp": 432,
-        "right_cp": 432,
-        "left_char": "ư",
-        "right_char": "ư",
-        "kerning_upem": 30
-      },
-      {
-        "left_cp": 432,
-        "right_cp": 7855,
-        "left_char": "ư",
-        "right_char": "ắ",
-        "kerning_upem": 15
       }
     ],
-    "total_pairs_probed": 169,
-    "active_kerning_pairs_count": 30,
-    "inference_method": "browser_text_metrics_differential",
-    "created_at": "2026-08-21T10:00:54.773198+00:00"
+    "total_pairs_probed": 12,
+    "active_kerning_pairs_count": 7,
+    "inference_method": "observation_store_cached_measurements",
+    "created_at": "2026-08-21T10:13:56.296043+00:00"
   },
   "chromium_validation": {
     "is_available": true,
@@ -293,8 +134,8 @@
     {
       "format": "OTF",
       "file_path": "build\\candidate_fonts\\BeVietnamProMAX-Regular.otf",
-      "size_bytes": 5360,
-      "sha256_hex": "7373773864dfacc85437b6840012a4cee1d83c9b22fe7576db5d572b61d9ede3",
+      "size_bytes": 5256,
+      "sha256_hex": "50c6c76559f24118628df982d785a0c542164dfc8a7d37ad8b1dd35676b587d5",
       "is_direct_loadable_fonttools": true,
       "is_direct_loadable_freetype": true,
       "is_roundtrip_loadable_freetype": true,
@@ -310,8 +151,8 @@
     {
       "format": "TTF",
       "file_path": "build\\candidate_fonts\\BeVietnamProMAX-Regular.ttf",
-      "size_bytes": 6608,
-      "sha256_hex": "d26318a92bd535d44f1d6422a5f660c1d57f8ce1185e12cac261810b5d153199",
+      "size_bytes": 6504,
+      "sha256_hex": "21c37285cdaa9f0f6c02769d14771fad9cf7527dcd7bc9c395a85d16c7e5cbea",
       "is_direct_loadable_fonttools": true,
       "is_direct_loadable_freetype": true,
       "is_roundtrip_loadable_freetype": true,
@@ -327,8 +168,8 @@
     {
       "format": "WOFF2",
       "file_path": "build\\candidate_fonts\\BeVietnamProMAX-Regular.woff2",
-      "size_bytes": 3756,
-      "sha256_hex": "7f09007c72d7f7682b3e68c8c6b5ffefdac4344bc42a122f1d10d76c2e6bcf70",
+      "size_bytes": 3704,
+      "sha256_hex": "556e803add5e2dc3952ac55f5b22e7d2de9cd96552eef138e9b6d02cb66e850a",
       "is_direct_loadable_fonttools": true,
       "is_direct_loadable_freetype": false,
       "is_roundtrip_loadable_freetype": true,
@@ -477,7 +318,7 @@
   "shaping_results": [
     {
       "text": "AO",
-      "category": "in_cmap_kerning_sensitive",
+      "category": "in_cmap_fit_kerning_pair",
       "in_candidate_cmap": true,
       "glyph_sequence_match": true,
       "candidate_glyph_names": [
@@ -487,26 +328,6 @@
       "reference_glyph_names": [
         "A",
         "O"
-      ],
-      "candidate_glyph_count": 2,
-      "reference_glyph_count": 2,
-      "candidate_total_advance_upem": 1522,
-      "reference_total_advance_upem": 1522,
-      "advance_delta_upem": 0,
-      "max_position_delta_upem": 0
-    },
-    {
-      "text": "OA",
-      "category": "in_cmap_kerning_sensitive",
-      "in_candidate_cmap": true,
-      "glyph_sequence_match": true,
-      "candidate_glyph_names": [
-        "O",
-        "A"
-      ],
-      "reference_glyph_names": [
-        "O",
-        "A"
       ],
       "candidate_glyph_count": 2,
       "reference_glyph_count": 2,
@@ -517,7 +338,7 @@
     },
     {
       "text": "BO",
-      "category": "in_cmap_kerning_sensitive",
+      "category": "in_cmap_fit_kerning_pair",
       "in_candidate_cmap": true,
       "glyph_sequence_match": true,
       "candidate_glyph_names": [
@@ -532,6 +353,186 @@
       "reference_glyph_count": 2,
       "candidate_total_advance_upem": 1490,
       "reference_total_advance_upem": 1490,
+      "advance_delta_upem": 0,
+      "max_position_delta_upem": 0
+    },
+    {
+      "text": "A%",
+      "category": "in_cmap_fit_kerning_pair",
+      "in_candidate_cmap": true,
+      "glyph_sequence_match": true,
+      "candidate_glyph_names": [
+        "A",
+        "percent"
+      ],
+      "reference_glyph_names": [
+        "A",
+        "percent"
+      ],
+      "candidate_glyph_count": 2,
+      "reference_glyph_count": 2,
+      "candidate_total_advance_upem": 1545,
+      "reference_total_advance_upem": 1545,
+      "advance_delta_upem": 0,
+      "max_position_delta_upem": 0
+    },
+    {
+      "text": "Ag",
+      "category": "in_cmap_fit_kerning_pair",
+      "in_candidate_cmap": true,
+      "glyph_sequence_match": true,
+      "candidate_glyph_names": [
+        "A",
+        "g"
+      ],
+      "reference_glyph_names": [
+        "A",
+        "g"
+      ],
+      "candidate_glyph_count": 2,
+      "reference_glyph_count": 2,
+      "candidate_total_advance_upem": 1359,
+      "reference_total_advance_upem": 1359,
+      "advance_delta_upem": 0,
+      "max_position_delta_upem": 0
+    },
+    {
+      "text": "Aơ",
+      "category": "in_cmap_fit_kerning_pair",
+      "in_candidate_cmap": true,
+      "glyph_sequence_match": true,
+      "candidate_glyph_names": [
+        "A",
+        "uni01A1"
+      ],
+      "reference_glyph_names": [
+        "A",
+        "ohorn"
+      ],
+      "candidate_glyph_count": 2,
+      "reference_glyph_count": 2,
+      "candidate_total_advance_upem": 1358,
+      "reference_total_advance_upem": 1358,
+      "advance_delta_upem": 0,
+      "max_position_delta_upem": 0
+    },
+    {
+      "text": "ĐA",
+      "category": "in_cmap_fit_kerning_pair",
+      "in_candidate_cmap": true,
+      "glyph_sequence_match": true,
+      "candidate_glyph_names": [
+        "uni0110",
+        "A"
+      ],
+      "reference_glyph_names": [
+        "Dcroat",
+        "A"
+      ],
+      "candidate_glyph_count": 2,
+      "reference_glyph_count": 2,
+      "candidate_total_advance_upem": 1484,
+      "reference_total_advance_upem": 1484,
+      "advance_delta_upem": 0,
+      "max_position_delta_upem": 0
+    },
+    {
+      "text": "gắ",
+      "category": "in_cmap_fit_kerning_pair",
+      "in_candidate_cmap": true,
+      "glyph_sequence_match": true,
+      "candidate_glyph_names": [
+        "g",
+        "uni1EAF"
+      ],
+      "reference_glyph_names": [
+        "g",
+        "uni1EAF"
+      ],
+      "candidate_glyph_count": 2,
+      "reference_glyph_count": 2,
+      "candidate_total_advance_upem": 1276,
+      "reference_total_advance_upem": 1276,
+      "advance_delta_upem": 0,
+      "max_position_delta_upem": 0
+    },
+    {
+      "text": "OA",
+      "category": "in_cmap_held_out_pair",
+      "in_candidate_cmap": true,
+      "glyph_sequence_match": true,
+      "candidate_glyph_names": [
+        "O",
+        "A"
+      ],
+      "reference_glyph_names": [
+        "O",
+        "A"
+      ],
+      "candidate_glyph_count": 2,
+      "reference_glyph_count": 2,
+      "candidate_total_advance_upem": 1562,
+      "reference_total_advance_upem": 1522,
+      "advance_delta_upem": 40,
+      "max_position_delta_upem": 40
+    },
+    {
+      "text": "OĐ",
+      "category": "in_cmap_held_out_pair",
+      "in_candidate_cmap": true,
+      "glyph_sequence_match": true,
+      "candidate_glyph_names": [
+        "O",
+        "uni0110"
+      ],
+      "reference_glyph_names": [
+        "O",
+        "Dcroat"
+      ],
+      "candidate_glyph_count": 2,
+      "reference_glyph_count": 2,
+      "candidate_total_advance_upem": 1614,
+      "reference_total_advance_upem": 1614,
+      "advance_delta_upem": 0,
+      "max_position_delta_upem": 0
+    },
+    {
+      "text": "ơA",
+      "category": "in_cmap_held_out_pair",
+      "in_candidate_cmap": true,
+      "glyph_sequence_match": true,
+      "candidate_glyph_names": [
+        "uni01A1",
+        "A"
+      ],
+      "reference_glyph_names": [
+        "ohorn",
+        "A"
+      ],
+      "candidate_glyph_count": 2,
+      "reference_glyph_count": 2,
+      "candidate_total_advance_upem": 1378,
+      "reference_total_advance_upem": 1378,
+      "advance_delta_upem": 0,
+      "max_position_delta_upem": 0
+    },
+    {
+      "text": "mơ",
+      "category": "in_cmap_held_out_pair",
+      "in_candidate_cmap": true,
+      "glyph_sequence_match": true,
+      "candidate_glyph_names": [
+        "m",
+        "uni01A1"
+      ],
+      "reference_glyph_names": [
+        "m",
+        "ohorn"
+      ],
+      "candidate_glyph_count": 2,
+      "reference_glyph_count": 2,
+      "candidate_total_advance_upem": 1535,
+      "reference_total_advance_upem": 1535,
       "advance_delta_upem": 0,
       "max_position_delta_upem": 0
     },
