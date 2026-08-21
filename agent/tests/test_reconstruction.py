@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from PIL import Image
+from fontTools.ttLib import TTFont
 
 from measurement.models import DirectMetrics, ObservationRecord
 from measurement.store import ObservationStore
@@ -304,3 +305,71 @@ def test_representative_subset_physical_smoke():
         assert score.chamfer_distance_mean_upem < 120.0
         assert score.topology_match is True
         assert glyph.total_cubic_segments > 0
+
+
+def test_candidate_builder_and_validator_e2e(tmp_path):
+    """Verify Candidate Builder builds OTF, TTF, WOFF2 and HeldOutValidator verifies load and shaping."""
+    from reconstruction.candidate_builder import MaxCandidateFontBuilder
+    from reconstruction.candidate_validator import MaxCandidateHeldOutValidator
+
+    store_dir = Path("observations/benchmark")
+    ttf_path = Path("agent/benchmark_data/ground_truth/BeVietnamPro-Regular.ttf")
+    if not store_dir.exists() or not ttf_path.exists():
+        pytest.skip("Benchmark observations or ground truth font not available")
+
+    store = ObservationStore(store_dir)
+    solver = MaxReconstructionSolver()
+
+    # Reconstruct subset
+    test_cps = [ord(c) for c in ["A", "B", "8", "ơ", "đ", "Đ"]]
+    glyphs = []
+    for cp in test_cps:
+        obs = store.get_glyph_observations("be_vietnam_pro", "regular", cp)
+        if obs:
+            glyphs.append(solver.reconstruct_glyph(obs))
+
+    builder = MaxCandidateFontBuilder(family_name="TestFont MAX", style_name="Regular", units_per_em=1000)
+    res = builder.build_candidate_family(glyphs, tmp_path)
+
+    # 1. Check OTF (CFF)
+    assert res.otf.format == "OTF"
+    assert res.otf.file_path.exists()
+    assert res.otf.size_bytes > 1000
+    font_otf = TTFont(res.otf.file_path)
+    assert "CFF " in font_otf
+
+    # 2. Check TTF (glyf derived via cu2qu)
+    assert res.ttf.format == "TTF"
+    assert res.ttf.file_path.exists()
+    assert res.ttf.size_bytes > 1000
+    font_ttf = TTFont(res.ttf.file_path)
+    assert "glyf" in font_ttf
+
+    # 3. Check WOFF2
+    assert res.woff2.format == "WOFF2"
+    assert res.woff2.file_path.exists()
+    font_woff2 = TTFont(res.woff2.file_path)
+    assert font_woff2.flavor == "woff2"
+
+    # 4. Check Deterministic Builds (Rebuilding must yield identical SHA256)
+    tmp_path2 = tmp_path / "second_build"
+    res2 = builder.build_candidate_family(glyphs, tmp_path2)
+    assert res.otf.sha256_hex == res2.otf.sha256_hex
+    assert res.ttf.sha256_hex == res2.ttf.sha256_hex
+    assert res.woff2.sha256_hex == res2.woff2.sha256_hex
+
+    # 5. Check Dynamic Cmap
+    best_cmap = font_ttf.getBestCmap()
+    assert best_cmap is not None
+    for cp in test_cps:
+        assert cp in best_cmap
+
+    # 6. Check HeldOutValidator Execution
+    validator = MaxCandidateHeldOutValidator(ttf_path)
+    report = validator.validate_family(res, tested_codepoints=test_cps)
+
+    assert report.all_formats_passed is True
+    assert report.mean_advance_error_upem < 1.0  # Direct metrics propagation
+    assert len(report.shaping_results) > 0
+    assert len(report.raster_results) > 0
+
