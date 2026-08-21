@@ -68,11 +68,37 @@ class FontBuilderService:
             lsb = g_vec.lsb if g_vec else 50
             metrics_dict[g_name] = (adv, lsb)
 
+        family = sanitized_family or "TeleFont"
+        style = sanitized_style or "Regular"
+        full_name = f"{family} {style}".strip()
+        ps = ps_name or f"{family.replace(' ', '')}-{style.replace(' ', '')}"
+        unique_id = f"1.000;TeleFont;{ps}"
+
         name_strings = {
-            "familyName": sanitized_family or "TeleFont",
-            "styleName": sanitized_style or "Regular",
-            "psName": ps_name or "TeleFont-Regular",
+            "familyName": family,
+            "styleName": style,
+            "uniqueFontIdentifier": unique_id,
+            "fullName": full_name,
+            "version": "Version 1.000",
+            "psName": ps,
         }
+
+        # Determine fsSelection flags based on style name
+        style_lower = style.lower()
+        is_italic = "italic" in style_lower or "oblique" in style_lower or "slanted" in style_lower
+        is_bold = "bold" in style_lower or style_source.weight_class >= 700
+        fs_selection = 0
+        if is_italic:
+            fs_selection |= 0x01
+        if is_bold:
+            fs_selection |= 0x20
+        if not is_italic and not is_bold:
+            fs_selection |= 0x40  # REGULAR
+
+        ascent = 800
+        descent = -200
+        win_ascent = max(ascent, abs(descent))
+        win_descent = abs(descent)
 
         # Build format-specific font representation (BLOCK G)
         if clean_format == "OTF":
@@ -96,15 +122,28 @@ class FontBuilderService:
                 charstrings[g_name] = pen.getCharString()
 
             fb.setupCFF(
-                psName=ps_name,
-                fontInfo={"FullName": f"{sanitized_family} {sanitized_style}", "FamilyName": sanitized_family},
+                psName=ps,
+                fontInfo={"FullName": full_name, "FamilyName": family},
                 charStringsDict=charstrings,
                 privateDict={},
             )
             fb.setupHorizontalMetrics(metrics_dict)
-            fb.setupHorizontalHeader(ascent=800, descent=-200)
+            fb.setupHorizontalHeader(ascent=ascent, descent=descent)
             fb.setupNameTable(name_strings)
-            fb.setupOS2(usWeightClass=style_source.weight_class)
+            fb.setupOS2(
+                sTypoAscender=ascent,
+                sTypoDescender=descent,
+                sTypoLineGap=200,
+                usWinAscent=win_ascent,
+                usWinDescent=win_descent,
+                sxHeight=500,
+                sCapHeight=700,
+                usWeightClass=style_source.weight_class,
+                usWidthClass=5,
+                fsSelection=fs_selection,
+                ulCodePageRange1=1,  # Latin 1 / 1252
+                ulUnicodeRange1=1,  # Basic Latin
+            )
             fb.setupPost()
 
         else:
@@ -128,9 +167,22 @@ class FontBuilderService:
 
             fb.setupGlyf(glyphs_dict)
             fb.setupHorizontalMetrics(metrics_dict)
-            fb.setupHorizontalHeader(ascent=800, descent=-200)
+            fb.setupHorizontalHeader(ascent=ascent, descent=descent)
             fb.setupNameTable(name_strings)
-            fb.setupOS2(usWeightClass=style_source.weight_class)
+            fb.setupOS2(
+                sTypoAscender=ascent,
+                sTypoDescender=descent,
+                sTypoLineGap=200,
+                usWinAscent=win_ascent,
+                usWinDescent=win_descent,
+                sxHeight=500,
+                sCapHeight=700,
+                usWeightClass=style_source.weight_class,
+                usWidthClass=5,
+                fsSelection=fs_selection,
+                ulCodePageRange1=1,  # Latin 1 / 1252
+                ulUnicodeRange1=1,  # Basic Latin
+            )
             fb.setupPost()
 
             if clean_format == "WOFF2":
