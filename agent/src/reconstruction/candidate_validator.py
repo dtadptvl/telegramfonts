@@ -674,7 +674,7 @@ class MaxCandidateHeldOutValidator:
             except Exception as e:
                 logger.error("Chromium validation failed: %s", e)
                 return ChromiumValidationResult(
-                    is_available=True,
+                    is_available=False,
                     browser_version="error",
                     is_direct_loadable_chromium=False,
                     fallback_rejection_verified=False,
