@@ -99,6 +99,34 @@ class ObservationStore:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS pair_observations (
+                    reference_id TEXT NOT NULL,
+                    style_id TEXT NOT NULL,
+                    left_cp INTEGER NOT NULL,
+                    right_cp INTEGER NOT NULL,
+                    left_char TEXT NOT NULL,
+                    right_char TEXT NOT NULL,
+                    left_advance_upem REAL NOT NULL,
+                    right_advance_upem REAL NOT NULL,
+                    pair_advance_upem REAL NOT NULL,
+                    inferred_kerning_upem INTEGER NOT NULL,
+                    confidence REAL NOT NULL,
+                    provenance TEXT NOT NULL DEFAULT 'untrusted',
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (reference_id, style_id, left_cp, right_cp)
+                )
+                """
+            )
+            # Automatic schema migration for existing databases
+            try:
+                conn.execute(
+                    "ALTER TABLE pair_observations ADD COLUMN provenance TEXT NOT NULL DEFAULT 'untrusted'"
+                )
+            except sqlite3.OperationalError:
+                pass
+
             conn.commit()
 
     def has_observation(self, cache_key: str) -> bool:
@@ -331,3 +359,73 @@ class ObservationStore:
             cur = conn.execute("SELECT COUNT(*) as cnt FROM observations")
             row = cur.fetchone()
             return int(row["cnt"]) if row else 0
+
+    def save_pair_observation(
+        self,
+        reference_id: str,
+        style_id: str,
+        left_cp: int,
+        right_cp: int,
+        left_char: str,
+        right_char: str,
+        left_advance_upem: float,
+        right_advance_upem: float,
+        pair_advance_upem: float,
+        inferred_kerning_upem: int = 0,
+        confidence: float = 1.0,
+        provenance: str = "untrusted",
+        created_at: str | None = None,
+    ) -> None:
+        """Persist an observable pair advance measurement into index."""
+        ts = created_at or datetime.datetime.now(datetime.timezone.utc).isoformat()
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO pair_observations (
+                    reference_id, style_id, left_cp, right_cp, left_char, right_char,
+                    left_advance_upem, right_advance_upem, pair_advance_upem,
+                    inferred_kerning_upem, confidence, provenance, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    reference_id,
+                    style_id,
+                    left_cp,
+                    right_cp,
+                    left_char,
+                    right_char,
+                    left_advance_upem,
+                    right_advance_upem,
+                    pair_advance_upem,
+                    inferred_kerning_upem,
+                    confidence,
+                    provenance,
+                    ts,
+                ),
+            )
+            conn.commit()
+
+    def get_pair_observations(
+        self, reference_id: str, style_id: str
+    ) -> list[dict[str, Any]]:
+        """Retrieve all stored observable pair measurements for a style."""
+        with self._get_connection() as conn:
+            cur = conn.execute(
+                """
+                SELECT * FROM pair_observations
+                WHERE reference_id = ? AND style_id = ?
+                ORDER BY left_cp ASC, right_cp ASC
+                """,
+                (reference_id, style_id),
+            )
+            rows = cur.fetchall()
+            return [dict(r) for r in rows]
+
+    def has_pair_observations(self, reference_id: str, style_id: str) -> bool:
+        """Check if any pair observations exist for this reference/style."""
+        with self._get_connection() as conn:
+            cur = conn.execute(
+                "SELECT 1 FROM pair_observations WHERE reference_id = ? AND style_id = ? LIMIT 1",
+                (reference_id, style_id),
+            )
+            return cur.fetchone() is not None
