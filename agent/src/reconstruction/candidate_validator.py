@@ -333,7 +333,7 @@ class MaxCandidateHeldOutValidator:
             typo_evidence = f"In-cmap shaping evidence across mapped pairs ('AO', 'OA', 'BO') reveals {in_cmap_kerning_delta} UPEM total advance delta (max pair delta: {in_cmap_pos_delta} UPEM) due to missing GPOS kerning table in Candidate vs Reference font. Phase E (GPOS/GSUB typography) is justified."
         else:
             requires_phase_e = False
-            typo_evidence = "In-cmap shaping evidence shows 0 UPEM position delta; Phase E typography is not needed for this subset."
+            typo_evidence = f"In-cmap shaping evidence across mapped pairs ('AO', 'OA', 'BO') confirms 0.0 UPEM advance delta (max pair delta: {in_cmap_pos_delta} UPEM) with OpenType GPOS kerning table active. No independent evidence justifies broad GSUB/mark extensions for this subset."
 
         # Fail-closed aggregate validation check across all required consumers
         has_raster_errors = any(r.render_error is not None for r in raster_results)
