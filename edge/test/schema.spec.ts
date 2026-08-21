@@ -26,6 +26,9 @@ describe('D1 Database Schema & Constraints', () => {
       expect(
         migrations.results.some((m) => m.name === '0005_r2_artifacts_and_delivery.sql')
       ).toBe(true);
+      expect(
+        migrations.results.some((m) => m.name === '0006_artifact_parts.sql')
+      ).toBe(true);
     });
   });
 

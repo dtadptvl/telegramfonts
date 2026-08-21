@@ -317,8 +317,8 @@ export async function handleInternalJobs(
       });
     }
 
-    if (!size || size <= 0 || size > 50 * 1024 * 1024) {
-      return new Response(JSON.stringify({ error: 'Valid size between 1 and 50 MiB is required' }), {
+    if (!size || size <= 0) {
+      return new Response(JSON.stringify({ error: 'Valid size is required' }), {
         status: 400,
         headers: { 'Content-Type': 'application/json' },
       });
@@ -364,11 +364,7 @@ export async function handleInternalJobs(
       });
     }
 
-    if (
-      r2Head.customMetadata?.sha256 !== sha256 ||
-      r2Head.customMetadata?.job_id !== jobId ||
-      r2Head.customMetadata?.order_id !== job.order_id
-    ) {
+    if (r2Head.customMetadata?.sha256 !== sha256 || r2Head.customMetadata?.job_id !== jobId || r2Head.customMetadata?.order_id !== job.order_id) {
       return new Response(JSON.stringify({ error: 'Artifact metadata mismatch in R2' }), {
         status: 400,
         headers: { 'Content-Type': 'application/json' },
@@ -383,6 +379,51 @@ export async function handleInternalJobs(
       });
     }
 
+    let partsMeta: import('../services/job-service').ArtifactPartMeta[] | undefined;
+    if (Array.isArray(body.parts) && body.parts.length > 0) {
+      partsMeta = [];
+      for (const p of body.parts as Array<Record<string, unknown>>) {
+        const pIndex = typeof p.part_index === 'number' ? p.part_index : 0;
+        const pTotal = typeof p.total_parts === 'number' ? p.total_parts : 0;
+        const pName = typeof p.filename === 'string' ? p.filename.trim() : '';
+        const pKey = typeof p.artifact_key === 'string' ? p.artifact_key.trim() : '';
+        const pSha = typeof p.artifact_sha256 === 'string' ? p.artifact_sha256.trim().toLowerCase() : '';
+        const pSize = typeof p.artifact_size_bytes === 'number' ? p.artifact_size_bytes : 0;
+
+        if (pIndex < 1 || pTotal < 1 || !pName || !pKey || !/^[0-9a-f]{64}$/.test(pSha) || pSize <= 0) {
+          return new Response(JSON.stringify({ error: 'Invalid part metadata in parts array' }), {
+            status: 400,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+
+        const expectedPartKey = buildArtifactStorageKey(job.order_id, jobId, pSha);
+        if (pKey !== expectedPartKey) {
+          return new Response(JSON.stringify({ error: `Invalid artifact_key path for part ${pIndex}` }), {
+            status: 400,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+
+        const r2PartHead = await env.ARTIFACTS_BUCKET.head(pKey);
+        if (!r2PartHead || r2PartHead.size !== pSize) {
+          return new Response(JSON.stringify({ error: `Artifact part ${pIndex} not found or size mismatch in R2` }), {
+            status: 400,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+
+        partsMeta.push({
+          part_index: pIndex,
+          total_parts: pTotal,
+          filename: pName,
+          artifact_key: pKey,
+          artifact_size_bytes: pSize,
+          artifact_sha256: pSha,
+        });
+      }
+    }
+
     // Atomic D1 completion
     const completeResult = await jobService.completeJob({
       jobId,
@@ -391,6 +432,7 @@ export async function handleInternalJobs(
       artifactKey,
       artifactSha256: sha256,
       artifactSizeBytes: size,
+      parts: partsMeta,
     });
 
     if (completeResult.status === 'COMPLETED' || completeResult.status === 'ALREADY_COMPLETED') {

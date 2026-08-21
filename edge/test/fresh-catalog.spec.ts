@@ -330,12 +330,21 @@ describe('Phase 7: Fresh-Catalog E2E Resolution & Scheduled Cron Delivery', () =
       .bind(orderId, userId, now, now)
       .run();
 
+    const artifactKey = `artifacts/${orderId}/bundle.zip`;
+    const dummyZip = new TextEncoder().encode('PK\x05\x06dummy_zip_content');
+    const shaBuf = await crypto.subtle.digest('SHA-256', dummyZip);
+    const shaHex = Array.from(new Uint8Array(shaBuf))
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('');
+
     await env.DB.prepare(
       `INSERT INTO fulfillment_receipts (job_id, order_id, artifact_key, artifact_size_bytes, artifact_sha256, completed_at, created_at)
-       VALUES (?, ?, ?, 1024, 'abc123', ?, ?)`
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
     )
-      .bind(`job_${orderId}`, orderId, `artifacts/${orderId}/bundle.zip`, now, now)
+      .bind(`job_${orderId}`, orderId, artifactKey, dummyZip.byteLength, shaHex, now, now)
       .run();
+
+    await env.ARTIFACTS_BUCKET.put(artifactKey, dummyZip);
 
     // 2. Insert pending DELIVERY_READY outbox event
     const outboxId = `outbox_cron_${crypto.randomUUID().replace(/-/g, '')}`;
@@ -346,15 +355,15 @@ describe('Phase 7: Fresh-Catalog E2E Resolution & Scheduled Cron Delivery', () =
       .bind(outboxId, orderId, JSON.stringify({ order_id: orderId }), now)
       .run();
 
-    // 3. Mock Telegram sendMessage
-    let sentToChat: number | null = null;
-    let sentText: string = '';
+    // 3. Mock Telegram sendDocument
+    let sentToChat: string | null = null;
+    let sentDocument: boolean = false;
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (info, init) => {
       const urlStr = typeof info === 'string' ? info : info instanceof Request ? info.url : info.toString();
-      if (urlStr.includes('/sendMessage')) {
-        const bodyObj = JSON.parse(String(init?.body || '{}')) as { chat_id: number; text: string };
-        sentToChat = bodyObj.chat_id;
-        sentText = bodyObj.text;
+      if (urlStr.includes('/sendDocument')) {
+        const formData = init?.body instanceof FormData ? init.body : new FormData();
+        sentToChat = formData.get('chat_id') as string;
+        sentDocument = Boolean(formData.get('document'));
         return new Response(JSON.stringify({ ok: true, result: { message_id: 9988 } }), {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
@@ -367,7 +376,7 @@ describe('Phase 7: Fresh-Catalog E2E Resolution & Scheduled Cron Delivery', () =
       // 4. Trigger scheduled cron event
       await worker.scheduled({} as ScheduledEvent, env, {} as ExecutionContext);
 
-      // 5. Verify outbox event is marked SENT and message was delivered to Telegram
+      // 5. Verify outbox event is marked SENT and document was delivered to Telegram
       const outboxRecord = await env.DB
         .prepare('SELECT status, last_dispatch_error FROM outbox_events WHERE id = ?')
         .bind(outboxId)
@@ -376,7 +385,7 @@ describe('Phase 7: Fresh-Catalog E2E Resolution & Scheduled Cron Delivery', () =
       expect(outboxRecord?.status).toBe('SENT');
       expect(outboxRecord?.last_dispatch_error).toBeNull();
       expect(String(sentToChat)).toBe('771122');
-      expect(sentText).toContain('Your fonts are ready!');
+      expect(sentDocument).toBe(true);
     } finally {
       fetchSpy.mockRestore();
     }
