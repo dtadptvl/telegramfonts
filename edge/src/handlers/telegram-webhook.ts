@@ -11,7 +11,6 @@ import { SUPPORTED_FORMATS } from '../types/session';
 import { escapeHtml } from '../utils/html';
 import { normalizeMyFontsUrl } from '../utils/myfonts';
 import { generateVietQrUrl } from '../utils/vietqr';
-import { generateSignedDownloadUrl, getDownloadTtlSeconds } from '../utils/download-signer';
 import { TelegramClient } from '../services/telegram-client';
 import { CatalogService } from '../services/catalog-service';
 import { SessionService, SessionConflictError } from '../services/session-service';
@@ -292,22 +291,7 @@ async function handleCallbackQuery(
       return;
     }
 
-    let signedDownloadUrl: string | undefined;
-    if (order.status === 'COMPLETED' && env.DOWNLOAD_SIGNING_SECRET && env.BASE_URL) {
-      try {
-        const ttlSeconds = getDownloadTtlSeconds(env.DOWNLOAD_URL_TTL_SECONDS);
-        const signed = await generateSignedDownloadUrl(order.id, env.DOWNLOAD_SIGNING_SECRET, {
-          baseUrl: env.BASE_URL,
-          ttlSeconds,
-          requireHttps: true,
-        });
-        signedDownloadUrl = signed.url;
-      } catch {
-        // Fallback without signed link if signing or baseUrl validation fails
-      }
-    }
-
-    const { text: msgText, replyMarkup } = renderOrderCreatedMessage(order, env, signedDownloadUrl);
+    const { text: msgText, replyMarkup } = renderOrderCreatedMessage(order, env);
     await tg.editMessageText({
       chat_id: session.chat_id,
       message_id: query.message?.message_id || session.last_message_id || undefined,
@@ -944,8 +928,7 @@ function renderOrderConfirmation(
 
 export function renderOrderCreatedMessage(
   order: OrderRecord,
-  env: Env,
-  signedDownloadUrl?: string
+  env: Env
 ): { text: string; replyMarkup: InlineKeyboardMarkup } {
   const hasBankInfo = Boolean(env.BANK_ID && env.BANK_ACCOUNT_NUMBER);
   const paymentCode = order.payment_code || 'N/A';
@@ -980,7 +963,7 @@ export function renderOrderCreatedMessage(
   let statusNote = '';
   if (order.status === 'COMPLETED') {
     statusBadge = `<b>COMPLETED 📦</b>`;
-    statusNote = `\n🎉 <b>Your font files are ready for download!</b>\n`;
+    statusNote = `\n🎉 <b>Your font bundle has been delivered directly to this chat as a document above!</b>\n`;
   } else if (order.status === 'PROCESSING') {
     statusBadge = `<b>PROCESSING ⚙️</b>`;
     statusNote = `\n⚙️ <i>Your fonts are currently being generated. This usually takes under a minute.</i>\n`;
@@ -996,23 +979,14 @@ export function renderOrderCreatedMessage(
     paymentCode
   )}</code>\n• <b>Amount:</b> <b>${order.total_amount.toLocaleString('vi-VN')} VND</b>\n${order.status === 'AWAITING_PAYMENT' ? bankSection + qrSection : ''}${statusNote}`;
 
-  const keyboard: InlineKeyboardMarkup['inline_keyboard'] = [];
-
-  if (order.status === 'COMPLETED' && signedDownloadUrl) {
-    keyboard.push([
+  const keyboard: InlineKeyboardMarkup['inline_keyboard'] = [
+    [
       {
-        text: '⬇️ Download Fonts (.ZIP)',
-        url: signedDownloadUrl,
+        text: '🔄 Refresh Status',
+        callback_data: `ord:chk:${order.id}`,
       },
-    ]);
-  }
-
-  keyboard.push([
-    {
-      text: '🔄 Refresh Status',
-      callback_data: `ord:chk:${order.id}`,
-    },
-  ]);
+    ],
+  ];
 
   return { text, replyMarkup: { inline_keyboard: keyboard } };
 }

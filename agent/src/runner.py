@@ -212,33 +212,59 @@ class JobRunner:
                 expiry_holder,
             )
 
-            # Step D: Upload ZIP artifact to private R2 storage endpoint
+            # Step D: Upload ZIP artifact(s) to private R2 storage endpoint
             if fenced_event.is_set():
                 raise RuntimeError("LEASE_FENCED_OR_EXPIRED")
 
-            upload_res = await self.worker_client.upload_artifact(
-                job_id=job.job_id,
-                lease_token=job.lease_token,
-                zip_path=manifest.zip_file_path,
-                sha256_hex=manifest.zip_sha256_hex,
-            )
-
-            if upload_res.fenced:
-                logger.warning(f"Upload for job {job.job_id} was fenced")
-                self.scratch_manager.cleanup_job_dir(job_dir)
-                return ProcessResult(action=RunnerAction.FENCED_ABORT, job_id=job.job_id, reason="upload_fenced")
-
-            if not upload_res.success or not upload_res.artifact_key:
-                logger.warning(f"Upload failed for job {job.job_id}: {upload_res.reason}")
-                await self.worker_client.fail(
-                    job.job_id,
-                    job.lease_token,
-                    retryable=True,
-                    reason_code="UPLOAD_FAILED",
+            uploaded_parts: list[dict[str, Any]] = []
+            parts_to_upload = manifest.parts if manifest.parts else [
+                ManifestPart(
+                    part_index=1,
+                    total_parts=1,
+                    filename=manifest.zip_filename,
+                    file_path=manifest.zip_file_path,
+                    size_bytes=manifest.zip_size_bytes,
+                    sha256_hex=manifest.zip_sha256_hex,
+                    file_count=len(manifest.files),
                 )
-                await self.queue_client.retry_messages([(msg.lease_id, 30)])
-                self.scratch_manager.cleanup_job_dir(job_dir)
-                return ProcessResult(action=RunnerAction.RETRIED, job_id=job.job_id, reason="upload_failed")
+            ]
+
+            for part in parts_to_upload:
+                if fenced_event.is_set():
+                    raise RuntimeError("LEASE_FENCED_OR_EXPIRED")
+
+                upload_res = await self.worker_client.upload_artifact(
+                    job_id=job.job_id,
+                    lease_token=job.lease_token,
+                    zip_path=part.file_path,
+                    sha256_hex=part.sha256_hex,
+                )
+
+                if upload_res.fenced:
+                    logger.warning(f"Upload for job {job.job_id} was fenced")
+                    self.scratch_manager.cleanup_job_dir(job_dir)
+                    return ProcessResult(action=RunnerAction.FENCED_ABORT, job_id=job.job_id, reason="upload_fenced")
+
+                if not upload_res.success or not upload_res.artifact_key:
+                    logger.warning(f"Upload failed for job {job.job_id}: {upload_res.reason}")
+                    await self.worker_client.fail(
+                        job.job_id,
+                        job.lease_token,
+                        retryable=True,
+                        reason_code="UPLOAD_FAILED",
+                    )
+                    await self.queue_client.retry_messages([(msg.lease_id, 30)])
+                    self.scratch_manager.cleanup_job_dir(job_dir)
+                    return ProcessResult(action=RunnerAction.RETRIED, job_id=job.job_id, reason="upload_failed")
+
+                uploaded_parts.append({
+                    "part_index": part.part_index,
+                    "total_parts": part.total_parts,
+                    "filename": part.filename,
+                    "artifact_key": upload_res.artifact_key,
+                    "artifact_size_bytes": part.size_bytes,
+                    "artifact_sha256": part.sha256_hex,
+                })
 
             # Step E: Fenced atomic D1 completion
             if fenced_event.is_set():
@@ -247,9 +273,10 @@ class JobRunner:
             complete_res = await self.worker_client.complete(
                 job_id=job.job_id,
                 lease_token=job.lease_token,
-                artifact_key=upload_res.artifact_key,
-                sha256_hex=manifest.zip_sha256_hex,
-                size=manifest.zip_size_bytes,
+                artifact_key=uploaded_parts[0]["artifact_key"],
+                sha256_hex=uploaded_parts[0]["artifact_sha256"],
+                size=uploaded_parts[0]["artifact_size_bytes"],
+                parts=uploaded_parts,
             )
 
             # Step F: Finalize and ACK Queue boundary (BLOCK 6)

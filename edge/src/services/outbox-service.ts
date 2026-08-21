@@ -1,8 +1,8 @@
 import type { Env } from '../env';
-import { generateSignedDownloadUrl, getDownloadTtlSeconds, formatTtlDescription } from '../utils/download-signer';
 import { TelegramClient } from './telegram-client';
 import { escapeHtml } from '../utils/html';
 import { emitStructuredLog } from '../utils/logger';
+import type { ArtifactPartMeta } from './job-service';
 
 export interface OutboxEventRecord {
   id: string;
@@ -212,9 +212,9 @@ export class OutboxService {
 
         // Query canonical order and user chat ID
         const order = await this.db
-          .prepare('SELECT id, user_id, status FROM orders WHERE id = ?')
+          .prepare('SELECT id, user_id, status, metadata FROM orders WHERE id = ?')
           .bind(orderId)
-          .first<{ id: string; user_id: string; status: string }>();
+          .first<{ id: string; user_id: string; status: string; metadata?: string | null }>();
 
         if (!order || order.status !== 'COMPLETED') {
           failureCount++;
@@ -270,9 +270,9 @@ export class OutboxService {
         }
 
         const botToken = this.env?.TELEGRAM_BOT_TOKEN;
-        const signingSecret = this.env?.DOWNLOAD_SIGNING_SECRET;
+        const bucket = this.env?.ARTIFACTS_BUCKET;
 
-        if (!botToken || !signingSecret) {
+        if (!botToken || !bucket) {
           failureCount++;
           const attempts = event.dispatch_attempts + 1;
           const backoffSeconds = Math.min(300, 5 * Math.pow(2, attempts - 1));
@@ -285,7 +285,40 @@ export class OutboxService {
                    dispatch_leased_at = NULL,
                    dispatch_lease_expires_at = NULL,
                    next_dispatch_at = ?,
-                   last_dispatch_error = 'MISSING_DELIVERY_SECRETS'
+                   last_dispatch_error = 'MISSING_DELIVERY_RESOURCES'
+               WHERE id = ? AND status = 'PENDING' AND dispatch_lease_token = ?`
+            )
+            .bind(nextDispatchAt, event.id, leaseToken)
+            .run();
+          continue;
+        }
+
+        const receipt = await this.db
+          .prepare(
+            'SELECT artifact_key, artifact_sha256, artifact_size_bytes, artifact_parts FROM fulfillment_receipts WHERE order_id = ?'
+          )
+          .bind(order.id)
+          .first<{
+            artifact_key: string;
+            artifact_sha256: string;
+            artifact_size_bytes: number;
+            artifact_parts?: string | null;
+          }>();
+
+        if (!receipt) {
+          failureCount++;
+          const attempts = event.dispatch_attempts + 1;
+          const backoffSeconds = Math.min(300, 5 * Math.pow(2, attempts - 1));
+          const nextDispatchAt = Date.now() + backoffSeconds * 1000;
+
+          await this.db
+            .prepare(
+              `UPDATE outbox_events
+               SET dispatch_lease_token = NULL,
+                   dispatch_leased_at = NULL,
+                   dispatch_lease_expires_at = NULL,
+                   next_dispatch_at = ?,
+                   last_dispatch_error = 'RECEIPT_NOT_FOUND'
                WHERE id = ? AND status = 'PENDING' AND dispatch_lease_token = ?`
             )
             .bind(nextDispatchAt, event.id, leaseToken)
@@ -294,37 +327,126 @@ export class OutboxService {
         }
 
         try {
-          const ttlSeconds = getDownloadTtlSeconds(this.env?.DOWNLOAD_URL_TTL_SECONDS);
-          const ttlDesc = formatTtlDescription(ttlSeconds);
-          const signed = await generateSignedDownloadUrl(order.id, signingSecret, {
-            baseUrl: this.env?.BASE_URL,
-            ttlSeconds,
-            requireHttps: true,
-          });
+          let familyName = 'Fonts';
+          if (order.metadata) {
+            try {
+              const meta = JSON.parse(order.metadata) as { family_name?: string };
+              if (meta.family_name) familyName = meta.family_name;
+            } catch {
+              // fallback to default
+            }
+          }
+
+          // 1. Determine parts list
+          let parts: ArtifactPartMeta[];
+          if (receipt.artifact_parts) {
+            try {
+              parts = JSON.parse(receipt.artifact_parts) as ArtifactPartMeta[];
+            } catch {
+              parts = [];
+            }
+          } else {
+            const safeFamily = (familyName || 'fonts').replace(/[^a-zA-Z0-9_-]/g, '_').toLowerCase();
+            parts = [
+              {
+                part_index: 1,
+                total_parts: 1,
+                filename: `${safeFamily}_${order.id}.zip`,
+                artifact_key: receipt.artifact_key,
+                artifact_size_bytes: receipt.artifact_size_bytes,
+                artifact_sha256: receipt.artifact_sha256,
+              },
+            ];
+          }
+
+          if (!parts || parts.length === 0) {
+            throw new Error('NO_PARTS_IN_RECEIPT');
+          }
+
+          // Sort deterministically by part_index ascending
+          parts.sort((a, b) => a.part_index - b.part_index);
+
+          // 2. Preflight check: verify EVERY canonical R2 part exists and matches recorded size/hash before upload without retaining bodies
+          for (const part of parts) {
+            const r2Obj = await bucket.get(part.artifact_key);
+            if (!r2Obj) {
+              throw new Error(`R2_PART_NOT_FOUND: ${part.artifact_key}`);
+            }
+            if (r2Obj.size !== part.artifact_size_bytes) {
+              throw new Error(
+                `R2_PART_SIZE_MISMATCH: expected ${part.artifact_size_bytes}, got ${r2Obj.size}`
+              );
+            }
+            const arrayBuf = await r2Obj.arrayBuffer();
+            if (arrayBuf.byteLength !== part.artifact_size_bytes) {
+              throw new Error(
+                `R2_PART_SIZE_MISMATCH: expected ${part.artifact_size_bytes}, got ${arrayBuf.byteLength}`
+              );
+            }
+            const shaBuf = await crypto.subtle.digest('SHA-256', arrayBuf);
+            const shaHex = Array.from(new Uint8Array(shaBuf))
+              .map((b) => b.toString(16).padStart(2, '0'))
+              .join('');
+            if (shaHex !== part.artifact_sha256.toLowerCase()) {
+              throw new Error(
+                `R2_PART_CHECKSUM_MISMATCH: expected ${part.artifact_sha256}, got ${shaHex}`
+              );
+            }
+            // Note: arrayBuf is not stored in any collection; eligible for immediate GC before next part
+          }
+
+          // 3. Progressive delivery with per-part confirmed progress tracking: load and send at most one part body at a time
+          let payloadObj: { order_id: string; confirmed_parts?: number[] } = {
+            order_id: order.id,
+            confirmed_parts: [],
+          };
+          try {
+            if (event.payload) {
+              payloadObj = JSON.parse(event.payload);
+            }
+          } catch {
+            // fallback to default
+          }
+          const confirmedParts: number[] = Array.isArray(payloadObj.confirmed_parts)
+            ? [...payloadObj.confirmed_parts]
+            : [];
 
           const tg = new TelegramClient(botToken);
-          const messageText = `📦 <b>Your fonts are ready!</b>\n\n• <b>Order ID:</b> <code>${escapeHtml(
-            order.id
-          )}</code>\n\nClick the button below to download your complete ZIP bundle. The download link is active for ${escapeHtml(
-            ttlDesc
-          )}.`;
 
-          await tg.sendMessage({
-            chat_id: userRecord.chat_id,
-            text: messageText,
-            reply_markup: {
-              inline_keyboard: [
-                [
-                  {
-                    text: '⬇️ Download Fonts (.ZIP)',
-                    url: signed.url,
-                  },
-                ],
-              ],
-            },
-          });
+          for (const part of parts) {
+            if (confirmedParts.includes(part.part_index)) {
+              // Already confirmed by Telegram in earlier attempt
+              continue;
+            }
 
-          // Mark outbox event SENT only after Telegram success
+            const r2Obj = await bucket.get(part.artifact_key);
+            if (!r2Obj) {
+              throw new Error(`R2_PART_NOT_FOUND_DURING_DELIVERY: ${part.artifact_key}`);
+            }
+            const partBuffer = await r2Obj.arrayBuffer();
+
+            const caption =
+              parts.length > 1
+                ? `📦 <b>${escapeHtml(familyName)}</b> (Part ${part.part_index}/${part.total_parts})`
+                : `📦 <b>${escapeHtml(familyName)}</b>`;
+
+            await tg.sendDocument({
+              chat_id: userRecord.chat_id,
+              document: new Blob([partBuffer], { type: 'application/zip' }),
+              filename: part.filename,
+              caption,
+            });
+
+            confirmedParts.push(part.part_index);
+
+            // Persist per-part progress so that partial failure won't re-send confirmed parts on retry
+            await this.db
+              .prepare('UPDATE outbox_events SET payload = ? WHERE id = ?')
+              .bind(JSON.stringify({ order_id: order.id, confirmed_parts: confirmedParts }), event.id)
+              .run();
+          }
+
+          // 4. Mark outbox event SENT only after every part is confirmed
           const markSentResult = await this.db
             .prepare(
               `UPDATE outbox_events
@@ -346,6 +468,7 @@ export class OutboxService {
               order_id: order.id,
               chat_id: userRecord.chat_id,
               event_id: event.id,
+              total_parts: parts.length,
             });
             emitStructuredLog({
               event: 'outbox_dispatched',
@@ -356,8 +479,9 @@ export class OutboxService {
               status: 'SENT',
             });
           }
-        } catch {
+        } catch (err: unknown) {
           failureCount++;
+          const errorMessage = err instanceof Error ? err.message : 'TELEGRAM_DELIVERY_FAILED';
           const attempts = event.dispatch_attempts + 1;
           const backoffSeconds = Math.min(300, 5 * Math.pow(2, attempts - 1));
           const nextDispatchAt = Date.now() + backoffSeconds * 1000;
@@ -369,10 +493,10 @@ export class OutboxService {
                    dispatch_leased_at = NULL,
                    dispatch_lease_expires_at = NULL,
                    next_dispatch_at = ?,
-                   last_dispatch_error = 'TELEGRAM_DELIVERY_FAILED'
+                   last_dispatch_error = ?
                WHERE id = ? AND status = 'PENDING' AND dispatch_lease_token = ?`
             )
-            .bind(nextDispatchAt, event.id, leaseToken)
+            .bind(nextDispatchAt, errorMessage, event.id, leaseToken)
             .run();
         }
       }

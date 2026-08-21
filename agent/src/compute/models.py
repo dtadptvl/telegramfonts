@@ -46,6 +46,27 @@ class GeneratedFontFile:
     sha256_hex: str
 
 
+@dataclass(frozen=True)
+class ManifestPart:
+    part_index: int
+    total_parts: int
+    filename: str
+    file_path: Path
+    size_bytes: int
+    sha256_hex: str
+    file_count: int
+
+    def to_dict(self) -> dict:
+        return {
+            "part_index": self.part_index,
+            "total_parts": self.total_parts,
+            "filename": self.filename,
+            "size_bytes": self.size_bytes,
+            "sha256_hex": self.sha256_hex,
+            "file_count": self.file_count,
+        }
+
+
 @dataclass
 class StagedManifest:
     job_id: str
@@ -56,6 +77,7 @@ class StagedManifest:
     zip_size_bytes: int
     zip_sha256_hex: str
     files: list[GeneratedFontFile] = field(default_factory=list)
+    parts: list[ManifestPart] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -65,6 +87,7 @@ class StagedManifest:
             "zip_filename": self.zip_filename,
             "zip_size_bytes": self.zip_size_bytes,
             "zip_sha256_hex": self.zip_sha256_hex,
+            "parts": [p.to_dict() for p in self.parts],
             "files": [
                 {
                     "style_id": f.style_id,
@@ -80,4 +103,5 @@ class StagedManifest:
 
 
 JobPackageManifest = StagedManifest
+
 

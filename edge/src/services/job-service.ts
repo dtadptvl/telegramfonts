@@ -1,3 +1,12 @@
+export interface ArtifactPartMeta {
+  part_index: number;
+  total_parts: number;
+  filename: string;
+  artifact_key: string;
+  artifact_size_bytes: number;
+  artifact_sha256: string;
+}
+
 export interface FulfillmentJobRecord {
   id: string;
   order_id: string;
@@ -13,6 +22,7 @@ export interface FulfillmentJobRecord {
   artifact_key?: string | null;
   artifact_sha256?: string | null;
   artifact_size_bytes?: number | null;
+  artifact_parts?: string | null;
   completed_at?: number | null;
   created_at: number;
   updated_at: number;
@@ -24,9 +34,11 @@ export interface FulfillmentReceiptRecord {
   artifact_key: string;
   artifact_sha256: string;
   artifact_size_bytes: number;
+  artifact_parts?: string | null;
   completed_at: number;
   created_at: number;
 }
+
 
 export interface ClaimComputePayload {
   job_id: string;
@@ -461,8 +473,9 @@ export class JobService {
     artifactKey: string;
     artifactSha256: string;
     artifactSizeBytes: number;
+    parts?: ArtifactPartMeta[];
   }): Promise<CompleteJobResult> {
-    const { jobId, workerId, leaseToken, artifactKey, artifactSha256, artifactSizeBytes } = params;
+    const { jobId, workerId, leaseToken, artifactKey, artifactSha256, artifactSizeBytes, parts } = params;
     const cleanWorkerId = workerId.trim();
     const cleanToken = leaseToken.trim();
     const cleanSha = artifactSha256.trim().toLowerCase();
@@ -471,8 +484,7 @@ export class JobService {
       !/^[a-zA-Z0-9_-]{1,64}$/.test(cleanWorkerId) ||
       !/^[0-9a-fA-F-]{36}$/.test(cleanToken) ||
       !/^[0-9a-f]{64}$/.test(cleanSha) ||
-      artifactSizeBytes <= 0 ||
-      artifactSizeBytes > 50 * 1024 * 1024
+      artifactSizeBytes <= 0
     ) {
       return { status: 'ERROR', queue_action: 'retry', reason: 'invalid_completion_params' };
     }
@@ -539,8 +551,22 @@ export class JobService {
 
     const orderId = job.order_id;
     const outboxId = crypto.randomUUID();
-    const outboxPayload = JSON.stringify({ order_id: orderId });
     const artifactId = crypto.randomUUID();
+    const outboxPayload = JSON.stringify({ order_id: orderId, confirmed_parts: [] });
+
+    const partsJson =
+      parts && parts.length > 0
+        ? JSON.stringify(parts)
+        : JSON.stringify([
+            {
+              part_index: 1,
+              total_parts: 1,
+              filename: `${jobId}.zip`,
+              artifact_key: artifactKey,
+              artifact_size_bytes: artifactSizeBytes,
+              artifact_sha256: cleanSha,
+            },
+          ]);
 
     // 3. Atomic D1 transactional batch (BLOCK 2: Fully gated mutations)
     const statements: D1PreparedStatement[] = [
@@ -548,9 +574,9 @@ export class JobService {
       this.db
         .prepare(
           `INSERT INTO fulfillment_receipts (
-             job_id, order_id, artifact_key, artifact_sha256, artifact_size_bytes, completed_at, created_at
+             job_id, order_id, artifact_key, artifact_sha256, artifact_size_bytes, artifact_parts, completed_at, created_at
            )
-           SELECT ?, ?, ?, ?, ?, ?, ?
+           SELECT ?, ?, ?, ?, ?, ?, ?, ?
            WHERE EXISTS (
              SELECT 1 FROM fulfillment_jobs
              WHERE id = ?
@@ -571,6 +597,7 @@ export class JobService {
           artifactKey,
           cleanSha,
           artifactSizeBytes,
+          partsJson,
           now,
           now,
           jobId,
@@ -588,6 +615,7 @@ export class JobService {
                artifact_key = ?,
                artifact_sha256 = ?,
                artifact_size_bytes = ?,
+               artifact_parts = ?,
                completed_at = ?,
                lease_owner = NULL,
                lease_token = NULL,
@@ -608,6 +636,7 @@ export class JobService {
           artifactKey,
           cleanSha,
           artifactSizeBytes,
+          partsJson,
           now,
           now,
           jobId,
@@ -619,7 +648,7 @@ export class JobService {
           cleanSha
         ),
 
-      // Statement 3: Transition order to COMPLETED only if gated receipt exists
+      // Statement 3: Transition order to COMPLETED only if job is completed and receipt exists
       this.db
         .prepare(
           `UPDATE orders
@@ -630,12 +659,12 @@ export class JobService {
              AND status = 'PROCESSING'
              AND EXISTS (
                SELECT 1 FROM fulfillment_receipts
-               WHERE job_id = ? AND order_id = ? AND artifact_key = ? AND artifact_sha256 = ?
+               WHERE order_id = ? AND job_id = ?
              )`
         )
-        .bind(now, now, orderId, jobId, orderId, artifactKey, cleanSha),
+        .bind(now, now, orderId, orderId, jobId),
 
-      // Statement 4: Insert exactly one PENDING DELIVERY_READY outbox event only if gated receipt exists
+      // Statement 4: Insert DELIVERY_READY outbox event only if order successfully transitioned to COMPLETED
       this.db
         .prepare(
           `INSERT INTO outbox_events (
@@ -643,11 +672,15 @@ export class JobService {
            )
            SELECT ?, 'DELIVERY_READY', 'order', ?, ?, 'PENDING', ?
            WHERE EXISTS (
+             SELECT 1 FROM orders
+             WHERE id = ? AND status = 'COMPLETED'
+           )
+           AND EXISTS (
              SELECT 1 FROM fulfillment_receipts
-             WHERE job_id = ? AND order_id = ? AND artifact_key = ? AND artifact_sha256 = ?
+             WHERE order_id = ? AND job_id = ?
            )`
         )
-        .bind(outboxId, orderId, outboxPayload, now, jobId, orderId, artifactKey, cleanSha),
+        .bind(outboxId, orderId, outboxPayload, now, orderId, orderId, jobId),
 
       // Statement 5: Insert artifact record only if gated receipt exists
       this.db

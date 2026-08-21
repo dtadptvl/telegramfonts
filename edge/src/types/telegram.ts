@@ -71,3 +71,12 @@ export interface AnswerCallbackQueryParams {
   url?: string;
   cache_time?: number;
 }
+
+export interface SendDocumentParams {
+  chat_id: number | string;
+  document: Blob | Uint8Array;
+  filename: string;
+  caption?: string;
+  parse_mode?: 'HTML';
+}
+

@@ -285,11 +285,29 @@ describe('Phase 7: Horizontal Multi-Consumer Concurrency & Recovery Proofs', () 
   });
 
   it('5. DELIVERY_READY outbox retry backoff delivers exactly once to Telegram', async () => {
-    const { orderId } = await setupOrderAndJob();
+    const { orderId, jobId } = await setupOrderAndJob();
+    const now = Date.now();
+
+    // Insert receipt and R2 artifact
+    const artifactKey = `artifacts/${orderId}/${jobId}/bundle.zip`;
+    const dummyZip = new TextEncoder().encode('PK\x05\x06dummy_zip_content');
+    const shaBuf = await crypto.subtle.digest('SHA-256', dummyZip);
+    const shaHex = Array.from(new Uint8Array(shaBuf))
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('');
+
+    await env.DB.prepare(
+      `INSERT INTO fulfillment_receipts (job_id, order_id, artifact_key, artifact_size_bytes, artifact_sha256, completed_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    )
+      .bind(jobId, orderId, artifactKey, dummyZip.byteLength, shaHex, now, now)
+      .run();
+
+    await env.ARTIFACTS_BUCKET.put(artifactKey, dummyZip);
 
     // Mark order COMPLETED
     await env.DB.prepare('UPDATE orders SET status = "COMPLETED", completed_at = ? WHERE id = ?')
-      .bind(Date.now(), orderId)
+      .bind(now, orderId)
       .run();
 
     // Clear prior pending outbox events
@@ -300,7 +318,7 @@ describe('Phase 7: Horizontal Multi-Consumer Concurrency & Recovery Proofs', () 
       `INSERT INTO outbox_events (id, event_type, aggregate_type, aggregate_id, payload, status, created_at)
        VALUES (?, 'DELIVERY_READY', 'order', ?, ?, 'PENDING', ?)`
     )
-      .bind(eventId, orderId, JSON.stringify({ order_id: orderId }), Date.now())
+      .bind(eventId, orderId, JSON.stringify({ order_id: orderId }), now)
       .run();
 
     let telegramAttempt = 0;
@@ -327,7 +345,11 @@ describe('Phase 7: Horizontal Multi-Consumer Concurrency & Recovery Proofs', () 
 
     try {
       const mockQueue = { send: async () => {}, sendBatch: async () => {} } as unknown as Queue<unknown>;
-      const outboxService = new OutboxService(env.DB, mockQueue, testEnv);
+      const deliveryEnv: Env = {
+        ...testEnv,
+        ARTIFACTS_BUCKET: env.ARTIFACTS_BUCKET,
+      };
+      const outboxService = new OutboxService(env.DB, mockQueue, deliveryEnv);
 
       // 1st dispatch attempt -> fails, stays PENDING
       const res1 = await outboxService.dispatchPendingEvents({ batchSize: 10 });
