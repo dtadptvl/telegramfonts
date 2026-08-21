@@ -54,24 +54,11 @@ class ObservationCollector:
         start_time = time.perf_counter()
         config_hash = self.config.compute_hash()
 
-        # If code_points not explicitly supplied, discover observable glyphs dynamically
+        # If code_points not explicitly supplied, discover observable glyphs dynamically using authoritative discovery
         if code_points is None:
-            # Query browser for active glyph presence
-            async def measure_adv(cp: int) -> float:
-                m = await self.session.measure_glyph_direct(font_family, cp, font_size_px=100.0)
-                return m.raw_advance_width
-
-            # Run discovery
-            candidates = ObservableGlyphDiscovery.get_candidate_code_points()
-            discovered: list[int] = []
-            for cp in candidates:
-                try:
-                    adv = await measure_adv(cp)
-                    if adv > 0.0:
-                        discovered.append(cp)
-                except Exception:
-                    pass
-            code_points = discovered
+            code_points = await ObservableGlyphDiscovery.discover_observable_glyphs(
+                measure_fn=lambda cp: self.session.is_glyph_supported_in_font(font_family, cp),
+            )
 
         self.store.save_coverage(reference_id, style_id, code_points)
 
@@ -87,9 +74,12 @@ class ObservationCollector:
                 upem=self.config.upem,
             )
 
-            # 2. Multi-resolution lossless raster captures + subpixel phase schedule
+            # 2. Determine adaptive subpixel phase schedule based on metric boundary alignment
+            subpixel_phases = self.config.get_phases_for_metrics(direct_metrics)
+
+            # 3. Multi-resolution lossless raster captures + adaptive subpixel phase schedule
             for res in self.config.resolutions:
-                for sub_x, sub_y in self.config.subpixel_phases:
+                for sub_x, sub_y in subpixel_phases:
                     cache_key = ObservationRecord.build_cache_key(
                         reference_id=reference_id,
                         style_id=style_id,

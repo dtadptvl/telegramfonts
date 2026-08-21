@@ -1,8 +1,6 @@
-"""Dynamic observable glyph discovery terminating on convergence or source exhaustion."""
-from __future__ import annotations
-
+import asyncio
 import logging
-from typing import AsyncIterable, Callable
+from typing import Any, Awaitable, Callable
 
 logger = logging.getLogger("telegramfonts.agent.measurement.discovery")
 
@@ -36,7 +34,7 @@ class ObservableGlyphDiscovery:
     @classmethod
     async def discover_observable_glyphs(
         cls,
-        measure_fn: Callable[[int], bool | float],
+        measure_fn: Callable[[int], Any],
         candidate_code_points: list[int] | None = None,
         max_consecutive_misses: int = 500,
     ) -> list[int]:
@@ -50,8 +48,12 @@ class ObservableGlyphDiscovery:
 
         for cp in candidates:
             try:
-                # measure_fn returns True/adv_width if glyph is present/renderable
-                result = measure_fn(cp)
+                res = measure_fn(cp)
+                if asyncio.iscoroutine(res):
+                    result = await res
+                else:
+                    result = res
+
                 if isinstance(result, bool):
                     is_observable = result
                 else:

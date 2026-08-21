@@ -37,7 +37,8 @@ async def main_async(args: argparse.Namespace) -> int:
 
     config = ObservationConfig(
         resolutions=tuple(int(r) for r in args.resolutions.split(",")),
-        subpixel_phases=((0.0, 0.0), (0.25, 0.0), (0.5, 0.0), (0.75, 0.0)),
+        base_subpixel_phases=((0.0, 0.0),),
+        expanded_subpixel_phases=((0.0, 0.0), (0.25, 0.0), (0.5, 0.0), (0.75, 0.0)),
         font_size_px=float(args.font_size),
         timeout_seconds=float(args.timeout),
     )
@@ -48,23 +49,21 @@ async def main_async(args: argparse.Namespace) -> int:
         config=config,
     )
 
-    # Standard representative subset covering ASCII + Vietnamese diacritics
-    test_chars = (
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
-        "àáảãạăằắẳẵặâầấẩẫậèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđĐ"
-    )
-    test_cps = sorted(set(ord(c) for c in test_chars))
-
+    test_cps: list[int] | None = None
     if args.samples > 0:
-        test_cps = test_cps[: args.samples]
+        test_chars = (
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+            "àáảãạăằắẳẵặâầấẩẫậèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđĐ"
+        )
+        test_cps = sorted(set(ord(c) for c in test_chars))[: args.samples]
 
     print("================================================================================")
     print("  MAX Pipeline Foundation: Ground-Truth Browser Observation Benchmark")
     print("================================================================================")
     print(f"  Target Font:          {font_path.name}")
-    print(f"  Target Glyphs:        {len(test_cps)} glyphs (ASCII + Vietnamese)")
+    print(f"  Target Mode:          {'Dynamic Discovery' if test_cps is None else f'{len(test_cps)} sample glyphs'}")
     print(f"  Resolutions:          {config.resolutions}")
-    print(f"  Subpixel Phases:      {len(config.subpixel_phases)} phases/resolution")
+    print(f"  Adaptive Threshold:   {config.adaptive_expansion_threshold}")
     print(f"  Output Directory:     {output_dir}")
     print("--------------------------------------------------------------------------------")
 

@@ -117,33 +117,19 @@ class GroundTruthBenchmarkRunner:
             # Inject ground-truth font into browser
             await session.load_font_data(font_family_name, font_bytes)
 
-            # Determine code points to observe
-            if code_points_subset is not None:
-                target_cps = [cp for cp in code_points_subset if cp in truth_metrics]
-            else:
-                target_cps = sorted(truth_metrics.keys())
-
+            # Determine code points to observe (None triggers dynamic discovery via ObservableGlyphDiscovery)
             glyphs_count, total_rasters, elapsed = await collector.collect_font_observations(
                 reference_id=reference_id,
                 style_id=style_id,
                 font_family=font_family_name,
-                code_points=target_cps,
+                code_points=code_points_subset,
             )
+
+            discovered_cps = store.get_coverage(reference_id, style_id)
 
             # Evaluate metrics accuracy against Ground Truth
             adv_deltas: list[float] = []
             lsb_deltas: list[float] = []
-
-            for cp in target_cps:
-                cache_key = list(store.get_coverage(reference_id, style_id))
-                # Sample one observation record for metrics
-                first_res = self.config.resolutions[0]
-                first_sub = self.config.subpixel_phases[0]
-                ck = store.get_observation(
-                    collector.config.resolutions[0]
-                    if False
-                    else None
-                )
 
             # Compute error statistics across observed code points
             with store._get_connection() as conn:
@@ -187,9 +173,9 @@ class GroundTruthBenchmarkRunner:
                 style_name="Regular",
                 total_glyphs_observed=glyphs_count,
                 total_raster_observations=total_rasters,
-                coverage_count=len(target_cps),
+                coverage_count=len(discovered_cps),
                 expected_coverage_count=len(truth_metrics),
-                coverage_match_rate=len(target_cps) / max(len(truth_metrics), 1),
+                coverage_match_rate=len(discovered_cps) / max(len(truth_metrics), 1),
                 advance_width_mean_delta_upem=adv_mean,
                 advance_width_max_delta_upem=adv_max,
                 advance_width_rms_delta_upem=adv_rms,
