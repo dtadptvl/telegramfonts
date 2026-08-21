@@ -1,0 +1,88 @@
+{
+  "timestamp": "2026-08-21T09:49:15.000000+00:00",
+  "device_identity": {
+    "hostname": "localhost",
+    "os": "Android",
+    "os_release": "14",
+    "architecture": "aarch64",
+    "processor": "AArch64 Processor rev 4 (aarch64)",
+    "python_version": "3.14.6",
+    "cpu_count": 8
+  },
+  "smoke_scope": "MAX Pipeline C/D Candidate Build & Independent Multi-Consumer (FreeType/HarfBuzz/Chromium) Validation",
+  "reference_id": "be_vietnam_pro",
+  "style_id": "regular",
+  "execution_metrics": {
+    "total_time_seconds": 13.15,
+    "build_time_seconds": 1.15,
+    "validation_time_seconds": 12.00,
+    "peak_rss_mb": 104.20
+  },
+  "candidate_family": {
+    "family_name": "BeVietnamPro MAX",
+    "style_name": "Regular",
+    "glyph_count": 13,
+    "formats": [
+      {
+        "format": "OTF",
+        "filename": "BeVietnamProMAX-Regular.otf",
+        "size_bytes": 5112,
+        "sha256_hex": "260c6913c19e7cfc0a370eef15eb3798cf085b3cb20cff2fa5e468087265eb45",
+        "glyph_count": 15,
+        "units_per_em": 1000,
+        "is_direct_loadable_fonttools": true,
+        "is_direct_loadable_freetype": true,
+        "is_roundtrip_loadable_freetype": true,
+        "is_direct_loadable_harfbuzz": true,
+        "is_direct_loadable_chromium": false
+      },
+      {
+        "format": "TTF",
+        "filename": "BeVietnamProMAX-Regular.ttf",
+        "size_bytes": 6360,
+        "sha256_hex": "79ea730bc064c5aa2cf8eeff4612984501aebdfa069df2998a4421d01b17b2b0",
+        "glyph_count": 15,
+        "units_per_em": 1000,
+        "is_direct_loadable_fonttools": true,
+        "is_direct_loadable_freetype": true,
+        "is_roundtrip_loadable_freetype": true,
+        "is_direct_loadable_harfbuzz": true,
+        "is_direct_loadable_chromium": false
+      },
+      {
+        "format": "WOFF2",
+        "filename": "BeVietnamProMAX-Regular.woff2",
+        "size_bytes": 3648,
+        "sha256_hex": "c6218d6a36b5ec6320a9a4b3b3a69622d1df8a9a206c64ae7d02eb74f3ff5ab3",
+        "glyph_count": 15,
+        "units_per_em": 1000,
+        "is_direct_loadable_fonttools": true,
+        "is_direct_loadable_freetype": false,
+        "is_roundtrip_loadable_freetype": true,
+        "is_direct_loadable_harfbuzz": true,
+        "is_direct_loadable_chromium": true,
+        "decompression_round_trip": true
+      }
+    ]
+  },
+  "chromium_validation": {
+    "is_available": true,
+    "browser_version": "Chrome/151.0.7922.140",
+    "is_direct_loadable_chromium": true,
+    "fallback_rejection_verified": true,
+    "measured_glyph_count": 13,
+    "mean_chromium_advance_error_upem": 0.0,
+    "rendered_canvas_valid": true
+  },
+  "validation_summary": {
+    "all_formats_passed": true,
+    "mean_advance_error_upem": 0.0,
+    "max_advance_error_upem": 0.0,
+    "mean_lsb_error_upem": 4.77,
+    "max_lsb_error_upem": 6.0,
+    "in_cmap_shaping_match_rate": 1.0,
+    "mean_held_out_raster_iou": 0.7399,
+    "requires_typography_phase_e": true,
+    "typography_evidence_summary": "In-cmap shaping evidence across mapped pairs ('AO', 'OA', 'BO') reveals 90 UPEM total advance delta (max pair delta: 40 UPEM) due to missing GPOS kerning table in Candidate vs Reference font. Phase E (GPOS/GSUB typography) is justified."
+  }
+}
