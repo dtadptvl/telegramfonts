@@ -441,6 +441,24 @@ class WorkerJobClient:
             logger.warning(f"Error completing catalog request ({request_id}): {exc}")
             return False
 
+    async def fail_catalog_request(
+        self,
+        request_id: str,
+        reason: str = "catalog_acquisition_failed",
+    ) -> bool:
+        """Post catalog failure notification back to Edge."""
+        url = f"{self.settings.EDGE_BASE_URL}/internal/catalog-requests/{request_id}/fail"
+        try:
+            resp = await self._client.post(
+                url,
+                headers=self.headers,
+                json={"reason": reason[:128], "error_code": reason[:64]},
+            )
+            return resp.status_code == 200
+        except Exception as exc:
+            logger.warning(f"Error failing catalog request ({request_id}): {exc}")
+            return False
+
 
 @dataclass(frozen=True)
 class PendingCatalogRequest:

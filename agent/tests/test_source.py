@@ -212,6 +212,58 @@ def test_extract_catalog_metadata_from_json_ld_and_html():
     assert res2["styles"][1]["id"] == "futura_now_bold"
 
 
+def test_extract_catalog_metadata_collection_page_ignores_breadcrumbs():
+    from compute.source import extract_catalog_metadata_from_html
+
+    # HTML with both BreadcrumbList and CollectionPage with ItemList
+    html = """
+    <html>
+      <head>
+        <meta property="og:title" content="Neurath Mono Font | René Bieder | MyFonts">
+        <meta name="author" content="René Bieder">
+        <script type="application/ld+json">
+        {
+          "@context": "https://schema.org",
+          "@type": "BreadcrumbList",
+          "itemListElement": [
+            {"@type": "ListItem", "position": 1, "name": "Home", "item": "https://www.myfonts.com/"},
+            {"@type": "ListItem", "position": 2, "name": "René Bieder", "item": "https://www.myfonts.com/foundry/rene-bieder/"},
+            {"@type": "ListItem", "position": 3, "name": "Neurath Mono", "item": "https://www.myfonts.com/collections/neurath-mono-font-rene-bieder"}
+          ]
+        }
+        </script>
+        <script type="application/ld+json">
+        {
+          "@context": "https://schema.org",
+          "@type": "CollectionPage",
+          "name": "Neurath Mono",
+          "mainEntity": {
+            "@type": "ItemList",
+            "itemListElement": [
+              {"@type": "ListItem", "position": 1, "name": "Neurath Mono Thin", "item": {"@type": "Product", "name": "Neurath Mono Thin"}},
+              {"@type": "ListItem", "position": 2, "name": "Neurath Mono Regular", "item": {"@type": "Product", "name": "Neurath Mono Regular"}},
+              {"@type": "ListItem", "position": 3, "name": "Neurath Mono Bold", "item": {"@type": "Product", "name": "Neurath Mono Bold"}}
+            ]
+          }
+        }
+        </script>
+      </head>
+      <body></body>
+    </html>
+    """
+    res = extract_catalog_metadata_from_html(html, "https://www.myfonts.com/collections/neurath-mono-font-rene-bieder")
+    assert res["family_name"] == "Neurath Mono"
+    assert res["foundry"] == "René Bieder"
+    assert len(res["styles"]) == 3
+    # Breadcrumbs (Home, René Bieder) must NOT appear in styles
+    style_names = [s["display_name"] for s in res["styles"]]
+    assert "Home" not in style_names
+    assert "René Bieder" not in style_names
+    assert "Neurath Mono Thin" in style_names
+    assert "Neurath Mono Regular" in style_names
+    assert "Neurath Mono Bold" in style_names
+
+
 def test_extract_catalog_metadata_fails_closed_without_synthetic_styles():
     from compute.source import extract_catalog_metadata_from_html
 
@@ -219,3 +271,4 @@ def test_extract_catalog_metadata_fails_closed_without_synthetic_styles():
     empty_styles_html = "<html><head><title>Empty Font</title></head><body><p>No styles available</p></body></html>"
     with pytest.raises(ValueError, match="NO_CATALOG_STYLES_FOUND"):
         extract_catalog_metadata_from_html(empty_styles_html, "https://www.myfonts.com/collections/empty-font")
+

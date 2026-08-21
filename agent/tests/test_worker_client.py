@@ -293,3 +293,19 @@ async def test_worker_get_and_complete_catalog_requests(test_settings: Settings)
         assert success is True
 
 
+@pytest.mark.asyncio
+async def test_worker_fail_catalog_request(test_settings: Settings):
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["Authorization"] == f"Bearer {test_settings.A23_NODE_SECRET.get_secret_value()}"
+        if request.method == "POST" and request.url.path == "/internal/catalog-requests/req_fail_1/fail":
+            return httpx.Response(200, json={"success": True, "status": "FAILED"})
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http_client:
+        client = WorkerJobClient(test_settings, client=http_client)
+        res = await client.fail_catalog_request("req_fail_1", "NO_CATALOG_STYLES_FOUND")
+        assert res is True
+
+
+

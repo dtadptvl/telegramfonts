@@ -181,12 +181,60 @@ def extract_catalog_metadata_from_html(html_text: str, source_url: str) -> dict[
             for item in items:
                 if not isinstance(item, dict):
                     continue
-                variants = item.get("hasVariant") or item.get("offers") or item.get("itemListElement") or []
-                if isinstance(variants, list):
-                    for v in variants:
-                        if isinstance(v, dict):
-                            s_name = v.get("name") or v.get("item", {}).get("name")
-                            if s_name and isinstance(s_name, str):
+                schema_type = str(item.get("@type", ""))
+                # Explicitly skip BreadcrumbList (never treat breadcrumb links as font styles)
+                if "Breadcrumb" in schema_type:
+                    continue
+
+                variants: list[Any] = []
+                # 1. CollectionPage with mainEntity ItemList
+                if schema_type == "CollectionPage" and isinstance(item.get("mainEntity"), dict):
+                    me = item["mainEntity"]
+                    if me.get("@type") == "ItemList" and isinstance(me.get("itemListElement"), list):
+                        variants.extend(me["itemListElement"])
+                # 2. Direct ItemList (non-breadcrumb)
+                elif schema_type == "ItemList" and isinstance(item.get("itemListElement"), list):
+                    variants.extend(item["itemListElement"])
+
+                # 3. Product / ProductModel variants or offers
+                if isinstance(item.get("hasVariant"), list):
+                    variants.extend(item["hasVariant"])
+                if isinstance(item.get("offers"), list):
+                    variants.extend(item["offers"])
+
+                for v in variants:
+                    if isinstance(v, dict):
+                        s_name: str | None = None
+                        if isinstance(v.get("item"), dict) and isinstance(v["item"].get("name"), str):
+                            s_name = v["item"]["name"]
+                        elif isinstance(v.get("name"), str):
+                            s_name = v["name"]
+
+                        if s_name and isinstance(s_name, str):
+                            s_name_clean = s_name.strip()
+                            s_id = re.sub(r'[^a-zA-Z0-9_-]+', '_', s_name_clean.lower()).strip('_')
+                            if s_id and s_id not in seen_style_ids:
+                                seen_style_ids.add(s_id)
+                                styles_list.append({
+                                    "id": s_id,
+                                    "display_name": s_name_clean,
+                                    "price": 5000,
+                                })
+        except Exception:
+            pass
+
+    # Pattern B: Embedded productVariants in JSON hydration scripts
+    if not styles_list:
+        pv_matches = re.findall(r'"productVariants"\s*:\s*(\[.*?\])\s*,\s*"(?:collection|product)"', html_text, re.DOTALL | re.IGNORECASE)
+        for pv_json in pv_matches:
+            try:
+                p_list = json.loads(pv_json)
+                if isinstance(p_list, list):
+                    for p in p_list:
+                        if isinstance(p, dict):
+                            prod = p.get("product") if isinstance(p.get("product"), dict) else p
+                            s_name = prod.get("title") or prod.get("name")
+                            if isinstance(s_name, str) and s_name.strip():
                                 s_name_clean = s_name.strip()
                                 s_id = re.sub(r'[^a-zA-Z0-9_-]+', '_', s_name_clean.lower()).strip('_')
                                 if s_id and s_id not in seen_style_ids:
@@ -196,8 +244,8 @@ def extract_catalog_metadata_from_html(html_text: str, source_url: str) -> dict[
                                         "display_name": s_name_clean,
                                         "price": 5000,
                                     })
-        except Exception:
-            pass
+            except Exception:
+                pass
 
     # Pattern B: HTML data attributes e.g. data-style-name="...", data-font-style="..."
     if not styles_list:
@@ -277,8 +325,10 @@ class SourceAcquirer:
 
         if resp.status_code in (403, 429):
             raise ValueError(f"SOURCE_ACQUISITION_BLOCKED_{resp.status_code}")
-        if resp.status_code >= 400:
+        if 400 <= resp.status_code < 500:
             raise ValueError(f"SOURCE_HTTP_ERROR_{resp.status_code}")
+        if resp.status_code >= 500:
+            resp.raise_for_status()
 
         return extract_catalog_metadata_from_html(resp.text, source_url)
 
