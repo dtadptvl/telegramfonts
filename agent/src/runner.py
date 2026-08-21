@@ -340,8 +340,11 @@ class JobRunner:
                 if success:
                     processed += 1
                     logger.info(f"Catalog request {req.id} resolved with authentic styles for {metadata.get('family_name')}")
+                else:
+                    await self.worker_client.fail_catalog_request(req.id, "catalog_completion_rejected")
             except Exception as exc:
                 logger.warning(f"Failed to process catalog request {req.id}: {exc}")
+                await self.worker_client.fail_catalog_request(req.id, str(exc))
         return processed
 
     async def close(self) -> None:
@@ -352,9 +355,8 @@ class JobRunner:
             await self.source_acquirer.close()
 
     async def run_once(self) -> list[ProcessResult]:
-        """Pull a batch of messages from Queue and process each, and check pending catalog requests."""
-        await self.process_pending_catalogs()
-
+        """Pull a batch of messages from Queue and process each, then check pending catalog requests."""
+        # 1. Prioritize paid fulfillment queue polling first (BLOCK 5)
         messages = await self.queue_client.pull_messages(
             batch_size=self.settings.PULL_BATCH_SIZE,
             visibility_timeout_ms=self.settings.VISIBILITY_TIMEOUT_MS,
@@ -364,6 +366,10 @@ class JobRunner:
         for msg in messages:
             res = await self.process_message(msg)
             results.append(res)
+
+        # 2. Process background catalog requests only after queue messages
+        await self.process_pending_catalogs()
+
         return results
 
     async def run_loop(

@@ -642,3 +642,66 @@ async def test_multi_consumer_queue_duplicate_and_ack_loss_redelivery_proves_sin
         await runner_1.close()
         await runner_2.close()
 
+
+@pytest.mark.asyncio
+async def test_runner_fails_pending_catalog_request_on_error(test_settings: Settings):
+    failed_requests = []
+    call_order = []
+
+    def queue_handler(request: httpx.Request) -> httpx.Response:
+        call_order.append("queue_pull")
+        return httpx.Response(200, json={"result": {"messages": []}, "success": True})
+
+    def worker_handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and "/internal/catalog-requests/pending" in request.url.path:
+            call_order.append("catalog_pending")
+            return httpx.Response(
+                200,
+                json={
+                    "requests": [
+                        {
+                            "id": "req_invalid_1",
+                            "user_id": "usr_99",
+                            "canonical_key": "invalid_font",
+                            "source_url": "https://www.myfonts.com/collections/invalid-font",
+                            "status": "PENDING",
+                            "created_at": 1700000000,
+                        }
+                    ]
+                },
+            )
+        if request.method == "POST" and "/internal/catalog-requests/req_invalid_1/fail" in request.url.path:
+            failed_requests.append("req_invalid_1")
+            return httpx.Response(200, json={"success": True, "status": "FAILED"})
+        return httpx.Response(404)
+
+    def source_handler(request: httpx.Request) -> httpx.Response:
+        # Return 404 for invalid font
+        return httpx.Response(404, text="Not Found")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(queue_handler)) as q_http, \
+               httpx.AsyncClient(transport=httpx.MockTransport(worker_handler)) as w_http, \
+               httpx.AsyncClient(transport=httpx.MockTransport(source_handler)) as s_http:
+
+        q_client = CloudflareQueueClient(test_settings, client=q_http)
+        w_client = WorkerJobClient(test_settings, client=w_http)
+        s_acquirer = SourceAcquirer(client=s_http)
+        runner = A23Runner(
+            test_settings,
+            queue_client=q_client,
+            worker_client=w_client,
+            source_acquirer=s_acquirer,
+        )
+
+        results = await runner.run_once()
+        assert results == []
+
+        # Verify queue was polled before catalog processing
+        assert call_order == ["queue_pull", "catalog_pending"]
+
+        # Verify failed request was transitioned out of PENDING via fail endpoint
+        assert failed_requests == ["req_invalid_1"]
+
+        await runner.close()
+
+
