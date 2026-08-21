@@ -104,3 +104,64 @@ def test_validate_corrupt_or_empty_file(tmp_path: Path):
     wrong_magic = tmp_path / "wrong.woff2"
     wrong_magic.write_bytes(b"NOT_WOFF2_MAGIC")
     assert validate_font_file(wrong_magic, "WOFF2") is False
+
+
+@pytest.mark.asyncio
+async def test_validator_rejects_missing_name_or_zero_os2_metrics(tmp_path: Path):
+    from fontTools.fontBuilder import FontBuilder
+    from fontTools.pens.ttGlyphPen import TTGlyphPen
+
+    # Build a font that has missing NameID 3 and 4, and zero OS/2 metrics (the old bug)
+    fb = FontBuilder(unitsPerEm=1024, isTTF=True)
+    fb.setupGlyphOrder([".notdef", "space", "A"])
+    fb.setupCharacterMap({0x20: "space", 0x41: "A"})
+    pen = TTGlyphPen(None)
+    pen.moveTo((50, 0))
+    pen.lineTo((50, 700))
+    pen.lineTo((450, 700))
+    pen.closePath()
+    g = pen.glyph()
+    g_empty = TTGlyphPen(None).glyph()
+    fb.setupGlyf({".notdef": g, "space": g_empty, "A": g})
+    fb.setupHorizontalMetrics({".notdef": (500, 50), "space": (250, 0), "A": (500, 50)})
+    fb.setupHorizontalHeader(ascent=800, descent=-200)
+    fb.setupNameTable({"familyName": "BrokenFont", "styleName": "Regular", "psName": "BrokenFont-Regular"})
+    fb.setupOS2(usWeightClass=400)
+    fb.setupPost()
+
+    broken_ttf = tmp_path / "broken.ttf"
+    fb.save(broken_ttf)
+
+    # Must be rejected by strengthened validator
+    assert validate_font_file(broken_ttf, "TTF") is False
+
+
+@pytest.mark.asyncio
+async def test_built_fonts_pass_independent_load_and_contain_required_records(tmp_path: Path):
+    from fontTools.ttLib import TTFont
+
+    source_acquirer = SourceAcquirer()
+    builder = FontBuilderService()
+
+    preview_bytes = _make_test_image_bytes(20, 60)
+    styles = [ClaimStyle(id="regular", display_name="Regular"), ClaimStyle(id="bold", display_name="Bold")]
+    payload = await source_acquirer.acquire_source(
+        "https://www.myfonts.com/collections/roboto-flex", styles, preview_input=preview_bytes
+    )
+
+    for fmt in ("TTF", "OTF", "WOFF2"):
+        font_file = builder.build_font(payload.styles["regular"], "Roboto Flex", fmt, tmp_path)
+        assert validate_font_file(font_file.file_path, fmt) is True
+
+        # Verify Name records
+        tt = TTFont(font_file.file_path)
+        name_ids = {n.nameID for n in tt["name"].names}
+        assert {1, 2, 3, 4, 6}.issubset(name_ids)
+
+        # Verify OS/2 metrics
+        os2 = tt["OS/2"]
+        assert os2.usWinAscent > 0
+        assert os2.usWinDescent > 0
+        assert os2.sTypoAscender != 0
+        assert os2.usWeightClass > 0
+        tt.close()
