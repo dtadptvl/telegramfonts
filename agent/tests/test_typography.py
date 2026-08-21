@@ -359,3 +359,75 @@ def test_chromium_pair_text_metrics_structure(tmp_path):
     assert ao_metric.material_improvement is True
 
 
+def test_chromium_pair_gate_fail_closed_negative_regression(tmp_path):
+    """Negative regression: verify that regressed/unimproved kerning in Chromium fails all_formats_passed."""
+    ttf_path = Path("agent/benchmark_data/ground_truth/BeVietnamPro-Regular.ttf")
+    if not ttf_path.exists():
+        pytest.skip("Ground truth font not available")
+
+    glyphs = [
+        _make_glyph(65, "A", 736.0),
+        _make_glyph(79, "O", 826.0),
+        _make_glyph(66, "B", 674.0),
+    ]
+
+    # Deliberately supply corrupt/regressed kerning (+200 UPEM)
+    typography = TypographyDataset(
+        family_name="TestFont MAX",
+        style_name="Regular",
+        kerning_pairs={(65, 79): 200},
+    )
+
+    builder = MaxCandidateFontBuilder(family_name="TestFont MAX", style_name="Regular")
+    res = builder.build_candidate_family(glyphs, tmp_path / "cand_bad", typography=typography)
+
+    validator = MaxCandidateHeldOutValidator(ttf_path)
+    report = validator.validate_family(res, tested_codepoints=[65, 79, 66], run_chromium=True)
+
+    # Fail-closed check: material improvement is False, and all_formats_passed MUST be False
+    assert report.chromium_result.fit_pairs_material_improvement is False
+    assert report.all_formats_passed is False
+
+
+@pytest.mark.asyncio
+async def test_observation_collector_pair_acquisition_with_provenance(tmp_path):
+    """Verify ObservationCollector harvests pair text metrics directly via browser CDP with real browser provenance."""
+    from measurement.browser_session import ChromiumSession, find_chromium_executable
+    from measurement.collector import ObservationCollector
+    from measurement.models import ObservationConfig
+    from measurement.store import ObservationStore
+
+    try:
+        find_chromium_executable()
+    except Exception:
+        pytest.skip("Chromium not available on host")
+
+    store = ObservationStore(tmp_path / "obs")
+    session = ChromiumSession(timeout_seconds=10.0)
+    await session.start()
+
+    ttf_path = Path("agent/benchmark_data/ground_truth/BeVietnamPro-Regular.ttf")
+    if not ttf_path.exists():
+        session.close()
+        pytest.skip("Ground truth font not available")
+
+    await session.load_font_data("ObservedFont", ttf_path.read_bytes())
+    collector = ObservationCollector(session, store, ObservationConfig())
+
+    captured = await collector.collect_pair_observations(
+        reference_id="test_ref",
+        style_id="regular",
+        font_family="ObservedFont",
+        pairs=[(65, 79), (66, 79)],
+    )
+    session.close()
+
+    assert captured == 2
+    rows = store.get_pair_observations("test_ref", "regular")
+    assert len(rows) == 2
+    for r in rows:
+        assert "chromium:" in r["provenance"]
+        assert ":canvas_text_metrics" in r["provenance"]
+
+
+
