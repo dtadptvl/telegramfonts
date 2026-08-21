@@ -159,6 +159,23 @@ class GroundTruthBenchmarkRunner:
             lsb_mean = float(sum(lsb_deltas) / len(lsb_deltas)) if lsb_deltas else 0.0
             lsb_max = float(max(lsb_deltas)) if lsb_deltas else 0.0
 
+            # Set-based ground-truth coverage evaluation (prevents equal-count false 100% match)
+            truth_set = set(truth_metrics.keys())
+            if code_points_subset is not None:
+                expected_set = set(code_points_subset) & truth_set
+            else:
+                expected_set = truth_set
+
+            discovered_set = set(discovered_cps)
+            exact_matches = expected_set & discovered_set
+            missing_cps = expected_set - discovered_set
+            extra_cps = discovered_set - expected_set
+
+            coverage_precision = len(exact_matches) / max(len(discovered_set), 1)
+            coverage_recall = len(exact_matches) / max(len(expected_set), 1)
+            # Intersection over Union (Jaccard) match rate - strictly < 1.0 if missing or extra exist
+            coverage_match_rate = len(exact_matches) / max(len(expected_set | discovered_set), 1)
+
             total_storage = store.get_total_storage_bytes()
             bytes_per_glyph = total_storage / max(glyphs_count, 1)
             glyphs_per_sec = glyphs_count / max(elapsed, 0.001)
@@ -173,9 +190,13 @@ class GroundTruthBenchmarkRunner:
                 style_name="Regular",
                 total_glyphs_observed=glyphs_count,
                 total_raster_observations=total_rasters,
-                coverage_count=len(discovered_cps),
-                expected_coverage_count=len(truth_metrics),
-                coverage_match_rate=len(discovered_cps) / max(len(truth_metrics), 1),
+                coverage_count=len(discovered_set),
+                expected_coverage_count=len(expected_set),
+                missing_glyphs_count=len(missing_cps),
+                extra_glyphs_count=len(extra_cps),
+                coverage_precision=coverage_precision,
+                coverage_recall=coverage_recall,
+                coverage_match_rate=coverage_match_rate,
                 advance_width_mean_delta_upem=adv_mean,
                 advance_width_max_delta_upem=adv_max,
                 advance_width_rms_delta_upem=adv_rms,

@@ -278,3 +278,41 @@ async def test_browser_session_font_restoration_and_fallback_rejection():
     finally:
         session.close()
 
+
+def test_ground_truth_coverage_set_comparison_rejects_equal_count_mismatch(tmp_path):
+    """Proves that equal counts with one missing and one extra glyph cannot report 100% coverage."""
+    # Expected ground truth: [65, 66, 67, 68, 69] (length 5)
+    # Discovered candidate: [65, 66, 67, 68, 999] (length 5: cp 69 missing, cp 999 extra)
+    truth_metrics = {
+        65: {"advance_width_upem": 600.0, "lsb_upem": 10.0},
+        66: {"advance_width_upem": 600.0, "lsb_upem": 10.0},
+        67: {"advance_width_upem": 600.0, "lsb_upem": 10.0},
+        68: {"advance_width_upem": 600.0, "lsb_upem": 10.0},
+        69: {"advance_width_upem": 600.0, "lsb_upem": 10.0},
+    }
+
+    truth_set = set(truth_metrics.keys())
+    discovered_cps = [65, 66, 67, 68, 999]  # Equal count (5), but mismatched sets!
+    discovered_set = set(discovered_cps)
+
+    exact_matches = truth_set & discovered_set
+    missing_cps = truth_set - discovered_set
+    extra_cps = discovered_set - truth_set
+
+    precision = len(exact_matches) / max(len(discovered_set), 1)
+    recall = len(exact_matches) / max(len(truth_set), 1)
+    iou_match_rate = len(exact_matches) / max(len(truth_set | discovered_set), 1)
+
+    # Assert that equal counts NEVER falsely report 100% match
+    assert len(truth_set) == 5
+    assert len(discovered_set) == 5
+    assert len(missing_cps) == 1
+    assert len(extra_cps) == 1
+    assert 69 in missing_cps
+    assert 999 in extra_cps
+    assert precision == 0.8
+    assert recall == 0.8
+    assert iou_match_rate < 1.0
+    assert iou_match_rate == 4 / 6  # 4 exact matches out of 6 total unique glyphs
+
+
