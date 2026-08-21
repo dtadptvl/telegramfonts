@@ -106,3 +106,88 @@ async def test_package_sanitizes_pathlike_order_id(tmp_path: Path):
     assert manifest.zip_file_path.exists()
     assert str(manifest.zip_file_path).startswith(str(out_dir))
     assert ".." not in manifest.zip_filename
+
+
+@pytest.mark.asyncio
+async def test_package_multipart_partitioning_and_naming(tmp_path: Path):
+    source_acquirer = SourceAcquirer()
+    builder = FontBuilderService()
+    packager = PackagerService()
+
+    preview_bytes = _make_test_image_bytes(20, 50)
+    styles = [
+        ClaimStyle(id="rf_regular", display_name="Regular"),
+        ClaimStyle(id="rf_bold", display_name="Bold"),
+        ClaimStyle(id="rf_italic", display_name="Italic"),
+    ]
+    payload = await source_acquirer.acquire_source(
+        "https://www.myfonts.com/collections/roboto-flex", styles, preview_input=preview_bytes
+    )
+
+    f1 = builder.build_font(payload.styles["rf_regular"], "Roboto Flex", "TTF", tmp_path)
+    f2 = builder.build_font(payload.styles["rf_bold"], "Roboto Flex", "TTF", tmp_path)
+    f3 = builder.build_font(payload.styles["rf_italic"], "Roboto Flex", "TTF", tmp_path)
+
+    out_dir = tmp_path / "multipart_out"
+    out_dir.mkdir()
+
+    # Use a small per-part cap to trigger multipart bin-packing across 3 files
+    # Each file is ~2-3 KB, so 3500 bytes forces partition into 2 or 3 parts
+    manifest = packager.package_job_output(
+        job_id="job_multi_1",
+        order_id="ord_multi_1",
+        family_name="Roboto Flex",
+        files=[f1, f2, f3],
+        output_dir=out_dir,
+        max_part_bytes=3500,
+    )
+
+    assert len(manifest.parts) > 1
+    assert manifest.parts[0].filename == f"roboto_flex_ord_multi_1_part-01-of-{len(manifest.parts):02d}.zip"
+    assert manifest.parts[1].filename == f"roboto_flex_ord_multi_1_part-02-of-{len(manifest.parts):02d}.zip"
+
+    # Verify all parts exist, are valid ZIPs, and contain all font files without duplicates
+    seen_fonts = set()
+    for part in manifest.parts:
+        part_path = Path(part.file_path)
+        assert part_path.exists()
+        assert part.size_bytes == part_path.stat().st_size
+        with zipfile.ZipFile(part_path, "r") as zf:
+            names = zf.namelist()
+            assert len(names) > 0
+            for name in names:
+                assert name not in seen_fonts, f"Duplicate font {name} found across parts"
+                seen_fonts.add(name)
+
+    assert "RobotoFlex-Regular.ttf" in seen_fonts
+    assert "RobotoFlex-Bold.ttf" in seen_fonts
+    assert "RobotoFlex-Italic.ttf" in seen_fonts
+
+
+@pytest.mark.asyncio
+async def test_package_individual_file_oversize_fails_closed(tmp_path: Path):
+    source_acquirer = SourceAcquirer()
+    builder = FontBuilderService()
+    packager = PackagerService()
+
+    preview_bytes = _make_test_image_bytes(20, 50)
+    styles = [ClaimStyle(id="rf_regular", display_name="Regular")]
+    payload = await source_acquirer.acquire_source(
+        "https://www.myfonts.com/collections/roboto-flex", styles, preview_input=preview_bytes
+    )
+    f1 = builder.build_font(payload.styles["rf_regular"], "Roboto Flex", "TTF", tmp_path)
+
+    out_dir = tmp_path / "oversize_out"
+    out_dir.mkdir()
+
+    # Pass max_part_bytes smaller than the single font file
+    with pytest.raises(ValueError, match="INDIVIDUAL_FONT_FILE_EXCEEDS_CAP"):
+        packager.package_job_output(
+            job_id="job_oversize",
+            order_id="ord_oversize",
+            family_name="Roboto Flex",
+            files=[f1],
+            output_dir=out_dir,
+            max_part_bytes=100,  # 100 bytes is smaller than ~2KB font file
+        )
+

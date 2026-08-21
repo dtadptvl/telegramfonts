@@ -300,16 +300,19 @@ class WorkerJobClient:
         artifact_key: str,
         sha256_hex: str,
         size: int,
+        parts: list[dict[str, Any]] | None = None,
     ) -> CompleteResult:
         """Commit canonical job and order completion to D1."""
         url = f"{self.base_url}/{job_id}/complete"
-        payload = {
+        payload: dict[str, Any] = {
             "worker_id": self.settings.A23_WORKER_ID,
             "lease_token": lease_token,
             "artifact_key": artifact_key,
             "sha256": sha256_hex,
             "size": size,
         }
+        if parts:
+            payload["parts"] = parts
 
         try:
             resp = await self._client.post(url, headers=self.headers, json=payload)
