@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from PIL import Image
+from fontTools.ttLib import TTFont
 
 from measurement.models import DirectMetrics, ObservationRecord
 from measurement.store import ObservationStore
@@ -16,6 +17,7 @@ from reconstruction.evaluator import GroundTruthGeometryEvaluator
 from reconstruction.models import (
     Contour,
     CubicSegment,
+    LineSegment,
     Point2D,
     ReconstructedGlyph,
     ReconstructionConfig,
@@ -304,3 +306,213 @@ def test_representative_subset_physical_smoke():
         assert score.chamfer_distance_mean_upem < 120.0
         assert score.topology_match is True
         assert glyph.total_cubic_segments > 0
+
+
+def _create_synthetic_glyph(code_point: int, character: str, advance_width: float = 736.0, lsb: float = 50.0) -> ReconstructedGlyph:
+    """Construct self-contained synthetic ReconstructedGlyph for unit tests."""
+    contour = Contour(
+        segments=[
+            LineSegment(p0=Point2D(lsb, 0), p1=Point2D(lsb + 200, 700)),
+            CubicSegment(
+                p0=Point2D(lsb + 200, 700),
+                p1=Point2D(lsb + 220, 710),
+                p2=Point2D(lsb + 240, 710),
+                p3=Point2D(lsb + 260, 700),
+            ),
+            LineSegment(p0=Point2D(lsb + 260, 700), p1=Point2D(lsb + 460, 0)),
+            LineSegment(p0=Point2D(lsb + 460, 0), p1=Point2D(lsb + 360, 0)),
+            LineSegment(p0=Point2D(lsb + 360, 0), p1=Point2D(lsb + 300, 200)),
+            LineSegment(p0=Point2D(lsb + 300, 200), p1=Point2D(lsb + 160, 200)),
+            LineSegment(p0=Point2D(lsb + 160, 200), p1=Point2D(lsb + 100, 0)),
+            LineSegment(p0=Point2D(lsb + 100, 0), p1=Point2D(lsb, 0)),
+        ]
+    )
+    return ReconstructedGlyph(
+        code_point=code_point,
+        character=character,
+        advance_width_upem=advance_width,
+        lsb_upem=lsb,
+        rsb_upem=max(0.0, advance_width - lsb - 460.0),
+        ascent_upem=700.0,
+        descent_upem=0.0,
+        contours=[contour],
+    )
+
+
+def test_candidate_builder_and_validator_e2e(tmp_path):
+    """Verify Candidate Builder builds OTF, TTF, WOFF2 and HeldOutValidator verifies load and shaping."""
+    from reconstruction.candidate_builder import MaxCandidateFontBuilder
+    from reconstruction.candidate_validator import MaxCandidateHeldOutValidator
+
+    ttf_path = Path("agent/benchmark_data/ground_truth/BeVietnamPro-Regular.ttf")
+    if not ttf_path.exists():
+        pytest.skip("Ground truth font not available")
+
+    # Construct self-contained candidate glyphs
+    test_chars = [("A", 65, 736.0), ("B", 66, 674.0), ("O", 79, 826.0), ("8", 56, 634.0)]
+    glyphs = [_create_synthetic_glyph(cp, char, adv) for char, cp, adv in test_chars]
+
+    builder = MaxCandidateFontBuilder(family_name="TestFont MAX", style_name="Regular", units_per_em=1000)
+    res = builder.build_candidate_family(glyphs, tmp_path)
+
+    # 1. Check OTF (CFF)
+    assert res.otf.format == "OTF"
+    assert res.otf.file_path.exists()
+    assert res.otf.size_bytes > 1000
+    font_otf = TTFont(res.otf.file_path)
+    assert "CFF " in font_otf
+
+    # 2. Check TTF (glyf derived via cu2qu)
+    assert res.ttf.format == "TTF"
+    assert res.ttf.file_path.exists()
+    assert res.ttf.size_bytes > 1000
+    font_ttf = TTFont(res.ttf.file_path)
+    assert "glyf" in font_ttf
+
+    # 3. Check WOFF2
+    assert res.woff2.format == "WOFF2"
+    assert res.woff2.file_path.exists()
+    font_woff2 = TTFont(res.woff2.file_path)
+    assert font_woff2.flavor == "woff2"
+
+    # 4. Check Deterministic Builds (Rebuilding must yield identical SHA256)
+    tmp_path2 = tmp_path / "second_build"
+    res2 = builder.build_candidate_family(glyphs, tmp_path2)
+    assert res.otf.sha256_hex == res2.otf.sha256_hex
+    assert res.ttf.sha256_hex == res2.ttf.sha256_hex
+    assert res.woff2.sha256_hex == res2.woff2.sha256_hex
+
+    # 5. Check Dynamic Cmap
+    best_cmap = font_ttf.getBestCmap()
+    assert best_cmap is not None
+    for _, cp, _ in test_chars:
+        assert cp in best_cmap
+
+    # 6. Check HeldOutValidator Execution
+    validator = MaxCandidateHeldOutValidator(ttf_path)
+    report = validator.validate_family(res, tested_codepoints=[cp for _, cp, _ in test_chars], run_chromium=False)
+
+    assert report.all_formats_passed is True
+    assert report.mean_advance_error_upem < 1.0  # Direct metrics propagation
+    assert report.in_cmap_shaping_match_rate > 0.0
+    assert len(report.shaping_results) > 0
+    assert len(report.raster_results) > 0
+
+
+def test_held_out_validator_no_fail_open_on_broken_consumer(tmp_path):
+    """Verify validator fails closed when a consumer throws an error during rasterization."""
+    from reconstruction.candidate_builder import MaxCandidateFontBuilder
+    from reconstruction.candidate_validator import MaxCandidateHeldOutValidator
+
+    ttf_path = Path("agent/benchmark_data/ground_truth/BeVietnamPro-Regular.ttf")
+    if not ttf_path.exists():
+        pytest.skip("Ground truth font not available")
+
+    glyph = _create_synthetic_glyph(65, "A")
+    builder = MaxCandidateFontBuilder(family_name="TestFont MAX", style_name="Regular")
+    res = builder.build_candidate_family([glyph], tmp_path)
+
+    validator = MaxCandidateHeldOutValidator(ttf_path)
+    
+    class BrokenFace:
+        def set_pixel_sizes(self, w, h):
+            pass
+        def load_char(self, c, flags=0):
+            raise RuntimeError("FT_SIMULATED_RASTER_CORRUPTION")
+
+    iou, delta, err = validator._compute_freetype_raster_iou(BrokenFace(), validator.ref_face, "A", 32)
+    
+    # Must NOT fail open (must return iou=0.0 and explicit error, not iou=1.0)
+    assert iou == 0.0
+    assert delta == -1
+    assert err == "FT_SIMULATED_RASTER_CORRUPTION"
+
+
+def test_held_out_validator_missing_cmap_sequence_mismatch(tmp_path):
+    """Verify strings containing unmapped characters do not falsely report glyph sequence match."""
+    from reconstruction.candidate_builder import MaxCandidateFontBuilder
+    from reconstruction.candidate_validator import MaxCandidateHeldOutValidator
+
+    ttf_path = Path("agent/benchmark_data/ground_truth/BeVietnamPro-Regular.ttf")
+    if not ttf_path.exists():
+        pytest.skip("Ground truth font not available")
+
+    # Candidate only contains 'A' and 'B'
+    glyphs = [_create_synthetic_glyph(65, "A"), _create_synthetic_glyph(66, "B")]
+
+    builder = MaxCandidateFontBuilder(family_name="TestFont AB", style_name="Regular")
+    res = builder.build_candidate_family(glyphs, tmp_path)
+
+    validator = MaxCandidateHeldOutValidator(ttf_path)
+    report = validator.validate_family(res, tested_codepoints=[65, 66], run_chromium=False)
+
+    # Missing cmap strings (e.g. "The quick brown fox") must NOT match sequence
+    out_of_cmap_results = [s for s in report.shaping_results if not s.in_candidate_cmap]
+    assert len(out_of_cmap_results) > 0
+    for s in out_of_cmap_results:
+        assert s.glyph_sequence_match is False
+        assert ".notdef" in s.candidate_glyph_names
+
+
+def test_held_out_validator_woff2_direct_and_roundtrip_semantics(tmp_path):
+    """Verify WOFF2 format validation properly distinguishes direct and round-trip capabilities."""
+    from reconstruction.candidate_builder import MaxCandidateFontBuilder
+    from reconstruction.candidate_validator import MaxCandidateHeldOutValidator
+
+    ttf_path = Path("agent/benchmark_data/ground_truth/BeVietnamPro-Regular.ttf")
+    if not ttf_path.exists():
+        pytest.skip("Ground truth font not available")
+
+    glyph = _create_synthetic_glyph(65, "A")
+    builder = MaxCandidateFontBuilder(family_name="TestFont WOFF2", style_name="Regular")
+    res = builder.build_candidate_family([glyph], tmp_path)
+
+    validator = MaxCandidateHeldOutValidator(ttf_path)
+    fmt_res = validator.validate_format_loadability(res.woff2, is_chromium_supported=True)
+
+    assert fmt_res.format == "WOFF2"
+    assert fmt_res.is_direct_loadable_fonttools is True
+    assert fmt_res.decompression_round_trip is True
+    assert fmt_res.is_roundtrip_loadable_freetype is True
+    assert fmt_res.is_direct_loadable_harfbuzz is True
+    assert fmt_res.is_direct_loadable_chromium is True
+
+
+def test_held_out_validator_broken_chromium_fails_closed(tmp_path, monkeypatch):
+    """Verify broken Chromium session causes aggregate report all_formats_passed to fail closed."""
+    from reconstruction.candidate_builder import MaxCandidateFontBuilder
+    from reconstruction.candidate_validator import ChromiumValidationResult, MaxCandidateHeldOutValidator
+
+    ttf_path = Path("agent/benchmark_data/ground_truth/BeVietnamPro-Regular.ttf")
+    if not ttf_path.exists():
+        pytest.skip("Ground truth font not available")
+
+    glyph = _create_synthetic_glyph(65, "A")
+    builder = MaxCandidateFontBuilder(family_name="TestFont Fail", style_name="Regular")
+    res = builder.build_candidate_family([glyph], tmp_path)
+
+    validator = MaxCandidateHeldOutValidator(ttf_path)
+
+    # Mock _validate_chromium_consumer to simulate Chromium failure
+    def mock_broken_browser(build_result, tested_codepoints=None):
+        return ChromiumValidationResult(
+            is_available=True,
+            browser_version="Chrome/Simulated",
+            is_direct_loadable_chromium=False,  # Failed load
+            fallback_rejection_verified=False,
+            measured_glyph_count=0,
+            mean_chromium_advance_error_upem=999.0,
+            rendered_canvas_valid=False,
+            error_message="CDP_CONNECTION_RESET",
+        )
+
+    monkeypatch.setattr(validator, "_validate_chromium_consumer", mock_broken_browser)
+    report = validator.validate_family(res, tested_codepoints=[65], run_chromium=True)
+
+    # Fail closed: must NOT report PASS
+    assert report.all_formats_passed is False
+    assert report.chromium_result.is_direct_loadable_chromium is False
+    assert report.chromium_result.error_message == "CDP_CONNECTION_RESET"
+
+
+

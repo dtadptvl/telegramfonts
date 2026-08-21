@@ -19,3 +19,5 @@ __pycache__/
 venv/
 observations/
 scratch/
+build/
+tmp_candidate_build/

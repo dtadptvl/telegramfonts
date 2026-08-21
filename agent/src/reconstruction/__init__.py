@@ -1,6 +1,22 @@
-"""MAX Pipeline B: Continuous Signed Distance Field, Topology Hierarchy, and Schneider Cubic Bézier Outline Reconstruction."""
+"""MAX Pipeline B/C/D: SDF/Topology Reconstruction, Candidate Font Builder, and Held-Out Validation."""
 from reconstruction.baseline import SingleObservationBaselineReconstructor
 from reconstruction.bezier_fitter import SchneiderFitter
+from reconstruction.candidate_builder import (
+    CandidateFamilyBuildResult,
+    CandidateFontArtifact,
+    MaxCandidateFontBuilder,
+    draw_reconstructed_glyph_to_pen,
+    get_glyph_name_for_codepoint,
+)
+from reconstruction.candidate_validator import (
+    ChromiumValidationResult,
+    FormatValidationResult,
+    HeldOutValidationReport,
+    MaxCandidateHeldOutValidator,
+    MetricDifferenceResult,
+    RasterComparisonResult,
+    ShapingTestResult,
+)
 from reconstruction.evaluator import GroundTruthGeometryEvaluator
 from reconstruction.models import (
     Contour,
@@ -31,4 +47,16 @@ __all__ = [
     "SingleObservationBaselineReconstructor",
     "MaxReconstructionSolver",
     "GroundTruthGeometryEvaluator",
+    "CandidateFontArtifact",
+    "CandidateFamilyBuildResult",
+    "MaxCandidateFontBuilder",
+    "draw_reconstructed_glyph_to_pen",
+    "get_glyph_name_for_codepoint",
+    "FormatValidationResult",
+    "ChromiumValidationResult",
+    "MetricDifferenceResult",
+    "ShapingTestResult",
+    "RasterComparisonResult",
+    "HeldOutValidationReport",
+    "MaxCandidateHeldOutValidator",
 ]
