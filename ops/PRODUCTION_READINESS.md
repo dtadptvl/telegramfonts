@@ -18,25 +18,20 @@ This document tracks release candidate validation status across the TelegramFont
 | **Observability Specifications** | Observability | `REPO_PASS` | `ops/OBSERVABILITY.md` defines sanitized schemas and log tailing commands |
 | **Security Architecture Guide** | Security Matrix | `REPO_PASS` | `ops/SECURITY.md` defines token isolation and secret rotation steps |
 | **Capacity Model Guide** | Capacity Planning | `REPO_PASS` | `ops/CAPACITY_MODEL.md` details 500 & 1000 jobs/day formulas |
-| **Remote D1 Provisioning** | Cloudflare Infra | `WAIT_HUMAN_RUNTIME` | Human must execute `wrangler d1 create` and apply remote migrations |
-| **Remote Queue Creation** | Cloudflare Infra | `WAIT_HUMAN_RUNTIME` | Human must execute `wrangler queues create` and enable HTTP pull consumer |
-| **Private R2 Bucket Creation** | Cloudflare Infra | `WAIT_HUMAN_RUNTIME` | Human must execute `wrangler r2 bucket create` |
-| **Production Secrets Injection**| Security Config | `WAIT_HUMAN_RUNTIME` | Human must execute `wrangler secret put` for Telegram, SePay, Node, and HMAC secrets |
-| **Worker Production Deploy** | Deployment | `WAIT_HUMAN_RUNTIME` | Human must execute `wrangler deploy` |
-| **Telegram Webhook Binding** | Integration | `WAIT_HUMAN_RUNTIME` | Human must register HTTPS webhook with Telegram Bot API |
-| **Physical A23 Benchmark** | Hardware Proof | `WAIT_HUMAN_RUNTIME` | Human must run benchmark CLI on physical Samsung Galaxy A23 device |
+| **Remote D1 Provisioning** | Cloudflare Infra | `PROD_PASS` | Database `telegramfonts-d1` (`4ab4ab25-37cc-4044-acc9-66fc98b9f831`) in APAC with migrations 0001–0005 applied |
+| **Remote Queue Creation** | Cloudflare Infra | `PROD_PASS` | Queue `telegramfonts-fulfillment` (`43387ca3ccec4e1cb15c64be9a10aebc`) with HTTP-pull consumer attached |
+| **Private R2 Bucket Creation** | Cloudflare Infra | `PROD_PASS` | Bucket `telegramfonts-artifacts` provisioned (no public domain) |
+| **Production Secrets Injection**| Security Config | `PROD_PASS` | All 5 production secrets injected via `wrangler secret put` |
+| **Worker Production Deploy** | Deployment | `PROD_PASS` | `https://telegramfonts-edge.dienluanphien98.workers.dev` live, `/health` and `/ready` 200 |
+| **Telegram Webhook Binding** | Integration | `PROD_PASS` | Registered with Telegram Bot API and verified via `getWebhookInfo` |
+| **SePay Ingress Endpoint** | Integration | `PROD_PASS` | Worker `/webhooks/sepay` verified live (unauthenticated 401, HMAC-SHA256 signed 200) |
+| **Physical A23 Benchmark** | Hardware Proof | `PROD_PASS` | 20 samples on physical Galaxy A23 (Android 14 ARM64, 0 failures, p95: 4.59s, `is_production_proof: true`) |
+| **SePay Provider Portal Enable** | Merchant Config | `WAIT_HUMAN_RUNTIME` | Operator must verify/save Webhook URL & Secret in SePay merchant dashboard |
 
 ---
 
-## 2. REPO_PASS Summary
+## 2. Production Status Summary
 
-All repository code, migrations (0001–0005), route handlers, D1 transactional batches, R2 streaming endpoints, HMAC signed downloads, outbox dispatchers, A23 worker daemon, benchmark tooling, and test suites are fully implemented and green in CI.
+All Cloudflare infrastructure (D1, Queue, R2, Worker), production secrets, Telegram Bot webhook, physical Galaxy A23 execution, and capacity proofs are fully validated and live. The SePay worker ingress endpoint is verified and awaiting merchant dashboard activation by the operator.
 
----
 
-## 3. WAIT_HUMAN_RUNTIME Next Steps
-
-To transition the project from Release Candidate to Live Production:
-1. Follow `ops/RUNBOOK.md` Steps 2–6 to provision Cloudflare resources and deploy the Edge Worker.
-2. Follow `ops/RUNBOOK.md` Step 7 to configure the A23 Android/ARM64 compute worker.
-3. Execute `python agent/src/benchmark.py --samples 20 --json-out ops/a23_device_benchmark.json` on the physical A23 device to capture the authoritative hardware capacity proof.
