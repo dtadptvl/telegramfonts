@@ -1,0 +1,1556 @@
+{
+  "timestamp": "2026-08-21T15:03:16.848455+00:00",
+  "device_identity": {
+    "hostname": "localhost",
+    "os": "Android",
+    "os_release": "14",
+    "architecture": "aarch64",
+    "processor": "",
+    "python_version": "3.14.6",
+    "cpu_count": 8
+  },
+  "reference_id": "be_vietnam_pro",
+  "style_id": "regular",
+  "total_time_seconds": 49.38,
+  "peak_rss_mb": 106.75,
+  "candidate_family": {
+    "family_name": "BeVietnamPro MAX",
+    "style_name": "Regular",
+    "glyph_count": 13,
+    "formats": [
+      {
+        "format": "OTF",
+        "filename": "BeVietnamProMAX-Regular.otf",
+        "file_path": "build/candidate_fonts/BeVietnamProMAX-Regular.otf",
+        "size_bytes": 5256,
+        "sha256_hex": "50c6c76559f24118628df982d785a0c542164dfc8a7d37ad8b1dd35676b587d5",
+        "glyph_count": 15,
+        "units_per_em": 1000
+      },
+      {
+        "format": "TTF",
+        "filename": "BeVietnamProMAX-Regular.ttf",
+        "file_path": "build/candidate_fonts/BeVietnamProMAX-Regular.ttf",
+        "size_bytes": 6504,
+        "sha256_hex": "21c37285cdaa9f0f6c02769d14771fad9cf7527dcd7bc9c395a85d16c7e5cbea",
+        "glyph_count": 15,
+        "units_per_em": 1000
+      },
+      {
+        "format": "WOFF2",
+        "filename": "BeVietnamProMAX-Regular.woff2",
+        "file_path": "build/candidate_fonts/BeVietnamProMAX-Regular.woff2",
+        "size_bytes": 3712,
+        "sha256_hex": "49fdf4d8363ebd1bcf148acafa24c9082762d6c292f0ec302af91fb80f2f4f85",
+        "glyph_count": 15,
+        "units_per_em": 1000
+      }
+    ]
+  },
+  "validation_summary": {
+    "all_formats_passed": false,
+    "mean_advance_error_upem": 0.0,
+    "max_advance_error_upem": 0.0,
+    "mean_lsb_error_upem": 4.77,
+    "max_lsb_error_upem": 6.0,
+    "in_cmap_shaping_match_rate": 1.0,
+    "fit_kerning_delta_upem": 0.0,
+    "held_out_in_cmap_kerning_delta_upem": 40.0,
+    "mean_held_out_raster_iou": 0.7399,
+    "requires_typography_phase_e": false,
+    "typography_evidence_summary": "In-cmap fit pairs confirm 0.0 UPEM advance delta with OpenType GPOS kerning active; separate held-out in-cmap pairs ('OA', 'OĐ', 'ơA', 'mơ') show no regressions (40 UPEM delta). No independent evidence justifies broad GSUB/mark extensions.",
+    "typography_provenance": "chromium:Chrome/151.0.7922.140:canvas_text_metrics",
+    "typography_fit_rows_count": 12,
+    "typography_fit_rows_sha256": "202ddfce9ce1db2d0c5065e2294d164dff5a45a61993c81ce18a2f45709ea878"
+  },
+  "typography": {
+    "family_name": "BeVietnamPro MAX",
+    "style_name": "Regular",
+    "units_per_em": 1000,
+    "provenance": "chromium:Chrome/151.0.7922.140:canvas_text_metrics",
+    "fit_rows_count": 12,
+    "fit_rows_sha256": "202ddfce9ce1db2d0c5065e2294d164dff5a45a61993c81ce18a2f45709ea878",
+    "kerning_pairs": [
+      {
+        "left_cp": 65,
+        "right_cp": 37,
+        "left_char": "A",
+        "right_char": "%",
+        "kerning_upem": -40
+      },
+      {
+        "left_cp": 65,
+        "right_cp": 79,
+        "left_char": "A",
+        "right_char": "O",
+        "kerning_upem": -40
+      },
+      {
+        "left_cp": 65,
+        "right_cp": 103,
+        "left_char": "A",
+        "right_char": "g",
+        "kerning_upem": -20
+      },
+      {
+        "left_cp": 65,
+        "right_cp": 417,
+        "left_char": "A",
+        "right_char": "ơ",
+        "kerning_upem": -20
+      },
+      {
+        "left_cp": 66,
+        "right_cp": 79,
+        "left_char": "B",
+        "right_char": "O",
+        "kerning_upem": -10
+      },
+      {
+        "left_cp": 103,
+        "right_cp": 7855,
+        "left_char": "g",
+        "right_char": "ắ",
+        "kerning_upem": -20
+      },
+      {
+        "left_cp": 272,
+        "right_cp": 65,
+        "left_char": "Đ",
+        "right_char": "A",
+        "kerning_upem": -40
+      }
+    ],
+    "total_pairs_probed": 12,
+    "active_kerning_pairs_count": 7,
+    "observations": [
+      {
+        "left_cp": 56,
+        "right_cp": 65,
+        "left_char": "8",
+        "right_char": "A",
+        "left_advance_upem": 634.0,
+        "right_advance_upem": 736.0,
+        "measured_pair_advance_upem": 1370.0,
+        "inferred_kerning_upem": 0,
+        "is_kerning_applied": false,
+        "confidence": 1.0,
+        "provenance": "chromium:Chrome/151.0.7922.140:canvas_text_metrics"
+      },
+      {
+        "left_cp": 65,
+        "right_cp": 37,
+        "left_char": "A",
+        "right_char": "%",
+        "left_advance_upem": 736.0,
+        "right_advance_upem": 849.0,
+        "measured_pair_advance_upem": 1545.0,
+        "inferred_kerning_upem": -40,
+        "is_kerning_applied": true,
+        "confidence": 1.0,
+        "provenance": "chromium:Chrome/151.0.7922.140:canvas_text_metrics"
+      },
+      {
+        "left_cp": 65,
+        "right_cp": 65,
+        "left_char": "A",
+        "right_char": "A",
+        "left_advance_upem": 736.0,
+        "right_advance_upem": 736.0,
+        "measured_pair_advance_upem": 1472.0,
+        "inferred_kerning_upem": 0,
+        "is_kerning_applied": false,
+        "confidence": 1.0,
+        "provenance": "chromium:Chrome/151.0.7922.140:canvas_text_metrics"
+      },
+      {
+        "left_cp": 65,
+        "right_cp": 79,
+        "left_char": "A",
+        "right_char": "O",
+        "left_advance_upem": 736.0,
+        "right_advance_upem": 826.0,
+        "measured_pair_advance_upem": 1522.0,
+        "inferred_kerning_upem": -40,
+        "is_kerning_applied": true,
+        "confidence": 1.0,
+        "provenance": "chromium:Chrome/151.0.7922.140:canvas_text_metrics"
+      },
+      {
+        "left_cp": 65,
+        "right_cp": 103,
+        "left_char": "A",
+        "right_char": "g",
+        "left_advance_upem": 736.0,
+        "right_advance_upem": 643.0,
+        "measured_pair_advance_upem": 1359.0,
+        "inferred_kerning_upem": -20,
+        "is_kerning_applied": true,
+        "confidence": 1.0,
+        "provenance": "chromium:Chrome/151.0.7922.140:canvas_text_metrics"
+      },
+      {
+        "left_cp": 65,
+        "right_cp": 417,
+        "left_char": "A",
+        "right_char": "ơ",
+        "left_advance_upem": 736.0,
+        "right_advance_upem": 642.0,
+        "measured_pair_advance_upem": 1358.0,
+        "inferred_kerning_upem": -20,
+        "is_kerning_applied": true,
+        "confidence": 1.0,
+        "provenance": "chromium:Chrome/151.0.7922.140:canvas_text_metrics"
+      },
+      {
+        "left_cp": 66,
+        "right_cp": 79,
+        "left_char": "B",
+        "right_char": "O",
+        "left_advance_upem": 674.0,
+        "right_advance_upem": 826.0,
+        "measured_pair_advance_upem": 1490.0,
+        "inferred_kerning_upem": -10,
+        "is_kerning_applied": true,
+        "confidence": 1.0,
+        "provenance": "chromium:Chrome/151.0.7922.140:canvas_text_metrics"
+      },
+      {
+        "left_cp": 79,
+        "right_cp": 79,
+        "left_char": "O",
+        "right_char": "O",
+        "left_advance_upem": 826.0,
+        "right_advance_upem": 826.0,
+        "measured_pair_advance_upem": 1652.0,
+        "inferred_kerning_upem": 0,
+        "is_kerning_applied": false,
+        "confidence": 1.0,
+        "provenance": "chromium:Chrome/151.0.7922.140:canvas_text_metrics"
+      },
+      {
+        "left_cp": 103,
+        "right_cp": 109,
+        "left_char": "g",
+        "right_char": "m",
+        "left_advance_upem": 643.0,
+        "right_advance_upem": 893.0,
+        "measured_pair_advance_upem": 1536.0,
+        "inferred_kerning_upem": 0,
+        "is_kerning_applied": false,
+        "confidence": 1.0,
+        "provenance": "chromium:Chrome/151.0.7922.140:canvas_text_metrics"
+      },
+      {
+        "left_cp": 103,
+        "right_cp": 7855,
+        "left_char": "g",
+        "right_char": "ắ",
+        "left_advance_upem": 643.0,
+        "right_advance_upem": 653.0,
+        "measured_pair_advance_upem": 1276.0,
+        "inferred_kerning_upem": -20,
+        "is_kerning_applied": true,
+        "confidence": 1.0,
+        "provenance": "chromium:Chrome/151.0.7922.140:canvas_text_metrics"
+      },
+      {
+        "left_cp": 272,
+        "right_cp": 65,
+        "left_char": "Đ",
+        "right_char": "A",
+        "left_advance_upem": 788.0,
+        "right_advance_upem": 736.0,
+        "measured_pair_advance_upem": 1484.0,
+        "inferred_kerning_upem": -40,
+        "is_kerning_applied": true,
+        "confidence": 1.0,
+        "provenance": "chromium:Chrome/151.0.7922.140:canvas_text_metrics"
+      },
+      {
+        "left_cp": 272,
+        "right_cp": 79,
+        "left_char": "Đ",
+        "right_char": "O",
+        "left_advance_upem": 788.0,
+        "right_advance_upem": 826.0,
+        "measured_pair_advance_upem": 1614.0,
+        "inferred_kerning_upem": 0,
+        "is_kerning_applied": false,
+        "confidence": 1.0,
+        "provenance": "chromium:Chrome/151.0.7922.140:canvas_text_metrics"
+      }
+    ],
+    "inference_method": "observation_store_differential_derivation",
+    "created_at": "2026-08-21T15:03:16.104196+00:00"
+  },
+  "chromium_validation": {
+    "is_available": false,
+    "browser_version": "not_available",
+    "is_direct_loadable_chromium": false,
+    "fallback_rejection_verified": false,
+    "measured_glyph_count": 0,
+    "mean_chromium_advance_error_upem": 0.0,
+    "pair_metrics": [],
+    "fit_pairs_material_improvement": false,
+    "held_out_pairs_non_regression": false,
+    "rendered_canvas_valid": false,
+    "error_message": "CHROMIUM_EXECUTABLE_NOT_FOUND: no Chromium / Chrome binary found on host"
+  },
+  "format_details": [
+    {
+      "format": "OTF",
+      "file_path": "build/candidate_fonts/BeVietnamProMAX-Regular.otf",
+      "size_bytes": 5256,
+      "sha256_hex": "50c6c76559f24118628df982d785a0c542164dfc8a7d37ad8b1dd35676b587d5",
+      "is_direct_loadable_fonttools": true,
+      "is_direct_loadable_freetype": true,
+      "is_roundtrip_loadable_freetype": true,
+      "is_direct_loadable_harfbuzz": true,
+      "is_direct_loadable_chromium": false,
+      "glyph_count": 15,
+      "units_per_em": 1000,
+      "has_valid_cmap": true,
+      "has_valid_metrics": true,
+      "decompression_round_trip": true,
+      "validation_error": null
+    },
+    {
+      "format": "TTF",
+      "file_path": "build/candidate_fonts/BeVietnamProMAX-Regular.ttf",
+      "size_bytes": 6504,
+      "sha256_hex": "21c37285cdaa9f0f6c02769d14771fad9cf7527dcd7bc9c395a85d16c7e5cbea",
+      "is_direct_loadable_fonttools": true,
+      "is_direct_loadable_freetype": true,
+      "is_roundtrip_loadable_freetype": true,
+      "is_direct_loadable_harfbuzz": true,
+      "is_direct_loadable_chromium": false,
+      "glyph_count": 15,
+      "units_per_em": 1000,
+      "has_valid_cmap": true,
+      "has_valid_metrics": true,
+      "decompression_round_trip": true,
+      "validation_error": null
+    },
+    {
+      "format": "WOFF2",
+      "file_path": "build/candidate_fonts/BeVietnamProMAX-Regular.woff2",
+      "size_bytes": 3712,
+      "sha256_hex": "49fdf4d8363ebd1bcf148acafa24c9082762d6c292f0ec302af91fb80f2f4f85",
+      "is_direct_loadable_fonttools": true,
+      "is_direct_loadable_freetype": true,
+      "is_roundtrip_loadable_freetype": true,
+      "is_direct_loadable_harfbuzz": true,
+      "is_direct_loadable_chromium": false,
+      "glyph_count": 15,
+      "units_per_em": 1000,
+      "has_valid_cmap": true,
+      "has_valid_metrics": true,
+      "decompression_round_trip": true,
+      "validation_error": null
+    }
+  ],
+  "metric_differences": [
+    {
+      "code_point": 65,
+      "character": "A",
+      "candidate_advance_upem": 736.0,
+      "reference_advance_upem": 736.0,
+      "advance_delta_upem": 0.0,
+      "candidate_lsb_upem": 40.0,
+      "reference_lsb_upem": 45.0,
+      "lsb_delta_upem": 5.0
+    },
+    {
+      "code_point": 66,
+      "character": "B",
+      "candidate_advance_upem": 674.0,
+      "reference_advance_upem": 674.0,
+      "advance_delta_upem": 0.0,
+      "candidate_lsb_upem": 76.0,
+      "reference_lsb_upem": 80.0,
+      "lsb_delta_upem": 4.0
+    },
+    {
+      "code_point": 79,
+      "character": "O",
+      "candidate_advance_upem": 826.0,
+      "reference_advance_upem": 826.0,
+      "advance_delta_upem": 0.0,
+      "candidate_lsb_upem": 51.0,
+      "reference_lsb_upem": 55.0,
+      "lsb_delta_upem": 4.0
+    },
+    {
+      "code_point": 56,
+      "character": "8",
+      "candidate_advance_upem": 634.0,
+      "reference_advance_upem": 634.0,
+      "advance_delta_upem": 0.0,
+      "candidate_lsb_upem": 55.0,
+      "reference_lsb_upem": 60.0,
+      "lsb_delta_upem": 5.0
+    },
+    {
+      "code_point": 64,
+      "character": "@",
+      "candidate_advance_upem": 1005.0,
+      "reference_advance_upem": 1005.0,
+      "advance_delta_upem": 0.0,
+      "candidate_lsb_upem": 50.0,
+      "reference_lsb_upem": 55.0,
+      "lsb_delta_upem": 5.0
+    },
+    {
+      "code_point": 37,
+      "character": "%",
+      "candidate_advance_upem": 849.0,
+      "reference_advance_upem": 849.0,
+      "advance_delta_upem": 0.0,
+      "candidate_lsb_upem": 55.0,
+      "reference_lsb_upem": 60.0,
+      "lsb_delta_upem": 5.0
+    },
+    {
+      "code_point": 103,
+      "character": "g",
+      "candidate_advance_upem": 643.0,
+      "reference_advance_upem": 643.0,
+      "advance_delta_upem": 0.0,
+      "candidate_lsb_upem": 55.0,
+      "reference_lsb_upem": 60.0,
+      "lsb_delta_upem": 5.0
+    },
+    {
+      "code_point": 109,
+      "character": "m",
+      "candidate_advance_upem": 893.0,
+      "reference_advance_upem": 893.0,
+      "advance_delta_upem": 0.0,
+      "candidate_lsb_upem": 66.0,
+      "reference_lsb_upem": 70.0,
+      "lsb_delta_upem": 4.0
+    },
+    {
+      "code_point": 417,
+      "character": "ơ",
+      "candidate_advance_upem": 642.0,
+      "reference_advance_upem": 642.0,
+      "advance_delta_upem": 0.0,
+      "candidate_lsb_upem": 54.0,
+      "reference_lsb_upem": 60.0,
+      "lsb_delta_upem": 6.0
+    },
+    {
+      "code_point": 432,
+      "character": "ư",
+      "candidate_advance_upem": 576.0,
+      "reference_advance_upem": 576.0,
+      "advance_delta_upem": 0.0,
+      "candidate_lsb_upem": 66.0,
+      "reference_lsb_upem": 70.0,
+      "lsb_delta_upem": 4.0
+    },
+    {
+      "code_point": 7855,
+      "character": "ắ",
+      "candidate_advance_upem": 653.0,
+      "reference_advance_upem": 653.0,
+      "advance_delta_upem": 0.0,
+      "candidate_lsb_upem": 60.0,
+      "reference_lsb_upem": 65.0,
+      "lsb_delta_upem": 5.0
+    },
+    {
+      "code_point": 273,
+      "character": "đ",
+      "candidate_advance_upem": 662.0,
+      "reference_advance_upem": 662.0,
+      "advance_delta_upem": 0.0,
+      "candidate_lsb_upem": 55.0,
+      "reference_lsb_upem": 60.0,
+      "lsb_delta_upem": 5.0
+    },
+    {
+      "code_point": 272,
+      "character": "Đ",
+      "candidate_advance_upem": 788.0,
+      "reference_advance_upem": 788.0,
+      "advance_delta_upem": 0.0,
+      "candidate_lsb_upem": 35.0,
+      "reference_lsb_upem": 40.0,
+      "lsb_delta_upem": 5.0
+    }
+  ],
+  "shaping_results": [
+    {
+      "text": "AO",
+      "category": "in_cmap_fit_kerning_pair",
+      "in_candidate_cmap": true,
+      "glyph_sequence_match": true,
+      "candidate_glyph_names": [
+        "A",
+        "O"
+      ],
+      "reference_glyph_names": [
+        "A",
+        "O"
+      ],
+      "candidate_glyph_count": 2,
+      "reference_glyph_count": 2,
+      "candidate_total_advance_upem": 1522,
+      "reference_total_advance_upem": 1522,
+      "advance_delta_upem": 0,
+      "max_position_delta_upem": 0
+    },
+    {
+      "text": "BO",
+      "category": "in_cmap_fit_kerning_pair",
+      "in_candidate_cmap": true,
+      "glyph_sequence_match": true,
+      "candidate_glyph_names": [
+        "B",
+        "O"
+      ],
+      "reference_glyph_names": [
+        "B",
+        "O"
+      ],
+      "candidate_glyph_count": 2,
+      "reference_glyph_count": 2,
+      "candidate_total_advance_upem": 1490,
+      "reference_total_advance_upem": 1490,
+      "advance_delta_upem": 0,
+      "max_position_delta_upem": 0
+    },
+    {
+      "text": "A%",
+      "category": "in_cmap_fit_kerning_pair",
+      "in_candidate_cmap": true,
+      "glyph_sequence_match": true,
+      "candidate_glyph_names": [
+        "A",
+        "percent"
+      ],
+      "reference_glyph_names": [
+        "A",
+        "percent"
+      ],
+      "candidate_glyph_count": 2,
+      "reference_glyph_count": 2,
+      "candidate_total_advance_upem": 1545,
+      "reference_total_advance_upem": 1545,
+      "advance_delta_upem": 0,
+      "max_position_delta_upem": 0
+    },
+    {
+      "text": "Ag",
+      "category": "in_cmap_fit_kerning_pair",
+      "in_candidate_cmap": true,
+      "glyph_sequence_match": true,
+      "candidate_glyph_names": [
+        "A",
+        "g"
+      ],
+      "reference_glyph_names": [
+        "A",
+        "g"
+      ],
+      "candidate_glyph_count": 2,
+      "reference_glyph_count": 2,
+      "candidate_total_advance_upem": 1359,
+      "reference_total_advance_upem": 1359,
+      "advance_delta_upem": 0,
+      "max_position_delta_upem": 0
+    },
+    {
+      "text": "Aơ",
+      "category": "in_cmap_fit_kerning_pair",
+      "in_candidate_cmap": true,
+      "glyph_sequence_match": true,
+      "candidate_glyph_names": [
+        "A",
+        "uni01A1"
+      ],
+      "reference_glyph_names": [
+        "A",
+        "ohorn"
+      ],
+      "candidate_glyph_count": 2,
+      "reference_glyph_count": 2,
+      "candidate_total_advance_upem": 1358,
+      "reference_total_advance_upem": 1358,
+      "advance_delta_upem": 0,
+      "max_position_delta_upem": 0
+    },
+    {
+      "text": "ĐA",
+      "category": "in_cmap_fit_kerning_pair",
+      "in_candidate_cmap": true,
+      "glyph_sequence_match": true,
+      "candidate_glyph_names": [
+        "uni0110",
+        "A"
+      ],
+      "reference_glyph_names": [
+        "Dcroat",
+        "A"
+      ],
+      "candidate_glyph_count": 2,
+      "reference_glyph_count": 2,
+      "candidate_total_advance_upem": 1484,
+      "reference_total_advance_upem": 1484,
+      "advance_delta_upem": 0,
+      "max_position_delta_upem": 0
+    },
+    {
+      "text": "gắ",
+      "category": "in_cmap_fit_kerning_pair",
+      "in_candidate_cmap": true,
+      "glyph_sequence_match": true,
+      "candidate_glyph_names": [
+        "g",
+        "uni1EAF"
+      ],
+      "reference_glyph_names": [
+        "g",
+        "uni1EAF"
+      ],
+      "candidate_glyph_count": 2,
+      "reference_glyph_count": 2,
+      "candidate_total_advance_upem": 1276,
+      "reference_total_advance_upem": 1276,
+      "advance_delta_upem": 0,
+      "max_position_delta_upem": 0
+    },
+    {
+      "text": "OA",
+      "category": "in_cmap_held_out_pair",
+      "in_candidate_cmap": true,
+      "glyph_sequence_match": true,
+      "candidate_glyph_names": [
+        "O",
+        "A"
+      ],
+      "reference_glyph_names": [
+        "O",
+        "A"
+      ],
+      "candidate_glyph_count": 2,
+      "reference_glyph_count": 2,
+      "candidate_total_advance_upem": 1562,
+      "reference_total_advance_upem": 1522,
+      "advance_delta_upem": 40,
+      "max_position_delta_upem": 40
+    },
+    {
+      "text": "OĐ",
+      "category": "in_cmap_held_out_pair",
+      "in_candidate_cmap": true,
+      "glyph_sequence_match": true,
+      "candidate_glyph_names": [
+        "O",
+        "uni0110"
+      ],
+      "reference_glyph_names": [
+        "O",
+        "Dcroat"
+      ],
+      "candidate_glyph_count": 2,
+      "reference_glyph_count": 2,
+      "candidate_total_advance_upem": 1614,
+      "reference_total_advance_upem": 1614,
+      "advance_delta_upem": 0,
+      "max_position_delta_upem": 0
+    },
+    {
+      "text": "ơA",
+      "category": "in_cmap_held_out_pair",
+      "in_candidate_cmap": true,
+      "glyph_sequence_match": true,
+      "candidate_glyph_names": [
+        "uni01A1",
+        "A"
+      ],
+      "reference_glyph_names": [
+        "ohorn",
+        "A"
+      ],
+      "candidate_glyph_count": 2,
+      "reference_glyph_count": 2,
+      "candidate_total_advance_upem": 1378,
+      "reference_total_advance_upem": 1378,
+      "advance_delta_upem": 0,
+      "max_position_delta_upem": 0
+    },
+    {
+      "text": "mơ",
+      "category": "in_cmap_held_out_pair",
+      "in_candidate_cmap": true,
+      "glyph_sequence_match": true,
+      "candidate_glyph_names": [
+        "m",
+        "uni01A1"
+      ],
+      "reference_glyph_names": [
+        "m",
+        "ohorn"
+      ],
+      "candidate_glyph_count": 2,
+      "reference_glyph_count": 2,
+      "candidate_total_advance_upem": 1535,
+      "reference_total_advance_upem": 1535,
+      "advance_delta_upem": 0,
+      "max_position_delta_upem": 0
+    },
+    {
+      "text": "A B O 8 @ % g m",
+      "category": "in_cmap_latin_subset",
+      "in_candidate_cmap": true,
+      "glyph_sequence_match": true,
+      "candidate_glyph_names": [
+        "A",
+        "space",
+        "B",
+        "space",
+        "O",
+        "space",
+        "eight",
+        "space",
+        "at",
+        "space",
+        "percent",
+        "space",
+        "g",
+        "space",
+        "m"
+      ],
+      "reference_glyph_names": [
+        "A",
+        "space",
+        "B",
+        "space",
+        "O",
+        "space",
+        "eight",
+        "space",
+        "at",
+        "space",
+        "percent",
+        "space",
+        "g",
+        "space",
+        "m"
+      ],
+      "candidate_glyph_count": 15,
+      "reference_glyph_count": 15,
+      "candidate_total_advance_upem": 8010,
+      "reference_total_advance_upem": 7870,
+      "advance_delta_upem": 140,
+      "max_position_delta_upem": 20
+    },
+    {
+      "text": "Đ ơ đ ư ắ",
+      "category": "in_cmap_vietnamese_subset",
+      "in_candidate_cmap": true,
+      "glyph_sequence_match": true,
+      "candidate_glyph_names": [
+        "uni0110",
+        "space",
+        "uni01A1",
+        "space",
+        "uni0111",
+        "space",
+        "uni01B0",
+        "space",
+        "uni1EAF"
+      ],
+      "reference_glyph_names": [
+        "Dcroat",
+        "space",
+        "ohorn",
+        "space",
+        "dcroat",
+        "space",
+        "uhorn",
+        "space",
+        "uni1EAF"
+      ],
+      "candidate_glyph_count": 9,
+      "reference_glyph_count": 9,
+      "candidate_total_advance_upem": 4321,
+      "reference_total_advance_upem": 4241,
+      "advance_delta_upem": 80,
+      "max_position_delta_upem": 20
+    },
+    {
+      "text": "The quick brown fox jumps over the lazy dog",
+      "category": "out_of_cmap_plain_latin",
+      "in_candidate_cmap": false,
+      "glyph_sequence_match": false,
+      "candidate_glyph_names": [
+        ".notdef",
+        ".notdef",
+        ".notdef",
+        "space",
+        ".notdef",
+        ".notdef",
+        ".notdef",
+        ".notdef",
+        ".notdef",
+        "space",
+        ".notdef",
+        ".notdef",
+        ".notdef",
+        ".notdef",
+        ".notdef",
+        "space",
+        ".notdef",
+        ".notdef",
+        ".notdef",
+        "space",
+        ".notdef",
+        ".notdef",
+        "m",
+        ".notdef",
+        ".notdef",
+        "space",
+        ".notdef",
+        ".notdef",
+        ".notdef",
+        ".notdef",
+        "space",
+        ".notdef",
+        ".notdef",
+        ".notdef",
+        "space",
+        ".notdef",
+        ".notdef",
+        ".notdef",
+        ".notdef",
+        "space",
+        ".notdef",
+        ".notdef",
+        "g"
+      ],
+      "reference_glyph_names": [
+        "T",
+        "h",
+        "e",
+        "space",
+        "q",
+        "u",
+        "i",
+        "c",
+        "k",
+        "space",
+        "b",
+        "r",
+        "o",
+        "w",
+        "n",
+        "space",
+        "f",
+        "o",
+        "x",
+        "space",
+        "j",
+        "u",
+        "m",
+        "p",
+        "s",
+        "space",
+        "o",
+        "v",
+        "e",
+        "r",
+        "space",
+        "t",
+        "h",
+        "e",
+        "space",
+        "l",
+        "a",
+        "z",
+        "y",
+        "space",
+        "d",
+        "o",
+        "g"
+      ],
+      "candidate_glyph_count": 43,
+      "reference_glyph_count": 43,
+      "candidate_total_advance_upem": 20036,
+      "reference_total_advance_upem": 21504,
+      "advance_delta_upem": 1468,
+      "max_position_delta_upem": 370
+    },
+    {
+      "text": "Tiếng Việt Đẹp Xinh",
+      "category": "out_of_cmap_vietnamese_precomposed",
+      "in_candidate_cmap": false,
+      "glyph_sequence_match": false,
+      "candidate_glyph_names": [
+        ".notdef",
+        ".notdef",
+        ".notdef",
+        ".notdef",
+        "g",
+        "space",
+        ".notdef",
+        ".notdef",
+        ".notdef",
+        ".notdef",
+        "space",
+        "uni0110",
+        ".notdef",
+        ".notdef",
+        "space",
+        ".notdef",
+        ".notdef",
+        ".notdef",
+        ".notdef"
+      ],
+      "reference_glyph_names": [
+        "T",
+        "i",
+        "uni1EBF",
+        "n",
+        "g",
+        "space",
+        "V",
+        "i",
+        "uni1EC7",
+        "t",
+        "space",
+        "Dcroat",
+        "uni1EB9",
+        "p",
+        "space",
+        "X",
+        "i",
+        "n",
+        "h"
+      ],
+      "candidate_glyph_count": 19,
+      "reference_glyph_count": 19,
+      "candidate_total_advance_upem": 9181,
+      "reference_total_advance_upem": 9615,
+      "advance_delta_upem": 434,
+      "max_position_delta_upem": 236
+    },
+    {
+      "text": "á ờ ữ",
+      "category": "out_of_cmap_combining_marks",
+      "in_candidate_cmap": false,
+      "glyph_sequence_match": false,
+      "candidate_glyph_names": [
+        ".notdef",
+        ".notdef",
+        "space",
+        "uni01A1",
+        ".notdef",
+        "space",
+        "uni01B0",
+        ".notdef"
+      ],
+      "reference_glyph_names": [
+        "aacute",
+        "space",
+        "uni1EDD",
+        "space",
+        "uni1EEF"
+      ],
+      "candidate_glyph_count": 8,
+      "reference_glyph_count": 5,
+      "candidate_total_advance_upem": 2218,
+      "reference_total_advance_upem": 2356,
+      "advance_delta_upem": 138,
+      "max_position_delta_upem": 138
+    },
+    {
+      "text": "“Hello, World!” 100% @ #41 (2026)",
+      "category": "out_of_cmap_punctuation_and_symbols",
+      "in_candidate_cmap": false,
+      "glyph_sequence_match": false,
+      "candidate_glyph_names": [
+        ".notdef",
+        ".notdef",
+        ".notdef",
+        ".notdef",
+        ".notdef",
+        ".notdef",
+        ".notdef",
+        "space",
+        ".notdef",
+        ".notdef",
+        ".notdef",
+        ".notdef",
+        ".notdef",
+        ".notdef",
+        ".notdef",
+        "space",
+        ".notdef",
+        ".notdef",
+        ".notdef",
+        "percent",
+        "space",
+        "at",
+        "space",
+        ".notdef",
+        ".notdef",
+        ".notdef",
+        "space",
+        ".notdef",
+        ".notdef",
+        ".notdef",
+        ".notdef",
+        ".notdef",
+        ".notdef"
+      ],
+      "reference_glyph_names": [
+        "quotedblleft",
+        "H",
+        "e",
+        "l",
+        "l",
+        "o",
+        "comma",
+        "space",
+        "W",
+        "o",
+        "r",
+        "l",
+        "d",
+        "exclam",
+        "quotedblright",
+        "space",
+        "one",
+        "zero",
+        "zero",
+        "percent",
+        "space",
+        "at",
+        "space",
+        "numbersign",
+        "four",
+        "one",
+        "space",
+        "parenleft",
+        "two",
+        "zero",
+        "two",
+        "six",
+        "parenright"
+      ],
+      "candidate_glyph_count": 33,
+      "reference_glyph_count": 33,
+      "candidate_total_advance_upem": 16104,
+      "reference_total_advance_upem": 16900,
+      "advance_delta_upem": 796,
+      "max_position_delta_upem": 460
+    },
+    {
+      "text": "fi fl ffi ffl",
+      "category": "out_of_cmap_ligatures",
+      "in_candidate_cmap": false,
+      "glyph_sequence_match": false,
+      "candidate_glyph_names": [
+        ".notdef",
+        ".notdef",
+        "space",
+        ".notdef",
+        ".notdef",
+        "space",
+        ".notdef",
+        ".notdef",
+        ".notdef",
+        "space",
+        ".notdef",
+        ".notdef",
+        ".notdef"
+      ],
+      "reference_glyph_names": [
+        "f_i.liga",
+        "space",
+        "f",
+        "l",
+        "space",
+        "f_f_i.liga",
+        "space",
+        "f_f.liga",
+        "l"
+      ],
+      "candidate_glyph_count": 13,
+      "reference_glyph_count": 9,
+      "candidate_total_advance_upem": 5750,
+      "reference_total_advance_upem": 4016,
+      "advance_delta_upem": 1734,
+      "max_position_delta_upem": 1734
+    },
+    {
+      "text": "AVATAR To Water",
+      "category": "out_of_cmap_kerning",
+      "in_candidate_cmap": false,
+      "glyph_sequence_match": false,
+      "candidate_glyph_names": [
+        "A",
+        ".notdef",
+        "A",
+        ".notdef",
+        "A",
+        ".notdef",
+        "space",
+        ".notdef",
+        ".notdef",
+        "space",
+        ".notdef",
+        ".notdef",
+        ".notdef",
+        ".notdef",
+        ".notdef"
+      ],
+      "reference_glyph_names": [
+        "A",
+        "V",
+        "A",
+        "T",
+        "A",
+        "R",
+        "space",
+        "T",
+        "o",
+        "space",
+        "W",
+        "a",
+        "t",
+        "e",
+        "r"
+      ],
+      "candidate_glyph_count": 15,
+      "reference_glyph_count": 15,
+      "candidate_total_advance_upem": 7708,
+      "reference_total_advance_upem": 8525,
+      "advance_delta_upem": 817,
+      "max_position_delta_upem": 460
+    }
+  ],
+  "raster_results": [
+    {
+      "code_point": 65,
+      "character": "A",
+      "render_size_px": 16,
+      "raster_iou": 0.6923076923076923,
+      "pixel_delta_count": 24,
+      "render_error": null
+    },
+    {
+      "code_point": 65,
+      "character": "A",
+      "render_size_px": 32,
+      "raster_iou": 0.7333333333333333,
+      "pixel_delta_count": 64,
+      "render_error": null
+    },
+    {
+      "code_point": 65,
+      "character": "A",
+      "render_size_px": 64,
+      "raster_iou": 0.8846611177170036,
+      "pixel_delta_count": 97,
+      "render_error": null
+    },
+    {
+      "code_point": 65,
+      "character": "A",
+      "render_size_px": 128,
+      "raster_iou": 0.9296272493573264,
+      "pixel_delta_count": 219,
+      "render_error": null
+    },
+    {
+      "code_point": 66,
+      "character": "B",
+      "render_size_px": 16,
+      "raster_iou": 0.9871794871794872,
+      "pixel_delta_count": 1,
+      "render_error": null
+    },
+    {
+      "code_point": 66,
+      "character": "B",
+      "render_size_px": 32,
+      "raster_iou": 0.8808664259927798,
+      "pixel_delta_count": 33,
+      "render_error": null
+    },
+    {
+      "code_point": 66,
+      "character": "B",
+      "render_size_px": 64,
+      "raster_iou": 0.9246031746031746,
+      "pixel_delta_count": 76,
+      "render_error": null
+    },
+    {
+      "code_point": 66,
+      "character": "B",
+      "render_size_px": 128,
+      "raster_iou": 0.9190981432360743,
+      "pixel_delta_count": 305,
+      "render_error": null
+    },
+    {
+      "code_point": 79,
+      "character": "O",
+      "render_size_px": 16,
+      "raster_iou": 0.6363636363636364,
+      "pixel_delta_count": 32,
+      "render_error": null
+    },
+    {
+      "code_point": 79,
+      "character": "O",
+      "render_size_px": 32,
+      "raster_iou": 0.7547169811320755,
+      "pixel_delta_count": 65,
+      "render_error": null
+    },
+    {
+      "code_point": 79,
+      "character": "O",
+      "render_size_px": 64,
+      "raster_iou": 0.8137154554759468,
+      "pixel_delta_count": 182,
+      "render_error": null
+    },
+    {
+      "code_point": 79,
+      "character": "O",
+      "render_size_px": 128,
+      "raster_iou": 0.8800880088008801,
+      "pixel_delta_count": 436,
+      "render_error": null
+    },
+    {
+      "code_point": 56,
+      "character": "8",
+      "render_size_px": 16,
+      "raster_iou": 0.8947368421052632,
+      "pixel_delta_count": 8,
+      "render_error": null
+    },
+    {
+      "code_point": 56,
+      "character": "8",
+      "render_size_px": 32,
+      "raster_iou": 0.7127272727272728,
+      "pixel_delta_count": 79,
+      "render_error": null
+    },
+    {
+      "code_point": 56,
+      "character": "8",
+      "render_size_px": 64,
+      "raster_iou": 0.8002070393374742,
+      "pixel_delta_count": 193,
+      "render_error": null
+    },
+    {
+      "code_point": 56,
+      "character": "8",
+      "render_size_px": 128,
+      "raster_iou": 0.904264837458992,
+      "pixel_delta_count": 321,
+      "render_error": null
+    },
+    {
+      "code_point": 64,
+      "character": "@",
+      "render_size_px": 16,
+      "raster_iou": 0.5328947368421053,
+      "pixel_delta_count": 71,
+      "render_error": null
+    },
+    {
+      "code_point": 64,
+      "character": "@",
+      "render_size_px": 32,
+      "raster_iou": 0.39087301587301587,
+      "pixel_delta_count": 307,
+      "render_error": null
+    },
+    {
+      "code_point": 64,
+      "character": "@",
+      "render_size_px": 64,
+      "raster_iou": 0.30157170923379173,
+      "pixel_delta_count": 1422,
+      "render_error": null
+    },
+    {
+      "code_point": 64,
+      "character": "@",
+      "render_size_px": 128,
+      "raster_iou": 0.30357142857142855,
+      "pixel_delta_count": 5070,
+      "render_error": null
+    },
+    {
+      "code_point": 37,
+      "character": "%",
+      "render_size_px": 16,
+      "raster_iou": 0.6888888888888889,
+      "pixel_delta_count": 28,
+      "render_error": null
+    },
+    {
+      "code_point": 37,
+      "character": "%",
+      "render_size_px": 32,
+      "raster_iou": 0.6725978647686833,
+      "pixel_delta_count": 92,
+      "render_error": null
+    },
+    {
+      "code_point": 37,
+      "character": "%",
+      "render_size_px": 64,
+      "raster_iou": 0.7536082474226804,
+      "pixel_delta_count": 239,
+      "render_error": null
+    },
+    {
+      "code_point": 37,
+      "character": "%",
+      "render_size_px": 128,
+      "raster_iou": 0.8917464114832536,
+      "pixel_delta_count": 362,
+      "render_error": null
+    },
+    {
+      "code_point": 103,
+      "character": "g",
+      "render_size_px": 16,
+      "raster_iou": 0.2708333333333333,
+      "pixel_delta_count": 70,
+      "render_error": null
+    },
+    {
+      "code_point": 103,
+      "character": "g",
+      "render_size_px": 32,
+      "raster_iou": 0.23214285714285715,
+      "pixel_delta_count": 215,
+      "render_error": null
+    },
+    {
+      "code_point": 103,
+      "character": "g",
+      "render_size_px": 64,
+      "raster_iou": 0.22201492537313433,
+      "pixel_delta_count": 834,
+      "render_error": null
+    },
+    {
+      "code_point": 103,
+      "character": "g",
+      "render_size_px": 128,
+      "raster_iou": 0.22887673956262425,
+      "pixel_delta_count": 3103,
+      "render_error": null
+    },
+    {
+      "code_point": 109,
+      "character": "m",
+      "render_size_px": 16,
+      "raster_iou": 0.7058823529411765,
+      "pixel_delta_count": 25,
+      "render_error": null
+    },
+    {
+      "code_point": 109,
+      "character": "m",
+      "render_size_px": 32,
+      "raster_iou": 0.823076923076923,
+      "pixel_delta_count": 46,
+      "render_error": null
+    },
+    {
+      "code_point": 109,
+      "character": "m",
+      "render_size_px": 64,
+      "raster_iou": 0.9238521836506159,
+      "pixel_delta_count": 68,
+      "render_error": null
+    },
+    {
+      "code_point": 109,
+      "character": "m",
+      "render_size_px": 128,
+      "raster_iou": 0.8955676988463873,
+      "pixel_delta_count": 344,
+      "render_error": null
+    },
+    {
+      "code_point": 417,
+      "character": "ơ",
+      "render_size_px": 16,
+      "raster_iou": 0.8524590163934426,
+      "pixel_delta_count": 9,
+      "render_error": null
+    },
+    {
+      "code_point": 417,
+      "character": "ơ",
+      "render_size_px": 32,
+      "raster_iou": 0.5646551724137931,
+      "pixel_delta_count": 101,
+      "render_error": null
+    },
+    {
+      "code_point": 417,
+      "character": "ơ",
+      "render_size_px": 64,
+      "raster_iou": 0.8601694915254238,
+      "pixel_delta_count": 99,
+      "render_error": null
+    },
+    {
+      "code_point": 417,
+      "character": "ơ",
+      "render_size_px": 128,
+      "raster_iou": 0.8062209510189489,
+      "pixel_delta_count": 542,
+      "render_error": null
+    },
+    {
+      "code_point": 432,
+      "character": "ư",
+      "render_size_px": 16,
+      "raster_iou": 0.8163265306122449,
+      "pixel_delta_count": 9,
+      "render_error": null
+    },
+    {
+      "code_point": 432,
+      "character": "ư",
+      "render_size_px": 32,
+      "raster_iou": 0.8201058201058201,
+      "pixel_delta_count": 34,
+      "render_error": null
+    },
+    {
+      "code_point": 432,
+      "character": "ư",
+      "render_size_px": 64,
+      "raster_iou": 0.9633173843700159,
+      "pixel_delta_count": 23,
+      "render_error": null
+    },
+    {
+      "code_point": 432,
+      "character": "ư",
+      "render_size_px": 128,
+      "raster_iou": 0.8927350427350428,
+      "pixel_delta_count": 251,
+      "render_error": null
+    },
+    {
+      "code_point": 7855,
+      "character": "ắ",
+      "render_size_px": 16,
+      "raster_iou": 0.735632183908046,
+      "pixel_delta_count": 23,
+      "render_error": null
+    },
+    {
+      "code_point": 7855,
+      "character": "ắ",
+      "render_size_px": 32,
+      "raster_iou": 0.876,
+      "pixel_delta_count": 31,
+      "render_error": null
+    },
+    {
+      "code_point": 7855,
+      "character": "ắ",
+      "render_size_px": 64,
+      "raster_iou": 0.8629550321199143,
+      "pixel_delta_count": 128,
+      "render_error": null
+    },
+    {
+      "code_point": 7855,
+      "character": "ắ",
+      "render_size_px": 128,
+      "raster_iou": 0.8580405598400457,
+      "pixel_delta_count": 497,
+      "render_error": null
+    },
+    {
+      "code_point": 273,
+      "character": "đ",
+      "render_size_px": 16,
+      "raster_iou": 0.5104166666666666,
+      "pixel_delta_count": 47,
+      "render_error": null
+    },
+    {
+      "code_point": 273,
+      "character": "đ",
+      "render_size_px": 32,
+      "raster_iou": 0.7211895910780669,
+      "pixel_delta_count": 75,
+      "render_error": null
+    },
+    {
+      "code_point": 273,
+      "character": "đ",
+      "render_size_px": 64,
+      "raster_iou": 0.8215811965811965,
+      "pixel_delta_count": 167,
+      "render_error": null
+    },
+    {
+      "code_point": 273,
+      "character": "đ",
+      "render_size_px": 128,
+      "raster_iou": 0.940403422982885,
+      "pixel_delta_count": 195,
+      "render_error": null
+    },
+    {
+      "code_point": 272,
+      "character": "Đ",
+      "render_size_px": 16,
+      "raster_iou": 0.9487179487179487,
+      "pixel_delta_count": 4,
+      "render_error": null
+    },
+    {
+      "code_point": 272,
+      "character": "Đ",
+      "render_size_px": 32,
+      "raster_iou": 0.6655948553054662,
+      "pixel_delta_count": 104,
+      "render_error": null
+    },
+    {
+      "code_point": 272,
+      "character": "Đ",
+      "render_size_px": 64,
+      "raster_iou": 0.9147058823529411,
+      "pixel_delta_count": 87,
+      "render_error": null
+    },
+    {
+      "code_point": 272,
+      "character": "Đ",
+      "render_size_px": 128,
+      "raster_iou": 0.8574724429633427,
+      "pixel_delta_count": 556,
+      "render_error": null
+    }
+  ]
+}
