@@ -372,16 +372,17 @@ class MaxCandidateHeldOutValidator:
         ft_all = all(f.is_direct_loadable_fonttools for f in format_results)
         free_all = all(f.is_direct_loadable_freetype or f.is_roundtrip_loadable_freetype for f in format_results)
         hb_all = all(f.is_direct_loadable_harfbuzz for f in format_results)
-        if not chromium_res.is_available or not run_chromium:
-            chrom_ok = True
-        else:
-            chrom_ok = bool(
-                chromium_res.is_direct_loadable_chromium
+        chrom_ok = (
+            (not run_chromium)
+            or (
+                chromium_res.is_available
+                and chromium_res.is_direct_loadable_chromium
                 and chromium_res.fallback_rejection_verified
                 and chromium_res.fit_pairs_material_improvement
                 and chromium_res.held_out_pairs_non_regression
                 and chromium_res.rendered_canvas_valid
             )
+        )
 
         all_passed = bool(ft_all and free_all and hb_all and chrom_ok and not has_raster_errors)
 
