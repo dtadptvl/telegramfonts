@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-08-21T09:40:30.000000+00:00",
+  "timestamp": "2026-08-21T09:49:15.000000+00:00",
   "device_identity": {
     "hostname": "localhost",
     "os": "Android",
@@ -13,10 +13,10 @@
   "reference_id": "be_vietnam_pro",
   "style_id": "regular",
   "execution_metrics": {
-    "total_time_seconds": 13.20,
-    "build_time_seconds": 1.18,
-    "validation_time_seconds": 12.02,
-    "peak_rss_mb": 104.10
+    "total_time_seconds": 13.15,
+    "build_time_seconds": 1.15,
+    "validation_time_seconds": 12.00,
+    "peak_rss_mb": 104.20
   },
   "candidate_family": {
     "family_name": "BeVietnamPro MAX",
@@ -34,7 +34,7 @@
         "is_direct_loadable_freetype": true,
         "is_roundtrip_loadable_freetype": true,
         "is_direct_loadable_harfbuzz": true,
-        "is_direct_loadable_chromium": true
+        "is_direct_loadable_chromium": false
       },
       {
         "format": "TTF",
@@ -47,13 +47,13 @@
         "is_direct_loadable_freetype": true,
         "is_roundtrip_loadable_freetype": true,
         "is_direct_loadable_harfbuzz": true,
-        "is_direct_loadable_chromium": true
+        "is_direct_loadable_chromium": false
       },
       {
         "format": "WOFF2",
         "filename": "BeVietnamProMAX-Regular.woff2",
-        "size_bytes": 3632,
-        "sha256_hex": "fdf88f3316ca975f80ba087a9173db7619286ebc0128cf7e85c2c77f0a8e0cb2",
+        "size_bytes": 3648,
+        "sha256_hex": "c6218d6a36b5ec6320a9a4b3b3a69622d1df8a9a206c64ae7d02eb74f3ff5ab3",
         "glyph_count": 15,
         "units_per_em": 1000,
         "is_direct_loadable_fonttools": true,
@@ -83,6 +83,6 @@
     "in_cmap_shaping_match_rate": 1.0,
     "mean_held_out_raster_iou": 0.7399,
     "requires_typography_phase_e": true,
-    "typography_evidence_summary": "Shaping evidence confirms 2551 UPEM advance difference on kerning/ligature strings ('AVATAR', 'fi'). Phase E (GPOS/GSUB) is justified."
+    "typography_evidence_summary": "In-cmap shaping evidence across mapped pairs ('AO', 'OA', 'BO') reveals 90 UPEM total advance delta (max pair delta: 40 UPEM) due to missing GPOS kerning table in Candidate vs Reference font. Phase E (GPOS/GSUB typography) is justified."
   }
 }
