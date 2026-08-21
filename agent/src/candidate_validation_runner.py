@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import datetime
 import json
 import logging
@@ -14,11 +15,14 @@ from pathlib import Path
 from typing import Any
 
 from measurement.benchmark_runner import get_peak_rss_mb
+from measurement.browser_session import ChromiumSession
 from measurement.store import ObservationStore
 from reconstruction.candidate_builder import MaxCandidateFontBuilder
 from reconstruction.candidate_validator import MaxCandidateHeldOutValidator
 from reconstruction.models import ReconstructionConfig
 from reconstruction.solver import MaxReconstructionSolver
+from typography.kerning_inferencer import EvidenceKerningInferencer
+from typography.models import TypographyDataset
 
 logging.basicConfig(
     level=logging.INFO,
@@ -57,6 +61,7 @@ def run_candidate_pipeline(
 
     store = ObservationStore(store_dir)
     solver = MaxReconstructionSolver(ReconstructionConfig(grid_resolution=512, fitting_tolerance_upem=1.5))
+    truth_file = Path(truth_path)
 
     logger.info("Reconstructing cubic master glyphs from cached observations...")
     reconstructed_glyphs = []
@@ -66,16 +71,37 @@ def run_candidate_pipeline(
             glyph = solver.reconstruct_glyph(obs)
             reconstructed_glyphs.append(glyph)
 
-    logger.info("Building candidate font binaries (OTF, TTF, WOFF2)...")
+    logger.info("Inferring evidence-driven kerning adjustments from observable store observations...")
+    inferencer = EvidenceKerningInferencer(
+        family_name="BeVietnamPro MAX",
+        style_name="Regular",
+        units_per_em=1000,
+    )
+    if store.has_pair_observations(reference_id, style_id):
+        typography_dataset = inferencer.infer_from_store(store, reference_id, style_id)
+        logger.info(
+            "Loaded %d active kerning pairs (from %d probed pairs) from store",
+            typography_dataset.active_kerning_pairs_count,
+            typography_dataset.total_pairs_probed,
+        )
+    else:
+        typography_dataset = None
+        logger.info("No cached pair observations found in store for %s/%s", reference_id, style_id)
+
+    logger.info("Building candidate font binaries with OpenType GPOS (OTF, TTF, WOFF2)...")
     builder = MaxCandidateFontBuilder(
         family_name="BeVietnamPro MAX",
         style_name="Regular",
         units_per_em=1000,
     )
-    build_result = builder.build_candidate_family(reconstructed_glyphs, output_dir)
+    build_result = builder.build_candidate_family(
+        reconstructed_glyphs,
+        output_dir,
+        typography=typography_dataset,
+    )
 
     logger.info("Executing independent held-out multi-consumer validation...")
-    validator = MaxCandidateHeldOutValidator(truth_path)
+    validator = MaxCandidateHeldOutValidator(truth_file)
     report = validator.validate_family(build_result, tested_codepoints=REPRESENTATIVE_CODE_POINTS)
 
     elapsed_s = time.perf_counter() - start_time
@@ -122,10 +148,16 @@ def run_candidate_pipeline(
             "mean_lsb_error_upem": report.mean_lsb_error_upem,
             "max_lsb_error_upem": report.max_lsb_error_upem,
             "in_cmap_shaping_match_rate": report.in_cmap_shaping_match_rate,
+            "fit_kerning_delta_upem": report.fit_kerning_delta_upem,
+            "held_out_in_cmap_kerning_delta_upem": report.held_out_in_cmap_kerning_delta_upem,
             "mean_held_out_raster_iou": report.mean_held_out_raster_iou,
             "requires_typography_phase_e": report.requires_typography_phase_e,
             "typography_evidence_summary": report.typography_evidence_summary,
+            "typography_provenance": typography_dataset.provenance if typography_dataset else None,
+            "typography_fit_rows_count": typography_dataset.fit_rows_count if typography_dataset else 0,
+            "typography_fit_rows_sha256": typography_dataset.fit_rows_sha256 if typography_dataset else None,
         },
+        "typography": typography_dataset.to_dict() if typography_dataset else None,
         "chromium_validation": asdict(report.chromium_result),
         "format_details": [asdict(f) for f in report.format_results],
         "metric_differences": [asdict(m) for m in report.metric_differences],
@@ -150,8 +182,12 @@ def run_candidate_pipeline(
     print(f"  Multi-Consumer Load:     {'PASS (100%)' if report.all_formats_passed else 'FAIL'}")
     print(f"  Chromium WOFF2 Load:     {'PASS' if report.chromium_result.is_direct_loadable_chromium else 'FAIL / N/A'} ({report.chromium_result.browser_version})")
     print(f"  Fallback Rejection:      {'PASS' if report.chromium_result.fallback_rejection_verified else 'FAIL / N/A'}")
+    if typography_dataset:
+        print(f"  Inferred Kerning Pairs:  {typography_dataset.active_kerning_pairs_count} active / {typography_dataset.total_pairs_probed} probed")
     print(f"  Mean Advance Error:      {report.mean_advance_error_upem} UPEM (Max: {report.max_advance_error_upem} UPEM)")
     print(f"  Mean LSB Error:          {report.mean_lsb_error_upem} UPEM (Max: {report.max_lsb_error_upem} UPEM)")
+    print(f"  Fit Kerning Delta:       {report.fit_kerning_delta_upem} UPEM")
+    print(f"  Held-Out In-Cmap Delta:  {report.held_out_in_cmap_kerning_delta_upem} UPEM")
     print(f"  In-Cmap Shaping Match:   {report.in_cmap_shaping_match_rate * 100:.1f}%")
     print(f"  Held-Out Raster IoU:     {report.mean_held_out_raster_iou * 100:.1f}%")
     print(f"  Requires Typography:     {report.requires_typography_phase_e}")
@@ -164,6 +200,12 @@ def run_candidate_pipeline(
 
 
 def main() -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+
     parser = argparse.ArgumentParser(description="MAX Candidate Font Build & Held-Out Validation")
     parser.add_argument("--store-dir", default="observations/benchmark")
     parser.add_argument("--truth-path", default="agent/benchmark_data/ground_truth/BeVietnamPro-Regular.ttf")

@@ -125,6 +125,13 @@ class GroundTruthBenchmarkRunner:
                 code_points=code_points_subset,
             )
 
+            # Collect bounded pair observations via browser text metrics with real provenance
+            await collector.collect_pair_observations(
+                reference_id=reference_id,
+                style_id=style_id,
+                font_family=font_family_name,
+            )
+
             discovered_cps = store.get_coverage(reference_id, style_id)
 
             # Evaluate metrics accuracy against Ground Truth

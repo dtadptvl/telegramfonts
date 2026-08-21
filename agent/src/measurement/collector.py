@@ -134,3 +134,72 @@ class ObservationCollector:
             f"Collected {total_glyphs} glyphs ({total_rasters} total observation rasters) in {elapsed:.2f}s"
         )
         return total_glyphs, total_rasters, elapsed
+
+    async def collect_pair_observations(
+        self,
+        reference_id: str,
+        style_id: str,
+        font_family: str,
+        pairs: list[tuple[int, int]] | None = None,
+    ) -> int:
+        """Collect observable character pair advance measurements from browser Canvas text metrics.
+
+        Measures raw left advance, right advance, and pair advance in Chromium to derive
+        observable kerning differentials with real browser acquisition provenance.
+        """
+        import json
+        from typography.models import BOUNDED_FIT_PAIRS
+
+        target_pairs = pairs or BOUNDED_FIT_PAIRS
+        captured = 0
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        provenance = f"chromium:{self.session.browser_version}:canvas_text_metrics"
+
+        for left_cp, right_cp in target_pairs:
+            m_left = await self.session.measure_glyph_direct(
+                font_family=font_family,
+                code_point=left_cp,
+                font_size_px=self.config.font_size_px,
+                upem=self.config.upem,
+            )
+            m_right = await self.session.measure_glyph_direct(
+                font_family=font_family,
+                code_point=right_cp,
+                font_size_px=self.config.font_size_px,
+                upem=self.config.upem,
+            )
+            pair_str = chr(left_cp) + chr(right_cp)
+
+            # Direct pair measurement via browser Canvas TextMetrics
+            js = f"""
+            (() => {{
+                const canvas = document.createElement('canvas');
+                const ctx = canvas.getContext('2d');
+                ctx.font = '{self.config.font_size_px}px "{font_family}"';
+                const w = ctx.measureText({json.dumps(pair_str)}).width;
+                return (w / {self.config.font_size_px}) * {self.config.upem};
+            }})()
+            """
+            pair_adv_upem = float(await self.session.evaluate_script(js))
+            raw_delta = pair_adv_upem - (m_left.advance_width_upem + m_right.advance_width_upem)
+            inferred_kern = int(round(raw_delta))
+
+            self.store.save_pair_observation(
+                reference_id=reference_id,
+                style_id=style_id,
+                left_cp=left_cp,
+                right_cp=right_cp,
+                left_char=chr(left_cp),
+                right_char=chr(right_cp),
+                left_advance_upem=round(m_left.advance_width_upem, 2),
+                right_advance_upem=round(m_right.advance_width_upem, 2),
+                pair_advance_upem=round(pair_adv_upem, 2),
+                inferred_kerning_upem=inferred_kern,
+                confidence=1.0,
+                provenance=provenance,
+                created_at=now_iso,
+            )
+            captured += 1
+
+        logger.info(f"Captured {captured} observable pair text metrics with provenance {provenance}")
+        return captured
