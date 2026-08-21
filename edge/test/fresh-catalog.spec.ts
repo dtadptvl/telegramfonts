@@ -877,5 +877,88 @@ describe('Phase 7: Fresh-Catalog E2E Resolution & Scheduled Cron Delivery', () =
       fetchSpy.mockRestore();
     }
   });
+
+  it('a stale older failure does not reset a newer different pending request session', async () => {
+    const userId = 'user_stale_fail_99';
+    const chatId = 999902;
+    const now = Date.now();
+
+    const oldKey = 'myfonts:collections/old-broken-font';
+    const oldUrl = 'https://www.myfonts.com/collections/old-broken-font';
+    const newKey = 'myfonts:collections/newer-active-font';
+    const newUrl = 'https://www.myfonts.com/collections/newer-active-font';
+
+    await env.DB.prepare(
+      `INSERT INTO telegram_users (id, first_name, username, created_at, updated_at)
+       VALUES (?, 'StaleFailUser', 'sfuser', ?, ?)`
+    )
+      .bind(userId, now, now)
+      .run();
+
+    await env.DB.prepare(
+      `INSERT INTO telegram_sessions (id, user_id, chat_id, status, workflow_token, checkout_token, version, created_at, updated_at)
+       VALUES (?, ?, ?, 'AWAITING_CATALOG', 'tok_new_f', 'chk_new_f', 2, ?, ?)`
+    )
+      .bind('sess_stale_f', userId, chatId, now, now)
+      .run();
+
+    const oldReqId = 'req_old_broken';
+    const newReqId = 'req_newer_active';
+
+    await env.DB.prepare(
+      `INSERT INTO catalog_requests (id, user_id, canonical_key, source_url, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'PENDING', ?, ?),
+              (?, ?, ?, ?, 'PENDING', ?, ?)`
+    )
+      .bind(oldReqId, userId, oldKey, oldUrl, now - 1000, now - 1000, newReqId, userId, newKey, newUrl, now, now)
+      .run();
+
+    const deliveredChats: number[] = [];
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (info, init) => {
+      const urlStr = typeof info === 'string' ? info : info instanceof Request ? info.url : info.toString();
+      if (urlStr.includes('/sendMessage')) {
+        const bodyObj = JSON.parse(String(init?.body || '{}')) as { chat_id: number };
+        deliveredChats.push(Number(bodyObj.chat_id));
+        return new Response(JSON.stringify({ ok: true, result: { message_id: 5556 } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    try {
+      // Late arriving failure for the OLD request arrives
+      const failOldReq = new Request(
+        `https://worker.local/internal/catalog-requests/${oldReqId}/fail`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${nodeSecret}`,
+          },
+          body: JSON.stringify({ reason: 'NO_CATALOG_STYLES_FOUND' }),
+        }
+      );
+      const oldResp = await worker.fetch(failOldReq, env, {} as ExecutionContext);
+      expect(oldResp.status).toBe(200);
+
+      // Verify the old request is marked FAILED
+      const oldReqRow = await env.DB.prepare('SELECT status FROM catalog_requests WHERE id = ?').bind(oldReqId).first<{ status: string }>();
+      expect(oldReqRow?.status).toBe('FAILED');
+
+      // Verify session did NOT get reset to IDLE because user has a newer active request
+      const currentSession = await env.DB
+        .prepare('SELECT status FROM telegram_sessions WHERE user_id = ?')
+        .bind(userId)
+        .first<{ status: string }>();
+      expect(currentSession?.status).toBe('AWAITING_CATALOG');
+
+      // Verify no failure message was sent to disrupt the newer ongoing request
+      expect(deliveredChats).not.toContain(chatId);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
 });
 

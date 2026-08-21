@@ -325,8 +325,10 @@ class SourceAcquirer:
 
         if resp.status_code in (403, 429):
             raise ValueError(f"SOURCE_ACQUISITION_BLOCKED_{resp.status_code}")
-        if resp.status_code >= 400:
+        if 400 <= resp.status_code < 500:
             raise ValueError(f"SOURCE_HTTP_ERROR_{resp.status_code}")
+        if resp.status_code >= 500:
+            resp.raise_for_status()
 
         return extract_catalog_metadata_from_html(resp.text, source_url)
 

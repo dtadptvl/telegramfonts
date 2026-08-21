@@ -705,3 +705,128 @@ async def test_runner_fails_pending_catalog_request_on_error(test_settings: Sett
         await runner.close()
 
 
+@pytest.mark.asyncio
+async def test_runner_leaves_catalog_retryable_on_transient_error(test_settings: Settings):
+    failed_requests = []
+
+    def queue_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"result": {"messages": []}, "success": True})
+
+    def worker_handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and "/internal/catalog-requests/pending" in request.url.path:
+            return httpx.Response(
+                200,
+                json={
+                    "requests": [
+                        {
+                            "id": "req_transient_1",
+                            "user_id": "usr_transient",
+                            "canonical_key": "transient_font",
+                            "source_url": "https://www.myfonts.com/collections/transient-font",
+                            "status": "PENDING",
+                            "created_at": 1700000000,
+                        }
+                    ]
+                },
+            )
+        if "/fail" in request.url.path:
+            failed_requests.append(request.url.path)
+            return httpx.Response(200, json={"success": True, "status": "FAILED"})
+        return httpx.Response(404)
+
+    def source_handler(request: httpx.Request) -> httpx.Response:
+        # Transient 503 Service Unavailable error
+        return httpx.Response(503, text="Service Unavailable")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(queue_handler)) as q_http, \
+               httpx.AsyncClient(transport=httpx.MockTransport(worker_handler)) as w_http, \
+               httpx.AsyncClient(transport=httpx.MockTransport(source_handler)) as s_http:
+
+        q_client = CloudflareQueueClient(test_settings, client=q_http)
+        w_client = WorkerJobClient(test_settings, client=w_http)
+        s_acquirer = SourceAcquirer(client=s_http)
+        runner = A23Runner(
+            test_settings,
+            queue_client=q_client,
+            worker_client=w_client,
+            source_acquirer=s_acquirer,
+        )
+
+        results = await runner.run_once()
+        assert results == []
+
+        # Verify /fail was NOT called for transient error; request remains retryable in D1
+        assert failed_requests == []
+
+        await runner.close()
+
+
+@pytest.mark.asyncio
+async def test_runner_bounds_catalog_processing_to_one_per_loop(test_settings: Settings):
+    completed_requests = []
+
+    def queue_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"result": {"messages": []}, "success": True})
+
+    def worker_handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and "/internal/catalog-requests/pending" in request.url.path:
+            return httpx.Response(
+                200,
+                json={
+                    "requests": [
+                        {
+                            "id": f"req_batch_{i}",
+                            "user_id": f"usr_{i}",
+                            "canonical_key": f"key_{i}",
+                            "source_url": f"https://www.myfonts.com/collections/font-{i}",
+                            "status": "PENDING",
+                            "created_at": 1700000000 + i,
+                        }
+                        for i in range(1, 4)
+                    ]
+                },
+            )
+        if "/complete" in request.url.path:
+            req_id = request.url.path.split("/")[-2]
+            completed_requests.append(req_id)
+            return httpx.Response(200, json={"success": True, "catalog_id": f"cat_{req_id}"})
+        return httpx.Response(404)
+
+    def source_handler(request: httpx.Request) -> httpx.Response:
+        html = """
+        <html>
+          <head>
+            <meta property="og:title" content="Test Font - MyFonts">
+          </head>
+          <body>
+            <div data-style-name="Regular"></div>
+          </body>
+        </html>
+        """
+        return httpx.Response(200, text=html)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(queue_handler)) as q_http, \
+               httpx.AsyncClient(transport=httpx.MockTransport(worker_handler)) as w_http, \
+               httpx.AsyncClient(transport=httpx.MockTransport(source_handler)) as s_http:
+
+        q_client = CloudflareQueueClient(test_settings, client=q_http)
+        w_client = WorkerJobClient(test_settings, client=w_http)
+        s_acquirer = SourceAcquirer(client=s_http)
+        runner = A23Runner(
+            test_settings,
+            queue_client=q_client,
+            worker_client=w_client,
+            source_acquirer=s_acquirer,
+        )
+
+        # Run one loop iteration
+        await runner.run_once()
+
+        # Bounded to exactly 1 catalog request in this run_once call
+        assert len(completed_requests) == 1
+        assert completed_requests[0] == "req_batch_1"
+
+        await runner.close()
+
+
+

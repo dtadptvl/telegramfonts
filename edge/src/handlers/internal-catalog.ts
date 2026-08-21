@@ -332,7 +332,7 @@ export async function handleInternalCatalog(
 
     await catalogService.failCatalogRequest(requestId);
 
-    // Notify waiting Telegram user and unblock session
+    // Notify waiting Telegram user and unblock session if this is still the active request
     if (env.TELEGRAM_BOT_TOKEN) {
       const tg = new TelegramClient(env.TELEGRAM_BOT_TOKEN);
 
@@ -351,16 +351,30 @@ export async function handleInternalCatalog(
         }>();
 
       if (userSession) {
-        // Reset session back to IDLE
-        await sessionService.setStatusUnconditional(userSession.user_id, 'IDLE', null);
+        // Verify the user is still waiting on this catalog (and did not start a newer different pending request)
+        const latestReqForUser = await env.DB
+          .prepare(
+            `SELECT canonical_key
+             FROM catalog_requests
+             WHERE user_id = ?
+             ORDER BY created_at DESC
+             LIMIT 1`
+          )
+          .bind(reqRow.user_id)
+          .first<{ canonical_key: string }>();
 
-        try {
-          await tg.sendMessage({
-            chat_id: userSession.chat_id,
-            text: '⚠️ Không thể tải thông tin font từ liên kết này. Vui lòng kiểm tra lại liên kết MyFonts hợp lệ hoặc thử lại sau.',
-          });
-        } catch {
-          // Log or tolerate telegram transport hiccups
+        if (!latestReqForUser || latestReqForUser.canonical_key === reqRow.canonical_key) {
+          // Reset session back to IDLE
+          await sessionService.setStatusUnconditional(userSession.user_id, 'IDLE', null);
+
+          try {
+            await tg.sendMessage({
+              chat_id: userSession.chat_id,
+              text: '⚠️ Không thể tải thông tin font từ liên kết này. Vui lòng kiểm tra lại liên kết MyFonts hợp lệ hoặc thử lại sau.',
+            });
+          } catch {
+            // Log or tolerate telegram transport hiccups
+          }
         }
       }
     }
