@@ -130,15 +130,21 @@ def test_geometry_optimizer_cache_only_operation(tmp_path):
             bbox_width_upem=655.0,
             bbox_height_upem=740.0,
         )
-        store.save_glyph_observation(
+        rec = ObservationRecord(
+            cache_key="font_a_reg_65_128_0_0",
             reference_id="font_a",
             style_id="reg",
             code_point=65,
             resolution=128,
-            subpixel_offset=(0.0, 0.0),
-            png_bytes=png_bytes,
+            subpixel_x=0.0,
+            subpixel_y=0.0,
+            raster_relative_path="rasters/font_a_reg_65_128.png",
+            raster_sha256="dummy_sha",
+            raster_size_bytes=len(png_bytes),
             metrics=metrics,
+            created_at="2026-08-21T00:00:00Z",
         )
+        store.save_observation(rec, png_bytes)
         obs = store.get_glyph_observations("font_a", "reg", 65)
     else:
         store = ObservationStore(store_dir)
