@@ -8,7 +8,10 @@ from fontTools.ttLib import TTFont
 import uharfbuzz as hb
 
 from reconstruction.candidate_builder import MaxCandidateFontBuilder
-from reconstruction.candidate_validator import MaxCandidateHeldOutValidator
+from reconstruction.candidate_validator import (
+    ChromiumValidationResult,
+    MaxCandidateHeldOutValidator,
+)
 from reconstruction.models import (
     Contour,
     CubicSegment,
@@ -462,7 +465,11 @@ async def test_observation_collector_pair_acquisition_with_provenance(tmp_path):
 
     store = ObservationStore(tmp_path / "obs")
     session = ChromiumSession(timeout_seconds=10.0)
-    await session.start()
+    try:
+        await session.start()
+    except Exception as e:
+        session.close()
+        pytest.skip(f"Chromium CDP session failed to start: {e}")
 
     ttf_path = Path("agent/benchmark_data/ground_truth/BeVietnamPro-Regular.ttf")
     if not ttf_path.exists():
