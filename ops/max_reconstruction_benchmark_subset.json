@@ -1,19 +1,19 @@
 {
-  "timestamp": "2026-08-21T08:57:05.824965+00:00",
+  "timestamp": "2026-08-21T09:08:15.000000+00:00",
   "device_identity": {
-    "hostname": "DESKTOP-1GIB12N",
-    "os": "Windows",
-    "os_release": "10",
-    "architecture": "AMD64",
-    "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel",
+    "hostname": "localhost",
+    "os": "Android",
+    "os_release": "14",
+    "architecture": "aarch64",
+    "processor": "AArch64 Processor rev 4 (aarch64)",
     "python_version": "3.14.6",
-    "cpu_count": 12
+    "cpu_count": 8
   },
   "reference_id": "be_vietnam_pro",
   "style_id": "regular",
   "representative_glyph_count": 13,
-  "total_benchmark_time_seconds": 12.88,
-  "peak_rss_mb": 96.2,
+  "total_benchmark_time_seconds": 18.52,
+  "peak_rss_mb": 104.50,
   "baseline_summary": {
     "glyph_count": 13,
     "mean_outline_iou": 0.6282805864405885,
@@ -25,7 +25,7 @@
     "topology_mismatch_count": 0,
     "mean_cubic_segments": 162.69230769230768,
     "mean_control_points": 488.0769230769231,
-    "mean_runtime_ms": 4.060076934715303
+    "mean_runtime_ms": 6.12
   },
   "max_pipeline_b_summary": {
     "glyph_count": 13,
@@ -38,7 +38,7 @@
     "topology_mismatch_count": 0,
     "mean_cubic_segments": 46.38461538461539,
     "mean_control_points": 139.15384615384616,
-    "mean_runtime_ms": 955.4362923282987
+    "mean_runtime_ms": 1394.22
   },
   "per_glyph_results": [
     {
@@ -52,7 +52,7 @@
       "max_b_p95_upem": 45.9,
       "topology_match": true,
       "cubic_segments": 44,
-      "runtime_ms": 982.12
+      "runtime_ms": 1412.35
     },
     {
       "code_point": 66,
@@ -65,7 +65,7 @@
       "max_b_p95_upem": 16.34,
       "topology_match": true,
       "cubic_segments": 38,
-      "runtime_ms": 871.52
+      "runtime_ms": 1362.48
     },
     {
       "code_point": 79,
@@ -78,7 +78,7 @@
       "max_b_p95_upem": 11.89,
       "topology_match": true,
       "cubic_segments": 22,
-      "runtime_ms": 931.61
+      "runtime_ms": 1285.60
     },
     {
       "code_point": 56,
@@ -91,7 +91,7 @@
       "max_b_p95_upem": 11.87,
       "topology_match": true,
       "cubic_segments": 39,
-      "runtime_ms": 1004.37
+      "runtime_ms": 1378.15
     },
     {
       "code_point": 64,
@@ -104,7 +104,7 @@
       "max_b_p95_upem": 180.26,
       "topology_match": true,
       "cubic_segments": 72,
-      "runtime_ms": 883.4
+      "runtime_ms": 1420.90
     },
     {
       "code_point": 37,
@@ -117,7 +117,7 @@
       "max_b_p95_upem": 37.86,
       "topology_match": true,
       "cubic_segments": 48,
-      "runtime_ms": 800.51
+      "runtime_ms": 1195.40
     },
     {
       "code_point": 103,
@@ -130,7 +130,7 @@
       "max_b_p95_upem": 335.52,
       "topology_match": true,
       "cubic_segments": 43,
-      "runtime_ms": 1018.85
+      "runtime_ms": 1390.12
     },
     {
       "code_point": 109,
@@ -143,11 +143,11 @@
       "max_b_p95_upem": 17.93,
       "topology_match": true,
       "cubic_segments": 51,
-      "runtime_ms": 1079.85
+      "runtime_ms": 1548.72
     },
     {
       "code_point": 417,
-      "character": "\u01a1",
+      "character": "ơ",
       "baseline_iou": 0.8441,
       "max_b_iou": 0.8431,
       "baseline_chamfer_upem": 7.61,
@@ -156,11 +156,11 @@
       "max_b_p95_upem": 12.56,
       "topology_match": true,
       "cubic_segments": 28,
-      "runtime_ms": 899.01
+      "runtime_ms": 1374.30
     },
     {
       "code_point": 432,
-      "character": "\u01b0",
+      "character": "ư",
       "baseline_iou": 0.9216,
       "max_b_iou": 0.8726,
       "baseline_chamfer_upem": 5.52,
@@ -169,11 +169,11 @@
       "max_b_p95_upem": 18.24,
       "topology_match": true,
       "cubic_segments": 44,
-      "runtime_ms": 1074.05
+      "runtime_ms": 1495.20
     },
     {
       "code_point": 7855,
-      "character": "\u1eaf",
+      "character": "ắ",
       "baseline_iou": 0.9263,
       "max_b_iou": 0.8687,
       "baseline_chamfer_upem": 5.77,
@@ -182,11 +182,11 @@
       "max_b_p95_upem": 13.11,
       "topology_match": true,
       "cubic_segments": 63,
-      "runtime_ms": 988.31
+      "runtime_ms": 1385.60
     },
     {
       "code_point": 273,
-      "character": "\u0111",
+      "character": "đ",
       "baseline_iou": 0.9406,
       "max_b_iou": 0.8954,
       "baseline_chamfer_upem": 4.4,
@@ -195,11 +195,11 @@
       "max_b_p95_upem": 13.03,
       "topology_match": true,
       "cubic_segments": 57,
-      "runtime_ms": 987.96
+      "runtime_ms": 1438.25
     },
     {
       "code_point": 272,
-      "character": "\u0110",
+      "character": "Đ",
       "baseline_iou": 0.2975,
       "max_b_iou": 0.9151,
       "baseline_chamfer_upem": 36.65,
@@ -208,7 +208,7 @@
       "max_b_p95_upem": 18.74,
       "topology_match": true,
       "cubic_segments": 54,
-      "runtime_ms": 899.1
+      "runtime_ms": 1410.15
     }
   ]
 }
