@@ -82,44 +82,48 @@ def fuse_observation_sdfs(
     fused_sdf = np.zeros((config.grid_resolution, config.grid_resolution), dtype=np.float32)
     total_weight = 0.0
 
-    # Prioritize highest resolution observations (e.g. 256px) if available
-    max_res = max((rec.resolution for rec, _ in observations), default=128)
-    active_obs = [(rec, b) for rec, b in observations if rec.resolution == max_res]
-    if not active_obs:
-        active_obs = observations
-
-    for rec, png_bytes in active_obs:
+    for rec, png_bytes in observations:
         if not png_bytes:
             continue
 
-        raw_sdf = compute_observation_sdf(png_bytes)
-        res = rec.resolution
-        f_size = math.floor(res * 0.72)
-        scale = f_size / 1000.0
+        img = Image.open(io.BytesIO(png_bytes)).convert("L")
+        arr = 1.0 - np.array(img, dtype=np.float32) / 255.0
+        mask = arr >= 0.5
+        if not np.any(mask):
+            continue
 
-        # Exact canvas coordinate metrics
-        raw_ascent_px = rec.metrics.raw_actual_ascent * (f_size / 200.0)
-        raw_descent_px = (-rec.metrics.raw_actual_descent) * (f_size / 200.0)
-        ascent_px = raw_ascent_px if raw_ascent_px > 0.001 else (f_size * 0.72)
-        descent_px = raw_descent_px if raw_descent_px > 0.001 else (f_size * 0.2)
-        total_h_px = ascent_px + descent_px
-        adv_px = rec.metrics.raw_advance_width * (f_size / 200.0)
+        v_idx, u_idx = np.where(mask)
+        u_min_obs, u_max_obs = float(u_idx.min()), float(u_idx.max())
+        v_min_obs, v_max_obs = float(v_idx.min()), float(v_idx.max())
+        if u_max_obs <= u_min_obs or v_max_obs <= v_min_obs:
+            continue
 
-        x_base = round((res - adv_px) / 2.0) + rec.subpixel_x
-        y_base = round((res - total_h_px) / 2.0 + ascent_px) + rec.subpixel_y
+        d_in = ndi.distance_transform_edt(mask)
+        d_out = ndi.distance_transform_edt(~mask)
+        sdf_raw = d_in - d_out
 
-        U_pixel = x_base + X_grid * scale
-        V_pixel = y_base - Y_grid * scale
+        # Subpixel anti-aliasing boundary refinement
+        boundary = (arr > 0.05) & (arr < 0.95)
+        sdf_raw[boundary] = arr[boundary] - 0.5
+
+        # Metric affine mapping to raster pixel coordinates
+        scale_u = (u_max_obs - u_min_obs) / max(x_max - x_min, 1.0)
+        scale_v = (v_max_obs - v_min_obs) / max(y_max - y_min, 1.0)
+
+        U_map = u_min_obs + (X_grid - x_min) * scale_u
+        V_map = v_max_obs - (Y_grid - y_min) * scale_v
 
         sampled_pixel_sdf = ndi.map_coordinates(
-            raw_sdf,
-            [V_pixel, U_pixel],
+            sdf_raw,
+            [V_map, U_map],
             order=1,
             mode="nearest",
         )
-        sampled_upem_sdf = sampled_pixel_sdf / max(scale, 1e-6)
+        avg_scale = 0.5 * (scale_u + scale_v)
+        sampled_upem_sdf = sampled_pixel_sdf / max(avg_scale, 1e-6)
 
-        weight = float(res / 256.0)
+        # Quadratic resolution weighting (256px has 4x weight of 128px)
+        weight = float((rec.resolution / 128.0) ** 2)
         fused_sdf += sampled_upem_sdf * weight
         total_weight += weight
 
