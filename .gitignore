@@ -17,7 +17,12 @@ __pycache__/
 .pytest_cache/
 .venv/
 venv/
-observations/
+observations/*
+!observations/benchmark/
+observations/benchmark/*
+!observations/benchmark/index.sqlite3
+!observations/benchmark/manifest.json
+!observations/benchmark/reconstructed_be_vietnam_pro_regular.pkl
 scratch/
 build/
 tmp_candidate_build/
