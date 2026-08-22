@@ -432,7 +432,7 @@ class SourceAcquirer:
                 is_italic = "italic" in s_lower or "oblique" in s_lower
                 style_key = s.id.lower().replace(" ", "_").replace("-", "_")
                 coverage = self.store.get_coverage(family_key, style_key)
-                if not coverage and style_key in ("regular", "reg", "s1", "default", "rf_reg"):
+                if not coverage and style_key in ("regular", "reg"):
                     coverage = self.store.get_coverage(family_key, "regular") or self.store.get_coverage(family_key, "reg")
                     style_key = "regular"
 
