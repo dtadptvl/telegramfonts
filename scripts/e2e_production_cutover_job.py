@@ -40,12 +40,14 @@ def load_env_config() -> tuple[str, str, str, str]:
                         env_map[k.strip()] = v.strip().strip("'\"")
 
     edge_url = env_map.get("EDGE_BASE_URL", "https://telegramfonts-edge.dienluanphien98.workers.dev").rstrip("/")
-    a23_secret = env_map.get("A23_NODE_SECRET", "").strip()
+    # A23 authentication must come from explicit process-level secret injection;
+    # never fall back to an env file that may be copied between runtimes.
+    a23_secret = os.environ.get("A23_NODE_SECRET", "").strip()
     sepay_secret = env_map.get("SEPAY_WEBHOOK_SECRET", "").strip()
     bank_account = env_map.get("BANK_ACCOUNT_NUMBER", "").strip()
 
     if not a23_secret:
-        raise RuntimeError("Missing A23_NODE_SECRET in environment or .telefont.env")
+        raise RuntimeError("Missing A23_NODE_SECRET in process environment")
     if not sepay_secret:
         raise RuntimeError("Missing SEPAY_WEBHOOK_SECRET in environment or .telefont.env")
     if not bank_account:
