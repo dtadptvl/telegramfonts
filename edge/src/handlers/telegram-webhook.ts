@@ -186,7 +186,7 @@ async function handleMessage(
   if (command === 'trogiup') {
     await tg.sendMessage({
       chat_id: chatId,
-      text: `<b>Trợ giúp</b>\n\nQuy trình mua hàng:\n1. Chọn <code>/muahang</code>.\n2. Gửi liên kết họ phông trên MyFonts.\n3. Chờ tải danh mục phông chữ.\n4. Chọn kiểu chữ.\n5. Chọn định dạng tệp.\n6. Xác nhận đơn hàng.\n7. Chuyển đúng số tiền với mã thanh toán được hiển thị.\n8. Hệ thống tự động xác nhận thanh toán.\n9. Tệp được xử lý và gửi trực tiếp vào cuộc trò chuyện dưới dạng tệp ZIP.`,
+      text: `<b>Trợ giúp</b>\n\nQuy trình mua hàng:\n1. Chọn nút Mua hàng trong Menu hoặc gõ /muahang.\n2. Gửi link Myfonts.\n3. Chờ tải danh mục.\n4. Chọn kiểu font chữ cần tải. Có thể chọn tất cả bên dưới.\n5. Chọn định dạng TTF, OTF, WOFF2.\n6. Xác nhận đơn hàng.\n7. Chuyển đúng số tiền với mã thanh toán được hiển thị.\n8. Hệ thống tự động xác nhận thanh toán.\n9. Tệp được xử lý và gửi trực tiếp vào cuộc trò chuyện dưới dạng tệp ZIP.`,
     }, { retention: 'persistent' });
     return;
   }
@@ -198,7 +198,7 @@ async function handleMessage(
     }
     await tg.sendMessage({
       chat_id: chatId,
-      text: `🛒 <b>Mua hàng</b>\n\nHãy gửi liên kết họ phông trên <b>MyFonts.com</b> để bắt đầu.`,
+      text: `🛒 <b>Mua hàng</b>\n\nGửi link Myfonts để bot xử lý.`,
     });
     return;
   }
@@ -996,23 +996,12 @@ export function renderOrderCreatedMessage(
   order: OrderRecord,
   env: Env
 ): { text: string; replyMarkup: InlineKeyboardMarkup } {
-  const hasBankInfo = Boolean(env.BANK_ID && env.BANK_ACCOUNT_NUMBER);
+  const hasPaymentQr = Boolean(env.BANK_ID && env.BANK_ACCOUNT_NUMBER);
   const paymentCode = order.payment_code || 'N/A';
 
-  let bankSection = '';
   let qrSection = '';
 
-  if (hasBankInfo && order.payment_code) {
-    bankSection = `\n💳 <b>Thông tin chuyển khoản:</b>\n• <b>Ngân hàng:</b> <code>${escapeHtml(
-      env.BANK_ID!
-    )}</code>\n• <b>Số tài khoản:</b> <code>${escapeHtml(
-      env.BANK_ACCOUNT_NUMBER!
-    )}</code>\n${
-    env.BANK_ACCOUNT_NAME
-        ? `• <b>Tên tài khoản:</b> <code>${escapeHtml(env.BANK_ACCOUNT_NAME)}</code>\n`
-        : ''
-    }• <b>Nội dung / mã chuyển khoản:</b> <code>${escapeHtml(paymentCode)}</code>\n`;
-
+  if (hasPaymentQr && order.payment_code) {
     qrSection = '\n📲 <b>Mã QR chuyển khoản được gửi ở ảnh bên dưới.</b>\n';
   }
 
@@ -1034,7 +1023,7 @@ export function renderOrderCreatedMessage(
 
   const text = `🎉 <b>Thông tin đơn hàng:</b>\n\n• <b>Mã đơn:</b> <code>${escapeHtml(order.id)}</code>\n• <b>Trạng thái:</b> ${statusBadge}\n• <b>Mã thanh toán:</b> <code>${escapeHtml(
     paymentCode
-  )}</code>\n• <b>Số tiền:</b> <b>${order.total_amount.toLocaleString('vi-VN')} VND</b>\n${order.status === 'AWAITING_PAYMENT' ? bankSection + qrSection : ''}${statusNote}`;
+  )}</code>\n• <b>Số tiền:</b> <b>${order.total_amount.toLocaleString('vi-VN')} VND</b>\n${order.status === 'AWAITING_PAYMENT' ? qrSection : ''}${statusNote}`;
 
   const keyboard: InlineKeyboardMarkup['inline_keyboard'] = [
     [

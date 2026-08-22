@@ -69,7 +69,15 @@ describe('Telegram QR delivery and ephemeral message retention', () => {
     });
 
     expect(rendered.text).not.toContain('img.vietqr.io');
+    expect(rendered.text).toContain('Mã đơn:');
+    expect(rendered.text).toContain('Mã thanh toán:');
+    expect(rendered.text).toContain('Số tiền:');
+    expect(rendered.text).toContain('Chờ thanh toán');
     expect(rendered.text).toContain('ảnh bên dưới');
+    expect(rendered.text).not.toContain('Thông tin chuyển khoản');
+    expect(rendered.text).not.toContain('Số tài khoản');
+    expect(rendered.text).not.toContain('Tên tài khoản');
+    expect(rendered.text).not.toContain('Nội dung / mã chuyển khoản');
     expect(calls).toEqual([
       {
         path: 'sendPhoto',

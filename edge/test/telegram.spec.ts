@@ -665,9 +665,15 @@ describe('Telegram Webhook & UX Flow', () => {
       expect(sentTexts[0]).toContain('Chào mừng bạn đến với TeleFont');
       expect(sentTexts[0]).toContain('/muahang');
       expect(sentTexts[1]).toContain('<b>Trợ giúp</b>');
+      expect(sentTexts[1]).toContain('1. Chọn nút Mua hàng trong Menu hoặc gõ /muahang.');
+      expect(sentTexts[1]).toContain('2. Gửi link Myfonts.');
+      expect(sentTexts[1]).toContain('3. Chờ tải danh mục.');
+      expect(sentTexts[1]).toContain('4. Chọn kiểu font chữ cần tải. Có thể chọn tất cả bên dưới.');
+      expect(sentTexts[1]).toContain('5. Chọn định dạng TTF, OTF, WOFF2.');
       expect(sentTexts[1]).toContain('tệp ZIP');
       expect(sentTexts[2]).toContain('<b>Mua hàng</b>');
-      expect(sentTexts[2]).toContain('MyFonts.com');
+      expect(sentTexts[2]).toContain('Gửi link Myfonts để bot xử lý.');
+      expect(sentTexts[2]).not.toContain('MyFonts.com');
       expect(sentTexts.every((text) => !text.includes('Worker'))).toBe(true);
 
       const retainedMessages = await env.DB
