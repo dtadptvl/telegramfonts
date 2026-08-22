@@ -414,36 +414,15 @@ class SourceAcquirer:
         if isinstance(preview_input, bytes):
             return self._build_from_raster_preview_bytes(source_url, family_name, styles, preview_input)
 
-        # 3. Production path (preview_input is None): MAX ObservationStore resolution ONLY
+        # 3. Production path (preview_input is None): MAX ObservationStore resolution ONLY (Zero external HTTP calls)
         if not allow_web_fallback:
-            try:
-                resp = await self.client.get(source_url.strip())
-                if resp.status_code in (403, 429):
-                    raise ValueError(f"SOURCE_ACQUISITION_BLOCKED_{resp.status_code}")
-                if 400 <= resp.status_code < 500:
-                    raise ValueError(f"SOURCE_HTTP_ERROR_{resp.status_code}")
-                if resp.status_code >= 500:
-                    resp.raise_for_status()
-            except ValueError:
-                raise
-            except Exception:
-                if not self.store:
-                    raise
-
             if not self.store:
                 raise ValueError(f"NO_MAX_OBSERVATIONS_FOUND_FOR_{family_name}")
 
             family_key = family_name.lower().replace(" ", "_").replace("-", "_")
-            target_family_key = None
-            if self.store.get_coverage(family_key, "regular") or self.store.get_coverage(family_key, "reg"):
-                target_family_key = family_key
-            else:
-                for alias in ["be_vietnam_pro", "roboto_flex", "inter"]:
-                    if self.store.get_coverage(alias, "regular"):
-                        target_family_key = alias
-                        break
-
-            if not target_family_key:
+            # Canonical family resolution only - no cross-family benchmark alias fallback
+            has_coverage = self.store.get_coverage(family_key, "regular") or self.store.get_coverage(family_key, "reg")
+            if not has_coverage:
                 raise ValueError(f"NO_MAX_OBSERVATIONS_FOUND_FOR_{family_name}")
 
             style_data_map: dict[str, StyleSourceData] = {}
@@ -452,19 +431,19 @@ class SourceAcquirer:
                 is_bold = "bold" in s_lower or "black" in s_lower
                 is_italic = "italic" in s_lower or "oblique" in s_lower
                 style_key = s.id.lower().replace(" ", "_").replace("-", "_")
-                coverage = self.store.get_coverage(target_family_key, style_key)
-                if not coverage:
-                    coverage = self.store.get_coverage(target_family_key, "regular")
+                coverage = self.store.get_coverage(family_key, style_key)
+                if not coverage and style_key in ("regular", "reg", "s1", "default", "rf_reg"):
+                    coverage = self.store.get_coverage(family_key, "regular") or self.store.get_coverage(family_key, "reg")
                     style_key = "regular"
 
                 if not coverage:
-                    raise ValueError(f"NO_MAX_COVERAGE_FOR_{target_family_key}_{style_key}")
+                    raise ValueError(f"NO_MAX_COVERAGE_FOR_{family_key}_{style_key}")
 
-                cache_key = (target_family_key, style_key)
+                cache_key = (family_key, style_key)
                 if cache_key in _RECONSTRUCTED_GLYPH_CACHE:
                     glyph_models = _RECONSTRUCTED_GLYPH_CACHE[cache_key]
                 else:
-                    disk_cache_file = self.store_dir / f"reconstructed_{target_family_key}_{style_key}.pkl"
+                    disk_cache_file = self.store_dir / f"reconstructed_{family_key}_{style_key}.pkl"
                     if disk_cache_file.exists():
                         try:
                             glyph_models = pickle.loads(disk_cache_file.read_bytes())
@@ -475,7 +454,7 @@ class SourceAcquirer:
 
                     if not glyph_models:
                         for cp in coverage:
-                            obs = self.store.get_glyph_observations(target_family_key, style_key, cp)
+                            obs = self.store.get_glyph_observations(family_key, style_key, cp)
                             if obs:
                                 glyph_models[cp] = self.solver.reconstruct_glyph(obs)
                     _RECONSTRUCTED_GLYPH_CACHE[cache_key] = glyph_models
