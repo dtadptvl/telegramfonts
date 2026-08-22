@@ -35,41 +35,48 @@ export default {
       }
 
       if (request.method === 'GET' && url.pathname === '/ready') {
-        if (!env.DB) {
+        try {
+          if (!env.DB) {
+            return new Response(JSON.stringify({ status: 'unavailable' }), {
+              status: 503,
+              headers: { 'Content-Type': 'application/json' },
+            });
+          }
+
+          const result = await env.DB.prepare(SCHEMA_CHECK_QUERY).first<{
+            table_count: number;
+            has_outbox_lease: number;
+            has_job_lease: number;
+            has_artifact_key: number;
+            has_payment_code: number;
+            has_order_completed_at: number;
+          }>();
+
+          if (
+            result &&
+            result.table_count === REQUIRED_TABLES_COUNT &&
+            result.has_outbox_lease === 1 &&
+            result.has_job_lease === 1 &&
+            result.has_artifact_key === 1 &&
+            result.has_payment_code === 1 &&
+            result.has_order_completed_at === 1
+          ) {
+            return new Response(JSON.stringify({ status: 'ready', database: 'connected' }), {
+              status: 200,
+              headers: { 'Content-Type': 'application/json' },
+            });
+          }
+
+          return new Response(JSON.stringify({ status: 'unavailable' }), {
+            status: 503,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        } catch {
           return new Response(JSON.stringify({ status: 'unavailable' }), {
             status: 503,
             headers: { 'Content-Type': 'application/json' },
           });
         }
-
-        const result = await env.DB.prepare(SCHEMA_CHECK_QUERY).first<{
-          table_count: number;
-          has_outbox_lease: number;
-          has_job_lease: number;
-          has_artifact_key: number;
-          has_payment_code: number;
-          has_order_completed_at: number;
-        }>();
-
-        if (
-          result &&
-          result.table_count === REQUIRED_TABLES_COUNT &&
-          result.has_outbox_lease === 1 &&
-          result.has_job_lease === 1 &&
-          result.has_artifact_key === 1 &&
-          result.has_payment_code === 1 &&
-          result.has_order_completed_at === 1
-        ) {
-          return new Response(JSON.stringify({ status: 'ready', database: 'connected' }), {
-            status: 200,
-            headers: { 'Content-Type': 'application/json' },
-          });
-        }
-
-        return new Response(JSON.stringify({ status: 'unavailable' }), {
-          status: 503,
-          headers: { 'Content-Type': 'application/json' },
-        });
       }
 
       if (request.method === 'POST' && url.pathname === '/webhooks/telegram') {
