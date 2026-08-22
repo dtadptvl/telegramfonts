@@ -2,6 +2,7 @@
 import io
 import httpx
 import pytest
+from pathlib import Path
 from PIL import Image, ImageDraw
 
 from compute.models import ClaimStyle
