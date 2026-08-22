@@ -1,7 +1,8 @@
 import type { Env } from '../env';
 import { PaymentService } from '../services/payment-service';
 import { OrderService } from '../services/order-service';
-import { retireInteractiveMessage, TelegramClient } from '../services/telegram-client';
+import { retireInteractiveMessage } from '../services/telegram-client';
+import { createRetentionAwareTelegramClient } from '../services/telegram-message-retention';
 import { SessionService } from '../services/session-service';
 import { renderOrderCreatedMessage } from './telegram-webhook';
 import { emitStructuredLog } from '../utils/logger';
@@ -93,7 +94,7 @@ async function notifyPaidOrder(
   const paidOrder = await orderService.getOrderById(orderId);
   if (!paidOrder || paidOrder.status !== 'PAID') return;
 
-  const tg = new TelegramClient(env.TELEGRAM_BOT_TOKEN);
+  const tg = createRetentionAwareTelegramClient(env.TELEGRAM_BOT_TOKEN, env.DB);
   const isActiveOrder = session.active_order_id === orderId;
   if (isActiveOrder) {
     await retireInteractiveMessage(tg, session.chat_id, session.last_message_id);
@@ -104,7 +105,7 @@ async function notifyPaidOrder(
     chat_id: session.chat_id,
     text,
     reply_markup: replyMarkup,
-  });
+  }, { retention: 'persistent' });
 
   if (sent.message_id && isActiveOrder) {
     await sessionService.setLastMessageId(userId, sent.message_id);

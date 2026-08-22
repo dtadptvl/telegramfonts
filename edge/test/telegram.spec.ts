@@ -669,6 +669,14 @@ describe('Telegram Webhook & UX Flow', () => {
       expect(sentTexts[2]).toContain('<b>Mua hàng</b>');
       expect(sentTexts[2]).toContain('MyFonts.com');
       expect(sentTexts.every((text) => !text.includes('Worker'))).toBe(true);
+
+      const retainedMessages = await env.DB
+        .prepare(
+          'SELECT message_id FROM telegram_message_retention WHERE chat_id = ? ORDER BY message_id'
+        )
+        .bind('12221')
+        .all<{ message_id: number }>();
+      expect(retainedMessages.results).toEqual([{ message_id: 503 }]);
     });
 
     it('creates and deduplicates catalog request when catalog is pending', async () => {

@@ -16,6 +16,7 @@ import {
   retireInteractiveMessage,
   TelegramClient,
 } from '../services/telegram-client';
+import { createRetentionAwareTelegramClient } from '../services/telegram-message-retention';
 import { CatalogService } from '../services/catalog-service';
 import { SessionService, SessionConflictError } from '../services/session-service';
 import { OrderService, type OrderRecord } from '../services/order-service';
@@ -93,7 +94,7 @@ export async function handleTelegramWebhook(
       .run();
   }
 
-  const tg = new TelegramClient(env.TELEGRAM_BOT_TOKEN);
+  const tg = createRetentionAwareTelegramClient(env.TELEGRAM_BOT_TOKEN, env.DB);
   const catalogService = new CatalogService(env.DB);
   const sessionService = new SessionService(env.DB);
   const orderService = new OrderService(env.DB);
@@ -178,7 +179,7 @@ async function handleMessage(
     await tg.sendMessage({
       chat_id: chatId,
       text: `<b>Chào mừng bạn đến với TeleFont!</b> 🎨\n\nChọn <code>/muahang</code> để bắt đầu mua hàng hoặc <code>/trogiup</code> để xem hướng dẫn.`,
-    });
+    }, { retention: 'persistent' });
     return;
   }
 
@@ -186,7 +187,7 @@ async function handleMessage(
     await tg.sendMessage({
       chat_id: chatId,
       text: `<b>Trợ giúp</b>\n\nQuy trình mua hàng:\n1. Chọn <code>/muahang</code>.\n2. Gửi liên kết họ phông trên MyFonts.\n3. Chờ tải danh mục phông chữ.\n4. Chọn kiểu chữ.\n5. Chọn định dạng tệp.\n6. Xác nhận đơn hàng.\n7. Chuyển đúng số tiền với mã thanh toán được hiển thị.\n8. Hệ thống tự động xác nhận thanh toán.\n9. Tệp được xử lý và gửi trực tiếp vào cuộc trò chuyện dưới dạng tệp ZIP.`,
-    });
+    }, { retention: 'persistent' });
     return;
   }
 
@@ -717,6 +718,10 @@ async function handleCallbackQuery(
               text: msgText,
               reply_markup: replyMarkup,
             });
+
+            if (!result.isExisting && order.status === 'AWAITING_PAYMENT') {
+              await sendPaymentQrPhoto(tg, session.chat_id, order, env);
+            }
           }
 
           await tg.answerCallbackQuery({
@@ -1008,16 +1013,7 @@ export function renderOrderCreatedMessage(
         : ''
     }• <b>Nội dung / mã chuyển khoản:</b> <code>${escapeHtml(paymentCode)}</code>\n`;
 
-    const vietQrUrl = generateVietQrUrl({
-      bankId: env.BANK_ID!,
-      accountNumber: env.BANK_ACCOUNT_NUMBER!,
-      amount: order.total_amount,
-      paymentCode: order.payment_code,
-      accountName: env.BANK_ACCOUNT_NAME,
-      template: env.VIETQR_TEMPLATE,
-    });
-
-    qrSection = `\n📲 <a href="${escapeHtml(vietQrUrl)}"><b>Mở mã VietQR</b></a>\n`;
+    qrSection = '\n📲 <b>Mã QR chuyển khoản được gửi ở ảnh bên dưới.</b>\n';
   }
 
   let statusBadge = `<code>${escapeHtml(getOrderStatusLabel(order.status))}</code>`;
@@ -1050,6 +1046,34 @@ export function renderOrderCreatedMessage(
   ];
 
   return { text, replyMarkup: { inline_keyboard: keyboard } };
+}
+
+export function getOrderPaymentQrUrl(order: OrderRecord, env: Env): string | null {
+  if (!env.BANK_ID || !env.BANK_ACCOUNT_NUMBER || !order.payment_code) return null;
+  return generateVietQrUrl({
+    bankId: env.BANK_ID,
+    accountNumber: env.BANK_ACCOUNT_NUMBER,
+    amount: order.total_amount,
+    paymentCode: order.payment_code,
+    accountName: env.BANK_ACCOUNT_NAME,
+    template: env.VIETQR_TEMPLATE,
+  });
+}
+
+async function sendPaymentQrPhoto(
+  tg: TelegramClient,
+  chatId: number | string,
+  order: OrderRecord,
+  env: Env
+): Promise<void> {
+  const qrUrl = getOrderPaymentQrUrl(order, env);
+  if (!qrUrl) return;
+
+  await tg.sendPhoto({
+    chat_id: chatId,
+    photo: qrUrl,
+    caption: '📲 <b>Quét mã QR để chuyển khoản đúng số tiền và mã thanh toán.</b>',
+  });
 }
 
 function getOrderStatusLabel(status: string): string {

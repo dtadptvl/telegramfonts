@@ -1,5 +1,6 @@
 import type {
   SendMessageParams,
+  SendPhotoParams,
   EditMessageTextParams,
   EditMessageReplyMarkupParams,
   AnswerCallbackQueryParams,
@@ -7,6 +8,16 @@ import type {
   SetMyCommandsParams,
   SetChatMenuButtonParams,
 } from '../types/telegram';
+
+export type TelegramMessageRetention = 'ephemeral' | 'persistent';
+
+export interface TelegramSendOptions {
+  retention?: TelegramMessageRetention;
+}
+
+export interface TelegramClientOptions {
+  onEphemeralMessageSent?: (chatId: number | string, messageId: number) => Promise<void>;
+}
 
 export class TelegramApiError extends Error {
   constructor(
@@ -29,12 +40,17 @@ export class TelegramApiError extends Error {
 
 export class TelegramClient {
   private readonly baseUrl: string;
+  private readonly onEphemeralMessageSent?: TelegramClientOptions['onEphemeralMessageSent'];
 
-  constructor(token: string) {
+  constructor(token: string, options: TelegramClientOptions = {}) {
     this.baseUrl = `https://api.telegram.org/bot${token}`;
+    this.onEphemeralMessageSent = options.onEphemeralMessageSent;
   }
 
-  async sendMessage(params: SendMessageParams): Promise<{ message_id?: number }> {
+  async sendMessage(
+    params: SendMessageParams,
+    options: TelegramSendOptions = {}
+  ): Promise<{ message_id?: number }> {
     const payload = {
       ...params,
       parse_mode: 'HTML',
@@ -63,7 +79,9 @@ export class TelegramClient {
     }
 
     const data = (await res.json()) as { ok: boolean; result?: { message_id?: number } };
-    return data.result || {};
+    const result = data.result || {};
+    await this.trackEphemeralMessage(params.chat_id, result, options);
+    return result;
   }
 
   async editMessageText(params: EditMessageTextParams): Promise<{ message_id?: number }> {
@@ -105,6 +123,65 @@ export class TelegramClient {
 
     const data = (await res.json()) as { ok: boolean; result?: { message_id?: number } };
     return data.result || {};
+  }
+
+  async sendPhoto(
+    params: SendPhotoParams,
+    options: TelegramSendOptions = {}
+  ): Promise<{ message_id?: number }> {
+    let res: Response;
+
+    if (typeof params.photo === 'string') {
+      res = await fetch(`${this.baseUrl}/sendPhoto`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...params,
+          parse_mode: 'HTML',
+        }),
+      });
+    } else {
+      const formData = new FormData();
+      formData.append('chat_id', params.chat_id.toString());
+      const blob =
+        params.photo instanceof Blob
+          ? params.photo
+          : new Blob([params.photo], { type: 'image/png' });
+      formData.append('photo', blob, 'telegram-photo.png');
+      if (params.caption) {
+        formData.append('caption', params.caption);
+        formData.append('parse_mode', params.parse_mode || 'HTML');
+      }
+      if (params.reply_markup) {
+        formData.append('reply_markup', JSON.stringify(params.reply_markup));
+      }
+
+      res = await fetch(`${this.baseUrl}/sendPhoto`, {
+        method: 'POST',
+        body: formData,
+      });
+    }
+
+    if (!res.ok) {
+      let description: string | undefined;
+      try {
+        const errorBody = (await res.json()) as { description?: string };
+        description = errorBody?.description;
+      } catch {
+        // Ignore JSON parse errors on non-2xx
+      }
+
+      throw new TelegramApiError(
+        res.status,
+        `Telegram sendPhoto failed with HTTP status ${res.status}`,
+        description
+      );
+    }
+
+    const data = (await res.json()) as { ok: boolean; result?: { message_id?: number } };
+    const result = data.result || {};
+    await this.trackEphemeralMessage(params.chat_id, result, options);
+    return result;
   }
 
   async editMessageReplyMarkup(params: EditMessageReplyMarkupParams): Promise<boolean> {
@@ -278,6 +355,15 @@ export class TelegramClient {
 
     const data = (await res.json()) as { ok: boolean; result?: { message_id?: number } };
     return data.result || {};
+  }
+
+  private async trackEphemeralMessage(
+    chatId: number | string,
+    result: { message_id?: number },
+    options: TelegramSendOptions
+  ): Promise<void> {
+    if (options.retention === 'persistent' || result.message_id === undefined) return;
+    await this.onEphemeralMessageSent?.(chatId, result.message_id);
   }
 }
 

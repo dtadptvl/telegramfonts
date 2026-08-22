@@ -1,7 +1,8 @@
 import type { Env } from '../env';
 import { CatalogService } from '../services/catalog-service';
 import { SessionService } from '../services/session-service';
-import { retireInteractiveMessage, TelegramClient } from '../services/telegram-client';
+import { retireInteractiveMessage } from '../services/telegram-client';
+import { createRetentionAwareTelegramClient } from '../services/telegram-message-retention';
 import { renderStyleSelection } from './telegram-webhook';
 import { verifyInternalAuth } from './internal-jobs';
 import { emitStructuredLog } from '../utils/logger';
@@ -195,7 +196,7 @@ export async function handleInternalCatalog(
 
     // 4. Advance every still-relevant waiting session whose request is satisfied by this catalog
     if (env.TELEGRAM_BOT_TOKEN) {
-      const tg = new TelegramClient(env.TELEGRAM_BOT_TOKEN);
+      const tg = createRetentionAwareTelegramClient(env.TELEGRAM_BOT_TOKEN, env.DB);
 
       for (const targetUserId of targetUserIds) {
         const userSession = await env.DB
@@ -342,7 +343,7 @@ export async function handleInternalCatalog(
 
     // Notify waiting Telegram user and unblock session if this is still the active request
     if (env.TELEGRAM_BOT_TOKEN) {
-      const tg = new TelegramClient(env.TELEGRAM_BOT_TOKEN);
+      const tg = createRetentionAwareTelegramClient(env.TELEGRAM_BOT_TOKEN, env.DB);
 
       const userSession = await env.DB
         .prepare(

@@ -55,6 +55,14 @@ export interface SendMessageParams {
   reply_markup?: InlineKeyboardMarkup;
 }
 
+export interface SendPhotoParams {
+  chat_id: number | string;
+  photo: string | Blob | Uint8Array;
+  caption?: string;
+  parse_mode?: 'HTML';
+  reply_markup?: InlineKeyboardMarkup;
+}
+
 export interface EditMessageTextParams {
   chat_id?: number | string;
   message_id?: number;

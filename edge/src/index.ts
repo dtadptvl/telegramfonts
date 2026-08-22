@@ -6,14 +6,16 @@ import { handleInternalCatalog } from './handlers/internal-catalog';
 import { handleInternalOutbox } from './handlers/internal-outbox';
 import { handleDownload } from './handlers/downloads';
 import { OutboxService } from './services/outbox-service';
+import { TelegramClient } from './services/telegram-client';
+import { TelegramMessageRetentionService } from './services/telegram-message-retention';
 
-const REQUIRED_TABLES_COUNT = 13;
+const REQUIRED_TABLES_COUNT = 14;
 const SCHEMA_CHECK_QUERY = `
   SELECT
     (SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN (
       'orders', 'order_items', 'payments', 'fulfillment_jobs', 'outbox_events', 'artifacts',
       'telegram_users', 'telegram_updates', 'catalogs', 'catalog_styles', 'catalog_requests',
-      'telegram_sessions', 'fulfillment_receipts'
+      'telegram_sessions', 'fulfillment_receipts', 'telegram_message_retention'
     )) as table_count,
     (SELECT count(*) FROM pragma_table_info('outbox_events') WHERE name = 'dispatch_lease_token') as has_outbox_lease,
     (SELECT count(*) FROM pragma_table_info('fulfillment_jobs') WHERE name = 'lease_token') as has_job_lease,
@@ -117,6 +119,12 @@ export default {
 
   async scheduled(_event: ScheduledEvent, env: Env, _ctx: ExecutionContext): Promise<void> {
     if (!env.DB) return;
+
+    if (env.TELEGRAM_BOT_TOKEN) {
+      const retentionService = new TelegramMessageRetentionService(env.DB);
+      await retentionService.deleteExpiredMessages(new TelegramClient(env.TELEGRAM_BOT_TOKEN));
+    }
+
     const outboxService = new OutboxService(env.DB, env.FULFILLMENT_QUEUE, env);
     await outboxService.dispatchPendingEvents({ batchSize: 20 });
   },

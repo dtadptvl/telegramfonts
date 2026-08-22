@@ -1,5 +1,6 @@
 import type { Env } from '../env';
-import { retireInteractiveMessage, TelegramClient } from './telegram-client';
+import { retireInteractiveMessage } from './telegram-client';
+import { createRetentionAwareTelegramClient } from './telegram-message-retention';
 import { escapeHtml } from '../utils/html';
 import { emitStructuredLog } from '../utils/logger';
 import type { ArtifactPartMeta } from './job-service';
@@ -415,7 +416,7 @@ export class OutboxService {
             ? [...payloadObj.confirmed_parts]
             : [];
 
-          const tg = new TelegramClient(botToken);
+          const tg = createRetentionAwareTelegramClient(botToken, this.db);
 
           if (userSession?.last_message_id !== null && userSession?.last_message_id !== undefined) {
             await retireInteractiveMessage(tg, userRecord.chat_id, userSession.last_message_id);
