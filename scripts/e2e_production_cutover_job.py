@@ -21,10 +21,37 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-EDGE_BASE_URL = "https://telegramfonts-edge.dienluanphien98.workers.dev"
-A23_NODE_SECRET = ""
-SEPAY_WEBHOOK_SECRET = "sepay_webhook_secret_production_key_48"
-BANK_ACCOUNT_NUMBER = "0000123456789"
+def load_env_config() -> tuple[str, str, str, str]:
+    """Load required configuration from environment or untracked .telefont.env file."""
+    env_map: dict[str, str] = dict(os.environ)
+    candidate_paths = [
+        Path(".telefont.env"),
+        Path.home() / ".telefont.env",
+        Path("agent/.env"),
+        Path("../.telefont.env"),
+    ]
+    for candidate_path in candidate_paths:
+        if candidate_path.exists():
+            for line in candidate_path.read_text(encoding="utf-8").splitlines():
+                stripped = line.strip()
+                if stripped and not stripped.startswith("#") and "=" in stripped:
+                    k, v = stripped.split("=", 1)
+                    if k.strip() not in env_map:
+                        env_map[k.strip()] = v.strip().strip("'\"")
+
+    edge_url = env_map.get("EDGE_BASE_URL", "https://telegramfonts-edge.dienluanphien98.workers.dev").rstrip("/")
+    a23_secret = env_map.get("A23_NODE_SECRET", "").strip()
+    sepay_secret = env_map.get("SEPAY_WEBHOOK_SECRET", "").strip()
+    bank_account = env_map.get("BANK_ACCOUNT_NUMBER", "").strip()
+
+    if not a23_secret:
+        raise RuntimeError("Missing A23_NODE_SECRET in environment or .telefont.env")
+    if not sepay_secret:
+        raise RuntimeError("Missing SEPAY_WEBHOOK_SECRET in environment or .telefont.env")
+    if not bank_account:
+        raise RuntimeError("Missing BANK_ACCOUNT_NUMBER in environment or .telefont.env")
+
+    return edge_url, a23_secret, sepay_secret, bank_account
 
 
 def execute_d1_file(sql: str) -> None:
@@ -92,14 +119,21 @@ def run_ssh_a23(cmd: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def call_worker_sepay_webhook(payment_code: str, amount: int, transaction_id: int) -> dict[str, Any]:
+def call_worker_sepay_webhook(
+    edge_url: str,
+    sepay_secret: str,
+    bank_account: str,
+    payment_code: str,
+    amount: int,
+    transaction_id: int,
+) -> dict[str, Any]:
     """Trigger real SePay verified payment transition via Worker endpoint."""
     now_ms = int(time.time() * 1000)
     payload = {
         "id": transaction_id,
         "gateway": "Vietcombank",
         "transactionDate": "2026-08-22 08:00:00",
-        "accountNumber": BANK_ACCOUNT_NUMBER,
+        "accountNumber": bank_account,
         "code": payment_code,
         "content": payment_code,
         "transferType": "in",
@@ -107,10 +141,10 @@ def call_worker_sepay_webhook(payment_code: str, amount: int, transaction_id: in
         "accumulated": amount,
     }
     body_str = json.dumps(payload)
-    sig = hmac.new(SEPAY_WEBHOOK_SECRET.encode("utf-8"), f"{now_ms}.{body_str}".encode("utf-8"), hashlib.sha256).hexdigest()
+    sig = hmac.new(sepay_secret.encode("utf-8"), f"{now_ms}.{body_str}".encode("utf-8"), hashlib.sha256).hexdigest()
 
     req = urllib.request.Request(
-        f"{EDGE_BASE_URL}/webhooks/sepay",
+        f"{edge_url}/webhooks/sepay",
         data=body_str.encode("utf-8"),
         headers={
             "Content-Type": "application/json",
@@ -125,13 +159,13 @@ def call_worker_sepay_webhook(payment_code: str, amount: int, transaction_id: in
         return json.loads(body)
 
 
-def call_worker_outbox_dispatch(batch_size: int = 20) -> dict[str, Any]:
+def call_worker_outbox_dispatch(edge_url: str, a23_secret: str, batch_size: int = 20) -> dict[str, Any]:
     """Trigger Worker Outbox dispatching."""
     req = urllib.request.Request(
-        f"{EDGE_BASE_URL}/internal/outbox/dispatch",
+        f"{edge_url}/internal/outbox/dispatch",
         data=json.dumps({"batchSize": batch_size}).encode("utf-8"),
         headers={
-            "Authorization": f"Bearer {A23_NODE_SECRET}",
+            "Authorization": f"Bearer {a23_secret}",
             "Content-Type": "application/json",
             "User-Agent": "TeleFont-A23-Worker/1.0",
         },
@@ -144,6 +178,8 @@ def call_worker_outbox_dispatch(batch_size: int = 20) -> dict[str, Any]:
 
 def run_e2e_cutover_proof() -> dict[str, Any]:
     print("=== Starting 100% REAL End-to-End Production Cutover Verification ===", flush=True)
+
+    edge_url, a23_secret, sepay_secret, bank_account = load_env_config()
 
     order_id = "ord_cutover_live_1"
     user_id = "901652398"
@@ -200,7 +236,14 @@ def run_e2e_cutover_proof() -> dict[str, Any]:
     # 2. Trigger real SePay Webhook transition on Worker
     print("2. Calling real Worker POST /webhooks/sepay with HMAC-SHA256...", flush=True)
     sepay_tx_id = int(time.time())
-    sepay_res = call_worker_sepay_webhook(payment_code=payment_code, amount=amount_vnd, transaction_id=sepay_tx_id)
+    sepay_res = call_worker_sepay_webhook(
+        edge_url=edge_url,
+        sepay_secret=sepay_secret,
+        bank_account=bank_account,
+        payment_code=payment_code,
+        amount=amount_vnd,
+        transaction_id=sepay_tx_id,
+    )
     print(f"   SePay Webhook Response: {sepay_res}", flush=True)
     assert sepay_res.get("success") is True, f"SePay webhook failed: {sepay_res}"
     assert sepay_res.get("status") == "processed", f"SePay status not processed: {sepay_res}"
@@ -219,7 +262,7 @@ def run_e2e_cutover_proof() -> dict[str, Any]:
 
     # 3. Real Worker Outbox Dispatch -> sends message to Cloudflare Queue
     print("3. Calling Worker POST /internal/outbox/dispatch to send JOB_READY to Cloudflare Queue...", flush=True)
-    outbox_res1 = call_worker_outbox_dispatch(batch_size=10)
+    outbox_res1 = call_worker_outbox_dispatch(edge_url=edge_url, a23_secret=a23_secret, batch_size=10)
     print(f"   Worker Outbox Dispatch Result: {outbox_res1}", flush=True)
     assert outbox_res1.get("status") == "ok", f"Outbox dispatch failed: {outbox_res1}"
 
@@ -258,7 +301,7 @@ def run_e2e_cutover_proof() -> dict[str, Any]:
 
     # 6. Real Worker Outbox Dispatch -> delivers ZIP to Telegram Bot API
     print("6. Calling Worker POST /internal/outbox/dispatch to deliver ZIP document via Telegram Bot API...", flush=True)
-    outbox_res2 = call_worker_outbox_dispatch(batch_size=10)
+    outbox_res2 = call_worker_outbox_dispatch(edge_url=edge_url, a23_secret=a23_secret, batch_size=10)
     print(f"   Worker Telegram Delivery Dispatch Result: {outbox_res2}", flush=True)
     assert outbox_res2.get("status") == "ok", f"Telegram delivery dispatch failed: {outbox_res2}"
 
@@ -269,7 +312,7 @@ def run_e2e_cutover_proof() -> dict[str, Any]:
     # 7. Deduplication & Idempotency Proof
     print("7. Verifying Deduplication & Idempotency across Worker & A23...", flush=True)
     # A. Re-dispatch outbox
-    outbox_res3 = call_worker_outbox_dispatch(batch_size=10)
+    outbox_res3 = call_worker_outbox_dispatch(edge_url=edge_url, a23_secret=a23_secret, batch_size=10)
     print(f"   Re-dispatch Outbox Result: {outbox_res3}", flush=True)
     assert outbox_res3.get("result", {}).get("dispatchedCount", 0) == 0, f"Expected 0 re-dispatches: {outbox_res3}"
 
