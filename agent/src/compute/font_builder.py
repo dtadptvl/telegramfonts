@@ -57,38 +57,11 @@ class FontBuilderService:
         sanitized_family = "".join(c for c in family_name if c.isalnum() or c in (" ", "-", "_")).strip() or "TeleFont"
         sanitized_style = "".join(c for c in style_source.style_name if c.isalnum() or c in (" ", "-", "_")).strip() or "Regular"
 
-        glyph_models: dict[int, ReconstructedGlyph] = {}
+        # 1. Require precomputed ReconstructedGlyph models from MAX solver
+        if not style_source.reconstructed_glyphs:
+            raise ValueError(f"NO_MAX_RECONSTRUCTED_GLYPHS_AVAILABLE_FOR_{style_source.style_id}")
 
-        # 1. Use precomputed ReconstructedGlyph models from MAX solver
-        if style_source.reconstructed_glyphs:
-            glyph_models = dict(style_source.reconstructed_glyphs)
-        elif style_source.glyphs:
-            for g_name, g_vec in style_source.glyphs.items():
-                cp = ord(g_vec.character[0]) if (g_vec.character and len(g_vec.character) > 0) else UNICODE_MAP.get(g_name, 0x20)
-                contours: list[Contour] = []
-                for loop in g_vec.contours:
-                    if len(loop) < 2:
-                        continue
-                    segs = [
-                        LineSegment(Point2D(loop[i][0], loop[i][1]), Point2D(loop[i + 1][0], loop[i + 1][1]))
-                        for i in range(len(loop) - 1)
-                    ]
-                    segs.append(LineSegment(Point2D(loop[-1][0], loop[-1][1]), Point2D(loop[0][0], loop[0][1])))
-                    contours.append(Contour(segments=segs, is_hole=False))
-
-                glyph_models[cp] = ReconstructedGlyph(
-                    code_point=cp,
-                    character=g_vec.character or (chr(cp) if 32 <= cp <= 126 else ""),
-                    advance_width_upem=float(g_vec.advance_width),
-                    lsb_upem=float(g_vec.lsb),
-                    rsb_upem=float(max(0, g_vec.advance_width - g_vec.lsb - 100)),
-                    ascent_upem=800.0,
-                    descent_upem=-200.0,
-                    contours=contours,
-                )
-
-        if not glyph_models:
-            raise ValueError(f"NO_RECONSTRUCTED_GLYPHS_AVAILABLE_FOR_{style_source.style_id}")
+        glyph_models: dict[int, ReconstructedGlyph] = dict(style_source.reconstructed_glyphs)
 
         typography = None
         if self.store:
