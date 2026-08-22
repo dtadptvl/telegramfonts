@@ -6,6 +6,7 @@ import io
 import json
 import logging
 import re
+from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlparse
 import httpx
@@ -291,10 +292,21 @@ def extract_catalog_metadata_from_html(html_text: str, source_url: str) -> dict[
 
 
 class SourceAcquirer:
-    def __init__(self, timeout: float = 20.0, client: httpx.AsyncClient | None = None) -> None:
+    def __init__(
+        self,
+        timeout: float = 20.0,
+        client: httpx.AsyncClient | None = None,
+        cache_dir: Path | str | None = None,
+    ) -> None:
         self.timeout = timeout
         self._external_client = client is not None
         self.client = client or httpx.AsyncClient(timeout=timeout)
+        self.cache_dir = Path(cache_dir).resolve() if cache_dir else None
+        if self.cache_dir:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.cache_hits: int = 0
+        self.cache_misses: int = 0
+        self.last_cache_hit: bool = False
 
     async def close(self) -> None:
         if not self._external_client:
@@ -311,6 +323,18 @@ class SourceAcquirer:
 
         if html_override is not None:
             return extract_catalog_metadata_from_html(html_override, source_url)
+
+        meta_cache_file = (
+            self.cache_dir / f"meta_{re.sub(r'[^a-zA-Z0-9_-]', '_', source_url.strip())}.json"
+        ) if self.cache_dir else None
+
+        if meta_cache_file and meta_cache_file.exists():
+            try:
+                self.last_cache_hit = True
+                self.cache_hits += 1
+                return json.loads(meta_cache_file.read_text(encoding="utf-8"))
+            except Exception:
+                pass
 
         try:
             resp = await self.client.get(
@@ -330,7 +354,16 @@ class SourceAcquirer:
         if resp.status_code >= 500:
             resp.raise_for_status()
 
-        return extract_catalog_metadata_from_html(resp.text, source_url)
+        meta = extract_catalog_metadata_from_html(resp.text, source_url)
+        if meta_cache_file:
+            try:
+                meta_cache_file.write_text(json.dumps(meta), encoding="utf-8")
+            except Exception:
+                pass
+
+        self.last_cache_hit = False
+        self.cache_misses += 1
+        return meta
 
     async def acquire_source(
         self,
@@ -352,86 +385,110 @@ class SourceAcquirer:
 
         # 2. If raw preview bytes are provided:
         raw_preview_bytes: bytes | None = None
+        preview_cache_file: Path | None = (
+            self.cache_dir / f"prev_{re.sub(r'[^a-zA-Z0-9_-]', '_', source_url.strip())}.bin"
+        ) if self.cache_dir else None
+
         if isinstance(preview_input, bytes):
             raw_preview_bytes = preview_input
         else:
-            # 3. Live public-preview acquisition via HTTP client
-            try:
-                resp = await self.client.get(
-                    source_url,
-                    headers={"User-Agent": "TeleFont-Agent/1.0"},
-                    timeout=self.timeout,
-                    follow_redirects=True,
-                )
-            except httpx.RequestError as exc:
-                logger.warning(f"Network error during source acquisition: {exc}")
-                raise
+            # 3. Check disk cache for source preview payload
 
-            if resp.status_code in (403, 429):
-                raise ValueError(f"SOURCE_ACQUISITION_BLOCKED_{resp.status_code}")
-            if resp.status_code >= 400:
-                raise ValueError(f"SOURCE_HTTP_ERROR_{resp.status_code}")
-
-            if len(resp.content) > MAX_SOURCE_BYTES:
-                raise ValueError("SOURCE_PAYLOAD_TOO_LARGE")
-
-            content_type = resp.headers.get("content-type", "").lower()
-            if not any(ct in content_type for ct in ALLOWED_CONTENT_TYPES):
-                raise ValueError(f"UNSUPPORTED_CONTENT_TYPE_{content_type}")
-
-            if any(ct in content_type for ct in ("image/png", "image/jpeg", "image/webp")):
-                raw_preview_bytes = resp.content
-            elif "application/json" in content_type:
+            if preview_cache_file and preview_cache_file.exists():
                 try:
-                    data = resp.json()
-                    preview_field = data.get("preview_url") or data.get("image") or data.get("preview_image")
-                    if isinstance(preview_field, str) and preview_field.startswith("data:image"):
-                        # Base64 data URI
-                        header, encoded = preview_field.split(",", 1)
-                        raw_preview_bytes = base64.b64decode(encoded)
-                    elif isinstance(preview_field, str) and preview_field.startswith("http"):
-                        img_resp = await self.client.get(preview_field, timeout=self.timeout)
-                        if img_resp.status_code == 200 and len(img_resp.content) <= MAX_SOURCE_BYTES:
-                            raw_preview_bytes = img_resp.content
+                    raw_preview_bytes = preview_cache_file.read_bytes()
+                    if raw_preview_bytes and len(raw_preview_bytes) > 0:
+                        self.last_cache_hit = True
+                        self.cache_hits += 1
                 except Exception:
-                    pass
+                    raw_preview_bytes = None
 
-                if not raw_preview_bytes:
-                    raise ValueError("NO_PUBLIC_PREVIEW_FOUND")
+            if not raw_preview_bytes:
+                # Live public-preview acquisition via HTTP client
+                self.last_cache_hit = False
+                self.cache_misses += 1
+                try:
+                    resp = await self.client.get(
+                        source_url,
+                        headers={"User-Agent": "TeleFont-Agent/1.0"},
+                        timeout=self.timeout,
+                        follow_redirects=True,
+                    )
+                except httpx.RequestError as exc:
+                    logger.warning(f"Network error during source acquisition: {exc}")
+                    raise
 
-            elif "text/html" in content_type:
-                preview_ref = extract_preview_url_from_html(resp.text)
-                if not preview_ref:
-                    raise ValueError("NO_PUBLIC_PREVIEW_FOUND")
+                if resp.status_code in (403, 429):
+                    raise ValueError(f"SOURCE_ACQUISITION_BLOCKED_{resp.status_code}")
+                if resp.status_code >= 400:
+                    raise ValueError(f"SOURCE_HTTP_ERROR_{resp.status_code}")
 
-                if preview_ref.startswith("data:image"):
+                if len(resp.content) > MAX_SOURCE_BYTES:
+                    raise ValueError("SOURCE_PAYLOAD_TOO_LARGE")
+
+                content_type = resp.headers.get("content-type", "").lower()
+                if not any(ct in content_type for ct in ALLOWED_CONTENT_TYPES):
+                    raise ValueError(f"UNSUPPORTED_CONTENT_TYPE_{content_type}")
+
+                if any(ct in content_type for ct in ("image/png", "image/jpeg", "image/webp")):
+                    raw_preview_bytes = resp.content
+                elif "application/json" in content_type:
                     try:
-                        header, encoded = preview_ref.split(",", 1)
-                        raw_preview_bytes = base64.b64decode(encoded)
+                        data = resp.json()
+                        preview_field = data.get("preview_url") or data.get("image") or data.get("preview_image")
+                        if isinstance(preview_field, str) and preview_field.startswith("data:image"):
+                            # Base64 data URI
+                            header, encoded = preview_field.split(",", 1)
+                            raw_preview_bytes = base64.b64decode(encoded)
+                        elif isinstance(preview_field, str) and preview_field.startswith("http"):
+                            img_resp = await self.client.get(preview_field, timeout=self.timeout)
+                            if img_resp.status_code == 200 and len(img_resp.content) <= MAX_SOURCE_BYTES:
+                                raw_preview_bytes = img_resp.content
                     except Exception:
-                        raise ValueError("MALFORMED_DATA_URI_PREVIEW")
+                        pass
+
+                    if not raw_preview_bytes:
+                        raise ValueError("NO_PUBLIC_PREVIEW_FOUND")
+
+                elif "text/html" in content_type:
+                    preview_ref = extract_preview_url_from_html(resp.text)
+                    if not preview_ref:
+                        raise ValueError("NO_PUBLIC_PREVIEW_FOUND")
+
+                    if preview_ref.startswith("data:image"):
+                        try:
+                            header, encoded = preview_ref.split(",", 1)
+                            raw_preview_bytes = base64.b64decode(encoded)
+                        except Exception:
+                            raise ValueError("MALFORMED_DATA_URI_PREVIEW")
+                    else:
+                        # Resolve relative preview URL to absolute
+                        full_img_url = urljoin(source_url, preview_ref)
+                        if not full_img_url.startswith("https://"):
+                            raise ValueError("INSECURE_PREVIEW_URL")
+
+                        img_resp = await self.client.get(full_img_url, timeout=self.timeout, follow_redirects=True)
+                        if img_resp.status_code >= 400:
+                            raise ValueError(f"PREVIEW_FETCH_ERROR_{img_resp.status_code}")
+                        if len(img_resp.content) > MAX_SOURCE_BYTES:
+                            raise ValueError("SOURCE_PAYLOAD_TOO_LARGE")
+
+                        img_ct = img_resp.headers.get("content-type", "").lower()
+                        if not any(ct in img_ct for ct in ("image/png", "image/jpeg", "image/webp")):
+                            raise ValueError(f"UNSUPPORTED_PREVIEW_CONTENT_TYPE_{img_ct}")
+
+                        raw_preview_bytes = img_resp.content
                 else:
-                    # Resolve relative preview URL to absolute
-                    full_img_url = urljoin(source_url, preview_ref)
-                    if not full_img_url.startswith("https://"):
-                        raise ValueError("INSECURE_PREVIEW_URL")
-
-                    img_resp = await self.client.get(full_img_url, timeout=self.timeout, follow_redirects=True)
-                    if img_resp.status_code >= 400:
-                        raise ValueError(f"PREVIEW_FETCH_ERROR_{img_resp.status_code}")
-                    if len(img_resp.content) > MAX_SOURCE_BYTES:
-                        raise ValueError("SOURCE_PAYLOAD_TOO_LARGE")
-
-                    img_ct = img_resp.headers.get("content-type", "").lower()
-                    if not any(ct in img_ct for ct in ("image/png", "image/jpeg", "image/webp")):
-                        raise ValueError(f"UNSUPPORTED_PREVIEW_CONTENT_TYPE_{img_ct}")
-
-                    raw_preview_bytes = img_resp.content
-            else:
-                raise ValueError("NO_PUBLIC_PREVIEW_FOUND")
+                    raise ValueError("NO_PUBLIC_PREVIEW_FOUND")
 
         if not raw_preview_bytes or len(raw_preview_bytes) == 0:
             raise ValueError("NO_PUBLIC_PREVIEW_FOUND")
+
+        if preview_cache_file and not preview_cache_file.exists():
+            try:
+                preview_cache_file.write_bytes(raw_preview_bytes)
+            except Exception:
+                pass
 
         # 4. Build style source data directly from acquired preview content
         style_data_map: dict[str, StyleSourceData] = {}

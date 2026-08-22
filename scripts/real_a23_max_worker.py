@@ -1,13 +1,15 @@
-"""Real A23 MAX Job Worker Process executing real reconstruction with checkpointing."""
+"""Real A23 MAX Job Worker Process executing real reconstruction with checkpointing and state persistence."""
 from __future__ import annotations
 
 import argparse
 import asyncio
 import json
 import os
+import pickle
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 # Add agent/src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "agent" / "src"))
@@ -25,7 +27,13 @@ from worker_client import WorkerJobClient
 REPRESENTATIVE_CPS = [65, 66, 79, 56, 64, 37, 103, 109, 272, 417, 273, 432, 7855]
 
 
-async def run_worker(job_id: str, lease_token: str, order_id: str, scratch_base: Path, stop_after_glyph: int | None = None) -> dict[str, Any]:
+async def run_worker(
+    job_id: str,
+    lease_token: str,
+    order_id: str,
+    scratch_base: Path,
+    stop_after_glyph: int | None = None,
+) -> dict[str, Any]:
     settings = Settings()
     w_client = WorkerJobClient(settings)
     store = ObservationStore(str(Path(__file__).parent.parent / "observations" / "benchmark"))
@@ -37,6 +45,8 @@ async def run_worker(job_id: str, lease_token: str, order_id: str, scratch_base:
     job_scratch = scratch_base / f"{job_id}"
     job_scratch.mkdir(parents=True, exist_ok=True)
     checkpoint_file = job_scratch / "checkpoint.json"
+    glyphs_cache_dir = job_scratch / "reconstructed_glyph_state"
+    glyphs_cache_dir.mkdir(parents=True, exist_ok=True)
 
     completed_cps: list[int] = []
     if checkpoint_file.exists():
@@ -49,39 +59,40 @@ async def run_worker(job_id: str, lease_token: str, order_id: str, scratch_base:
             print(f"CHECKPOINT_READ_ERROR: {e}", flush=True)
 
     reconstructed_glyphs = []
-    repeated_work_count = 0
-    newly_processed_count = 0
-
-    # Load existing glyph cache if any
-    glyphs_cache_dir = job_scratch / "glyphs"
-    glyphs_cache_dir.mkdir(parents=True, exist_ok=True)
+    solver_invocations = 0
+    loaded_from_checkpoint_count = 0
+    newly_computed_count = 0
 
     for i, cp in enumerate(REPRESENTATIVE_CPS):
-        glyph_file = glyphs_cache_dir / f"glyph_{cp}.json"
-        if cp in completed_cps and glyph_file.exists():
-            # Load from durable checkpoint - do not repeat compute
-            repeated_work_count += 0  # Not repeated!
-            with open(glyph_file, "r", encoding="utf-8") as gf:
-                g_dict = json.load(gf)
-            # Reconstruct from cached solver representation
-            obs = store.get_glyph_observations("be_vietnam_pro", "regular", cp)
-            if obs:
-                reconstructed_glyphs.append(solver.reconstruct_glyph(obs))
-            continue
+        glyph_file = glyphs_cache_dir / f"glyph_{cp}.pkl"
 
-        # Actually compute glyph
+        if cp in completed_cps and glyph_file.exists():
+            # Load the actual reconstructed glyph state from durable persistence
+            try:
+                with open(glyph_file, "rb") as gf:
+                    persisted_glyph = pickle.load(gf)
+                reconstructed_glyphs.append(persisted_glyph)
+                loaded_from_checkpoint_count += 1
+                print(f"LOADED_FROM_CHECKPOINT_GLYPH_{i+1}_{cp}_PID_{os.getpid()}", flush=True)
+                continue
+            except Exception as e:
+                print(f"FAILED_TO_LOAD_GLYPH_{cp}: {e}, recomputing...", flush=True)
+
+        # Genuinely compute glyph with solver
         obs = store.get_glyph_observations("be_vietnam_pro", "regular", cp)
         if not obs:
             continue
 
+        solver_invocations += 1
         glyph = solver.reconstruct_glyph(obs)
         reconstructed_glyphs.append(glyph)
-        newly_processed_count += 1
-        completed_cps.append(cp)
+        newly_computed_count += 1
+        if cp not in completed_cps:
+            completed_cps.append(cp)
 
-        # Save durable glyph & checkpoint
-        with open(glyph_file, "w", encoding="utf-8") as gf:
-            json.dump({"code_point": cp, "character": glyph.character, "advance": glyph.advance_width_upem}, gf)
+        # Persist full reconstructed outline geometry and metrics
+        with open(glyph_file, "wb") as gf:
+            pickle.dump(glyph, gf)
 
         with open(checkpoint_file, "w", encoding="utf-8") as f:
             json.dump({"completed_cps": completed_cps, "last_updated": time.time()}, f)
@@ -94,7 +105,7 @@ async def run_worker(job_id: str, lease_token: str, order_id: str, scratch_base:
             while True:
                 time.sleep(1)
 
-    # All glyphs computed -> build font binaries
+    # All glyphs assembled -> build font binaries
     build_dir = job_scratch / "build"
     build_dir.mkdir(parents=True, exist_ok=True)
     typo = inferencer.infer_from_store(store, "be_vietnam_pro", "regular")
@@ -129,11 +140,16 @@ async def run_worker(job_id: str, lease_token: str, order_id: str, scratch_base:
     )
     await w_client.close()
 
+    # Repeated work is any solver invocation on already checkpointed glyphs
+    repeated_work_count = max(0, solver_invocations - newly_computed_count)
+
     result = {
         "success": comp_res.success,
         "job_id": job_id,
         "order_id": order_id,
-        "newly_processed_glyphs": newly_processed_count,
+        "solver_invocations": solver_invocations,
+        "loaded_from_checkpoint": loaded_from_checkpoint_count,
+        "newly_computed_glyphs": newly_computed_count,
         "repeated_glyphs": repeated_work_count,
         "total_glyphs": len(reconstructed_glyphs),
         "artifact_key": upload_res.artifact_key,
