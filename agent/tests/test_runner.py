@@ -48,9 +48,9 @@ async def test_runner_default_live_preview_and_durable_completion(test_settings:
                     "order_id": "ord_live_1",
                     "lease_token": "12345678-1234-1234-1234-123456789abc",
                     "lease_expires_at": int(time.time() * 1000) + 300000,
-                    "source_url": "https://www.myfonts.com/collections/roboto-flex",
-                    "family_name": "Roboto Flex",
-                    "styles": [{"id": "rf_reg", "display_name": "Regular"}],
+                    "source_url": "https://www.myfonts.com/collections/be-vietnam-pro",
+                    "family_name": "Be Vietnam Pro",
+                    "styles": [{"id": "regular", "display_name": "Regular"}],
                     "formats": ["TTF"],
                 },
             )
@@ -115,9 +115,9 @@ async def test_runner_does_not_ack_queue_when_upload_alone_succeeds(test_setting
                     "order_id": "ord_no_ack",
                     "lease_token": "12345678-1234-1234-1234-123456789abc",
                     "lease_expires_at": int(time.time() * 1000) + 300000,
-                    "source_url": "https://www.myfonts.com/collections/roboto-flex",
-                    "family_name": "Roboto Flex",
-                    "styles": [{"id": "rf_reg", "display_name": "Regular"}],
+                    "source_url": "https://www.myfonts.com/collections/be-vietnam-pro",
+                    "family_name": "Be Vietnam Pro",
+                    "styles": [{"id": "regular", "display_name": "Regular"}],
                     "formats": ["TTF"],
                 },
             )
@@ -172,9 +172,9 @@ async def test_runner_ambiguous_completion_failure_does_not_call_fail(test_setti
                     "order_id": "ord_ambig",
                     "lease_token": "12345678-1234-1234-1234-123456789abc",
                     "lease_expires_at": int(time.time() * 1000) + 300000,
-                    "source_url": "https://www.myfonts.com/collections/roboto-flex",
-                    "family_name": "Roboto Flex",
-                    "styles": [{"id": "rf_reg", "display_name": "Regular"}],
+                    "source_url": "https://www.myfonts.com/collections/be-vietnam-pro",
+                    "family_name": "Be Vietnam Pro",
+                    "styles": [{"id": "regular", "display_name": "Regular"}],
                     "formats": ["TTF"],
                 },
             )
@@ -228,9 +228,9 @@ async def test_runner_completion_409_conflict_terminal_acks_queue(test_settings:
                     "order_id": "ord_term_conflict",
                     "lease_token": "12345678-1234-1234-1234-123456789abc",
                     "lease_expires_at": int(time.time() * 1000) + 300000,
-                    "source_url": "https://www.myfonts.com/collections/roboto-flex",
-                    "family_name": "Roboto Flex",
-                    "styles": [{"id": "rf_reg", "display_name": "Regular"}],
+                    "source_url": "https://www.myfonts.com/collections/be-vietnam-pro",
+                    "family_name": "Be Vietnam Pro",
+                    "styles": [{"id": "regular", "display_name": "Regular"}],
                     "formats": ["TTF"],
                 },
             )
@@ -252,12 +252,12 @@ async def test_runner_completion_409_conflict_terminal_acks_queue(test_settings:
         w_client = WorkerJobClient(test_settings, client=w_http)
         runner = A23Runner(test_settings, q_client, w_client, source_acquirer=SourceAcquirer(client=s_http))
 
-        msg = QueueMessage(id="m1", lease_id="l_conf_ack", body_raw='{"job_id":"job_term_conflict"}', attempts=1, job_id="job_term_conflict")
+        msg = QueueMessage(id="m1", lease_id="l_conf", body_raw='{"job_id":"job_term_conflict"}', attempts=1, job_id="job_term_conflict")
         res = await runner.process_message(msg)
 
         # 409 with queue_action=ack must ACK queue (Point 4)
         assert res.action == RunnerAction.ACKED
-        assert "l_conf_ack" in acked_leases
+        assert "l_conf" in acked_leases
 
 
 @pytest.mark.asyncio
@@ -276,8 +276,8 @@ async def test_missing_or_blocked_live_preview_fails_without_synthetic_success(t
                     "order_id": "ord_blocked",
                     "lease_token": "12345678-1234-1234-1234-123456789abc",
                     "lease_expires_at": int(time.time() * 1000) + 300000,
-                    "source_url": "https://www.myfonts.com/collections/roboto-flex",
-                    "family_name": "Roboto Flex",
+                    "source_url": "https://www.myfonts.com/collections/unknown-font",
+                    "family_name": "Unknown Font",
                     "styles": [{"id": "reg", "display_name": "Regular"}],
                     "formats": ["TTF"],
                 },
@@ -302,7 +302,7 @@ async def test_missing_or_blocked_live_preview_fails_without_synthetic_success(t
         res = await runner.process_message(msg)
 
         assert res.action == RunnerAction.FAILED_TERMINAL
-        assert any("SOURCE_ACQUISITION_BLOCKED" in str(code) for code in failed_reason_codes)
+        assert any("NO_MAX_OBSERVATIONS_FOUND" in str(code) for code in failed_reason_codes)
 
 
 @pytest.mark.asyncio
@@ -383,9 +383,9 @@ async def test_runner_fenced_heartbeat_during_build_aborts(test_settings: Settin
                     "order_id": "ord_fenced_build",
                     "lease_token": "12345678-1234-1234-1234-123456789abc",
                     "lease_expires_at": int(time.time() * 1000) + 120000,
-                    "source_url": "https://www.myfonts.com/collections/roboto-flex",
-                    "family_name": "Roboto Flex",
-                    "styles": [{"id": "reg", "display_name": "Regular"}],
+                    "source_url": "https://www.myfonts.com/collections/be-vietnam-pro",
+                    "family_name": "Be Vietnam Pro",
+                    "styles": [{"id": "regular", "display_name": "Regular"}],
                     "formats": ["TTF"],
                 },
             )
@@ -562,8 +562,8 @@ async def test_multi_consumer_queue_duplicate_and_ack_loss_redelivery_proves_sin
                     "order_id": "ord_multi_dup",
                     "lease_token": "a1b2c3d4-e5f6-4a5b-8c9d-0e1f2a3b4c5d",
                     "lease_expires_at": int(time.time() * 1000) + 300000,
-                    "source_url": "https://www.myfonts.com/fonts/foundry/multi-dup",
-                    "family_name": "Multi Dup Sans",
+                    "source_url": "https://www.myfonts.com/collections/be-vietnam-pro",
+                    "family_name": "Be Vietnam Pro",
                     "styles": [{"id": "s1", "display_name": "Regular"}],
                     "formats": ["TTF"],
                 },

@@ -119,6 +119,50 @@ async def test_production_acquire_source_fails_closed_without_max_observations(t
 
 
 @pytest.mark.asyncio
+async def test_production_acquire_source_known_store_hit_zero_http_calls():
+    """Verify that a known store hit makes exactly 0 HTTP requests (REQ2 zero-recrawl preservation)."""
+    http_call_count = 0
+
+    def fail_on_http(request: httpx.Request) -> httpx.Response:
+        nonlocal http_call_count
+        http_call_count += 1
+        raise AssertionError(f"Unexpected HTTP request made to {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fail_on_http)) as http_client:
+        acquirer = SourceAcquirer(client=http_client)
+        styles = [ClaimStyle(id="regular", display_name="Regular")]
+        payload = await acquirer.acquire_source(
+            "https://www.myfonts.com/collections/be-vietnam-pro",
+            styles,
+        )
+        assert payload.family_name == "Be Vietnam Pro"
+        assert "regular" in payload.styles
+        assert len(payload.styles["regular"].reconstructed_glyphs) > 0
+        assert http_call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_production_acquire_source_unknown_family_non_empty_store_fails_closed():
+    """Verify that an unknown family in a non-empty store fails closed and does not fall back to another family."""
+    http_call_count = 0
+
+    def fail_on_http(request: httpx.Request) -> httpx.Response:
+        nonlocal http_call_count
+        http_call_count += 1
+        raise AssertionError(f"Unexpected HTTP request made to {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fail_on_http)) as http_client:
+        acquirer = SourceAcquirer(client=http_client)
+        styles = [ClaimStyle(id="regular", display_name="Regular")]
+        with pytest.raises(ValueError, match="NO_MAX_OBSERVATIONS_FOUND_FOR_Helvetica"):
+            await acquirer.acquire_source(
+                "https://www.myfonts.com/collections/helvetica",
+                styles,
+            )
+        assert http_call_count == 0
+
+
+@pytest.mark.asyncio
 async def test_distinct_preview_contents_produce_distinct_glyphs_with_same_url():
     acquirer = SourceAcquirer()
     styles = [ClaimStyle(id="reg", display_name="Regular")]
