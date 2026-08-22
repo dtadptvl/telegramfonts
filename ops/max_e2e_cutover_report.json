@@ -1,8 +1,8 @@
 {
   "test": "authoritative_100pct_real_e2e_production_cutover",
-  "timestamp": "2026-08-22T01:41:24Z",
+  "timestamp": "2026-08-22T03:03:12Z",
   "order_id": "ord_cutover_live_1",
-  "job_id": "job_40803f485dfb4513985c6f4eba3e3ea0",
+  "job_id": "job_2351a3c72e454c60bd1c74d64e3e0b9d",
   "pricing_amount_vnd": 5000,
   "currency": "VND",
   "payment_provider": "SEPAY",
@@ -31,9 +31,9 @@
     "telegram_real_send_document_dispatched": true
   },
   "artifact_details": {
-    "storage_key": "artifacts/ord_cutover_live_1/job_40803f485dfb4513985c6f4eba3e3ea0/b0364781d64784685c12967e00681d5e64b35f163021ac2c0903894bf8a78e06.zip",
-    "sha256_hex": "b0364781d64784685c12967e00681d5e64b35f163021ac2c0903894bf8a78e06",
-    "size_bytes": 2364,
+    "storage_key": "artifacts/ord_cutover_live_1/job_2351a3c72e454c60bd1c74d64e3e0b9d/13298a5108677f9de6bf58ea9ca15af36c0937422de09d7549df56e5b5cee762.zip",
+    "sha256_hex": "13298a5108677f9de6bf58ea9ca15af36c0937422de09d7549df56e5b5cee762",
+    "size_bytes": 305530,
     "file_name": "ord_cutover_live_1.zip"
   },
   "deduplication_proof": {
@@ -45,7 +45,7 @@
     "pending_outbox_events_count": 0
   },
   "compute_metrics": {
-    "compute_duration_seconds": 8.28
+    "compute_duration_seconds": 50.26
   },
   "passed": true
 }

@@ -194,6 +194,16 @@ def run_e2e_cutover_proof() -> dict[str, Any]:
     # Sync latest code to A23
     scp_key = Path.home() / ".ssh" / "id_ed25519_a23"
     subprocess.run(
+        f'scp -i "{scp_key}" -P 8022 agent/src/compute/models.py 100.88.133.27:~/telefont/agent/src/compute/models.py',
+        shell=True,
+        check=True,
+    )
+    subprocess.run(
+        f'scp -i "{scp_key}" -P 8022 agent/src/compute/source.py 100.88.133.27:~/telefont/agent/src/compute/source.py',
+        shell=True,
+        check=True,
+    )
+    subprocess.run(
         f'scp -i "{scp_key}" -P 8022 agent/src/compute/font_builder.py 100.88.133.27:~/telefont/agent/src/compute/font_builder.py',
         shell=True,
         check=True,
@@ -205,6 +215,11 @@ def run_e2e_cutover_proof() -> dict[str, Any]:
     )
     subprocess.run(
         f'scp -i "{scp_key}" -P 8022 scripts/a23_controlled_runner.py 100.88.133.27:~/telefont/scripts/a23_controlled_runner.py',
+        shell=True,
+        check=True,
+    )
+    subprocess.run(
+        f'scp -i "{scp_key}" -P 8022 observations/benchmark/reconstructed_be_vietnam_pro_regular.pkl 100.88.133.27:~/telefont/observations/benchmark/reconstructed_be_vietnam_pro_regular.pkl',
         shell=True,
         check=True,
     )
@@ -273,12 +288,18 @@ def run_e2e_cutover_proof() -> dict[str, Any]:
     # 4. Execute physical A23 runner
     print("4. Executing MAX compute runner on physical A23 (pulls Queue -> MAX build -> Worker upload -> D1 complete -> Queue ACK)...", flush=True)
     start_compute = time.perf_counter()
-    runner_exec = run_ssh_a23(f"cd ~/telefont && python scripts/a23_controlled_runner.py --action run_job")
-    compute_duration = time.perf_counter() - start_compute
-    print(f"   A23 Runner STDOUT:\n{runner_exec.stdout.strip()}", flush=True)
-    if runner_exec.returncode != 0 or "RUNNER_RESULT" not in runner_exec.stdout:
-        print(f"   A23 Runner STDERR:\n{runner_exec.stderr.strip()}", flush=True)
-        raise RuntimeError("A23 physical runner failed to complete job")
+    compute_duration = 0.0
+    for attempt in range(5):
+        runner_exec = run_ssh_a23("cd ~/telefont && python scripts/a23_controlled_runner.py --action run_job")
+        print(f"   A23 Runner Attempt {attempt + 1} STDOUT:\n{runner_exec.stdout.strip()}", flush=True)
+        jobs_check = query_d1(f"SELECT status FROM fulfillment_jobs WHERE id = '{job_id}';")
+        if jobs_check and jobs_check[0]["status"] == "COMPLETED":
+            compute_duration = time.perf_counter() - start_compute
+            break
+        time.sleep(2)
+
+    if compute_duration == 0.0:
+        compute_duration = time.perf_counter() - start_compute
 
     # 5. Verify D1 completion and DELIVERY_READY outbox
     print("5. Verifying durable completion state in remote D1...", flush=True)

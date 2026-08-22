@@ -26,6 +26,7 @@ class StyleSourceData:
     weight_class: int = 400
     is_italic: bool = False
     glyphs: dict[str, GlyphVector] = field(default_factory=dict)
+    reconstructed_glyphs: dict[int, Any] = field(default_factory=dict)
 
 
 @dataclass
