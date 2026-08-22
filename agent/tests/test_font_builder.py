@@ -112,3 +112,24 @@ async def test_unsupported_format(tmp_path: Path):
 
     with pytest.raises(ValueError, match="UNSUPPORTED_FORMAT"):
         builder.build_font(payload.styles["regular"], "Roboto", "EXE", tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_font_builder_fails_closed_without_max_reconstructed_glyphs(tmp_path: Path):
+    from compute.models import GlyphVector, StyleSourceData
+    builder = FontBuilderService()
+
+    # StyleSourceData with only legacy glyphs and empty reconstructed_glyphs
+    style_data = StyleSourceData(
+        style_id="reg",
+        style_name="Regular",
+        weight_class=400,
+        is_italic=False,
+        glyphs={
+            "A": GlyphVector(character="A", contours=[[(0, 0), (10, 10)]], advance_width=600, lsb=50)
+        },
+        reconstructed_glyphs={},
+    )
+
+    with pytest.raises(ValueError, match="NO_MAX_RECONSTRUCTED_GLYPHS_AVAILABLE_FOR_reg"):
+        builder.build_font(style_data, "Test Font", "TTF", tmp_path)
