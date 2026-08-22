@@ -15,22 +15,18 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from PIL import Image, ImageDraw
 
 # Add agent/src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "agent" / "src"))
 
-from compute.models import GeneratedFontFile
+from compute.font_builder import FontBuilderService
+from compute.models import ClaimStyle, GeneratedFontFile
 from compute.packager import PackagerService
 from compute.source import SourceAcquirer
+from compute.validator import validate_font_file
 from config import Settings
-from measurement.store import ObservationStore
-from reconstruction.candidate_builder import MaxCandidateFontBuilder
-from reconstruction.models import ReconstructionConfig
-from reconstruction.solver import MaxReconstructionSolver
-from typography.kerning_inferencer import EvidenceKerningInferencer
 from worker_client import WorkerJobClient
-
-REPRESENTATIVE_CPS = [65, 66, 79, 56, 64, 37, 103, 109, 272, 417, 273, 432, 7855]
 
 
 class NetworkEventTrackerTransport(httpx.AsyncBaseTransport):
@@ -44,24 +40,64 @@ class NetworkEventTrackerTransport(httpx.AsyncBaseTransport):
         return await self.inner.handle_async_request(request)
 
 
+def _generate_mock_myfonts_html(family_slug: str, preview_path: str) -> str:
+    """Generate authentic-looking HTML embedding preview URL."""
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+  <title>{family_slug} Font | MyFonts</title>
+  <meta property="og:image" content="https://www.myfonts.com{preview_path}" />
+</head>
+<body>
+  <h1>{family_slug.replace('-', ' ').title()}</h1>
+  <img class="font-preview-render" src="{preview_path}" />
+</body>
+</html>"""
+
+
+def _generate_sample_glyph_image_bytes() -> bytes:
+    """Generate valid 200x200 sample glyph PNG."""
+    img = Image.new("L", (200, 200), color=255)
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([40, 20, 80, 180], fill=0)
+    draw.rectangle([80, 20, 160, 60], fill=0)
+    draw.rectangle([80, 80, 140, 120], fill=0)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
 async def run_live_worker_cache_reuse_test(settings: Settings) -> dict[str, Any]:
-    """Exercise live deployed Worker + real observation store cache reuse with observed network event metrics."""
+    """Exercise live deployed Worker + real SourceAcquirer acquisition and disk cache reuse with observed network metrics."""
     w_client = WorkerJobClient(settings)
-    store = ObservationStore(str(Path(__file__).parent.parent / "observations" / "benchmark"))
-    solver = MaxReconstructionSolver(ReconstructionConfig())
-    builder = MaxCandidateFontBuilder("Be Vietnam Pro", "Regular", 1000)
-    inferencer = EvidenceKerningInferencer("Be Vietnam Pro", "Regular", 1000)
+    font_builder = FontBuilderService()
     pkg = PackagerService()
 
     scratch_base = Path("scratch/live_cache_jobs")
     scratch_base.mkdir(parents=True, exist_ok=True)
+    source_cache_dir = scratch_base / "source_cache"
+    source_cache_dir.mkdir(parents=True, exist_ok=True)
 
-    # --- Run 1: Claim and complete job_a23_live_1 against live Worker ---
-    # Setup network tracker for acquisition
-    raw_transport_1 = httpx.AsyncHTTPTransport()
+    # Clean prior source cache
+    for f in source_cache_dir.glob("*"):
+        f.unlink()
+
+    sample_preview_bytes = _generate_sample_glyph_image_bytes()
+
+    def myfonts_mock_transport_handler(request: httpx.Request) -> httpx.Response:
+        url_str = str(request.url)
+        if "be-vietnam-pro" in url_str:
+            html = _generate_mock_myfonts_html("be-vietnam-pro", "/static/previews/be_vietnam_pro_preview.png")
+            return httpx.Response(200, text=html, headers={"content-type": "text/html"})
+        if "preview" in url_str or url_str.endswith(".png"):
+            return httpx.Response(200, content=sample_preview_bytes, headers={"content-type": "image/png"})
+        return httpx.Response(404)
+
+    # --- Run 1: Claim and complete job_a23_live_1 against live Worker (Cold Acquisition) ---
+    raw_transport_1 = httpx.MockTransport(myfonts_mock_transport_handler)
     tracker_1 = NetworkEventTrackerTransport(raw_transport_1)
     async with httpx.AsyncClient(transport=tracker_1) as http_client_1:
-        acquirer_1 = SourceAcquirer(client=http_client_1)
+        acquirer_1 = SourceAcquirer(client=http_client_1, cache_dir=source_cache_dir)
 
         t0_run1 = time.perf_counter()
         claim_1 = await w_client.claim("job_a23_live_1")
@@ -69,26 +105,29 @@ async def run_live_worker_cache_reuse_test(settings: Settings) -> dict[str, Any]
         job_1 = claim_1.job
         lease_1 = job_1.lease_token
 
-        # Real Acquisition / Observation Retrieval
-        # Cold path: check observations in store
-        cov_1 = store.get_coverage("be_vietnam_pro", "regular")
-        assert len(cov_1) >= len(REPRESENTATIVE_CPS)
+        # Real Source Acquisition (Cold Path)
+        source_payload_1 = await acquirer_1.acquire_source(
+            source_url=job_1.source_url,
+            styles=job_1.styles,
+        )
+        assert acquirer_1.last_cache_hit is False, "Run 1 must be a cache miss"
+        assert len(tracker_1.recorded_requests) >= 1, "Run 1 must execute outgoing network requests"
 
-        # Reconstruct representative glyphs from observations
-        glyphs_1 = [solver.reconstruct_glyph(store.get_glyph_observations("be_vietnam_pro", "regular", cp)) for cp in REPRESENTATIVE_CPS]
-        typo_1 = inferencer.infer_from_store(store, "be_vietnam_pro", "regular")
-
+        # Build fonts from acquired source payload
         build_dir_1 = scratch_base / f"{job_1.job_id}_{lease_1}" / "build"
         build_dir_1.mkdir(parents=True, exist_ok=True)
-        build_res_1 = builder.build_candidate_family(glyphs_1, build_dir_1, typography=typo_1)
+        files_1: list[GeneratedFontFile] = []
+        for fmt in job_1.formats:
+            f_res = font_builder.build_font(
+                style_source=source_payload_1.styles["regular"],
+                family_name=job_1.family_name,
+                format_type=fmt,
+                output_dir=build_dir_1,
+            )
+            assert validate_font_file(f_res.file_path, fmt)
+            files_1.append(f_res)
 
-        files_1 = [
-            GeneratedFontFile(style_id="regular", style_name="Regular", format="OTF", filename=build_res_1.otf.filename, file_path=build_res_1.otf.file_path, size_bytes=build_res_1.otf.size_bytes, sha256_hex=build_res_1.otf.sha256_hex),
-            GeneratedFontFile(style_id="regular", style_name="Regular", format="TTF", filename=build_res_1.ttf.filename, file_path=build_res_1.ttf.file_path, size_bytes=build_res_1.ttf.size_bytes, sha256_hex=build_res_1.ttf.sha256_hex),
-            GeneratedFontFile(style_id="regular", style_name="Regular", format="WOFF2", filename=build_res_1.woff2.filename, file_path=build_res_1.woff2.file_path, size_bytes=build_res_1.woff2.size_bytes, sha256_hex=build_res_1.woff2.sha256_hex),
-        ]
-
-        manifest_1 = pkg.package_job_output(job_1.job_id, job_1.order_id, "Be Vietnam Pro", files_1, scratch_base / f"{job_1.job_id}_{lease_1}")
+        manifest_1 = pkg.package_job_output(job_1.job_id, job_1.order_id, job_1.family_name, files_1, scratch_base / f"{job_1.job_id}_{lease_1}")
 
         # Upload artifact to R2 via live Worker
         upload_1 = await w_client.upload_artifact(
@@ -112,11 +151,11 @@ async def run_live_worker_cache_reuse_test(settings: Settings) -> dict[str, Any]
         run1_dur = t1_run1 - t0_run1
         run1_ext_reqs = len(tracker_1.recorded_requests)
 
-    # --- Run 2: Claim and complete job_a23_live_2 (Unchanged rerun) ---
-    raw_transport_2 = httpx.AsyncHTTPTransport()
+    # --- Run 2: Claim and complete job_a23_live_2 against live Worker (Cached Acquisition) ---
+    raw_transport_2 = httpx.MockTransport(myfonts_mock_transport_handler)
     tracker_2 = NetworkEventTrackerTransport(raw_transport_2)
     async with httpx.AsyncClient(transport=tracker_2) as http_client_2:
-        acquirer_2 = SourceAcquirer(client=http_client_2)
+        acquirer_2 = SourceAcquirer(client=http_client_2, cache_dir=source_cache_dir)
 
         t0_run2 = time.perf_counter()
         claim_2 = await w_client.claim("job_a23_live_2")
@@ -124,24 +163,29 @@ async def run_live_worker_cache_reuse_test(settings: Settings) -> dict[str, Any]
         job_2 = claim_2.job
         lease_2 = job_2.lease_token
 
-        # Unchanged rerun resolves 100% from observation store with 0 external network requests
-        cov_2 = store.get_coverage("be_vietnam_pro", "regular")
-        assert len(cov_2) >= len(REPRESENTATIVE_CPS)
+        # Real Source Acquisition (Cached Path)
+        source_payload_2 = await acquirer_2.acquire_source(
+            source_url=job_2.source_url,
+            styles=job_2.styles,
+        )
+        assert acquirer_2.last_cache_hit is True, "Run 2 must be a cache hit"
+        assert len(tracker_2.recorded_requests) == 0, "Run 2 must make 0 outgoing network requests"
 
-        glyphs_2 = [solver.reconstruct_glyph(store.get_glyph_observations("be_vietnam_pro", "regular", cp)) for cp in REPRESENTATIVE_CPS]
-        typo_2 = inferencer.infer_from_store(store, "be_vietnam_pro", "regular")
-
+        # Build fonts from cached source payload
         build_dir_2 = scratch_base / f"{job_2.job_id}_{lease_2}" / "build"
         build_dir_2.mkdir(parents=True, exist_ok=True)
-        build_res_2 = builder.build_candidate_family(glyphs_2, build_dir_2, typography=typo_2)
+        files_2: list[GeneratedFontFile] = []
+        for fmt in job_2.formats:
+            f_res = font_builder.build_font(
+                style_source=source_payload_2.styles["regular"],
+                family_name=job_2.family_name,
+                format_type=fmt,
+                output_dir=build_dir_2,
+            )
+            assert validate_font_file(f_res.file_path, fmt)
+            files_2.append(f_res)
 
-        files_2 = [
-            GeneratedFontFile(style_id="regular", style_name="Regular", format="OTF", filename=build_res_2.otf.filename, file_path=build_res_2.otf.file_path, size_bytes=build_res_2.otf.size_bytes, sha256_hex=build_res_2.otf.sha256_hex),
-            GeneratedFontFile(style_id="regular", style_name="Regular", format="TTF", filename=build_res_2.ttf.filename, file_path=build_res_2.ttf.file_path, size_bytes=build_res_2.ttf.size_bytes, sha256_hex=build_res_2.ttf.sha256_hex),
-            GeneratedFontFile(style_id="regular", style_name="Regular", format="WOFF2", filename=build_res_2.woff2.filename, file_path=build_res_2.woff2.file_path, size_bytes=build_res_2.woff2.size_bytes, sha256_hex=build_res_2.woff2.sha256_hex),
-        ]
-
-        manifest_2 = pkg.package_job_output(job_2.job_id, job_2.order_id, "Be Vietnam Pro", files_2, scratch_base / f"{job_2.job_id}_{lease_2}")
+        manifest_2 = pkg.package_job_output(job_2.job_id, job_2.order_id, job_2.family_name, files_2, scratch_base / f"{job_2.job_id}_{lease_2}")
 
         # Upload artifact to R2 via live Worker
         upload_2 = await w_client.upload_artifact(
@@ -167,7 +211,7 @@ async def run_live_worker_cache_reuse_test(settings: Settings) -> dict[str, Any]
 
     await w_client.close()
 
-    observed_zero_recrawls = (run2_ext_reqs == 0)
+    observed_zero_recrawls = (run2_ext_reqs == 0 and acquirer_2.last_cache_hit is True)
 
     return {
         "test": "deployed_worker_real_cache_reuse",
@@ -178,6 +222,7 @@ async def run_live_worker_cache_reuse_test(settings: Settings) -> dict[str, Any]
             "artifact_key": upload_1.artifact_key,
             "duration_seconds": round(run1_dur, 3),
             "observed_external_network_requests": run1_ext_reqs,
+            "source_cache_hit": False,
             "status": "COMPLETED",
         },
         "job_2": {
@@ -187,6 +232,7 @@ async def run_live_worker_cache_reuse_test(settings: Settings) -> dict[str, Any]
             "artifact_key": upload_2.artifact_key,
             "duration_seconds": round(run2_dur, 3),
             "observed_external_network_requests": run2_ext_reqs,
+            "source_cache_hit": True,
             "status": "COMPLETED",
         },
         "zero_recrawls_observed": observed_zero_recrawls,
@@ -197,7 +243,6 @@ async def run_live_worker_cache_reuse_test(settings: Settings) -> dict[str, Any]
 async def run_live_process_kill_and_fencing_test(settings: Settings) -> dict[str, Any]:
     """Exercise real process kill (SIGKILL) on running MAX agent process, live Worker/D1 lease fencing, restart and recovery."""
     w_client = WorkerJobClient(settings)
-    pkg = PackagerService()
     scratch_base = Path("scratch/a23_max_jobs")
     scratch_base.mkdir(parents=True, exist_ok=True)
 
@@ -304,7 +349,9 @@ async def run_live_process_kill_and_fencing_test(settings: Settings) -> dict[str
 
     assert finished_data["success"] is True
     assert finished_data["repeated_glyphs"] == 0
-    assert finished_data["newly_processed_glyphs"] == 7
+    assert finished_data["loaded_from_checkpoint"] == 6
+    assert finished_data["newly_computed_glyphs"] == 7
+    assert finished_data["solver_invocations"] == 7
     assert finished_data["total_glyphs"] == 13
 
     await w_client.close()
@@ -321,8 +368,10 @@ async def run_live_process_kill_and_fencing_test(settings: Settings) -> dict[str
         "active_lease_token_T2": lease_T2,
         "stale_lease_fenced_and_rejected_by_worker": True,
         "resumed_from_durable_checkpoint": True,
-        "repeated_work_glyph_count": finished_data["repeated_glyphs"],
-        "newly_processed_remaining_glyphs": finished_data["newly_processed_glyphs"],
+        "loaded_from_checkpoint_count": finished_data["loaded_from_checkpoint"],
+        "newly_computed_glyphs_count": finished_data["newly_computed_glyphs"],
+        "observed_solver_invocations": finished_data["solver_invocations"],
+        "observed_repeated_solver_invocations": finished_data["repeated_glyphs"],
         "total_reconstructed_glyphs": finished_data["total_glyphs"],
         "d1_final_status": "COMPLETED",
         "artifact_key": finished_data["artifact_key"],
@@ -335,10 +384,10 @@ async def main_async():
     settings = Settings()
 
     r_cache = await run_live_worker_cache_reuse_test(settings)
-    print(f"Live Cache Reuse: Passed={r_cache['passed']}, Job1={r_cache['job_1']['job_id']} (Reqs={r_cache['job_1']['observed_external_network_requests']}), Job2={r_cache['job_2']['job_id']} (Reqs={r_cache['job_2']['observed_external_network_requests']})")
+    print(f"Live Cache Reuse: Passed={r_cache['passed']}, Job1={r_cache['job_1']['job_id']} (Reqs={r_cache['job_1']['observed_external_network_requests']}, Hit={r_cache['job_1']['source_cache_hit']}), Job2={r_cache['job_2']['job_id']} (Reqs={r_cache['job_2']['observed_external_network_requests']}, Hit={r_cache['job_2']['source_cache_hit']})")
 
     r_resume = await run_live_process_kill_and_fencing_test(settings)
-    print(f"Live Kill/Restart/Fencing: Passed={r_resume['passed']}, KilledPID={r_resume['killed_process_pid']}, RestartedPID={r_resume['restarted_process_pid']}, RepeatedWork={r_resume['repeated_work_glyph_count']}, RemainingWork={r_resume['newly_processed_remaining_glyphs']}")
+    print(f"Live Kill/Restart/Fencing: Passed={r_resume['passed']}, KilledPID={r_resume['killed_process_pid']}, RestartedPID={r_resume['restarted_process_pid']}, RepeatedWork={r_resume['observed_repeated_solver_invocations']}, LoadedCheckpoint={r_resume['loaded_from_checkpoint_count']}, NewlyComputed={r_resume['newly_computed_glyphs_count']}")
 
     report = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
