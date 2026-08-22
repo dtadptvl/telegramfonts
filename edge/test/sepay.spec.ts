@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { afterEach, describe, it, expect } from 'vitest';
 import { env, createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import worker, { type Env } from '../src/index';
 import { CatalogService } from '../src/services/catalog-service';
@@ -29,6 +29,12 @@ const testEnv: Env = {
   BANK_ACCOUNT_NAME: 'TELEFONT STORE',
   PAYMENT_CODE_PREFIX: 'TF',
 };
+
+const originalFetch = globalThis.fetch;
+
+afterEach(() => {
+  globalThis.fetch = originalFetch;
+});
 
 const sampleCatalog: FontCatalog = {
   sourceUrl: 'https://www.myfonts.com/collections/roboto-flex',
@@ -706,6 +712,102 @@ describe('Phase 3: SePay Verified Payment & Transactional Outbox', () => {
       expect(JSON.parse(outbox.results[0].payload)).toEqual({ job_id: jobs.results[0].id });
     });
 
+    it('notifies payment success once and refresh re-renders the same Vietnamese processing state', async () => {
+      const catalogService = new CatalogService(env.DB);
+      const catalogId = await catalogService.persistCatalogResult(sampleCatalog);
+      const sessionService = new SessionService(env.DB);
+      const orderService = new OrderService(env.DB);
+
+      await sessionService.upsertTelegramUser({ id: 91104, is_bot: false, first_name: 'PaymentUxUser' });
+      await sessionService.getOrCreateSession('91104', '91104');
+      await sessionService.updateSessionCatalog('91104', catalogId, 'SELECTING_STYLES');
+      const s1 = await sessionService.getSessionByUserId('91104');
+      await sessionService.setAllStyles('91104', s1!.workflow_token, ['rf_regular'], s1!.version);
+      const s2 = await sessionService.getSessionByUserId('91104');
+      await sessionService.transitionStatus('91104', s2!.workflow_token, 'SELECTING_STYLES', 'CONFIRMING', s2!.version);
+      const s3 = await sessionService.getSessionByUserId('91104');
+      const catalog = await catalogService.getCatalogById(catalogId);
+      const orderRes = await orderService.createOrderFromSession(s3!, catalog!);
+      await sessionService.setLastMessageId('91104', 77);
+
+      const apiCalls: Array<{ path: string; body: Record<string, unknown> }> = [];
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (!url.includes('api.telegram.org')) return originalFetch(input, init);
+        const path = new URL(url).pathname.split('/').pop() || '';
+        const body = init?.body && typeof init.body === 'string'
+          ? (JSON.parse(init.body) as Record<string, unknown>)
+          : {};
+        apiCalls.push({ path, body });
+        const result = path === 'answerCallbackQuery' || path === 'setMyCommands' || path === 'setChatMenuButton'
+          ? true
+          : { message_id: 1000 };
+        return new Response(JSON.stringify({ ok: true, result }), { status: 200 });
+      };
+
+      const timestamp = Math.floor(Date.now() / 1000);
+      const body = JSON.stringify({
+        id: 778900,
+        transferType: 'in',
+        transferAmount: 50000,
+        accountNumber: BANK_ACCOUNT,
+        code: orderRes.paymentCode,
+      });
+      const signature = await generateSePaySignature(SEPAY_SECRET, timestamp, body);
+      const makePaymentRequest = () =>
+        new Request('http://example.com/webhooks/sepay', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-SePay-Signature': `sha256=${signature}`,
+            'X-SePay-Timestamp': String(timestamp),
+          },
+          body,
+        });
+
+      const paymentCtx = createExecutionContext();
+      const paymentResponse = await worker.fetch(makePaymentRequest(), testEnv, paymentCtx);
+      await waitOnExecutionContext(paymentCtx);
+      expect(paymentResponse.status).toBe(200);
+
+      const refreshUpdate: TelegramUpdate = {
+        update_id: 9110402,
+        callback_query: {
+          id: 'payment_refresh',
+          from: { id: 91104, is_bot: false, first_name: 'PaymentUxUser' },
+          message: {
+            message_id: 1000,
+            chat: { id: 91104, type: 'private' },
+            date: Date.now(),
+          },
+          data: `ord:chk:${orderRes.orderId}`,
+        },
+      };
+      const refreshRequest = new Request('http://example.com/webhooks/telegram', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Telegram-Bot-Api-Secret-Token': TELEGRAM_SECRET,
+        },
+        body: JSON.stringify(refreshUpdate),
+      });
+      const refreshCtx = createExecutionContext();
+      const refreshResponse = await worker.fetch(refreshRequest, testEnv, refreshCtx);
+      await waitOnExecutionContext(refreshCtx);
+      expect(refreshResponse.status).toBe(200);
+
+      const duplicateCtx = createExecutionContext();
+      const duplicateResponse = await worker.fetch(makePaymentRequest(), testEnv, duplicateCtx);
+      await waitOnExecutionContext(duplicateCtx);
+      expect(duplicateResponse.status).toBe(200);
+
+      const sendMessages = apiCalls.filter((call) => call.path === 'sendMessage');
+      expect(sendMessages).toHaveLength(1);
+      expect(String(sendMessages[0].body.text)).toContain('Thanh toán thành công. Đang xử lý tệp');
+      expect(apiCalls.filter((call) => call.path === 'deleteMessage')).toHaveLength(1);
+      expect(apiCalls.some((call) => call.path === 'editMessageText' && String(call.body.text).includes('Thanh toán thành công. Đang xử lý tệp'))).toBe(true);
+    });
+
     it('injected mid-batch failure rolls back earlier statements in the transaction completely (BLOCK 5)', async () => {
       const catalogService = new CatalogService(env.DB);
       const catalogId = await catalogService.persistCatalogResult(sampleCatalog);
@@ -1067,8 +1169,8 @@ describe('Phase 3: SePay Verified Payment & Transactional Outbox', () => {
       await waitOnExecutionContext(ctx1);
       expect(res1.status).toBe(200);
 
-      expect(lastEditPayload.text).toContain('AWAITING_PAYMENT');
-      expect(lastAnswerText).toContain('AWAITING_PAYMENT');
+      expect(lastEditPayload.text).toContain('Chờ thanh toán');
+      expect(lastAnswerText).toContain('Chờ thanh toán');
 
       // 2. Transition order to PAID via verified payment
       const paymentService = new PaymentService(env.DB);
@@ -1103,8 +1205,8 @@ describe('Phase 3: SePay Verified Payment & Transactional Outbox', () => {
       await waitOnExecutionContext(ctx2);
       expect(res2.status).toBe(200);
 
-      expect(lastEditPayload.text).toContain('PAID');
-      expect(lastAnswerText).toContain('PAID');
+      expect(lastEditPayload.text).toContain('Đã thanh toán');
+      expect(lastAnswerText).toContain('Đã thanh toán');
 
       // 4. Unauthorized user cannot check other user's order
       const unauthorizedUpdate: TelegramUpdate = {
@@ -1134,7 +1236,7 @@ describe('Phase 3: SePay Verified Payment & Transactional Outbox', () => {
       await waitOnExecutionContext(ctx3);
       expect(res3.status).toBe(200);
 
-      expect(lastAnswerText).toContain('unauthorized');
+      expect(lastAnswerText).toContain('không có quyền truy cập');
     });
   });
 });

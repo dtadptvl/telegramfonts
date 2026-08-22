@@ -486,4 +486,11 @@ export class SessionService {
         .run();
     }
   }
+
+  async setLastMessageId(userId: string, lastMessageId: number | null): Promise<void> {
+    await this.db
+      .prepare('UPDATE telegram_sessions SET last_message_id = ?, updated_at = ? WHERE user_id = ?')
+      .bind(lastMessageId, Date.now(), userId)
+      .run();
+  }
 }

@@ -136,10 +136,11 @@ describe('Issue #33: In-Telegram Bot API sendDocument Delivery & Multipart Recov
       expect(res.dispatchedCount).toBe(1);
       expect(res.failureCount).toBe(0);
 
-      expect(fetchCalls.length).toBe(1);
-      expect(fetchCalls[0].url).toContain('/sendDocument');
-      expect(fetchCalls[0].formData.get('chat_id')).toBe('889977');
-      expect(fetchCalls[0].formData.get('caption')).toBe('📦 <b>Roboto Test</b>');
+      const documentCalls = fetchCalls.filter((call) => call.url.includes('/sendDocument'));
+      expect(documentCalls.length).toBe(1);
+      expect(documentCalls[0].formData.get('chat_id')).toBe('889977');
+      expect(documentCalls[0].formData.get('caption')).toBe('📦 <b>Roboto Test</b>');
+      expect(fetchCalls.some((call) => call.url.includes('/sendMessage'))).toBe(true);
 
       const outbox = await env.DB.prepare('SELECT status, dispatched_at, last_dispatch_error FROM outbox_events WHERE id = ?')
         .bind(eventId)
@@ -189,10 +190,11 @@ describe('Issue #33: In-Telegram Bot API sendDocument Delivery & Multipart Recov
       expect(res.failureCount).toBe(0);
 
       // Verify all 3 parts sent in order
-      expect(fetchCalls.length).toBe(3);
-      expect(fetchCalls[0].formData.get('caption')).toBe('📦 <b>Roboto Test</b> (Part 1/3)');
-      expect(fetchCalls[1].formData.get('caption')).toBe('📦 <b>Roboto Test</b> (Part 2/3)');
-      expect(fetchCalls[2].formData.get('caption')).toBe('📦 <b>Roboto Test</b> (Part 3/3)');
+      const documentCalls = fetchCalls.filter((call) => call.url.includes('/sendDocument'));
+      expect(documentCalls.length).toBe(3);
+      expect(documentCalls[0].formData.get('caption')).toBe('📦 <b>Roboto Test</b> (Phần 1/3)');
+      expect(documentCalls[1].formData.get('caption')).toBe('📦 <b>Roboto Test</b> (Phần 2/3)');
+      expect(documentCalls[2].formData.get('caption')).toBe('📦 <b>Roboto Test</b> (Phần 3/3)');
 
       const outbox = await env.DB.prepare('SELECT status, payload FROM outbox_events WHERE id = ?')
         .bind(eventId)
@@ -270,10 +272,11 @@ describe('Issue #33: In-Telegram Bot API sendDocument Delivery & Multipart Recov
       expect(res2.dispatchedCount).toBe(1);
       expect(res2.failureCount).toBe(0);
 
-      // Total fetch calls = 1 (part 1) + 1 (part 2 fail) + 1 (part 2 retry) + 1 (part 3) = 4
-      expect(fetchCalls.length).toBe(4);
-      expect(fetchCalls[2].formData.get('caption')).toBe('📦 <b>Roboto Test</b> (Part 2/3)');
-      expect(fetchCalls[3].formData.get('caption')).toBe('📦 <b>Roboto Test</b> (Part 3/3)');
+      // Document calls = 1 (part 1) + 1 (part 2 fail) + 1 (part 2 retry) + 1 (part 3) = 4
+      const documentCalls = fetchCalls.filter((call) => call.url.includes('/sendDocument'));
+      expect(documentCalls.length).toBe(4);
+      expect(documentCalls[2].formData.get('caption')).toBe('📦 <b>Roboto Test</b> (Phần 2/3)');
+      expect(documentCalls[3].formData.get('caption')).toBe('📦 <b>Roboto Test</b> (Phần 3/3)');
 
       const outboxFinal = await env.DB.prepare('SELECT status, payload FROM outbox_events WHERE id = ?')
         .bind(eventId)

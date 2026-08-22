@@ -11,7 +11,11 @@ import { SUPPORTED_FORMATS } from '../types/session';
 import { escapeHtml } from '../utils/html';
 import { normalizeMyFontsUrl } from '../utils/myfonts';
 import { generateVietQrUrl } from '../utils/vietqr';
-import { TelegramClient } from '../services/telegram-client';
+import {
+  ensureCustomerMenu,
+  retireInteractiveMessage,
+  TelegramClient,
+} from '../services/telegram-client';
 import { CatalogService } from '../services/catalog-service';
 import { SessionService, SessionConflictError } from '../services/session-service';
 import { OrderService, type OrderRecord } from '../services/order-service';
@@ -19,7 +23,7 @@ import { OrderService, type OrderRecord } from '../services/order-service';
 export async function handleTelegramWebhook(
   request: Request,
   env: Env,
-  _ctx: ExecutionContext
+  ctx: ExecutionContext
 ): Promise<Response> {
   // 1. Secret & Token validation (fail-closed)
   if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_WEBHOOK_SECRET) {
@@ -124,6 +128,14 @@ export async function handleTelegramWebhook(
     )
       .bind(Date.now(), update.update_id)
       .run();
+
+    if (update.message || update.callback_query) {
+      if (typeof ctx?.waitUntil === 'function') {
+        ctx.waitUntil(ensureCustomerMenu(tg));
+      } else {
+        void ensureCustomerMenu(tg);
+      }
+    }
   } catch (err: unknown) {
     // Leave update in its current status (RECEIVED or APPLIED) so retry will reprocess safely, and return 500
     return new Response(JSON.stringify({ error: 'Internal Processing Error' }), {
@@ -154,15 +166,38 @@ async function handleMessage(
 
   // Upsert user and session
   await sessionService.upsertTelegramUser(message.from);
-  await sessionService.getOrCreateSession(userId, chatId);
+  const session = await sessionService.getOrCreateSession(userId, chatId);
+  const commandMatch = text.match(/^\/([a-z0-9_]+)(?:@[^\s]+)?$/i);
+  const command = commandMatch?.[1].toLowerCase();
 
-  if (text === '/start') {
+  if (command === 'start') {
+    await retireInteractiveMessage(tg, chatId, session.last_message_id);
     if (!alreadyApplied) {
       await sessionService.resetSession(userId, chatId, updateId);
     }
     await tg.sendMessage({
       chat_id: chatId,
-      text: `<b>Welcome to TeleFont!</b> 🎨\n\nSend me a link to any font family on <b>MyFonts.com</b> to start.\n\n<i>Example:</i> <code>https://www.myfonts.com/collections/helvetica-now-font-monotype-imaging</code>`,
+      text: `<b>Chào mừng bạn đến với TeleFont!</b> 🎨\n\nChọn <code>/muahang</code> để bắt đầu mua hàng hoặc <code>/trogiup</code> để xem hướng dẫn.`,
+    });
+    return;
+  }
+
+  if (command === 'trogiup') {
+    await tg.sendMessage({
+      chat_id: chatId,
+      text: `<b>Trợ giúp</b>\n\nQuy trình mua hàng:\n1. Chọn <code>/muahang</code>.\n2. Gửi liên kết họ phông trên MyFonts.\n3. Chờ tải danh mục phông chữ.\n4. Chọn kiểu chữ.\n5. Chọn định dạng tệp.\n6. Xác nhận đơn hàng.\n7. Chuyển đúng số tiền với mã thanh toán được hiển thị.\n8. Hệ thống tự động xác nhận thanh toán.\n9. Tệp được xử lý và gửi trực tiếp vào cuộc trò chuyện dưới dạng tệp ZIP.`,
+    });
+    return;
+  }
+
+  if (command === 'muahang') {
+    await retireInteractiveMessage(tg, chatId, session.last_message_id);
+    if (!alreadyApplied) {
+      await sessionService.resetSession(userId, chatId, updateId);
+    }
+    await tg.sendMessage({
+      chat_id: chatId,
+      text: `🛒 <b>Mua hàng</b>\n\nHãy gửi liên kết họ phông trên <b>MyFonts.com</b> để bắt đầu.`,
     });
     return;
   }
@@ -172,9 +207,9 @@ async function handleMessage(
   if (!normalized.isValid || !normalized.canonicalUrl || !normalized.canonicalKey) {
     await tg.sendMessage({
       chat_id: chatId,
-      text: `⚠️ <b>Invalid MyFonts Link</b>\n\n${escapeHtml(
-        normalized.reason || 'Please provide a valid https MyFonts URL.'
-      )}\n\n<i>Example:</i> <code>https://www.myfonts.com/collections/helvetica-now-font-monotype-imaging</code>`,
+      text: `⚠️ <b>Liên kết MyFonts không hợp lệ</b>\n\n${escapeHtml(
+        localizeMyFontsReason(normalized.reason)
+      )}\n\n<i>Ví dụ:</i> <code>https://www.myfonts.com/collections/helvetica-now-font-monotype-imaging</code>`,
     });
     return;
   }
@@ -191,29 +226,36 @@ async function handleMessage(
 
   if (!catalog) {
     // Catalog pending (future A23 agent will satisfy this)
+    await retireInteractiveMessage(tg, chatId, session.last_message_id);
+    await sessionService.setLastMessageId(userId, null);
     if (!alreadyApplied) {
       await sessionService.setStatusUnconditional(userId, 'AWAITING_CATALOG');
     }
-    await tg.sendMessage({
+    const sent = await tg.sendMessage({
       chat_id: chatId,
-      text: `🔍 <b>Analyzing font catalog...</b>\n\nWe are analyzing:\n<code>${escapeHtml(
+      text: `🔍 <b>Đang tải danh mục phông chữ...</b>\n\nĐang phân tích:\n<code>${escapeHtml(
         normalized.canonicalUrl
-      )}</code>\n\nPlease wait a moment.`,
+      )}</code>\n\nVui lòng chờ một chút.`,
     });
+    if (sent.message_id) {
+      await sessionService.setStatusUnconditional(userId, 'AWAITING_CATALOG', sent.message_id);
+    }
     return;
   }
 
   // Catalog is ready! Persist to session with fresh workflow_token and render style selection
+  await retireInteractiveMessage(tg, chatId, session.last_message_id);
+  await sessionService.setLastMessageId(userId, null);
   const catalogId = reqRecord.catalog_id || (await catalogService.persistCatalogResult(catalog));
   if (!alreadyApplied) {
     await sessionService.updateSessionCatalog(userId, catalogId, 'SELECTING_STYLES', updateId);
   }
 
-  const session = await sessionService.getSessionByUserId(userId);
-  if (session) {
+  const updatedSession = await sessionService.getSessionByUserId(userId);
+  if (updatedSession) {
     let selectedStyleIds: string[] = [];
     try {
-      selectedStyleIds = JSON.parse(session.selected_styles);
+      selectedStyleIds = JSON.parse(updatedSession.selected_styles);
     } catch {
       selectedStyleIds = [];
     }
@@ -221,7 +263,7 @@ async function handleMessage(
     const { text: msgText, replyMarkup } = renderStyleSelection(
       catalog,
       selectedStyleIds,
-      session.workflow_token
+      updatedSession.workflow_token
     );
     const sent = await tg.sendMessage({
       chat_id: chatId,
@@ -232,6 +274,25 @@ async function handleMessage(
     if (sent.message_id) {
       await sessionService.setStatusUnconditional(userId, 'SELECTING_STYLES', sent.message_id);
     }
+  }
+}
+
+function localizeMyFontsReason(reason?: string): string {
+  switch (reason) {
+    case 'Empty or invalid URL input':
+      return 'Vui lòng gửi một liên kết MyFonts hợp lệ.';
+    case 'Malformed URL':
+      return 'Định dạng liên kết không hợp lệ.';
+    case 'Only https protocol is allowed':
+      return 'Liên kết phải sử dụng giao thức https.';
+    case 'Host is not myfonts.com':
+      return 'Liên kết phải thuộc myfonts.com.';
+    case 'URL must point to a font collection, font family, or product page':
+      return 'Liên kết phải trỏ đến bộ sưu tập, họ phông hoặc sản phẩm phông chữ.';
+    case 'URL lacks a specific font family or product identifier':
+      return 'Liên kết chưa có mã họ phông hoặc sản phẩm phông chữ cụ thể.';
+    default:
+      return 'Vui lòng gửi một liên kết https của họ phông trên MyFonts.';
   }
 }
 
@@ -253,7 +314,7 @@ async function handleCallbackQuery(
   if (!session) {
     await tg.answerCallbackQuery({
       callback_query_id: query.id,
-      text: 'Session expired. Please send a font link again.',
+      text: 'Phiên đã hết hạn. Vui lòng gửi lại liên kết phông chữ.',
       show_alert: true,
     });
     return;
@@ -275,7 +336,7 @@ async function handleCallbackQuery(
     if (!orderId) {
       await tg.answerCallbackQuery({
         callback_query_id: query.id,
-        text: 'Invalid order reference.',
+        text: 'Mã đơn hàng không hợp lệ.',
         show_alert: true,
       });
       return;
@@ -285,7 +346,7 @@ async function handleCallbackQuery(
     if (!order || order.user_id !== userId) {
       await tg.answerCallbackQuery({
         callback_query_id: query.id,
-        text: 'Order not found or unauthorized.',
+        text: 'Không tìm thấy đơn hàng hoặc bạn không có quyền truy cập.',
         show_alert: true,
       });
       return;
@@ -301,7 +362,7 @@ async function handleCallbackQuery(
 
     await tg.answerCallbackQuery({
       callback_query_id: query.id,
-      text: `Current status: ${order.status}`,
+      text: `Trạng thái: ${getOrderStatusLabel(order.status)}`,
     });
     return;
   }
@@ -310,7 +371,7 @@ async function handleCallbackQuery(
   if (!session.catalog_id) {
     await tg.answerCallbackQuery({
       callback_query_id: query.id,
-      text: 'Session expired. Please send a font link again.',
+      text: 'Phiên đã hết hạn. Vui lòng gửi lại liên kết phông chữ.',
       show_alert: true,
     });
     return;
@@ -320,7 +381,7 @@ async function handleCallbackQuery(
   if (!catalog) {
     await tg.answerCallbackQuery({
       callback_query_id: query.id,
-      text: 'Catalog not found. Please send a font link again.',
+      text: 'Không tìm thấy danh mục. Vui lòng gửi lại liên kết MyFonts.',
       show_alert: true,
     });
     return;
@@ -332,7 +393,7 @@ async function handleCallbackQuery(
   if (!token || token !== session.workflow_token) {
     await tg.answerCallbackQuery({
       callback_query_id: query.id,
-      text: 'This menu is expired. Please use the latest message.',
+      text: 'Menu này đã hết hạn. Vui lòng dùng tin nhắn mới nhất.',
       show_alert: true,
     });
     return;
@@ -344,7 +405,7 @@ async function handleCallbackQuery(
       if (session.status !== 'SELECTING_STYLES') {
         await tg.answerCallbackQuery({
           callback_query_id: query.id,
-          text: 'Action is no longer valid in current step.',
+          text: 'Thao tác không còn hợp lệ ở bước hiện tại.',
           show_alert: true,
         });
         return;
@@ -358,7 +419,7 @@ async function handleCallbackQuery(
         if (!targetStyle) {
           await tg.answerCallbackQuery({
             callback_query_id: query.id,
-            text: 'Style not found in catalog.',
+            text: 'Không tìm thấy kiểu chữ trong danh mục.',
             show_alert: true,
           });
           return;
@@ -410,7 +471,7 @@ async function handleCallbackQuery(
           text,
           reply_markup: replyMarkup,
         });
-        await tg.answerCallbackQuery({ callback_query_id: query.id, text: 'All styles selected' });
+        await tg.answerCallbackQuery({ callback_query_id: query.id, text: 'Đã chọn tất cả kiểu chữ' });
         return;
       }
 
@@ -434,7 +495,7 @@ async function handleCallbackQuery(
           text,
           reply_markup: replyMarkup,
         });
-        await tg.answerCallbackQuery({ callback_query_id: query.id, text: 'Selection cleared' });
+        await tg.answerCallbackQuery({ callback_query_id: query.id, text: 'Đã bỏ chọn' });
         return;
       }
 
@@ -452,7 +513,7 @@ async function handleCallbackQuery(
         if (!currentStyles.length) {
           await tg.answerCallbackQuery({
             callback_query_id: query.id,
-            text: 'Please select at least 1 style to continue.',
+            text: 'Vui lòng chọn ít nhất 1 kiểu chữ để tiếp tục.',
             show_alert: true,
           });
           return;
@@ -491,7 +552,7 @@ async function handleCallbackQuery(
       if (session.status !== 'SELECTING_FORMATS') {
         await tg.answerCallbackQuery({
           callback_query_id: query.id,
-          text: 'Action is no longer valid in current step.',
+          text: 'Thao tác không còn hợp lệ ở bước hiện tại.',
           show_alert: true,
         });
         return;
@@ -574,7 +635,7 @@ async function handleCallbackQuery(
         if (!currentFormats.length) {
           await tg.answerCallbackQuery({
             callback_query_id: query.id,
-            text: 'Please select at least 1 font format.',
+            text: 'Vui lòng chọn ít nhất 1 định dạng tệp.',
             show_alert: true,
           });
           return;
@@ -622,9 +683,9 @@ async function handleCallbackQuery(
         await tg.editMessageText({
           chat_id: session.chat_id,
           message_id: query.message?.message_id || session.last_message_id || undefined,
-          text: '❌ <b>Order cancelled.</b>\n\nSend a new MyFonts link whenever you are ready.',
+          text: '❌ <b>Đã hủy đơn hàng.</b>\n\nBạn có thể gửi một liên kết MyFonts mới bất cứ lúc nào.',
         });
-        await tg.answerCallbackQuery({ callback_query_id: query.id, text: 'Order cancelled' });
+        await tg.answerCallbackQuery({ callback_query_id: query.id, text: 'Đã hủy đơn hàng' });
         return;
       }
 
@@ -633,7 +694,7 @@ async function handleCallbackQuery(
         if (session.status !== 'CONFIRMING') {
           await tg.answerCallbackQuery({
             callback_query_id: query.id,
-            text: 'Order confirmation is no longer valid.',
+            text: 'Xác nhận đơn hàng không còn hợp lệ.',
             show_alert: true,
           });
           return;
@@ -660,14 +721,14 @@ async function handleCallbackQuery(
 
           await tg.answerCallbackQuery({
             callback_query_id: query.id,
-            text: result.isExisting ? 'Order already placed!' : 'Order created successfully!',
+            text: result.isExisting ? 'Đơn hàng đã được tạo trước đó.' : 'Đã tạo đơn hàng thành công.',
           });
           return;
         } catch {
           // Controlled generic message without leaking internal D1 error text (BLOCK 5)
           await tg.answerCallbackQuery({
             callback_query_id: query.id,
-            text: 'An error occurred while creating your order. Please try again.',
+            text: 'Đã xảy ra lỗi khi tạo đơn hàng. Vui lòng thử lại.',
             show_alert: true,
           });
           return;
@@ -678,7 +739,7 @@ async function handleCallbackQuery(
     if (err instanceof SessionConflictError) {
       await tg.answerCallbackQuery({
         callback_query_id: query.id,
-        text: 'Action conflict or menu expired. Please refresh.',
+        text: 'Thao tác bị xung đột hoặc menu đã hết hạn. Vui lòng cập nhật lại.',
         show_alert: true,
       });
       return;
@@ -714,9 +775,9 @@ async function replayAppliedCallbackUI(
     await tg.editMessageText({
       chat_id: session.chat_id,
       message_id: messageId,
-      text: '❌ <b>Order cancelled.</b>\n\nSend a new MyFonts link whenever you are ready.',
+      text: '❌ <b>Đã hủy đơn hàng.</b>\n\nBạn có thể gửi một liên kết MyFonts mới bất cứ lúc nào.',
     });
-    await safeAnswer('Order cancelled');
+    await safeAnswer('Đã hủy đơn hàng');
     return;
   }
 
@@ -734,7 +795,7 @@ async function replayAppliedCallbackUI(
       }
     }
 
-    await safeAnswer('Order created successfully!');
+    await safeAnswer('Đã tạo đơn hàng thành công.');
     return;
   }
 
@@ -817,10 +878,10 @@ export function renderStyleSelection(
   workflowToken: string
 ): { text: string; replyMarkup: InlineKeyboardMarkup } {
   const text = `📦 <b>${escapeHtml(catalog.familyName)}</b>\n${
-    catalog.foundry ? `<i>Foundry: ${escapeHtml(catalog.foundry)}</i>\n` : ''
-  }\nSelected styles: <b>${selectedStyleIds.length} / ${
+    catalog.foundry ? `<i>Nhà phát hành: ${escapeHtml(catalog.foundry)}</i>\n` : ''
+  }\nĐã chọn: <b>${selectedStyleIds.length} / ${
     catalog.styles.length
-  }</b>\n\nTap styles below to select or deselect:`;
+  }</b>\n\nChạm vào kiểu chữ bên dưới để chọn hoặc bỏ chọn:`;
 
   const keyboard: InlineKeyboardMarkup['inline_keyboard'] = [];
 
@@ -837,13 +898,13 @@ export function renderStyleSelection(
   }
 
   keyboard.push([
-    { text: 'Select All', callback_data: `st:all:${workflowToken}` },
-    { text: 'Clear', callback_data: `st:clr:${workflowToken}` },
+    { text: 'Chọn tất cả', callback_data: `st:all:${workflowToken}` },
+    { text: 'Bỏ chọn', callback_data: `st:clr:${workflowToken}` },
   ]);
 
   keyboard.push([
     {
-      text: `Next: Select Formats (${selectedStyleIds.length}) ➡️`,
+      text: `Tiếp theo: chọn định dạng (${selectedStyleIds.length}) ➡️`,
       callback_data: `st:nxt:${workflowToken}`,
     },
   ]);
@@ -859,7 +920,7 @@ function renderFormatSelection(
 ): { text: string; replyMarkup: InlineKeyboardMarkup } {
   const text = `📦 <b>${escapeHtml(
     catalog.familyName
-  )}</b>\n\nSelected Styles: <b>${stylesCount}</b>\n\nChoose font formats to include:`;
+  )}</b>\n\nSố kiểu chữ đã chọn: <b>${stylesCount}</b>\n\nChọn định dạng tệp cần nhận:`;
 
   const formatButtons = SUPPORTED_FORMATS.map((fmt) => {
     const isSelected = selectedFormats.includes(fmt);
@@ -872,8 +933,8 @@ function renderFormatSelection(
   const keyboard: InlineKeyboardMarkup['inline_keyboard'] = [
     formatButtons,
     [
-      { text: '⬅️ Back to Styles', callback_data: `fmt:bck:${workflowToken}` },
-      { text: 'Review Order ➡️', callback_data: `fmt:nxt:${workflowToken}` },
+      { text: '⬅️ Quay lại kiểu chữ', callback_data: `fmt:bck:${workflowToken}` },
+      { text: 'Xem lại đơn ➡️', callback_data: `fmt:nxt:${workflowToken}` },
     ],
   ];
 
@@ -906,20 +967,20 @@ function renderOrderConfirmation(
     .join('\n');
 
   const extraStylesCount = selectedStyles.length > 15 ? selectedStyles.length - 15 : 0;
-  const extraText = extraStylesCount > 0 ? `\n  <i>...and ${extraStylesCount} more styles</i>` : '';
+  const extraText = extraStylesCount > 0 ? `\n  <i>...và ${extraStylesCount} kiểu chữ khác</i>` : '';
 
-  const text = `📋 <b>Order Confirmation</b>\n\n• <b>Font Family:</b> ${escapeHtml(
+  const text = `📋 <b>Xác nhận đơn hàng</b>\n\n• <b>Họ phông:</b> ${escapeHtml(
     catalog.familyName
   )}\n${
-    catalog.foundry ? `• <b>Foundry:</b> ${escapeHtml(catalog.foundry)}\n` : ''
-  }• <b>Styles (${selectedStyles.length}):</b>\n${stylesListText}${extraText}\n• <b>Formats:</b> ${selectedFormats.join(
+    catalog.foundry ? `• <b>Nhà phát hành:</b> ${escapeHtml(catalog.foundry)}\n` : ''
+  }• <b>Kiểu chữ (${selectedStyles.length}):</b>\n${stylesListText}${extraText}\n• <b>Định dạng:</b> ${selectedFormats.join(
     ', '
-  )}\n• <b>Total Amount:</b> <b>${totalAmount.toLocaleString('vi-VN')} VND</b>\n\nConfirm to create your order:`;
+  )}\n• <b>Tổng tiền:</b> <b>${totalAmount.toLocaleString('vi-VN')} VND</b>\n\nXác nhận để tạo đơn hàng:`;
 
   const keyboard: InlineKeyboardMarkup['inline_keyboard'] = [
     [
-      { text: '❌ Cancel', callback_data: `ord:ccl:${workflowToken}` },
-      { text: '💳 Confirm Order', callback_data: `ord:cnf:${workflowToken}` },
+      { text: '❌ Hủy', callback_data: `ord:ccl:${workflowToken}` },
+      { text: '💳 Xác nhận đơn', callback_data: `ord:cnf:${workflowToken}` },
     ],
   ];
 
@@ -937,15 +998,15 @@ export function renderOrderCreatedMessage(
   let qrSection = '';
 
   if (hasBankInfo && order.payment_code) {
-    bankSection = `\n💳 <b>Bank Transfer Info:</b>\n• <b>Bank:</b> <code>${escapeHtml(
+    bankSection = `\n💳 <b>Thông tin chuyển khoản:</b>\n• <b>Ngân hàng:</b> <code>${escapeHtml(
       env.BANK_ID!
-    )}</code>\n• <b>Account No:</b> <code>${escapeHtml(
+    )}</code>\n• <b>Số tài khoản:</b> <code>${escapeHtml(
       env.BANK_ACCOUNT_NUMBER!
     )}</code>\n${
-      env.BANK_ACCOUNT_NAME
-        ? `• <b>Account Name:</b> <code>${escapeHtml(env.BANK_ACCOUNT_NAME)}</code>\n`
+    env.BANK_ACCOUNT_NAME
+        ? `• <b>Tên tài khoản:</b> <code>${escapeHtml(env.BANK_ACCOUNT_NAME)}</code>\n`
         : ''
-    }• <b>Transfer Content / Code:</b> <code>${escapeHtml(paymentCode)}</code>\n`;
+    }• <b>Nội dung / mã chuyển khoản:</b> <code>${escapeHtml(paymentCode)}</code>\n`;
 
     const vietQrUrl = generateVietQrUrl({
       bankId: env.BANK_ID!,
@@ -956,37 +1017,56 @@ export function renderOrderCreatedMessage(
       template: env.VIETQR_TEMPLATE,
     });
 
-    qrSection = `\n📲 <a href="${escapeHtml(vietQrUrl)}"><b>Click here to open VietQR Code</b></a>\n`;
+    qrSection = `\n📲 <a href="${escapeHtml(vietQrUrl)}"><b>Mở mã VietQR</b></a>\n`;
   }
 
-  let statusBadge = `<code>${order.status}</code>`;
+  let statusBadge = `<code>${escapeHtml(getOrderStatusLabel(order.status))}</code>`;
   let statusNote = '';
   if (order.status === 'COMPLETED') {
-    statusBadge = `<b>COMPLETED 📦</b>`;
-    statusNote = `\n🎉 <b>Your font bundle has been delivered directly to this chat as a document above!</b>\n`;
+    statusBadge = `<b>Đã hoàn tất 📦</b>`;
+    statusNote = `\n🎉 <b>Tệp ZIP đã được gửi trực tiếp vào cuộc trò chuyện này.</b>\n`;
   } else if (order.status === 'PROCESSING') {
-    statusBadge = `<b>PROCESSING ⚙️</b>`;
-    statusNote = `\n⚙️ <i>Your fonts are currently being generated. This usually takes under a minute.</i>\n`;
+    statusBadge = `<b>Đang xử lý ⚙️</b>`;
+    statusNote = `\n⚙️ <i>Phông chữ đang được tạo. Thường sẽ mất chưa đến một phút.</i>\n`;
   } else if (order.status === 'PAID') {
-    statusBadge = `<b>PAID ✅</b>`;
-    statusNote = `\n🎉 <i>Payment confirmed! Your order is queued for processing.</i>\n`;
+    statusBadge = `<b>Đã thanh toán ✅</b>`;
+    statusNote = `\n✅ <i>Thanh toán thành công. Đang xử lý tệp...</i>\n`;
   } else if (order.status === 'AWAITING_PAYMENT') {
-    statusBadge = `<b>AWAITING_PAYMENT ⏳</b>`;
-    statusNote = `\n⏳ <i>Please transfer the exact amount with the transfer content above. Payment is confirmed automatically within 1-2 minutes.</i>\n`;
+    statusBadge = `<b>Chờ thanh toán ⏳</b>`;
+    statusNote = `\n⏳ <i>Vui lòng chuyển đúng số tiền và ghi đúng mã thanh toán ở trên. Hệ thống sẽ tự động xác nhận trong 1–2 phút.</i>\n`;
   }
 
-  const text = `🎉 <b>Order Info:</b>\n\n• <b>Order ID:</b> <code>${order.id}</code>\n• <b>Status:</b> ${statusBadge}\n• <b>Payment Code:</b> <code>${escapeHtml(
+  const text = `🎉 <b>Thông tin đơn hàng:</b>\n\n• <b>Mã đơn:</b> <code>${escapeHtml(order.id)}</code>\n• <b>Trạng thái:</b> ${statusBadge}\n• <b>Mã thanh toán:</b> <code>${escapeHtml(
     paymentCode
-  )}</code>\n• <b>Amount:</b> <b>${order.total_amount.toLocaleString('vi-VN')} VND</b>\n${order.status === 'AWAITING_PAYMENT' ? bankSection + qrSection : ''}${statusNote}`;
+  )}</code>\n• <b>Số tiền:</b> <b>${order.total_amount.toLocaleString('vi-VN')} VND</b>\n${order.status === 'AWAITING_PAYMENT' ? bankSection + qrSection : ''}${statusNote}`;
 
   const keyboard: InlineKeyboardMarkup['inline_keyboard'] = [
     [
       {
-        text: '🔄 Refresh Status',
+        text: '🔄 Cập nhật trạng thái',
         callback_data: `ord:chk:${order.id}`,
       },
     ],
   ];
 
   return { text, replyMarkup: { inline_keyboard: keyboard } };
+}
+
+function getOrderStatusLabel(status: string): string {
+  switch (status) {
+    case 'AWAITING_PAYMENT':
+      return 'Chờ thanh toán';
+    case 'PAID':
+      return 'Đã thanh toán';
+    case 'PROCESSING':
+      return 'Đang xử lý';
+    case 'COMPLETED':
+      return 'Đã hoàn tất';
+    case 'FAILED':
+      return 'Xử lý thất bại';
+    case 'CANCELLED':
+      return 'Đã hủy';
+    default:
+      return 'Đang cập nhật';
+  }
 }

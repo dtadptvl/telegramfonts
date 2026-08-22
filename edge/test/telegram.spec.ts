@@ -364,7 +364,7 @@ describe('Telegram Webhook & UX Flow', () => {
       expect(res2.status).toBe(200);
 
       // Verify UI text contains format selection menu
-      expect(lastEditPayload.text).toContain('Choose font formats to include');
+      expect(lastEditPayload.text).toContain('Chọn định dạng tệp cần nhận');
 
       // Verify state and version were not bumped again
       const sessAfterAttempt2 = await sessionService.getSessionByUserId('88884');
@@ -449,7 +449,7 @@ describe('Telegram Webhook & UX Flow', () => {
       await waitOnExecutionContext(ctx2);
       expect(res2.status).toBe(200);
 
-      expect(lastEditPayload.text).toContain('Order cancelled');
+      expect(lastEditPayload.text).toContain('Đã hủy đơn hàng');
     });
 
     it('handles no-op edit and expired callback ack on APPLIED retry: response 200, ledger COMPLETED, state/version unchanged', async () => {
@@ -614,6 +614,61 @@ describe('Telegram Webhook & UX Flow', () => {
         .bind('11111')
         .first<{ status: string }>();
       expect(session?.status).toBe('IDLE');
+    });
+
+    it('handles /start, /trogiup, and /muahang with Vietnamese customer copy', async () => {
+      const sentTexts: string[] = [];
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        const urlStr = typeof input === 'string' ? input : input.toString();
+        if (urlStr.includes('/sendMessage') && init?.body) {
+          const payload = JSON.parse(String(init.body)) as { text?: string };
+          if (payload.text) sentTexts.push(payload.text);
+        }
+        if (urlStr.includes('api.telegram.org')) {
+          return new Response(JSON.stringify({ ok: true, result: { message_id: 500 + sentTexts.length } }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return new Response('Not found', { status: 404 });
+      };
+
+      const sendCommand = async (updateId: number, text: string) => {
+        const update: TelegramUpdate = {
+          update_id: updateId,
+          message: {
+            message_id: updateId,
+            from: { id: 12221, is_bot: false, first_name: 'CommandUser' },
+            chat: { id: 12221, type: 'private', first_name: 'CommandUser' },
+            date: Date.now(),
+            text,
+          },
+        };
+        const req = new Request('http://example.com/webhooks/telegram', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Telegram-Bot-Api-Secret-Token': WEBHOOK_SECRET,
+          },
+          body: JSON.stringify(update),
+        });
+        const ctx = createExecutionContext();
+        const res = await worker.fetch(req, testEnv, ctx);
+        await waitOnExecutionContext(ctx);
+        expect(res.status).toBe(200);
+      };
+
+      await sendCommand(1101, '/start');
+      await sendCommand(1102, '/trogiup');
+      await sendCommand(1103, '/muahang');
+
+      expect(sentTexts[0]).toContain('Chào mừng bạn đến với TeleFont');
+      expect(sentTexts[0]).toContain('/muahang');
+      expect(sentTexts[1]).toContain('<b>Trợ giúp</b>');
+      expect(sentTexts[1]).toContain('tệp ZIP');
+      expect(sentTexts[2]).toContain('<b>Mua hàng</b>');
+      expect(sentTexts[2]).toContain('MyFonts.com');
+      expect(sentTexts.every((text) => !text.includes('Worker'))).toBe(true);
     });
 
     it('creates and deduplicates catalog request when catalog is pending', async () => {

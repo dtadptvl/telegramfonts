@@ -1,7 +1,7 @@
 import type { Env } from '../env';
 import { CatalogService } from '../services/catalog-service';
 import { SessionService } from '../services/session-service';
-import { TelegramClient } from '../services/telegram-client';
+import { retireInteractiveMessage, TelegramClient } from '../services/telegram-client';
 import { renderStyleSelection } from './telegram-webhook';
 import { verifyInternalAuth } from './internal-jobs';
 import { emitStructuredLog } from '../utils/logger';
@@ -235,6 +235,9 @@ export async function handleInternalCatalog(
           continue;
         }
 
+        await retireInteractiveMessage(tg, userSession.chat_id, userSession.last_message_id);
+        await sessionService.setLastMessageId(userSession.user_id, null);
+
         // Update session to SELECTING_STYLES
         await sessionService.updateSessionCatalog(
           userSession.user_id,
@@ -369,6 +372,9 @@ export async function handleInternalCatalog(
           .first<{ canonical_key: string }>();
 
         if (!latestReqForUser || latestReqForUser.canonical_key === reqRow.canonical_key) {
+          await retireInteractiveMessage(tg, userSession.chat_id, userSession.last_message_id);
+          await sessionService.setLastMessageId(userSession.user_id, null);
+
           // Reset session back to IDLE
           await sessionService.setStatusUnconditional(userSession.user_id, 'IDLE');
 

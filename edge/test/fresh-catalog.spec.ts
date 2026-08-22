@@ -304,7 +304,7 @@ describe('Phase 7: Fresh-Catalog E2E Resolution & Scheduled Cron Delivery', () =
 
       const staleResp = await worker.fetch(staleReq, env, {} as ExecutionContext);
       expect(staleResp.status).toBe(200);
-      expect(lastAnswerCallbackText).toContain('This menu is expired');
+      expect(lastAnswerCallbackText).toContain('Menu này đã hết hạn');
     } finally {
       fetchSpy.mockRestore();
     }
