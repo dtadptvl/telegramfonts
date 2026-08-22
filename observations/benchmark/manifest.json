@@ -1,0 +1,15 @@
+{
+  "git_commit": "327c3a8a586b0be3a0643f217495927e167a5574",
+  "git_is_dirty": true,
+  "os_name": "Windows",
+  "os_release": "10",
+  "architecture": "AMD64",
+  "python_version": "3.14.6",
+  "chromium_version": "Chrome/151.0.7922.140",
+  "playwright_version": null,
+  "freetype_version": null,
+  "harfbuzz_version": null,
+  "fonttools_version": "4.63.0",
+  "config_hash": "5a4150d9b710b66af22c0776626713550f212ce8ff86189d4bea78b45e69ab5b",
+  "timestamp": "2026-08-21T08:05:31.796274+00:00"
+}
