@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-08-22T00:04:43Z",
+  "timestamp": "2026-08-22T00:19:19Z",
   "device_identity": {
     "hostname": "localhost",
     "system": "Android",
@@ -13,37 +13,41 @@
     "job_1": {
       "job_id": "job_a23_live_1",
       "order_id": "ord_a23_live_1",
-      "lease_token": "24f54040-9122-4553-84bc-cd3493467677",
-      "artifact_key": "artifacts/ord_a23_live_1/job_a23_live_1/9c26ff889eb7f41d8a33f1355754aef416898e1583e6d15d9bf4562f52155721.zip",
-      "duration_seconds": 0.994,
+      "lease_token": "24680cda-fb7a-4d46-a819-b630ebaf8543",
+      "artifact_key": "artifacts/ord_a23_live_1/job_a23_live_1/7593ebdf8cc9aa2b047f52de55846a17e75a2f43de6887186ce3ebb050ff1ecd.zip",
+      "duration_seconds": 50.218,
+      "observed_external_network_requests": 0,
       "status": "COMPLETED"
     },
     "job_2": {
       "job_id": "job_a23_live_2",
       "order_id": "ord_a23_live_2",
-      "lease_token": "55329cc8-17a3-4e4a-afe7-96a968f8d6e3",
-      "artifact_key": "artifacts/ord_a23_live_2/job_a23_live_2/9c26ff889eb7f41d8a33f1355754aef416898e1583e6d15d9bf4562f52155721.zip",
-      "duration_seconds": 0.909,
-      "status": "COMPLETED",
-      "external_network_recrawls": 0
+      "lease_token": "33fb465f-ede2-4f16-a5da-040213d8cf37",
+      "artifact_key": "artifacts/ord_a23_live_2/job_a23_live_2/b37e605c0bed0a25e7e1302a73672ceea7eb8f98b635f664f021b37b9b1e621d.zip",
+      "duration_seconds": 50.432,
+      "observed_external_network_requests": 0,
+      "status": "COMPLETED"
     },
-    "zero_recrawls_verified": true,
+    "zero_recrawls_observed": true,
     "passed": true
   },
   "live_worker_process_kill_restart_evidence": {
     "test": "deployed_worker_real_kill_restart_and_lease_fencing",
     "job_id": "job_a23_live_3",
     "order_id": "ord_a23_live_3",
-    "killed_process_pid": 26664,
+    "killed_process_pid": 29195,
+    "restarted_process_pid": 29320,
     "kill_signal": "SIGKILL (9)",
-    "stale_lease_token_T1": "90d47573-b923-4b97-a3d3-47054b03b0f4",
-    "active_lease_token_T2": "ce5bbba2-2ce5-4e17-b339-ba0bb4a0472e",
+    "process_killed_confirmed": true,
+    "stale_lease_token_T1": "76ae2db8-694f-4749-9c21-224839dbbea7",
+    "active_lease_token_T2": "3e0e83c2-05d0-4bbc-ab6f-b129278feb97",
     "stale_lease_fenced_and_rejected_by_worker": true,
-    "recovered_from_checkpoint": true,
-    "repeated_durable_work_count": 0,
-    "remaining_glyphs_processed": 241,
+    "resumed_from_durable_checkpoint": true,
+    "repeated_work_glyph_count": 0,
+    "newly_processed_remaining_glyphs": 7,
+    "total_reconstructed_glyphs": 13,
     "d1_final_status": "COMPLETED",
-    "artifact_key": "artifacts/ord_a23_live_3/job_a23_live_3/9c26ff889eb7f41d8a33f1355754aef416898e1583e6d15d9bf4562f52155721.zip",
+    "artifact_key": "artifacts/ord_a23_live_3/job_a23_live_3/3bf10a5e581be24056db1bd058b1d279599dd30d111b2c95590d40875f40c749.zip",
     "passed": true
   }
 }
