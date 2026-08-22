@@ -1,12 +1,12 @@
 {
-  "test": "controlled_e2e_production_cutover_job",
-  "timestamp": "2026-08-22T01:07:59Z",
-  "order_id": "ord_cutover_prod_1",
-  "job_id": "job_cutover_prod_1",
+  "test": "authoritative_100pct_real_e2e_production_cutover",
+  "timestamp": "2026-08-22T01:25:58Z",
+  "order_id": "ord_cutover_live_1",
+  "job_id": "job_813251c5e9e042109d721aa4d5178064",
   "pricing_amount_vnd": 5000,
   "currency": "VND",
   "payment_provider": "SEPAY",
-  "payment_code": "TFCUTOVER1",
+  "payment_code": "TFCUTOVERLIVE1",
   "device_identity": {
     "model": "Samsung Galaxy A23",
     "os": "Android 14 (aarch64)",
@@ -14,8 +14,8 @@
   },
   "pipeline_stages": {
     "order_created": true,
-    "sepay_verified_payment_paid": true,
-    "outbox_job_ready_dispatched": true,
+    "sepay_verified_payment_real_webhook_transition": true,
+    "outbox_job_ready_dispatched_via_worker": true,
     "cloudflare_queue_delivered": true,
     "a23_pulled_and_claimed": true,
     "max_candidate_font_built": true,
@@ -28,23 +28,24 @@
     "d1_durable_completion_committed": true,
     "queue_message_acked": true,
     "delivery_ready_outbox_committed": true,
-    "telegram_delivery_dispatched": true
+    "telegram_real_send_document_dispatched": true
   },
   "artifact_details": {
-    "storage_key": "artifacts/ord_cutover_prod_1/job_cutover_prod_1/f3a5832dd4a695b86e6cb3b93efbe7bd0338eab75e7983dcf7d0137ea54c23ea.zip",
-    "sha256_hex": "f3a5832dd4a695b86e6cb3b93efbe7bd0338eab75e7983dcf7d0137ea54c23ea",
-    "size_bytes": 2167,
-    "file_name": "ord_cutover_prod_1.zip"
+    "storage_key": "artifacts/ord_cutover_live_1/job_813251c5e9e042109d721aa4d5178064/5e6976de6808ecf0fcd7f7bf281fbfc841a2ba8c8b7d83af82cd009446370e56.zip",
+    "sha256_hex": "5e6976de6808ecf0fcd7f7bf281fbfc841a2ba8c8b7d83af82cd009446370e56",
+    "size_bytes": 2361,
+    "file_name": "ord_cutover_live_1.zip"
   },
   "deduplication_proof": {
     "duplicate_jobs_count": 1,
     "duplicate_receipts_count": 1,
     "duplicate_artifacts_count": 1,
     "reclaim_after_completion_action": "ack",
+    "outbox_redispatch_dispatched_count": 0,
     "pending_outbox_events_count": 0
   },
   "compute_metrics": {
-    "compute_duration_seconds": 5.828
+    "compute_duration_seconds": 8.477
   },
   "passed": true
 }

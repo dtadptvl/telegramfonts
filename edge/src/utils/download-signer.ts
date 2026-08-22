@@ -169,8 +169,11 @@ export async function verifyDownloadSignature(
     return { valid: false, reason: 'SIGNATURE_MISMATCH' };
   }
 
-  const isMatch = crypto.subtle.timingSafeEqual(providedBytes, expectedBytes);
-  if (!isMatch) {
+  let diff = 0;
+  for (let i = 0; i < providedBytes.byteLength; i++) {
+    diff |= providedBytes[i] ^ expectedBytes[i];
+  }
+  if (diff !== 0) {
     return { valid: false, reason: 'SIGNATURE_MISMATCH' };
   }
 

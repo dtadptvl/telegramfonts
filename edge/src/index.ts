@@ -3,6 +3,7 @@ import { handleTelegramWebhook } from './handlers/telegram-webhook';
 import { handleSePayWebhook } from './handlers/sepay-webhook';
 import { handleInternalJobs } from './handlers/internal-jobs';
 import { handleInternalCatalog } from './handlers/internal-catalog';
+import { handleInternalOutbox } from './handlers/internal-outbox';
 import { handleDownload } from './handlers/downloads';
 import { OutboxService } from './services/outbox-service';
 
@@ -25,15 +26,15 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
-    if (request.method === 'GET' && url.pathname === '/health') {
-      return new Response(JSON.stringify({ status: 'ok' }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }
+    try {
+      if (request.method === 'GET' && url.pathname === '/health') {
+        return new Response(JSON.stringify({ status: 'ok' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
 
-    if (request.method === 'GET' && url.pathname === '/ready') {
-      try {
+      if (request.method === 'GET' && url.pathname === '/ready') {
         if (!env.DB) {
           return new Response(JSON.stringify({ status: 'unavailable' }), {
             status: 503,
@@ -69,38 +70,42 @@ export default {
           status: 503,
           headers: { 'Content-Type': 'application/json' },
         });
-      } catch {
-        return new Response(JSON.stringify({ status: 'unavailable' }), {
-          status: 503,
-          headers: { 'Content-Type': 'application/json' },
-        });
       }
-    }
 
-    if (request.method === 'POST' && url.pathname === '/webhooks/telegram') {
-      return handleTelegramWebhook(request, env, ctx);
-    }
+      if (request.method === 'POST' && url.pathname === '/webhooks/telegram') {
+        return handleTelegramWebhook(request, env, ctx);
+      }
 
-    if (request.method === 'POST' && url.pathname === '/webhooks/sepay') {
-      return handleSePayWebhook(request, env, ctx);
-    }
+      if (request.method === 'POST' && url.pathname === '/webhooks/sepay') {
+        return handleSePayWebhook(request, env, ctx);
+      }
 
-    if (url.pathname.startsWith('/internal/jobs/')) {
-      return handleInternalJobs(request, env, ctx);
-    }
+      if (url.pathname.startsWith('/internal/jobs/')) {
+        return handleInternalJobs(request, env, ctx);
+      }
 
-    if (url.pathname.startsWith('/internal/catalog-requests')) {
-      return handleInternalCatalog(request, env, ctx);
-    }
+      if (url.pathname.startsWith('/internal/catalog-requests')) {
+        return handleInternalCatalog(request, env, ctx);
+      }
 
-    if (url.pathname.startsWith('/downloads/')) {
-      return handleDownload(request, env, ctx);
-    }
+      if (url.pathname.startsWith('/internal/outbox')) {
+        return handleInternalOutbox(request, env, ctx);
+      }
 
-    return new Response(JSON.stringify({ error: 'Not Found' }), {
-      status: 404,
-      headers: { 'Content-Type': 'application/json' },
-    });
+      if (url.pathname.startsWith('/downloads/')) {
+        return handleDownload(request, env, ctx);
+      }
+
+      return new Response(JSON.stringify({ error: 'Not Found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    } catch (err: any) {
+      return new Response(JSON.stringify({ error: err.message, stack: err.stack }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
   },
 
   async scheduled(_event: ScheduledEvent, env: Env, _ctx: ExecutionContext): Promise<void> {
