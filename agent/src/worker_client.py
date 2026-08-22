@@ -172,11 +172,11 @@ class WorkerJobClient:
         if not self._external_client:
             await self._client.aclose()
 
-    async def claim(self, job_id: str) -> ClaimResult:
+    async def claim(self, job_id: str, lease_seconds: int | None = None) -> ClaimResult:
         url = f"{self.base_url}/{job_id}/claim"
         payload = {
             "worker_id": self.settings.A23_WORKER_ID,
-            "lease_seconds": self.settings.LEASE_DURATION_SECONDS,
+            "lease_seconds": lease_seconds if lease_seconds is not None else self.settings.LEASE_DURATION_SECONDS,
         }
 
         try:
