@@ -163,6 +163,28 @@ async def test_production_acquire_source_unknown_family_non_empty_store_fails_cl
 
 
 @pytest.mark.asyncio
+async def test_production_acquire_source_known_family_unknown_style_fails_closed():
+    """Verify that a known family with an unknown requested style fails closed and makes 0 HTTP calls."""
+    http_call_count = 0
+
+    def fail_on_http(request: httpx.Request) -> httpx.Response:
+        nonlocal http_call_count
+        http_call_count += 1
+        raise AssertionError(f"Unexpected HTTP request made to {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fail_on_http)) as http_client:
+        acquirer = SourceAcquirer(client=http_client)
+        # Request non-existent 'black_italic' style on known 'be_vietnam_pro'
+        styles = [ClaimStyle(id="black_italic", display_name="Black Italic")]
+        with pytest.raises(ValueError, match="NO_MAX_COVERAGE_FOR_be_vietnam_pro_black_italic"):
+            await acquirer.acquire_source(
+                "https://www.myfonts.com/collections/be-vietnam-pro",
+                styles,
+            )
+        assert http_call_count == 0
+
+
+@pytest.mark.asyncio
 async def test_distinct_preview_contents_produce_distinct_glyphs_with_same_url():
     acquirer = SourceAcquirer()
     styles = [ClaimStyle(id="reg", display_name="Regular")]

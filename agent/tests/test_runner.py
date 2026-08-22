@@ -564,7 +564,7 @@ async def test_multi_consumer_queue_duplicate_and_ack_loss_redelivery_proves_sin
                     "lease_expires_at": int(time.time() * 1000) + 300000,
                     "source_url": "https://www.myfonts.com/collections/be-vietnam-pro",
                     "family_name": "Be Vietnam Pro",
-                    "styles": [{"id": "s1", "display_name": "Regular"}],
+                    "styles": [{"id": "regular", "display_name": "Regular"}],
                     "formats": ["TTF"],
                 },
             )
