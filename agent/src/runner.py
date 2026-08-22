@@ -57,7 +57,10 @@ class JobRunner:
         self.queue_client = queue_client
         self.worker_client = worker_client
         self.scratch_manager = scratch_manager or ScratchManager(settings.SCRATCH_DIR)
-        self.source_acquirer = source_acquirer or SourceAcquirer(timeout=settings.HTTP_TIMEOUT_SECONDS)
+        self.source_acquirer = source_acquirer or SourceAcquirer(
+            timeout=settings.HTTP_TIMEOUT_SECONDS,
+            cache_dir=self.scratch_manager.root / "source_cache",
+        )
         self.font_builder = font_builder or FontBuilderService()
         self.packager = packager or PackagerService()
 

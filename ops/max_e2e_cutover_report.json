@@ -1,0 +1,50 @@
+{
+  "test": "controlled_e2e_production_cutover_job",
+  "timestamp": "2026-08-22T01:07:59Z",
+  "order_id": "ord_cutover_prod_1",
+  "job_id": "job_cutover_prod_1",
+  "pricing_amount_vnd": 5000,
+  "currency": "VND",
+  "payment_provider": "SEPAY",
+  "payment_code": "TFCUTOVER1",
+  "device_identity": {
+    "model": "Samsung Galaxy A23",
+    "os": "Android 14 (aarch64)",
+    "runtime": "Termux Python 3.14.6"
+  },
+  "pipeline_stages": {
+    "order_created": true,
+    "sepay_verified_payment_paid": true,
+    "outbox_job_ready_dispatched": true,
+    "cloudflare_queue_delivered": true,
+    "a23_pulled_and_claimed": true,
+    "max_candidate_font_built": true,
+    "formats_validated": [
+      "TTF",
+      "OTF",
+      "WOFF2"
+    ],
+    "r2_artifact_uploaded": true,
+    "d1_durable_completion_committed": true,
+    "queue_message_acked": true,
+    "delivery_ready_outbox_committed": true,
+    "telegram_delivery_dispatched": true
+  },
+  "artifact_details": {
+    "storage_key": "artifacts/ord_cutover_prod_1/job_cutover_prod_1/f3a5832dd4a695b86e6cb3b93efbe7bd0338eab75e7983dcf7d0137ea54c23ea.zip",
+    "sha256_hex": "f3a5832dd4a695b86e6cb3b93efbe7bd0338eab75e7983dcf7d0137ea54c23ea",
+    "size_bytes": 2167,
+    "file_name": "ord_cutover_prod_1.zip"
+  },
+  "deduplication_proof": {
+    "duplicate_jobs_count": 1,
+    "duplicate_receipts_count": 1,
+    "duplicate_artifacts_count": 1,
+    "reclaim_after_completion_action": "ack",
+    "pending_outbox_events_count": 0
+  },
+  "compute_metrics": {
+    "compute_duration_seconds": 5.828
+  },
+  "passed": true
+}
