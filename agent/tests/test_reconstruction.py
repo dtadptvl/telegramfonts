@@ -286,6 +286,10 @@ def test_representative_subset_physical_smoke():
         pytest.skip("Benchmark observations or ground truth font not available")
 
     store = ObservationStore(store_dir)
+    obs_sample = store.get_glyph_observations("be_vietnam_pro", "regular", ord("A"))
+    if not obs_sample or not any(b for _, b in obs_sample):
+        pytest.skip("Benchmark observation raw rasters not available")
+
     evaluator = GroundTruthGeometryEvaluator(ttf_path)
     solver = MaxReconstructionSolver()
 
