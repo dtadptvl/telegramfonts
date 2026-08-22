@@ -15,7 +15,11 @@ export function verifyInternalAuth(request: Request, secret: string | undefined)
   const secretBytes = enc.encode(secret.trim());
 
   if (tokenBytes.byteLength !== secretBytes.byteLength) return false;
-  return crypto.subtle.timingSafeEqual(tokenBytes, secretBytes);
+  let diff = 0;
+  for (let i = 0; i < tokenBytes.byteLength; i++) {
+    diff |= tokenBytes[i] ^ secretBytes[i];
+  }
+  return diff === 0;
 }
 
 export function hexToArrayBuffer(hex: string): ArrayBuffer {

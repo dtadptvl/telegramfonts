@@ -132,14 +132,14 @@ async def test_package_multipart_partitioning_and_naming(tmp_path: Path):
     out_dir.mkdir()
 
     # Use a small per-part cap to trigger multipart bin-packing across 3 files
-    # Each file is ~2-3 KB, so 3500 bytes forces partition into 2 or 3 parts
+    # Each file is ~1.1 KB, so 2000 bytes forces partition into 2 or 3 parts
     manifest = packager.package_job_output(
         job_id="job_multi_1",
         order_id="ord_multi_1",
         family_name="Roboto Flex",
         files=[f1, f2, f3],
         output_dir=out_dir,
-        max_part_bytes=3500,
+        max_part_bytes=2000,
     )
 
     assert len(manifest.parts) > 1

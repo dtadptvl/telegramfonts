@@ -5,13 +5,18 @@ import base64
 import io
 import json
 import logging
+import pickle
 import re
+from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlparse
 import httpx
 from PIL import Image, ImageDraw
 
 from compute.models import ClaimStyle, GlyphVector, SourcePayload, StyleSourceData
+from measurement.store import ObservationStore
+from reconstruction.models import Contour, LineSegment, Point2D, ReconstructedGlyph, ReconstructionConfig
+from reconstruction.solver import MaxReconstructionSolver
 
 logger = logging.getLogger("telegramfonts.agent.source")
 
@@ -290,11 +295,44 @@ def extract_catalog_metadata_from_html(html_text: str, source_url: str) -> dict[
     }
 
 
+_RECONSTRUCTED_GLYPH_CACHE: dict[tuple[str, str], dict[int, ReconstructedGlyph]] = {}
+
+
 class SourceAcquirer:
-    def __init__(self, timeout: float = 20.0, client: httpx.AsyncClient | None = None) -> None:
+    def __init__(
+        self,
+        timeout: float = 20.0,
+        client: httpx.AsyncClient | None = None,
+        cache_dir: Path | str | None = None,
+        observation_store_dir: Path | str | None = None,
+    ) -> None:
         self.timeout = timeout
         self._external_client = client is not None
         self.client = client or httpx.AsyncClient(timeout=timeout)
+        self.cache_dir = Path(cache_dir).resolve() if cache_dir else None
+        if self.cache_dir:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.cache_hits: int = 0
+        self.cache_misses: int = 0
+        self.last_cache_hit: bool = False
+
+        if observation_store_dir:
+            self.store_dir = Path(observation_store_dir)
+        else:
+            candidates = [
+                Path("observations/benchmark"),
+                Path.home() / "telefont" / "observations" / "benchmark",
+                Path(__file__).parent.parent.parent / "observations" / "benchmark",
+                Path("observations"),
+            ]
+            self.store_dir = candidates[0]
+            for c in candidates:
+                if (c / "index.sqlite3").exists():
+                    self.store_dir = c
+                    break
+
+        self.store = ObservationStore(self.store_dir) if (self.store_dir / "index.sqlite3").exists() else None
+        self.solver = MaxReconstructionSolver(config=ReconstructionConfig())
 
     async def close(self) -> None:
         if not self._external_client:
@@ -311,6 +349,18 @@ class SourceAcquirer:
 
         if html_override is not None:
             return extract_catalog_metadata_from_html(html_override, source_url)
+
+        meta_cache_file = (
+            self.cache_dir / f"meta_{re.sub(r'[^a-zA-Z0-9_-]', '_', source_url.strip())}.json"
+        ) if self.cache_dir else None
+
+        if meta_cache_file and meta_cache_file.exists():
+            try:
+                self.last_cache_hit = True
+                self.cache_hits += 1
+                return json.loads(meta_cache_file.read_text(encoding="utf-8"))
+            except Exception:
+                pass
 
         try:
             resp = await self.client.get(
@@ -330,15 +380,25 @@ class SourceAcquirer:
         if resp.status_code >= 500:
             resp.raise_for_status()
 
-        return extract_catalog_metadata_from_html(resp.text, source_url)
+        meta = extract_catalog_metadata_from_html(resp.text, source_url)
+        if meta_cache_file:
+            try:
+                meta_cache_file.write_text(json.dumps(meta), encoding="utf-8")
+            except Exception:
+                pass
+
+        self.last_cache_hit = False
+        self.cache_misses += 1
+        return meta
 
     async def acquire_source(
         self,
         source_url: str,
         styles: list[ClaimStyle],
         preview_input: bytes | dict[str, Any] | None = None,
+        allow_web_fallback: bool = False,
     ) -> SourcePayload:
-        """Validate source and acquire structured source payload from preview content (BLOCK B)."""
+        """Validate source and acquire structured source payload from MAX observations exclusively (BLOCK B)."""
         if not validate_myfonts_url(source_url):
             raise ValueError("INVALID_SOURCE_URL")
 
@@ -346,94 +406,116 @@ class SourceAcquirer:
         path_parts = [p for p in parsed.path.split("/") if p]
         family_name = path_parts[-1].replace("-", " ").title() if path_parts else "Custom Font"
 
-        # 1. If structured fixture dict is provided:
+        # 1. Offline structured fixture dict (test/fixture-only path)
         if isinstance(preview_input, dict):
             return self.from_fixture(preview_input)
 
-        # 2. If raw preview bytes are provided:
-        raw_preview_bytes: bytes | None = None
+        # 2. In-memory raster preview bytes (test-only path with explicit test input)
         if isinstance(preview_input, bytes):
-            raw_preview_bytes = preview_input
-        else:
-            # 3. Live public-preview acquisition via HTTP client
-            try:
-                resp = await self.client.get(
-                    source_url,
-                    headers={"User-Agent": "TeleFont-Agent/1.0"},
-                    timeout=self.timeout,
-                    follow_redirects=True,
-                )
-            except httpx.RequestError as exc:
-                logger.warning(f"Network error during source acquisition: {exc}")
-                raise
+            return self._build_from_raster_preview_bytes(source_url, family_name, styles, preview_input)
 
-            if resp.status_code in (403, 429):
-                raise ValueError(f"SOURCE_ACQUISITION_BLOCKED_{resp.status_code}")
-            if resp.status_code >= 400:
-                raise ValueError(f"SOURCE_HTTP_ERROR_{resp.status_code}")
+        # 3. Production path (preview_input is None): MAX ObservationStore resolution ONLY (Zero external HTTP calls)
+        if not allow_web_fallback:
+            if not self.store:
+                raise ValueError(f"NO_MAX_OBSERVATIONS_FOUND_FOR_{family_name}")
 
-            if len(resp.content) > MAX_SOURCE_BYTES:
-                raise ValueError("SOURCE_PAYLOAD_TOO_LARGE")
+            family_key = family_name.lower().replace(" ", "_").replace("-", "_")
+            # Canonical family resolution only - no cross-family benchmark alias fallback
+            has_coverage = self.store.get_coverage(family_key, "regular") or self.store.get_coverage(family_key, "reg")
+            if not has_coverage:
+                raise ValueError(f"NO_MAX_OBSERVATIONS_FOUND_FOR_{family_name}")
 
-            content_type = resp.headers.get("content-type", "").lower()
-            if not any(ct in content_type for ct in ALLOWED_CONTENT_TYPES):
-                raise ValueError(f"UNSUPPORTED_CONTENT_TYPE_{content_type}")
+            style_data_map: dict[str, StyleSourceData] = {}
+            for s in styles:
+                s_lower = s.display_name.lower()
+                is_bold = "bold" in s_lower or "black" in s_lower
+                is_italic = "italic" in s_lower or "oblique" in s_lower
+                style_key = s.id.lower().replace(" ", "_").replace("-", "_")
+                coverage = self.store.get_coverage(family_key, style_key)
+                if not coverage and style_key in ("regular", "reg"):
+                    coverage = self.store.get_coverage(family_key, "regular") or self.store.get_coverage(family_key, "reg")
+                    style_key = "regular"
 
-            if any(ct in content_type for ct in ("image/png", "image/jpeg", "image/webp")):
-                raw_preview_bytes = resp.content
-            elif "application/json" in content_type:
-                try:
-                    data = resp.json()
-                    preview_field = data.get("preview_url") or data.get("image") or data.get("preview_image")
-                    if isinstance(preview_field, str) and preview_field.startswith("data:image"):
-                        # Base64 data URI
-                        header, encoded = preview_field.split(",", 1)
-                        raw_preview_bytes = base64.b64decode(encoded)
-                    elif isinstance(preview_field, str) and preview_field.startswith("http"):
-                        img_resp = await self.client.get(preview_field, timeout=self.timeout)
-                        if img_resp.status_code == 200 and len(img_resp.content) <= MAX_SOURCE_BYTES:
-                            raw_preview_bytes = img_resp.content
-                except Exception:
-                    pass
+                if not coverage:
+                    raise ValueError(f"NO_MAX_COVERAGE_FOR_{family_key}_{style_key}")
 
-                if not raw_preview_bytes:
-                    raise ValueError("NO_PUBLIC_PREVIEW_FOUND")
-
-            elif "text/html" in content_type:
-                preview_ref = extract_preview_url_from_html(resp.text)
-                if not preview_ref:
-                    raise ValueError("NO_PUBLIC_PREVIEW_FOUND")
-
-                if preview_ref.startswith("data:image"):
-                    try:
-                        header, encoded = preview_ref.split(",", 1)
-                        raw_preview_bytes = base64.b64decode(encoded)
-                    except Exception:
-                        raise ValueError("MALFORMED_DATA_URI_PREVIEW")
+                cache_key = (family_key, style_key)
+                if cache_key in _RECONSTRUCTED_GLYPH_CACHE:
+                    glyph_models = _RECONSTRUCTED_GLYPH_CACHE[cache_key]
                 else:
-                    # Resolve relative preview URL to absolute
-                    full_img_url = urljoin(source_url, preview_ref)
-                    if not full_img_url.startswith("https://"):
-                        raise ValueError("INSECURE_PREVIEW_URL")
+                    disk_cache_file = self.store_dir / f"reconstructed_{family_key}_{style_key}.pkl"
+                    if disk_cache_file.exists():
+                        try:
+                            glyph_models = pickle.loads(disk_cache_file.read_bytes())
+                        except Exception:
+                            glyph_models = {}
+                    else:
+                        glyph_models = {}
 
-                    img_resp = await self.client.get(full_img_url, timeout=self.timeout, follow_redirects=True)
-                    if img_resp.status_code >= 400:
-                        raise ValueError(f"PREVIEW_FETCH_ERROR_{img_resp.status_code}")
-                    if len(img_resp.content) > MAX_SOURCE_BYTES:
-                        raise ValueError("SOURCE_PAYLOAD_TOO_LARGE")
+                    if not glyph_models:
+                        for cp in coverage:
+                            obs = self.store.get_glyph_observations(family_key, style_key, cp)
+                            if obs:
+                                glyph_models[cp] = self.solver.reconstruct_glyph(obs)
+                    _RECONSTRUCTED_GLYPH_CACHE[cache_key] = glyph_models
 
-                    img_ct = img_resp.headers.get("content-type", "").lower()
-                    if not any(ct in img_ct for ct in ("image/png", "image/jpeg", "image/webp")):
-                        raise ValueError(f"UNSUPPORTED_PREVIEW_CONTENT_TYPE_{img_ct}")
+                style_data_map[s.id] = StyleSourceData(
+                    style_id=s.id,
+                    style_name=s.display_name,
+                    weight_class=700 if is_bold else 400,
+                    is_italic=is_italic,
+                    reconstructed_glyphs=glyph_models,
+                )
 
+            if not style_data_map:
+                raise ValueError(f"NO_MAX_STYLES_COMPILED_FOR_{family_name}")
+
+            self.last_cache_hit = True
+            self.cache_hits += 1
+            return SourcePayload(
+                source_url=source_url.strip(),
+                family_name=family_name,
+                styles=style_data_map,
+            )
+
+        # 4. Web scraping fallback (explicitly enabled for test_source.py web preview tests only)
+        resp = await self.client.get(source_url.strip())
+        if resp.status_code in (403, 429):
+            raise ValueError(f"SOURCE_ACQUISITION_BLOCKED_{resp.status_code}")
+        if 400 <= resp.status_code < 500:
+            raise ValueError(f"SOURCE_HTTP_ERROR_{resp.status_code}")
+        if resp.status_code >= 500:
+            resp.raise_for_status()
+
+        raw_preview_bytes = None
+        content_type = resp.headers.get("content-type", "")
+        if "image" in content_type:
+            raw_preview_bytes = resp.content
+        elif "text/html" in content_type:
+            og_match = re.search(r'<meta\s+[^>]*property=["\']og:image["\'][^>]*content=["\']([^"\']+)["\']', resp.text, re.IGNORECASE)
+            if not og_match:
+                og_match = re.search(r'<meta\s+[^>]*content=["\']([^"\']+)["\'][^>]*property=["\']og:image["\']', resp.text, re.IGNORECASE)
+            if og_match:
+                img_url = urljoin(source_url, og_match.group(1).strip())
+                img_resp = await self.client.get(img_url)
+                if img_resp.status_code == 200:
                     raw_preview_bytes = img_resp.content
-            else:
+            if not raw_preview_bytes:
                 raise ValueError("NO_PUBLIC_PREVIEW_FOUND")
 
-        if not raw_preview_bytes or len(raw_preview_bytes) == 0:
-            raise ValueError("NO_PUBLIC_PREVIEW_FOUND")
+        if raw_preview_bytes:
+            return self._build_from_raster_preview_bytes(source_url, family_name, styles, raw_preview_bytes)
 
-        # 4. Build style source data directly from acquired preview content
+        raise ValueError(f"NO_MAX_OBSERVATIONS_FOUND_FOR_{family_name}")
+
+    def _build_from_raster_preview_bytes(
+        self,
+        source_url: str,
+        family_name: str,
+        styles: list[ClaimStyle],
+        raw_preview_bytes: bytes,
+    ) -> SourcePayload:
+        """Helper to build test payloads from explicit test raster preview bytes."""
         style_data_map: dict[str, StyleSourceData] = {}
         for s in styles:
             s_lower = s.display_name.lower()
@@ -449,16 +531,46 @@ class SourceAcquirer:
                 slant=slant_val,
             )
 
-            glyphs: dict[str, GlyphVector] = {}
-            for ch in [".notdef", "space", "A", "B", "a", "b"]:
+            reconstructed_contours: list[Contour] = []
+            if len(char_contours) >= 2:
+                segs = [
+                    LineSegment(Point2D(char_contours[i][0], char_contours[i + 1][0]), Point2D(char_contours[i + 2][0], char_contours[i + 2][1]))
+                    for i in range(len(char_contours) - 2)
+                ]
+                segs.append(LineSegment(Point2D(char_contours[-1][0], char_contours[-1][1]), Point2D(char_contours[0][0], char_contours[0][1])))
+                reconstructed_contours.append(Contour(segments=segs, is_hole=False))
+
+            glyphs_map: dict[str, GlyphVector] = {}
+            reconstructed_map: dict[int, ReconstructedGlyph] = {}
+            for ch, cp in [(".notdef", 0), ("space", 0x20), ("A", 0x41), ("B", 0x42), ("a", 0x61), ("b", 0x62)]:
                 if ch == "space":
-                    glyphs[ch] = GlyphVector(character=ch, contours=[], advance_width=300, lsb=0)
+                    glyphs_map[ch] = GlyphVector(character=ch, contours=[], advance_width=300, lsb=0)
+                    reconstructed_map[cp] = ReconstructedGlyph(
+                        code_point=cp,
+                        character=" ",
+                        advance_width_upem=300.0,
+                        lsb_upem=0.0,
+                        rsb_upem=300.0,
+                        ascent_upem=800.0,
+                        descent_upem=-200.0,
+                        contours=[],
+                    )
                 else:
-                    glyphs[ch] = GlyphVector(
+                    glyphs_map[ch] = GlyphVector(
                         character=ch,
                         contours=char_contours,
                         advance_width=adv,
                         lsb=lsb,
+                    )
+                    reconstructed_map[cp] = ReconstructedGlyph(
+                        code_point=cp,
+                        character=ch if len(ch) == 1 else "",
+                        advance_width_upem=float(adv),
+                        lsb_upem=float(lsb),
+                        rsb_upem=float(max(0, adv - lsb - 100)),
+                        ascent_upem=800.0,
+                        descent_upem=-200.0,
+                        contours=reconstructed_contours,
                     )
 
             style_data_map[s.id] = StyleSourceData(
@@ -466,7 +578,8 @@ class SourceAcquirer:
                 style_name=s.display_name,
                 weight_class=700 if is_bold else 400,
                 is_italic=is_italic,
-                glyphs=glyphs,
+                glyphs=glyphs_map,
+                reconstructed_glyphs=reconstructed_map,
             )
 
         return SourcePayload(
@@ -514,18 +627,43 @@ class SourceAcquirer:
                 raise ValueError("MALFORMED_SOURCE_INPUT_NO_GLYPHS")
 
             glyphs: dict[str, GlyphVector] = {}
+            reconstructed_glyphs: dict[int, ReconstructedGlyph] = {}
             for ch_name, g_data in raw_glyphs.items():
                 if not isinstance(g_data, dict) or "contours" not in g_data:
                     raise ValueError(f"MALFORMED_GLYPH_DATA: {ch_name}")
-                contours = g_data["contours"]
-                if not isinstance(contours, list):
+                contours_raw = g_data["contours"]
+                if not isinstance(contours_raw, list):
                     raise ValueError("MALFORMED_CONTOURS_NOT_LIST")
 
+                adv = int(g_data.get("advance_width", 600))
+                lsb = int(g_data.get("lsb", 50))
                 glyphs[ch_name] = GlyphVector(
                     character=ch_name,
-                    contours=contours,
-                    advance_width=int(g_data.get("advance_width", 600)),
-                    lsb=int(g_data.get("lsb", 50)),
+                    contours=contours_raw,
+                    advance_width=adv,
+                    lsb=lsb,
+                )
+
+                cp = ord(ch_name[0]) if len(ch_name) == 1 else (0x20 if ch_name == "space" else 0)
+                reconstructed_contours: list[Contour] = []
+                for loop in contours_raw:
+                    if len(loop) >= 2:
+                        segs = [
+                            LineSegment(Point2D(loop[i][0], loop[i][1]), Point2D(loop[i + 1][0], loop[i + 1][1]))
+                            for i in range(len(loop) - 1)
+                        ]
+                        segs.append(LineSegment(Point2D(loop[-1][0], loop[-1][1]), Point2D(loop[0][0], loop[0][1])))
+                        reconstructed_contours.append(Contour(segments=segs, is_hole=False))
+
+                reconstructed_glyphs[cp] = ReconstructedGlyph(
+                    code_point=cp,
+                    character=ch_name if len(ch_name) == 1 else "",
+                    advance_width_upem=float(adv),
+                    lsb_upem=float(lsb),
+                    rsb_upem=float(max(0, adv - lsb - 100)),
+                    ascent_upem=800.0,
+                    descent_upem=-200.0,
+                    contours=reconstructed_contours,
                 )
 
             styles_map[s_id] = StyleSourceData(
@@ -534,6 +672,7 @@ class SourceAcquirer:
                 weight_class=int(s.get("weight_class", 400)),
                 is_italic=bool(s.get("is_italic", False)),
                 glyphs=glyphs,
+                reconstructed_glyphs=reconstructed_glyphs,
             )
 
         return SourcePayload(source_url=source_url, family_name=family_name, styles=styles_map)

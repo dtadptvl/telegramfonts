@@ -1,0 +1,75 @@
+{
+  "timestamp": "2026-08-21T16:29:47Z",
+  "device_identity": {
+    "hostname": "localhost",
+    "system": "Android",
+    "release": "14",
+    "version": "#1 SMP PREEMPT Sun Aug 16 07:35:24 UTC 2026",
+    "machine": "aarch64",
+    "processor": "",
+    "cpu_count": 8,
+    "python_version": "3.14.6"
+  },
+  "family_name": "Be Vietnam Pro",
+  "style_name": "Regular",
+  "total_codepoints_reconstructed": 481,
+  "total_canonical_coverage": 481,
+  "reconstruction_errors_count": 0,
+  "reconstruction_errors": [],
+  "total_wall_time_seconds": 1629.338,
+  "mean_glyph_time_ms": 3387.4,
+  "start_rss_mb": 86.73,
+  "peak_rss_mb": 119.99,
+  "rss_budget_mb": 120.0,
+  "rss_budget_passed": true,
+  "total_cache_hits": 4192,
+  "artifacts": {
+    "OTF": {
+      "path": "build/candidate_fonts/BeVietnamPro-Regular.otf",
+      "size_bytes": 147464,
+      "sha256": "11a159dc9216164d06903d12d2a691d373a0d660f322fcebfd1813fb78f5e21a",
+      "glyph_count": 482
+    },
+    "TTF": {
+      "path": "build/candidate_fonts/BeVietnamPro-Regular.ttf",
+      "size_bytes": 197364,
+      "sha256": "b54daa854f6328c3d24cb58e10d9cab4ca6f4b1f8f8efaf30c82191e14c14887",
+      "glyph_count": 482
+    },
+    "WOFF2": {
+      "path": "build/candidate_fonts/BeVietnamPro-Regular.woff2",
+      "size_bytes": 87020,
+      "sha256": "f78c05cf1c7e565e7c7fa57dd8bd8ce6b4082ba005367e611eebbd5b1a2aaa94",
+      "glyph_count": 482
+    }
+  },
+  "kerning_summary": {
+    "active_kerning_pairs_count": 7,
+    "total_pairs_probed": 12
+  },
+  "validation_summary": {
+    "all_formats_passed": true,
+    "mean_held_out_raster_iou": 0.7454,
+    "mean_advance_error_upem": 0.0,
+    "max_advance_error_upem": 0.0,
+    "mean_lsb_error_upem": 4.77,
+    "in_cmap_shaping_match_rate": 0.9444,
+    "fit_kerning_delta_upem": 0.0,
+    "held_out_in_cmap_kerning_delta_upem": 40.0
+  },
+  "capacity_model": {
+    "measured_full_style_cold_seconds": 1629.34,
+    "measured_physical_cached_packaging_ms": 34.69,
+    "cold_reconstruction_capacity_styles_per_day_100pct_duty": 53,
+    "cold_reconstruction_capacity_styles_per_day_25pct_duty": 13,
+    "cached_steady_state_capacity_styles_per_day_25pct_duty": 622669,
+    "daily_download_target_min": 500,
+    "daily_download_target_max": 1000,
+    "workload_and_cache_hit_assumptions": {
+      "target_500_downloads_per_day": "At 98.0% cache hit rate (10 cold styles, 490 cached), compute duty is 4.53 h/day (18.9% duty cycle <= 25% budget -> PASS)",
+      "target_1000_downloads_per_day": "At 98.8% cache hit rate (12 cold styles, 988 cached), compute duty is 5.44 h/day (22.7% duty cycle <= 25% budget -> PASS)",
+      "single_node_cold_absorption_limit": "13 cold unseen styles/day max on single phone; queue throttling or node scaling applies if cold unseen styles exceed 13/day"
+    },
+    "capacity_verdict": "PASS (Physical A23 fulfills 500-1000 downloads/day under >=98% catalog cache hit rate within 25% duty cycle; single cold phone absorbs up to 13 unseen full styles/day)"
+  }
+}

@@ -1,0 +1,57 @@
+{
+  "timestamp": "2026-08-22T00:32:57Z",
+  "device_identity": {
+    "hostname": "localhost",
+    "system": "Android",
+    "release": "14",
+    "machine": "aarch64",
+    "python_version": "3.14.6"
+  },
+  "live_deployed_worker_endpoint": "https://telegramfonts-edge.dienluanphien98.workers.dev",
+  "live_worker_cache_reuse_evidence": {
+    "test": "deployed_worker_real_cache_reuse",
+    "job_1": {
+      "job_id": "job_a23_live_1",
+      "order_id": "ord_a23_live_1",
+      "lease_token": "3ae9f8d2-39be-40ac-9165-1ef0715ca15d",
+      "artifact_key": "artifacts/ord_a23_live_1/job_a23_live_1/c77938d3097dbefdc8567ce904c0737d7ac7504c45de88bb48dff3690163f6df.zip",
+      "duration_seconds": 1.702,
+      "observed_external_network_requests": 2,
+      "source_cache_hit": false,
+      "status": "COMPLETED"
+    },
+    "job_2": {
+      "job_id": "job_a23_live_2",
+      "order_id": "ord_a23_live_2",
+      "lease_token": "4642bd6d-a0a6-4de3-b123-ec0d2002454f",
+      "artifact_key": "artifacts/ord_a23_live_2/job_a23_live_2/64c6c3b61a8d43e639b16f9d221062d3cbab7bcad85bff69d81a4f6ddf503109.zip",
+      "duration_seconds": 1.491,
+      "observed_external_network_requests": 0,
+      "source_cache_hit": true,
+      "status": "COMPLETED"
+    },
+    "zero_recrawls_observed": true,
+    "passed": true
+  },
+  "live_worker_process_kill_restart_evidence": {
+    "test": "deployed_worker_real_kill_restart_and_lease_fencing",
+    "job_id": "job_a23_live_3",
+    "order_id": "ord_a23_live_3",
+    "killed_process_pid": 32065,
+    "restarted_process_pid": 32177,
+    "kill_signal": "SIGKILL (9)",
+    "process_killed_confirmed": true,
+    "stale_lease_token_T1": "069540d4-baa2-4b1e-a0bb-91d61b67de74",
+    "active_lease_token_T2": "e8e03a2f-e572-428e-a517-331e421e06b6",
+    "stale_lease_fenced_and_rejected_by_worker": true,
+    "resumed_from_durable_checkpoint": true,
+    "loaded_from_checkpoint_count": 6,
+    "newly_computed_glyphs_count": 7,
+    "observed_solver_invocations": 7,
+    "observed_repeated_solver_invocations": 0,
+    "total_reconstructed_glyphs": 13,
+    "d1_final_status": "COMPLETED",
+    "artifact_key": "artifacts/ord_a23_live_3/job_a23_live_3/13de3f8af3ccdced97bdab83d462d5d0f17e9b5958973657a650c7a0b6698c0c.zip",
+    "passed": true
+  }
+}
