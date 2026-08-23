@@ -26,6 +26,22 @@ def _make_test_image_bytes(stroke_x0: int, stroke_x1: int) -> bytes:
     return buf.getvalue()
 
 
+class FixtureSourceAcquirer(SourceAcquirer):
+    """Run-loop fixture adapter for the explicit test-only preview input path."""
+
+    def __init__(self, preview_bytes: bytes, **kwargs):
+        super().__init__(**kwargs)
+        self.preview_bytes = preview_bytes
+
+    async def acquire_source(self, source_url, styles, preview_input=None, allow_web_fallback=False):
+        return await super().acquire_source(
+            source_url,
+            styles,
+            preview_input=self.preview_bytes,
+            allow_web_fallback=allow_web_fallback,
+        )
+
+
 @pytest.mark.asyncio
 async def test_runner_default_live_preview_and_durable_completion(test_settings: Settings):
     preview_bytes = _make_test_image_bytes(20, 60)
@@ -83,7 +99,7 @@ async def test_runner_default_live_preview_and_durable_completion(test_settings:
         runner = A23Runner(test_settings, q_client, w_client, source_acquirer=s_acquirer)
 
         msg = QueueMessage(id="m1", lease_id="l_live", body_raw='{"job_id":"job_live_1"}', attempts=1, job_id="job_live_1")
-        res = await runner.process_message(msg)
+        res = await runner.process_message(msg, preview_input=preview_bytes)
 
         # Full pipeline completed -> uploaded, completed, and ACKed from Queue
         assert res.action == RunnerAction.ACKED
@@ -142,7 +158,7 @@ async def test_runner_does_not_ack_queue_when_upload_alone_succeeds(test_setting
         runner = A23Runner(test_settings, q_client, w_client, source_acquirer=SourceAcquirer(client=s_http))
 
         msg = QueueMessage(id="m1", lease_id="l_no_ack", body_raw='{"job_id":"job_no_ack"}', attempts=1, job_id="job_no_ack")
-        res = await runner.process_message(msg)
+        res = await runner.process_message(msg, preview_input=preview_bytes)
 
         # Never ACK Queue because upload alone succeeded (BLOCK 6)
         assert res.action == RunnerAction.RETRIED
@@ -200,7 +216,7 @@ async def test_runner_ambiguous_completion_failure_does_not_call_fail(test_setti
         runner = A23Runner(test_settings, q_client, w_client, source_acquirer=SourceAcquirer(client=s_http))
 
         msg = QueueMessage(id="m1", lease_id="l_ambig", body_raw='{"job_id":"job_ambig"}', attempts=1, job_id="job_ambig")
-        res = await runner.process_message(msg)
+        res = await runner.process_message(msg, preview_input=preview_bytes)
 
         # Must not call /fail on ambiguous completion network failure (BLOCK 6)
         assert failed_called is False
@@ -253,7 +269,7 @@ async def test_runner_completion_409_conflict_terminal_acks_queue(test_settings:
         runner = A23Runner(test_settings, q_client, w_client, source_acquirer=SourceAcquirer(client=s_http))
 
         msg = QueueMessage(id="m1", lease_id="l_conf", body_raw='{"job_id":"job_term_conflict"}', attempts=1, job_id="job_term_conflict")
-        res = await runner.process_message(msg)
+        res = await runner.process_message(msg, preview_input=preview_bytes)
 
         # 409 with queue_action=ack must ACK queue (Point 4)
         assert res.action == RunnerAction.ACKED
@@ -296,13 +312,34 @@ async def test_missing_or_blocked_live_preview_fails_without_synthetic_success(t
                httpx.AsyncClient(transport=httpx.MockTransport(source_handler_blocked)) as s_http:
         q_client = CloudflareQueueClient(test_settings, client=q_http)
         w_client = WorkerJobClient(test_settings, client=w_http)
-        runner = A23Runner(test_settings, q_client, w_client, source_acquirer=SourceAcquirer(client=s_http))
+        class UnobservableBrowser:
+            browser_version = "Chromium/Test"
+
+            async def start(self):
+                return None
+
+            async def observe_source_font(self, source_url, style_name, family_name):
+                raise ValueError("NO_OBSERVABLE_BROWSER_FONT_FACES")
+
+            def close(self):
+                return None
+
+        runner = A23Runner(
+            test_settings,
+            q_client,
+            w_client,
+            source_acquirer=SourceAcquirer(
+                client=s_http,
+                observation_store_dir=test_settings.SCRATCH_DIR / "unobservable",
+                browser_session_factory=UnobservableBrowser,
+            ),
+        )
 
         msg = QueueMessage(id="m1", lease_id="l1", body_raw='{"job_id":"job_blocked_preview"}', attempts=1, job_id="job_blocked_preview")
         res = await runner.process_message(msg)
 
         assert res.action == RunnerAction.FAILED_TERMINAL
-        assert any("NO_MAX_OBSERVATIONS_FOUND" in str(code) for code in failed_reason_codes)
+        assert any("NO_OBSERVABLE_BROWSER_FONT_FACES" in str(code) for code in failed_reason_codes)
 
 
 @pytest.mark.asyncio
@@ -419,7 +456,7 @@ async def test_runner_fenced_heartbeat_during_build_aborts(test_settings: Settin
         )
 
         msg = QueueMessage(id="m1", lease_id="l_fn", body_raw='{"job_id":"job_fenced_build"}', attempts=1, job_id="job_fenced_build")
-        res = await runner.process_message(msg)
+        res = await runner.process_message(msg, preview_input=preview_bytes)
 
         assert res.action == RunnerAction.FENCED_ABORT
 
@@ -603,7 +640,7 @@ async def test_multi_consumer_queue_duplicate_and_ack_loss_redelivery_proves_sin
         # 1. Consumer 1 pulls and processes job
         q_client_1 = CloudflareQueueClient(test_settings, client=q_http_1)
         w_client_1 = WorkerJobClient(test_settings, client=w_http)
-        s_acquirer_1 = SourceAcquirer(client=s_http)
+        s_acquirer_1 = FixtureSourceAcquirer(preview_bytes, client=s_http)
         runner_1 = A23Runner(
             test_settings,
             queue_client=q_client_1,
@@ -622,7 +659,7 @@ async def test_multi_consumer_queue_duplicate_and_ack_loss_redelivery_proves_sin
         # 2. Simulated Queue ACK loss & redelivery: Consumer 2 receives duplicate message
         q_client_2 = CloudflareQueueClient(test_settings, client=q_http_2)
         w_client_2 = WorkerJobClient(test_settings, client=w_http)
-        s_acquirer_2 = SourceAcquirer(client=s_http)
+        s_acquirer_2 = FixtureSourceAcquirer(preview_bytes, client=s_http)
         runner_2 = A23Runner(
             test_settings,
             queue_client=q_client_2,

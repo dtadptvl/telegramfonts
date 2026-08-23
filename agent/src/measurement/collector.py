@@ -10,7 +10,13 @@ from typing import Callable
 from measurement.browser_session import ChromiumSession
 from measurement.discovery import ObservableGlyphDiscovery
 from measurement.manifest import create_reproducibility_manifest
-from measurement.models import DirectMetrics, ObservationConfig, ObservationRecord
+from measurement.models import (
+    BrowserFontSelection,
+    MetricObservation,
+    ObservationConfig,
+    ObservationRecord,
+    OpenTypeFeatureObservation,
+)
 from measurement.store import ObservationStore
 
 logger = logging.getLogger("telegramfonts.agent.measurement.collector")
@@ -42,7 +48,7 @@ class ObservationCollector:
         self,
         reference_id: str,
         style_id: str,
-        font_family: str,
+        font_family: str | BrowserFontSelection,
         code_points: list[int] | None = None,
         progress_cb: Callable[[int, int], None] | None = None,
     ) -> tuple[int, int, float]:
@@ -66,13 +72,34 @@ class ObservationCollector:
         total_glyphs = len(code_points)
 
         for idx, cp in enumerate(code_points, start=1):
-            # 1. Direct browser metric measurement (single measurement per glyph)
-            direct_metrics = await self.session.measure_glyph_direct(
-                font_family=font_family,
-                code_point=cp,
-                font_size_px=self.config.font_size_px,
-                upem=self.config.upem,
-            )
+            # 1. Direct browser metric measurements across the canonical size schedule.
+            metrics_by_size = {}
+            for metric_size in self.config.metric_sizes_px:
+                measured = await self.session.measure_glyph_direct(
+                    font_family=font_family,
+                    code_point=cp,
+                    font_size_px=metric_size,
+                    upem=self.config.upem,
+                )
+                metrics_by_size[metric_size] = measured
+                self.store.save_metric_observation(
+                    MetricObservation(
+                        reference_id=reference_id,
+                        style_id=style_id,
+                        browser_version=self.session.browser_version,
+                        config_hash=config_hash,
+                        metrics=measured,
+                        created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    )
+                )
+            direct_metrics = metrics_by_size.get(self.config.font_size_px)
+            if direct_metrics is None:
+                direct_metrics = await self.session.measure_glyph_direct(
+                    font_family=font_family,
+                    code_point=cp,
+                    font_size_px=self.config.font_size_px,
+                    upem=self.config.upem,
+                )
 
             # 2. Determine adaptive subpixel phase schedule based on metric boundary alignment
             subpixel_phases = self.config.get_phases_for_metrics(direct_metrics)
@@ -139,7 +166,7 @@ class ObservationCollector:
         self,
         reference_id: str,
         style_id: str,
-        font_family: str,
+        font_family: str | BrowserFontSelection,
         pairs: list[tuple[int, int]] | None = None,
     ) -> int:
         """Collect observable character pair advance measurements from browser Canvas text metrics.
@@ -147,7 +174,6 @@ class ObservationCollector:
         Measures raw left advance, right advance, and pair advance in Chromium to derive
         observable kerning differentials with real browser acquisition provenance.
         """
-        import json
         from typography.models import BOUNDED_FIT_PAIRS
 
         target_pairs = pairs or BOUNDED_FIT_PAIRS
@@ -170,17 +196,12 @@ class ObservationCollector:
             )
             pair_str = chr(left_cp) + chr(right_cp)
 
-            # Direct pair measurement via browser Canvas TextMetrics
-            js = f"""
-            (() => {{
-                const canvas = document.createElement('canvas');
-                const ctx = canvas.getContext('2d');
-                ctx.font = '{self.config.font_size_px}px "{font_family}"';
-                const w = ctx.measureText({json.dumps(pair_str)}).width;
-                return (w / {self.config.font_size_px}) * {self.config.upem};
-            }})()
-            """
-            pair_adv_upem = float(await self.session.evaluate_script(js))
+            pair_adv_upem = await self.session.measure_text_advance(
+                font_family,
+                pair_str,
+                font_size_px=self.config.font_size_px,
+                upem=self.config.upem,
+            )
             raw_delta = pair_adv_upem - (m_left.advance_width_upem + m_right.advance_width_upem)
             inferred_kern = int(round(raw_delta))
 
@@ -202,4 +223,43 @@ class ObservationCollector:
             captured += 1
 
         logger.info(f"Captured {captured} observable pair text metrics with provenance {provenance}")
+        return captured
+
+    async def collect_feature_observations(
+        self,
+        reference_id: str,
+        style_id: str,
+        font_family: str | BrowserFontSelection,
+    ) -> int:
+        """Collect bounded browser probes for kerning and common GSUB/GPOS features."""
+        captured = 0
+        provenance = f"chromium:{self.session.browser_version}:canvas_feature_probe"
+        for feature_tag, sample_text in self.config.feature_probes:
+            raw = await self.session.probe_opentype_feature(
+                font_family,
+                feature_tag,
+                sample_text,
+                font_size_px=self.config.font_size_px,
+                upem=self.config.upem,
+            )
+            effect_observed = (
+                raw["enabled_advance_upem"] != raw["disabled_advance_upem"]
+                or raw["enabled_raster_signature"] != raw["disabled_raster_signature"]
+            )
+            self.store.save_feature_observation(
+                OpenTypeFeatureObservation(
+                    reference_id=reference_id,
+                    style_id=style_id,
+                    feature_tag=feature_tag,
+                    sample_text=sample_text,
+                    enabled_advance_upem=raw["enabled_advance_upem"],
+                    disabled_advance_upem=raw["disabled_advance_upem"],
+                    enabled_raster_signature=raw["enabled_raster_signature"],
+                    disabled_raster_signature=raw["disabled_raster_signature"],
+                    effect_observed=effect_observed,
+                    provenance=provenance,
+                    created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                )
+            )
+            captured += 1
         return captured

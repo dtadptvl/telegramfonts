@@ -284,6 +284,8 @@ def test_representative_subset_physical_smoke():
     ttf_path = Path("agent/benchmark_data/ground_truth/BeVietnamPro-Regular.ttf")
     if not store_dir.exists() or not ttf_path.exists():
         pytest.skip("Benchmark observations or ground truth font not available")
+    if not any(store_dir.glob("**/*.png")):
+        pytest.skip("Benchmark observation raw rasters not available")
 
     store = ObservationStore(store_dir)
     obs_sample = store.get_glyph_observations("be_vietnam_pro", "regular", ord("A"))
@@ -344,7 +346,7 @@ def _create_synthetic_glyph(code_point: int, character: str, advance_width: floa
 
 
 def test_candidate_builder_and_validator_e2e(tmp_path):
-    """Verify Candidate Builder builds OTF, TTF, WOFF2 and HeldOutValidator verifies load and shaping."""
+    """Verify Candidate Builder builds OTF/TTF and HeldOutValidator verifies load and shaping."""
     from reconstruction.candidate_builder import MaxCandidateFontBuilder
     from reconstruction.candidate_validator import MaxCandidateHeldOutValidator
 
@@ -373,18 +375,11 @@ def test_candidate_builder_and_validator_e2e(tmp_path):
     font_ttf = TTFont(res.ttf.file_path)
     assert "glyf" in font_ttf
 
-    # 3. Check WOFF2
-    assert res.woff2.format == "WOFF2"
-    assert res.woff2.file_path.exists()
-    font_woff2 = TTFont(res.woff2.file_path)
-    assert font_woff2.flavor == "woff2"
-
-    # 4. Check Deterministic Builds (Rebuilding must yield identical SHA256)
+    # 3. Check Deterministic Builds (Rebuilding must yield identical SHA256)
     tmp_path2 = tmp_path / "second_build"
     res2 = builder.build_candidate_family(glyphs, tmp_path2)
     assert res.otf.sha256_hex == res2.otf.sha256_hex
     assert res.ttf.sha256_hex == res2.ttf.sha256_hex
-    assert res.woff2.sha256_hex == res2.woff2.sha256_hex
 
     # 5. Check Dynamic Cmap
     best_cmap = font_ttf.getBestCmap()
@@ -397,6 +392,7 @@ def test_candidate_builder_and_validator_e2e(tmp_path):
     report = validator.validate_family(res, tested_codepoints=[cp for _, cp, _ in test_chars], run_chromium=False)
 
     assert report.all_formats_passed is True
+    assert {result.format for result in report.format_results} == {"OTF", "TTF"}
     assert report.mean_advance_error_upem < 1.0  # Direct metrics propagation
     assert report.in_cmap_shaping_match_rate > 0.0
     assert len(report.shaping_results) > 0
@@ -456,30 +452,6 @@ def test_held_out_validator_missing_cmap_sequence_mismatch(tmp_path):
     for s in out_of_cmap_results:
         assert s.glyph_sequence_match is False
         assert ".notdef" in s.candidate_glyph_names
-
-
-def test_held_out_validator_woff2_direct_and_roundtrip_semantics(tmp_path):
-    """Verify WOFF2 format validation properly distinguishes direct and round-trip capabilities."""
-    from reconstruction.candidate_builder import MaxCandidateFontBuilder
-    from reconstruction.candidate_validator import MaxCandidateHeldOutValidator
-
-    ttf_path = Path("agent/benchmark_data/ground_truth/BeVietnamPro-Regular.ttf")
-    if not ttf_path.exists():
-        pytest.skip("Ground truth font not available")
-
-    glyph = _create_synthetic_glyph(65, "A")
-    builder = MaxCandidateFontBuilder(family_name="TestFont WOFF2", style_name="Regular")
-    res = builder.build_candidate_family([glyph], tmp_path)
-
-    validator = MaxCandidateHeldOutValidator(ttf_path)
-    fmt_res = validator.validate_format_loadability(res.woff2, is_chromium_supported=True)
-
-    assert fmt_res.format == "WOFF2"
-    assert fmt_res.is_direct_loadable_fonttools is True
-    assert fmt_res.decompression_round_trip is True
-    assert fmt_res.is_roundtrip_loadable_freetype is True
-    assert fmt_res.is_direct_loadable_harfbuzz is True
-    assert fmt_res.is_direct_loadable_chromium is True
 
 
 def test_held_out_validator_broken_chromium_fails_closed(tmp_path, monkeypatch):

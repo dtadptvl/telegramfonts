@@ -88,7 +88,7 @@ export function buildArtifactStorageKey(orderId: string, jobId: string, sha256He
   return `artifacts/${cleanOrder}/${cleanJob}/${cleanSha}.zip`;
 }
 
-const ALLOWED_FORMATS = new Set(['TTF', 'OTF', 'WOFF', 'WOFF2']);
+const ALLOWED_FORMATS = new Set(['TTF', 'OTF']);
 
 export class JobService {
   constructor(private readonly db: D1Database) {}

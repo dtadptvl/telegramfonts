@@ -19,7 +19,7 @@ def _make_test_image_bytes(stroke_x0: int = 20, stroke_x1: int = 50) -> bytes:
 
 
 @pytest.mark.asyncio
-async def test_build_font_ttf_otf_woff2(tmp_path: Path):
+async def test_build_font_ttf_otf_and_reject_woff2(tmp_path: Path):
     source_acquirer = SourceAcquirer()
     builder = FontBuilderService()
 
@@ -43,11 +43,9 @@ async def test_build_font_ttf_otf_woff2(tmp_path: Path):
     assert file_otf.style_id == "bold"
     assert file_otf.file_path.read_bytes().startswith(b"OTTO")
 
-    # 3. WOFF2
-    file_woff2 = builder.build_font(payload.styles["regular"], "Roboto Flex", "WOFF2", tmp_path)
-    assert file_woff2.file_path.exists()
-    assert file_woff2.format == "WOFF2"
-    assert file_woff2.file_path.read_bytes().startswith(b"wOF2")
+    # 3. WOFF2 is no longer a product format.
+    with pytest.raises(ValueError, match="UNSUPPORTED_FORMAT: WOFF2"):
+        builder.build_font(payload.styles["regular"], "Roboto Flex", "WOFF2", tmp_path)
 
 
 @pytest.mark.asyncio

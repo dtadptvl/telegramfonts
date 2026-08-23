@@ -20,7 +20,7 @@ def _make_test_image_bytes(stroke_x0: int = 20, stroke_x1: int = 50) -> bytes:
 
 
 @pytest.mark.asyncio
-async def test_validate_valid_ttf_otf_woff2(tmp_path: Path):
+async def test_validate_valid_ttf_otf_and_reject_woff2(tmp_path: Path):
     source_acquirer = SourceAcquirer()
     builder = FontBuilderService()
 
@@ -38,9 +38,10 @@ async def test_validate_valid_ttf_otf_woff2(tmp_path: Path):
     otf_file = builder.build_font(payload.styles["regular"], "Roboto Flex", "OTF", tmp_path)
     assert validate_font_file(otf_file.file_path, "OTF") is True
 
-    # 3. Valid WOFF2
-    woff2_file = builder.build_font(payload.styles["regular"], "Roboto Flex", "WOFF2", tmp_path)
-    assert validate_font_file(woff2_file.file_path, "WOFF2") is True
+    # 3. WOFF2 is rejected even if its magic is present.
+    woff2_file = tmp_path / "unsupported.woff2"
+    woff2_file.write_bytes(b"wOF2unsupported")
+    assert validate_font_file(woff2_file, "WOFF2") is False
 
 
 @pytest.mark.asyncio
@@ -149,7 +150,7 @@ async def test_built_fonts_pass_independent_load_and_contain_required_records(tm
         "https://www.myfonts.com/collections/roboto-flex", styles, preview_input=preview_bytes
     )
 
-    for fmt in ("TTF", "OTF", "WOFF2"):
+    for fmt in ("TTF", "OTF"):
         font_file = builder.build_font(payload.styles["regular"], "Roboto Flex", fmt, tmp_path)
         assert validate_font_file(font_file.file_path, fmt) is True
 

@@ -114,7 +114,6 @@ async def run_worker(
     files = [
         GeneratedFontFile(style_id="regular", style_name="Regular", format="OTF", filename=build_result.otf.filename, file_path=build_result.otf.file_path, size_bytes=build_result.otf.size_bytes, sha256_hex=build_result.otf.sha256_hex),
         GeneratedFontFile(style_id="regular", style_name="Regular", format="TTF", filename=build_result.ttf.filename, file_path=build_result.ttf.file_path, size_bytes=build_result.ttf.size_bytes, sha256_hex=build_result.ttf.sha256_hex),
-        GeneratedFontFile(style_id="regular", style_name="Regular", format="WOFF2", filename=build_result.woff2.filename, file_path=build_result.woff2.file_path, size_bytes=build_result.woff2.size_bytes, sha256_hex=build_result.woff2.sha256_hex),
     ]
 
     manifest = pkg.package_job_output(job_id, order_id, "Be Vietnam Pro", files, job_scratch)

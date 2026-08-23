@@ -82,7 +82,7 @@ class ClaimedJob:
         if not isinstance(raw_formats, list) or len(raw_formats) == 0:
             raise ValueError("MISSING_OR_EMPTY_FORMATS")
 
-        allowed_formats = {"TTF", "OTF", "WOFF2"}
+        allowed_formats = {"TTF", "OTF"}
         formats: list[str] = []
         for f in raw_formats:
             if not isinstance(f, str):

@@ -88,7 +88,7 @@ def run_candidate_pipeline(
         typography_dataset = None
         logger.info("No cached pair observations found in store for %s/%s", reference_id, style_id)
 
-    logger.info("Building candidate font binaries with OpenType GPOS (OTF, TTF, WOFF2)...")
+    logger.info("Building candidate font binaries with OpenType GPOS (OTF, TTF)...")
     builder = MaxCandidateFontBuilder(
         family_name="BeVietnamPro MAX",
         style_name="Regular",
@@ -138,7 +138,7 @@ def run_candidate_pipeline(
                     "glyph_count": art.glyph_count,
                     "units_per_em": art.units_per_em,
                 }
-                for art in (build_result.otf, build_result.ttf, build_result.woff2)
+                for art in (build_result.otf, build_result.ttf)
             ],
         },
         "validation_summary": {
@@ -177,10 +177,9 @@ def run_candidate_pipeline(
     print(f"  Glyph Count:             {build_result.glyph_count} glyphs")
     print(f"  OTF/CFF Candidate:       {build_result.otf.size_bytes} bytes ({build_result.otf.filename})")
     print(f"  TTF Candidate:           {build_result.ttf.size_bytes} bytes ({build_result.ttf.filename})")
-    print(f"  WOFF2 Candidate:         {build_result.woff2.size_bytes} bytes ({build_result.woff2.filename})")
     print("-" * 80)
     print(f"  Multi-Consumer Load:     {'PASS (100%)' if report.all_formats_passed else 'FAIL'}")
-    print(f"  Chromium WOFF2 Load:     {'PASS' if report.chromium_result.is_direct_loadable_chromium else 'FAIL / N/A'} ({report.chromium_result.browser_version})")
+    print(f"  Chromium OTF/TTF Load:   {'PASS' if report.chromium_result.is_direct_loadable_chromium else 'FAIL / N/A'} ({report.chromium_result.browser_version})")
     print(f"  Fallback Rejection:      {'PASS' if report.chromium_result.fallback_rejection_verified else 'FAIL / N/A'}")
     if typography_dataset:
         print(f"  Inferred Kerning Pairs:  {typography_dataset.active_kerning_pairs_count} active / {typography_dataset.total_pairs_probed} probed")

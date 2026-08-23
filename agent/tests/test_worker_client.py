@@ -18,7 +18,7 @@ async def test_worker_claim_success(test_settings: Settings):
         "family_name": "Roboto Flex",
         "foundry": "Google Fonts",
         "styles": [{"id": "regular", "display_name": "Regular"}],
-        "formats": ["TTF", "WOFF2"],
+        "formats": ["TTF", "OTF"],
     }
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -35,7 +35,7 @@ async def test_worker_claim_success(test_settings: Settings):
         assert res.queue_action == "claimed"
         assert res.job is not None
         assert res.job.job_id == "job_100"
-        assert res.job.formats == ["TTF", "WOFF2"]
+        assert res.job.formats == ["TTF", "OTF"]
 
 
 def test_claimed_job_fail_closed_validation():
@@ -76,11 +76,11 @@ def test_claimed_job_fail_closed_validation():
             "styles": [{"id": "s1", "display_name": "Regular"}, {"id": "bad style with spaces!", "display_name": "Bad"}],
         })
 
-    # 4. Mixed valid + invalid formats fails closed (BLOCK C)
+    # 4. Removed WOFF2 format fails closed.
     with pytest.raises(ValueError, match="UNSUPPORTED_FORMAT"):
         ClaimedJob.from_dict({
             **base_valid,
-            "formats": ["TTF", "EXE"],
+            "formats": ["TTF", "WOFF2"],
         })
 
     # 5. Empty styles or formats fails closed

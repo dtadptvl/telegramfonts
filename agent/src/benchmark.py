@@ -1,6 +1,6 @@
 """A23 Compute Pipeline Capacity Benchmark Harness.
 
-Measures local compute performance across font reconstruction (TTF, OTF, WOFF2),
+Measures local compute performance across font reconstruction (TTF and OTF),
 production font validation, ZIP packaging, and calculates conservative consumer dimensioning
 for 500 & 1000 jobs/day.
 
@@ -223,7 +223,7 @@ async def run_single_iteration(
         )
         t_acq_ms = (time.perf_counter() - t_acq_start) * 1000
 
-        # 2. Build font formats (TTF, OTF, WOFF2)
+        # 2. Build font formats (TTF and OTF)
         t_bld_start = time.perf_counter()
         built_files: list[GeneratedFontFile] = []
         for style_id, style_data in source_payload.styles.items():
@@ -304,9 +304,9 @@ async def run_benchmark(
         raise ValueError("style_count must be >= 1")
 
     if formats is None:
-        formats = ["TTF", "OTF", "WOFF2"]
+        formats = ["TTF", "OTF"]
     for f in formats:
-        if f.upper() not in ("TTF", "OTF", "WOFF", "WOFF2"):
+        if f.upper() not in ("TTF", "OTF"):
             raise ValueError(f"Unsupported format in benchmark: {f}")
 
     git_meta = get_git_metadata()

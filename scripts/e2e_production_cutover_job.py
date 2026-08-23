@@ -3,7 +3,7 @@ Executes 100% REAL production paths:
 1. Seed order in AWAITING_PAYMENT in remote D1.
 2. Real SePay webhook call to Worker (HMAC-SHA256) -> transitions order to PAID, creates job, creates outbox JOB_READY.
 3. Real Worker outbox dispatch -> Worker sends message to Cloudflare Fulfillment Queue, marks outbox SENT.
-4. Physical Samsung Galaxy A23 pulls message from Queue -> claims job -> executes MAX Candidate Builder (OTF/TTF/WOFF2) -> uploads ZIP to R2 -> completes job in D1 -> ACKs queue message -> creates outbox DELIVERY_READY.
+4. Physical Samsung Galaxy A23 pulls message from Queue -> claims job -> executes MAX Candidate Builder (OTF/TTF) -> uploads ZIP to R2 -> completes job in D1 -> ACKs queue message -> creates outbox DELIVERY_READY.
 5. Real Worker outbox dispatch -> Worker verifies R2 artifact SHA256 -> delivers ZIP document via Telegram Bot API to chat -> marks outbox SENT.
 6. Real Deduplication proof -> Re-dispatching outbox and re-claiming job produces zero duplicates and zero repeated deliveries.
 """
@@ -218,18 +218,12 @@ def run_e2e_cutover_proof() -> dict[str, Any]:
         shell=True,
         check=True,
     )
-    subprocess.run(
-        f'scp -i "{scp_key}" -P 8022 observations/benchmark/reconstructed_be_vietnam_pro_regular.pkl 100.88.133.27:~/telefont/observations/benchmark/reconstructed_be_vietnam_pro_regular.pkl',
-        shell=True,
-        check=True,
-    )
-
     # 1. Clean D1 and seed initial order in AWAITING_PAYMENT state
     print("1. Seeding order in AWAITING_PAYMENT state in remote D1...", flush=True)
     meta_dict = {
         "family_name": "Be Vietnam Pro",
         "source_url": "https://www.myfonts.com/collections/be-vietnam-pro",
-        "selected_formats": ["TTF", "OTF", "WOFF2"],
+        "selected_formats": ["TTF", "OTF"],
     }
     setup_sql = f"""
     DELETE FROM outbox_events WHERE aggregate_id = '{order_id}';
@@ -378,7 +372,7 @@ def run_e2e_cutover_proof() -> dict[str, Any]:
             "cloudflare_queue_delivered": True,
             "a23_pulled_and_claimed": True,
             "max_candidate_font_built": True,
-            "formats_validated": ["TTF", "OTF", "WOFF2"],
+            "formats_validated": ["TTF", "OTF"],
             "r2_artifact_uploaded": True,
             "d1_durable_completion_committed": True,
             "queue_message_acked": True,

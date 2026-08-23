@@ -2,18 +2,22 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import json
 import logging
 import pickle
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urljoin, urlparse
 import httpx
 from PIL import Image, ImageDraw
 
 from compute.models import ClaimStyle, GlyphVector, SourcePayload, StyleSourceData
+from measurement.browser_session import ChromiumSession
+from measurement.collector import ObservationCollector
+from measurement.models import ObservationConfig
 from measurement.store import ObservationStore
 from reconstruction.models import Contour, LineSegment, Point2D, ReconstructedGlyph, ReconstructionConfig
 from reconstruction.solver import MaxReconstructionSolver
@@ -305,6 +309,8 @@ class SourceAcquirer:
         client: httpx.AsyncClient | None = None,
         cache_dir: Path | str | None = None,
         observation_store_dir: Path | str | None = None,
+        browser_session_factory: Callable[[], ChromiumSession] | None = None,
+        observation_config: ObservationConfig | None = None,
     ) -> None:
         self.timeout = timeout
         self._external_client = client is not None
@@ -318,20 +324,16 @@ class SourceAcquirer:
 
         if observation_store_dir:
             self.store_dir = Path(observation_store_dir)
+        elif self.cache_dir:
+            self.store_dir = self.cache_dir.parent / "observations"
         else:
-            candidates = [
-                Path("observations/benchmark"),
-                Path.home() / "telefont" / "observations" / "benchmark",
-                Path(__file__).parent.parent.parent / "observations" / "benchmark",
-                Path("observations"),
-            ]
-            self.store_dir = candidates[0]
-            for c in candidates:
-                if (c / "index.sqlite3").exists():
-                    self.store_dir = c
-                    break
+            self.store_dir = Path("observations/runtime")
 
-        self.store = ObservationStore(self.store_dir) if (self.store_dir / "index.sqlite3").exists() else None
+        self.store = ObservationStore(self.store_dir)
+        self.browser_session_factory = browser_session_factory or (
+            lambda: ChromiumSession(timeout_seconds=self.timeout)
+        )
+        self.observation_config = observation_config or ObservationConfig()
         self.solver = MaxReconstructionSolver(config=ReconstructionConfig())
 
     async def close(self) -> None:
@@ -414,64 +416,107 @@ class SourceAcquirer:
         if isinstance(preview_input, bytes):
             return self._build_from_raster_preview_bytes(source_url, family_name, styles, preview_input)
 
-        # 3. Production path (preview_input is None): MAX ObservationStore resolution ONLY (Zero external HTTP calls)
+        # 3. Production path: reuse durable observations or collect authorized browser evidence on a miss.
         if not allow_web_fallback:
-            if not self.store:
-                raise ValueError(f"NO_MAX_OBSERVATIONS_FOUND_FOR_{family_name}")
-
             family_key = family_name.lower().replace(" ", "_").replace("-", "_")
-            # Canonical family resolution only - no cross-family benchmark alias fallback
-            has_coverage = self.store.get_coverage(family_key, "regular") or self.store.get_coverage(family_key, "reg")
-            if not has_coverage:
-                raise ValueError(f"NO_MAX_OBSERVATIONS_FOUND_FOR_{family_name}")
-
+            browser_session: ChromiumSession | None = None
+            collector: ObservationCollector | None = None
+            collected_any = False
             style_data_map: dict[str, StyleSourceData] = {}
-            for s in styles:
-                s_lower = s.display_name.lower()
-                is_bold = "bold" in s_lower or "black" in s_lower
-                is_italic = "italic" in s_lower or "oblique" in s_lower
-                style_key = s.id.lower().replace(" ", "_").replace("-", "_")
-                coverage = self.store.get_coverage(family_key, style_key)
-                if not coverage and style_key in ("regular", "reg"):
-                    coverage = self.store.get_coverage(family_key, "regular") or self.store.get_coverage(family_key, "reg")
-                    style_key = "regular"
+            try:
+                for s in styles:
+                    s_lower = s.display_name.lower()
+                    is_bold = "bold" in s_lower or "black" in s_lower
+                    is_italic = "italic" in s_lower or "oblique" in s_lower
+                    style_key = s.id.lower().replace(" ", "_").replace("-", "_")
+                    coverage = self.store.get_coverage(family_key, style_key)
+                    collection_key = hashlib.sha256(
+                        f"{source_url.strip()}\0{s.id}\0{s.display_name}\0{self.observation_config.compute_hash()}".encode("utf-8")
+                    ).hexdigest()
 
-                if not coverage:
-                    raise ValueError(f"NO_MAX_COVERAGE_FOR_{family_key}_{style_key}")
+                    collection_complete = self.store.is_source_collection_complete(collection_key)
+                    collection_started = self.store.is_source_collection_started(collection_key)
+                    if not coverage or (collection_started and not collection_complete):
+                        if collection_complete:
+                            raise ValueError(f"COMPLETED_MAX_COLLECTION_HAS_NO_COVERAGE_{family_key}_{style_key}")
+                        self.store.mark_source_collection_started(collection_key)
+                        if browser_session is None:
+                            browser_session = self.browser_session_factory()
+                            collector = ObservationCollector(
+                                browser_session,
+                                self.store,
+                                self.observation_config,
+                            )
+                            await collector.initialize()
+                        assert collector is not None
+                        selected_font = await browser_session.observe_source_font(
+                            source_url.strip(), s.display_name, family_name
+                        )
+                        await collector.collect_font_observations(
+                            family_key, style_key, selected_font
+                        )
+                        await collector.collect_pair_observations(
+                            family_key, style_key, selected_font
+                        )
+                        await collector.collect_feature_observations(
+                            family_key, style_key, selected_font
+                        )
+                        coverage = self.store.get_coverage(family_key, style_key)
+                        if not coverage:
+                            raise ValueError(f"NO_OBSERVABLE_GLYPHS_FOR_{family_key}_{style_key}")
+                        self.store.mark_source_collection_complete(
+                            collection_key,
+                            source_url.strip(),
+                            family_key,
+                            style_key,
+                            self.observation_config.compute_hash(),
+                            browser_session.browser_version,
+                        )
+                        collected_any = True
 
-                cache_key = (family_key, style_key)
-                if cache_key in _RECONSTRUCTED_GLYPH_CACHE:
-                    glyph_models = _RECONSTRUCTED_GLYPH_CACHE[cache_key]
-                else:
-                    disk_cache_file = self.store_dir / f"reconstructed_{family_key}_{style_key}.pkl"
-                    if disk_cache_file.exists():
-                        try:
-                            glyph_models = pickle.loads(disk_cache_file.read_bytes())
-                        except Exception:
-                            glyph_models = {}
+                    cache_key = (family_key, style_key)
+                    if collected_any:
+                        _RECONSTRUCTED_GLYPH_CACHE.pop(cache_key, None)
+                    if cache_key in _RECONSTRUCTED_GLYPH_CACHE:
+                        glyph_models = _RECONSTRUCTED_GLYPH_CACHE[cache_key]
                     else:
                         glyph_models = {}
+                        disk_cache_file = self.store_dir / f"reconstructed_{family_key}_{style_key}.pkl"
+                        if disk_cache_file.exists() and not collected_any:
+                            try:
+                                glyph_models = pickle.loads(disk_cache_file.read_bytes())
+                            except Exception:
+                                glyph_models = {}
+                        if not glyph_models:
+                            for cp in coverage:
+                                observations = self.store.get_glyph_observations(family_key, style_key, cp)
+                                if observations:
+                                    glyph_models[cp] = self.solver.reconstruct_glyph(observations)
+                        _RECONSTRUCTED_GLYPH_CACHE[cache_key] = glyph_models
 
                     if not glyph_models:
-                        for cp in coverage:
-                            obs = self.store.get_glyph_observations(family_key, style_key, cp)
-                            if obs:
-                                glyph_models[cp] = self.solver.reconstruct_glyph(obs)
-                    _RECONSTRUCTED_GLYPH_CACHE[cache_key] = glyph_models
-
-                style_data_map[s.id] = StyleSourceData(
-                    style_id=s.id,
-                    style_name=s.display_name,
-                    weight_class=700 if is_bold else 400,
-                    is_italic=is_italic,
-                    reconstructed_glyphs=glyph_models,
-                )
+                        raise ValueError(f"NO_MAX_RECONSTRUCTION_FOR_{family_key}_{style_key}")
+                    style_data_map[s.id] = StyleSourceData(
+                        style_id=s.id,
+                        style_name=s.display_name,
+                        weight_class=700 if is_bold else 400,
+                        is_italic=is_italic,
+                        reconstructed_glyphs=glyph_models,
+                        observation_reference_id=family_key,
+                        observation_style_id=style_key,
+                    )
+            finally:
+                if browser_session is not None:
+                    browser_session.close()
 
             if not style_data_map:
                 raise ValueError(f"NO_MAX_STYLES_COMPILED_FOR_{family_name}")
 
-            self.last_cache_hit = True
-            self.cache_hits += 1
+            self.last_cache_hit = not collected_any
+            if collected_any:
+                self.cache_misses += 1
+            else:
+                self.cache_hits += 1
             return SourcePayload(
                 source_url=source_url.strip(),
                 family_name=family_name,

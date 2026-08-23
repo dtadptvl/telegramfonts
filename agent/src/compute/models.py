@@ -27,6 +27,8 @@ class StyleSourceData:
     is_italic: bool = False
     glyphs: dict[str, GlyphVector] = field(default_factory=dict)
     reconstructed_glyphs: dict[int, Any] = field(default_factory=dict)
+    observation_reference_id: str | None = None
+    observation_style_id: str | None = None
 
 
 @dataclass
@@ -40,7 +42,7 @@ class SourcePayload:
 class GeneratedFontFile:
     style_id: str
     style_name: str
-    format: str  # "TTF" | "OTF" | "WOFF2"
+    format: str  # "TTF" | "OTF"
     filename: str
     file_path: Path
     size_bytes: int

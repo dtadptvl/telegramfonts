@@ -882,7 +882,7 @@ describe('Telegram Webhook & UX Flow', () => {
       await sessionService.transitionStatus('77771', sess2!.workflow_token, 'SELECTING_STYLES', 'SELECTING_FORMATS', sess2!.version);
 
       const sess3 = await sessionService.getSessionByUserId('77771');
-      await sessionService.toggleFormatSelection('77771', sess3!.workflow_token, 'WOFF2', sess3!.version); // ['TTF', 'WOFF2']
+      await sessionService.toggleFormatSelection('77771', sess3!.workflow_token, 'OTF', sess3!.version); // ['TTF', 'OTF']
 
       const sess4 = await sessionService.getSessionByUserId('77771');
       await sessionService.transitionStatus('77771', sess4!.workflow_token, 'SELECTING_FORMATS', 'CONFIRMING', sess4!.version);

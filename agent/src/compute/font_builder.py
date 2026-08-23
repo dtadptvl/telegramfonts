@@ -29,19 +29,9 @@ class FontBuilderService:
         if observation_store_dir:
             self.store_dir = Path(observation_store_dir)
         else:
-            candidates = [
-                Path("observations/benchmark"),
-                Path.home() / "telefont" / "observations" / "benchmark",
-                Path(__file__).parent.parent.parent / "observations" / "benchmark",
-                Path("observations"),
-            ]
-            self.store_dir = candidates[0]
-            for c in candidates:
-                if (c / "index.sqlite3").exists():
-                    self.store_dir = c
-                    break
+            self.store_dir = Path("observations/runtime")
 
-        self.store = ObservationStore(self.store_dir) if (self.store_dir / "index.sqlite3").exists() else None
+        self.store = ObservationStore(self.store_dir)
 
     def build_font(
         self,
@@ -51,7 +41,7 @@ class FontBuilderService:
         output_dir: Path,
     ) -> GeneratedFontFile:
         clean_format = format_type.strip().upper()
-        if clean_format not in ("TTF", "OTF", "WOFF2"):
+        if clean_format not in ("TTF", "OTF"):
             raise ValueError(f"UNSUPPORTED_FORMAT: {clean_format}")
 
         sanitized_family = "".join(c for c in family_name if c.isalnum() or c in (" ", "-", "_")).strip() or "TeleFont"
@@ -65,14 +55,8 @@ class FontBuilderService:
 
         typography = None
         if self.store:
-            family_key = sanitized_family.lower().replace(" ", "_").replace("-", "_")
-            style_key = sanitized_style.lower().replace(" ", "_").replace("-", "_")
-            if not self.store.get_coverage(family_key, style_key):
-                for ref in ["be_vietnam_pro", "roboto_flex", "inter"]:
-                    if self.store.get_coverage(ref, style_key) or self.store.get_coverage(ref, "regular"):
-                        family_key = ref
-                        style_key = style_key if self.store.get_coverage(ref, style_key) else "regular"
-                        break
+            family_key = style_source.observation_reference_id or sanitized_family.lower().replace(" ", "_").replace("-", "_")
+            style_key = style_source.observation_style_id or sanitized_style.lower().replace(" ", "_").replace("-", "_")
             try:
                 inferencer = EvidenceKerningInferencer(
                     family_name=sanitized_family,
@@ -99,8 +83,6 @@ class FontBuilderService:
             art = family_res.ttf
         elif clean_format == "OTF":
             art = family_res.otf
-        elif clean_format == "WOFF2":
-            art = family_res.woff2
         else:
             raise ValueError(f"UNSUPPORTED_FORMAT: {clean_format}")
 

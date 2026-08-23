@@ -1,7 +1,7 @@
 """Held-Out Candidate Font Validator (MAX Pipeline D).
 
 Performs independent multi-consumer verification of candidate font binaries
-(OTF, TTF, WOFF2) using FreeType, HarfBuzz, Chromium, and FontTools against held-out evidence.
+(OTF and TTF) using FreeType, HarfBuzz, Chromium, and FontTools against held-out evidence.
 Ground truth reference font binaries may be read ONLY by this validator module.
 """
 from __future__ import annotations
@@ -192,8 +192,8 @@ class MaxCandidateHeldOutValidator:
         tested_codepoints: list[int] | None = None,
         run_chromium: bool = True,
     ) -> HeldOutValidationReport:
-        """Run full multi-consumer held-out validation suite across OTF, TTF, WOFF2, and Chromium."""
-        # 1. Chromium Browser Validation (Direct WOFF2)
+        """Run full multi-consumer held-out validation across OTF, TTF, and Chromium."""
+        # 1. Chromium browser validation for both canonical binaries.
         chromium_res = self._validate_chromium_consumer(build_result, tested_codepoints) if run_chromium else ChromiumValidationResult(
             is_available=False,
             browser_version="skipped",
@@ -206,7 +206,7 @@ class MaxCandidateHeldOutValidator:
 
         # 2. Format Loadability Validation
         format_results: list[FormatValidationResult] = []
-        for art in (build_result.otf, build_result.ttf, build_result.woff2):
+        for art in (build_result.otf, build_result.ttf):
             fmt_res = self.validate_format_loadability(art, is_chromium_supported=chromium_res.is_direct_loadable_chromium)
             format_results.append(fmt_res)
 
@@ -415,6 +415,24 @@ class MaxCandidateHeldOutValidator:
     ) -> FormatValidationResult:
         """Validate that candidate binary loads in FontTools, FreeType, HarfBuzz, and Chromium with direct/roundtrip semantics."""
         path = artifact.file_path
+        if artifact.format not in {"OTF", "TTF"}:
+            return FormatValidationResult(
+                format=artifact.format,
+                file_path=str(path),
+                size_bytes=artifact.size_bytes,
+                sha256_hex=artifact.sha256_hex,
+                is_direct_loadable_fonttools=False,
+                is_direct_loadable_freetype=False,
+                is_roundtrip_loadable_freetype=False,
+                is_direct_loadable_harfbuzz=False,
+                is_direct_loadable_chromium=False,
+                glyph_count=0,
+                units_per_em=0,
+                has_valid_cmap=False,
+                has_valid_metrics=False,
+                decompression_round_trip=False,
+                validation_error=f"UNSUPPORTED_FORMAT: {artifact.format}",
+            )
         data = path.read_bytes()
 
         # 1. FontTools Direct Load
@@ -434,13 +452,6 @@ class MaxCandidateHeldOutValidator:
             has_hmtx = "hmtx" in tt
             ft_ok = True
 
-            # If WOFF2, verify decompression round-trip to SFNT
-            if artifact.format == "WOFF2":
-                tt.flavor = None
-                buf = io.BytesIO()
-                tt.save(buf)
-                decomp_tt = TTFont(io.BytesIO(buf.getvalue()))
-                decomp_ok = len(decomp_tt.getGlyphOrder()) == glyph_cnt
         except Exception as e:
             err_msg = f"FontTools failed: {e}"
             logger.error("FontTools failed to load %s: %s", artifact.filename, e)
@@ -455,19 +466,7 @@ class MaxCandidateHeldOutValidator:
         except Exception:
             ft_direct_ok = False
 
-        if artifact.format == "WOFF2":
-            try:
-                tt_decomp = TTFont(io.BytesIO(data))
-                tt_decomp.flavor = None
-                buf = io.BytesIO()
-                tt_decomp.save(buf)
-                face_rt = freetype.Face(io.BytesIO(buf.getvalue()))
-                face_rt.set_char_size(1000 * 64)
-                ft_roundtrip_ok = face_rt.num_glyphs > 0
-            except Exception:
-                ft_roundtrip_ok = False
-        else:
-            ft_roundtrip_ok = ft_direct_ok
+        ft_roundtrip_ok = ft_direct_ok
 
         # 3. HarfBuzz Direct Load
         hb_direct_ok = False
@@ -483,8 +482,8 @@ class MaxCandidateHeldOutValidator:
         except Exception:
             hb_direct_ok = False
 
-        # 4. Chromium Direct Load (only tested on direct WOFF2 web font path)
-        chrom_direct_ok = is_chromium_supported if artifact.format == "WOFF2" else False
+        # 4. Chromium direct load is required for both canonical formats.
+        chrom_direct_ok = is_chromium_supported
 
         return FormatValidationResult(
             format=artifact.format,
@@ -509,7 +508,7 @@ class MaxCandidateHeldOutValidator:
         build_result: CandidateFamilyBuildResult,
         tested_codepoints: list[int] | None = None,
     ) -> ChromiumValidationResult:
-        """Exercise candidate WOFF2 in headless Chromium via CDP."""
+        """Exercise candidate OTF and TTF binaries in headless Chromium via CDP."""
         from measurement.browser_session import ChromiumSession, find_chromium_executable
 
         try:
@@ -531,25 +530,33 @@ class MaxCandidateHeldOutValidator:
             session = ChromiumSession(timeout_seconds=10.0)
             try:
                 await session.start()
-                woff2_bytes = build_result.woff2.file_path.read_bytes()
-                await session.load_font_data("CandidateMAXWOFF2", woff2_bytes)
+                candidate_bytes = {
+                    "CandidateMAXOTF": build_result.otf.file_path.read_bytes(),
+                    "CandidateMAXTTF": build_result.ttf.file_path.read_bytes(),
+                }
+                for alias, font_bytes in candidate_bytes.items():
+                    await session.load_font_data(alias, font_bytes)
 
-                # 1. Fallback Rejection Verification on unmapped code point 'Z'
-                fallback_ok = not (await session.is_glyph_supported_in_font("CandidateMAXWOFF2", ord("Z")))
+                # 1. Fallback rejection must hold for both formats.
+                fallback_ok = all([
+                    not (await session.is_glyph_supported_in_font(alias, ord("Z")))
+                    for alias in candidate_bytes
+                ])
 
                 # 2. Direct browser metrics comparison for mapped glyphs
                 cps = tested_codepoints or [ord("A"), ord("B"), ord("O"), ord("8")]
                 adv_deltas = []
-                for cp in cps:
-                    m = await session.measure_glyph_direct("CandidateMAXWOFF2", cp, 200.0)
-                    self.ref_face.load_char(chr(cp))
-                    ref_adv = self.ref_face.glyph.advance.x / 64.0
-                    adv_deltas.append(abs(m.advance_width_upem - ref_adv))
+                for alias in candidate_bytes:
+                    for cp in cps:
+                        m = await session.measure_glyph_direct(alias, cp, 200.0)
+                        self.ref_face.load_char(chr(cp))
+                        ref_adv = self.ref_face.glyph.advance.x / 64.0
+                        adv_deltas.append(abs(m.advance_width_upem - ref_adv))
 
                 # 3. Direct Chromium Pair TextMetrics for Fit and Distinct Held-Out Pairs
                 from typography.models import BOUNDED_FIT_PAIRS, SEPARATE_HELD_OUT_IN_CMAP_PAIRS
 
-                cand_tt = TTFont(io.BytesIO(woff2_bytes))
+                cand_tt = TTFont(io.BytesIO(candidate_bytes["CandidateMAXTTF"]))
                 cand_cmap = set(cand_tt.getBestCmap().keys()) if cand_tt.getBestCmap() else set()
 
                 fit_test_pairs = [
@@ -570,7 +577,7 @@ class MaxCandidateHeldOutValidator:
                 (() => {{
                     const canvas = document.createElement('canvas');
                     const ctx = canvas.getContext('2d', {{ willReadFrequently: true }});
-                    ctx.font = '200px "CandidateMAXWOFF2"';
+                    ctx.font = '200px "CandidateMAXTTF"';
                     
                     const pairs = {pairs_json};
                     const single_widths = {{}};
@@ -645,14 +652,15 @@ class MaxCandidateHeldOutValidator:
                 # 4. Canvas Text Rendering
                 js_render = """
                 (() => {
-                    const canvas = document.createElement('canvas');
-                    canvas.width = 400;
-                    canvas.height = 100;
-                    const ctx = canvas.getContext('2d');
-                    ctx.font = '32px "CandidateMAXWOFF2"';
-                    ctx.fillText('A B O 8', 10, 50);
-                    const dataUrl = canvas.toDataURL('image/png');
-                    return dataUrl.length > 500;
+                    return ['CandidateMAXOTF', 'CandidateMAXTTF'].every(family => {
+                        const canvas = document.createElement('canvas');
+                        canvas.width = 400;
+                        canvas.height = 100;
+                        const ctx = canvas.getContext('2d');
+                        ctx.font = `32px "${family}"`;
+                        ctx.fillText('A B O 8', 10, 50);
+                        return canvas.toDataURL('image/png').length > 500;
+                    });
                 })()
                 """
                 canvas_ok = bool(await session.evaluate_script(js_render))

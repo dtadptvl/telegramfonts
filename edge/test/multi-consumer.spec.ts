@@ -39,7 +39,7 @@ async function setupOrderAndJob(): Promise<{ orderId: string; jobId: string }> {
       userId,
       JSON.stringify({
         source_url: 'https://www.myfonts.com/fonts/foundry/mc-font/',
-        selected_formats: ['TTF', 'OTF', 'WOFF2'],
+        selected_formats: ['TTF', 'OTF'],
       }),
       now,
       now
