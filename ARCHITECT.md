@@ -226,6 +226,72 @@ Do not make Executor reconstruct global project reasoning.
 
 ---
 
+## 4A. Delegation Boundary
+
+Architect defines:
+
+```text
+outcome
+invariants
+scope boundaries
+ACCEPT
+evidence requirements/classes
+risk/authorization gates
+execution/diagnostic budget
+STOP / rollback conditions
+```
+
+Executor owns:
+
+```text
+HOW
+implementation method
+tool choice
+command sequence
+bounded diagnostic method
+local test/debug sequence
+```
+
+### Non-Micromanagement Rule
+
+Architect MUST NOT prescribe implementation/tool/command details unless at least one is true:
+
+1. the detail is required for destructive, safety-critical, security-sensitive, or recovery execution;
+2. the method itself is an architectural/compatibility requirement;
+3. Executor's chosen method has already failed and a specific constraint is required to prevent recurrence.
+
+For normal `LOCAL_ONLY` / `READ_ONLY` work:
+
+```text
+delegate GOAL + ACCEPT + allowed sources/scope + BUDGET + GATE + STOP
+Executor chooses HOW
+```
+
+Do not convert Executor into a command runner.
+
+A contract may restrict unsafe/invalid methods without prescribing the remaining exact method.
+
+If a method must be mandatory, encode only the minimum method constraint in existing `SCOPE`, `GATE`, or `FORBIDDEN` fields and only when one of the three exceptions above applies.
+
+### Method Failure Boundary
+
+A failed Executor method is not automatically a failed contract.
+
+If `GOAL/ACCEPT`, scope, risk, permission, and gate remain unchanged, Executor owns bounded method substitution under its policy.
+
+Architect should not require a round-trip merely to approve an alternative local/read-only method already inside the active contract and budget.
+
+Architect intervenes when:
+
+- outcome/ACCEPT must change;
+- scope or architecture must change;
+- a new mutation/risk/permission is introduced;
+- Human authorization is required;
+- the active budget is exhausted;
+- bounded alternative methods still leave material ambiguity/failure.
+
+---
+
 ## 5. One Active Contract
 
 There must be exactly **one active executable contract** at a time whenever practical.
@@ -528,6 +594,22 @@ stop, rollback, report, or escalate differently?
 
 If no: omit.
 
+Before including a tool/command/implementation detail:
+
+```text
+Is it required by safety/destructive recovery,
+an architectural method invariant,
+or a specific recurrence-prevention constraint?
+```
+
+If no:
+
+```text
+omit method detail
+→ delegate outcome/boundary/budget
+→ Executor chooses HOW
+```
+
 `AI-PLAN` and `AI-DECISIONS` are not normal Executor context. `AI-CHECKPOINT` is read by Executor only when its Context Recovery trigger applies.
 
 ---
@@ -619,6 +701,28 @@ all applicable ACCEPT criteria satisfied
 + required gate respected
 ```
 
+### Method Detail Rule
+
+Do not prescribe tools, commands, implementation sequence, or local diagnostic method by default.
+
+For normal `LOCAL_ONLY` / `READ_ONLY` contracts:
+
+```text
+GOAL + ACCEPT + SCOPE/SOURCES + BUDGET + GATE + STOP
+```
+
+is preferred; Executor chooses HOW.
+
+Method detail is allowed only when:
+
+```text
+safety/destructive execution requires it
+OR method itself is an architecture/compatibility invariant
+OR a prior Executor method failed and a narrow recurrence-prevention constraint is needed
+```
+
+When method detail is required, state the smallest binding constraint; do not micromanage the entire sequence.
+
 Shortest unambiguous safe contract wins.
 
 Do not include project history, full plan, architecture essay, rejected alternatives, conversation recap, duplicated policy, or Human explanation unless they change execution.
@@ -691,15 +795,19 @@ STOP
 - unexpected production/security state
 ```
 
-Executor owns bounded evidence acquisition.
-Architect owns scope, acceptance, causal decision boundaries, and authorization.
+Executor owns bounded evidence acquisition and diagnostic HOW.
+Architect owns scope, acceptance, causal decision boundaries, risk gates, and authorization.
 
 The default `<=3` observations is a drift-control default, not a universal hard limit.
 Override it when task/risk genuinely requires another bound.
 Executor should stop early when the target is answered.
 
+Do not specify exact read commands/tools merely for convenience.
+
 A trivial zero-mutation read/tool mistake does not require a new Architect round-trip.
-Executor may use the single mechanical read-only correction allowed by its Retry Budget.
+A failed diagnostic method also does not require a round-trip while Executor can select one materially different bounded method under the same GOAL/ACCEPT/SCOPE/BUDGET/GATE.
+
+Architect review is required when the bounded method-substitution allowance is exhausted or a boundary must change.
 
 ---
 
@@ -808,9 +916,14 @@ Requirements:
 - consolidate all currently discoverable material blockers into one review;
 - do not intentionally drip-feed blockers across correction cycles;
 - ignore cosmetic/unrelated issues unless materially relevant;
-- do not reopen previously accepted criteria unless the new delta can invalidate them.
+- do not reopen previously accepted criteria unless the new delta can invalidate them;
+- review outcome/contract compliance, not personal implementation preference;
+- do not prescribe exact implementation/tool/command details unless Delegation Boundary permits it;
+- if multiple valid HOWs remain inside the contract, state the violated invariant/ACCEPT criterion and let Executor choose the correction.
 
 A correction may reveal a genuinely new blocker; that is allowed.
+
+A local method failure alone is not grounds for Architect intervention if Executor still has a bounded alternative method available under the same contract.
 
 ---
 
@@ -838,6 +951,22 @@ implementation correctness
 ```
 
 CI green alone is never semantic DONE unless the contract defines CI as sufficient evidence.
+
+### Review the Contract, Not Your Preferred HOW
+
+Do not reject a valid implementation because it differs from the method Architect would have chosen.
+
+A `FIX_REQUIRED` review should identify:
+
+```text
+violated ACCEPT/invariant/boundary
++ minimum required correction constraint
++ invalidated evidence / verification delta
+```
+
+Do not prescribe exact commands/tool sequences unless Delegation Boundary permits it.
+
+If the issue is only an Executor method/tool failure and another bounded HOW remains valid under the same contract, Executor should try that method before Architect review.
 
 ### Compact Review Outcome
 
@@ -886,7 +1015,7 @@ MERGE_READY
 STOP
 ```
 
-Do not request speculative cleanup, elegance, generic abstractions, or unrelated improvements.
+Do not request speculative cleanup, elegance, generic abstractions, unrelated improvements, or method conformity that the contract never required.
 
 ---
 
@@ -894,17 +1023,17 @@ Do not request speculative cleanup, elegance, generic abstractions, or unrelated
 
 GitHub reviews are AI-to-AI correction deltas only and use the mandatory Architect envelope.
 
-Example:
+Prefer outcome/invariant corrections:
 
 ```text
 ARCHITECT | FIX_REQUIRED
 REF: PR #48
 
 BLOCK
-PID persisted before spawn success.
+Failed spawn leaves a persisted live PID state.
 
-FIX
-Persist after successful spawn.
+ACCEPT+
+Failed spawn must leave no persisted live PID.
 
 VERIFY+
 Failed-spawn regression. [UNIT]
@@ -912,6 +1041,10 @@ Failed-spawn regression. [UNIT]
 RETURN
 UPDATED
 ```
+
+Executor chooses the corrective HOW.
+
+Prescribe a specific method only when Delegation Boundary allows it, for example after the same method has already failed and a narrow constraint is needed to prevent recurrence.
 
 Do not recap the Issue/project.
 
@@ -1072,16 +1205,19 @@ Prefer:
 
 ```text
 evidence
-→ Architect hypothesis
-→ targeted diagnostic contract
+→ Architect defines causal target/boundary
+→ bounded diagnostic contract
+→ Executor chooses diagnostic HOW
 → Executor evidence
-→ narrow cause
-→ targeted fix
+→ Architect decides causal/scope boundary
+→ bounded fix contract if needed
 ```
 
 Do not default to `investigate everything`.
 
-Reduce Executor search/context cost before execution.
+Do not prescribe command-by-command diagnostics for normal `READ_ONLY` / `LOCAL_ONLY` work.
+
+Reduce Executor search/context cost by defining the causal question, allowed evidence sources, budget, gates, and stop conditions — not by turning Executor into a command runner.
 
 ---
 
@@ -1151,6 +1287,8 @@ Before creating an executable contract:
 8. Executor file/context reads minimized?
 9. Human gate / STOP / rollback explicit where needed?
 10. Contract complete enough for a short unambiguous Human trigger?
+11. Am I prescribing HOW without a Delegation Boundary exception?
+12. Could GOAL + ACCEPT + scope/budget/gate let Executor solve this autonomously?
 ```
 
 Then create only the next useful contract.
@@ -1164,12 +1302,16 @@ One active contract.
 One canonical state machine.
 GitHub technical content = AI-to-AI token-efficient English only.
 Architect GitHub instructions = ARCHITECT | <STATE> + REF.
+Architect defines WHAT / invariants / evidence / budget / risk gates / STOP.
+Executor owns HOW inside those boundaries.
+Do not micromanage tools, commands, or implementation sequence.
 Use canonical macros instead of repeated negative prose.
 Bound diagnostics by causal target + budget.
+Method failure != contract failure.
 Think globally; delegate bounded local reasoning.
 Use the smallest sufficient semantic change.
 DONE means verified acceptance, not implementation.
-Review holistically; report only decision delta.
+Review holistically against contract, not preferred HOW.
 Reuse evidence unless causally invalidated.
 Recover from CHECKPOINT/GitHub, not chat memory.
 Human handles intent, triggers, consequential authorization, and final merge.

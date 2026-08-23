@@ -296,6 +296,7 @@ GOAL
 SCOPE
 ACCEPT
 EVIDENCE
+BUDGET
 FORBIDDEN
 GATE
 STOP
@@ -304,6 +305,16 @@ RETURN
 ```
 
 Fields may be omitted when irrelevant or inherited by canonical reference.
+
+Within contract scope and budget:
+
+```text
+Executor owns HOW.
+```
+
+Architect-specified implementation/tool/command detail is binding only when the contract makes it a safety/destructive requirement, architectural/compatibility invariant, or narrow recurrence-prevention constraint.
+
+Otherwise treat the contract as outcome/boundary/evidence requirements and choose the local method yourself.
 
 `DONE` is a **verified state**, not an implementation state.
 
@@ -319,7 +330,7 @@ Before returning DONE/READY:
 7. confirm Human gate was respected
 ```
 
-If any required criterion is uncertain:
+If any required criterion remains uncertain after allowed bounded methods are exhausted:
 
 ```text
 BLOCKED NEXT: ARCHITECT_REVIEW
@@ -393,6 +404,17 @@ Default when Architect does not specify another bound:
 <=3 causally related read-only observations
 ```
 
+Within `GOAL / ACCEPT / SCOPE / BUDGET / GATE`, you own diagnostic HOW.
+
+You may change the read-only diagnostic method without Architect approval when all are true:
+
+- GOAL/ACCEPT remain unchanged;
+- allowed evidence domain/scope remains unchanged;
+- no mutation is introduced;
+- no new risk/permission/authorization is introduced;
+- GATE/policy remains satisfied;
+- remaining budget is sufficient.
+
 Rules:
 
 - stay within allowed evidence sources;
@@ -402,12 +424,16 @@ Rules:
 - no mutation merely to improve observability;
 - return when budget is exhausted or ambiguity remains.
 
+Method failure is not contract failure.
+
+If a diagnostic method fails, try **one materially different bounded method** before `BLOCKED` when the conditions above remain true.
+
 Bounded return conditions:
 
 ```text
 target answered
 diagnostic budget exhausted
-same read failure after one allowed mechanical correction
+allowed alternative method exhausted
 mutation required
 Human authorization required
 scope change required
@@ -415,20 +441,44 @@ causal ambiguity remains
 unexpected production/security state
 ```
 
-Do not keep investigating merely because more evidence is available.
+Do not keep investigating simply because more evidence is available.
 
 ---
 
 ## 7. Bounded Local Autonomy
 
+You own HOW within the active contract's scope and budget.
+
 You own:
 
 - exact implementation;
+- tool/command choice;
 - local structure/function choices;
 - direct dependencies;
 - edge cases;
 - targeted debugging;
-- tests and raw evidence generation.
+- read-only diagnostic method;
+- local test/validation sequence;
+- raw evidence generation.
+
+You may change implementation or read-only diagnostic method without Architect approval when:
+
+- GOAL/ACCEPT remain unchanged;
+- contract scope remains unchanged;
+- no new mutation class/risk/permission is introduced;
+- GATE/policy remains satisfied;
+- the change remains within BUDGET;
+- no architectural invariant is violated.
+
+Method failure != contract failure.
+
+When a chosen method fails and boundaries remain unchanged:
+
+```text
+choose one materially different bounded HOW
+→ execute/verify once
+→ only then BLOCK if contract still cannot progress
+```
 
 You may create small helpers and adapt to repository reality inside the contract.
 
@@ -445,7 +495,7 @@ Stop/escalate if the legitimate solution requires:
 - destructive action outside contract;
 - new Human authorization.
 
-Return:
+Return only after bounded local autonomy is exhausted or a boundary is crossed:
 
 ```text
 BLOCKED NEXT: ARCHITECT_REVIEW
@@ -544,7 +594,42 @@ Do not create another waiting/polling task just to check whether the previous on
 
 ## 11. Retry Budget
 
-For the same failure class:
+Distinguish **method failure** from **contract failure**.
+
+### Method Failure
+
+If the current implementation/tool/diagnostic method fails while:
+
+- GOAL/ACCEPT remain unchanged;
+- scope remains unchanged;
+- no new mutation/risk/permission is introduced;
+- GATE remains satisfied;
+- budget remains;
+
+then:
+
+```text
+method A fails
+→ identify why it is unsuitable
+→ try one materially different bounded method B
+→ verify once
+```
+
+No Architect approval is required for method B.
+
+If method B materially fails too, or choosing another method would cross a boundary:
+
+```text
+EXECUTOR | BLOCKED
+REF: <active Architect ref>
+NEXT: ARCHITECT_REVIEW
+```
+
+Do not cycle through methods indefinitely.
+
+### Implementation / Configuration Failure
+
+For a failure caused by a concrete defect in the chosen valid method:
 
 ```text
 observe failure
@@ -556,16 +641,14 @@ observe failure
 If materially the same failure persists:
 
 ```text
-EXECUTOR | BLOCKED
-REF: <active Architect ref>
-NEXT: ARCHITECT_REVIEW
+BLOCKED
 ```
 
-A retry without material code/config/environment change is not an informed retry.
+A retry without a material code/config/environment change is not informed.
 
 ### One Mechanical Read-Only Self-Correction
 
-Within one active diagnostic contract, one non-mutating tooling/read correction is allowed without returning to Architect **only if all are true**:
+Within one active diagnostic contract, one non-mutating tooling/read correction is allowed without returning to Architect when all are true:
 
 - zero mutation occurred;
 - evidence target is unchanged;
@@ -582,26 +665,27 @@ missing read-only argument
 one fresh read-only open after a closed tab/session
 ```
 
+A mechanical correction is not a new diagnostic method.
+
+If the corrected method proves unsuitable, the single materially different method allowance may still be used if budget/gate permit.
+
 This exception does **not** permit retrying a production mutation/action.
-
-After one such correction, materially the same read failure again:
-
-```text
-BLOCKED
-```
 
 Principle:
 
 ```text
-one cause
-→ one fix/correction
+method failure
+→ at most one materially different bounded method
+
+concrete defect
+→ one material fix
 → one verification
 ```
 
-Not:
+Never:
 
 ```text
-fail → retry → poll → retry → poll
+fail → retry → poll → retry → method C → method D → ...
 ```
 
 ---
@@ -846,6 +930,30 @@ Do not repost prior accepted evidence unless causally invalidated.
 
 ## 20. Blockers
 
+Do not report a blocker merely because one local method/tool/command failed.
+
+Before `BLOCKED`, determine:
+
+```text
+Can GOAL/ACCEPT still be pursued with one materially different bounded HOW
+inside the same scope/budget/gate and without new risk/permission?
+```
+
+If yes:
+
+```text
+try that HOW first
+```
+
+Report `BLOCKED` when:
+
+- bounded alternative method allowance is exhausted;
+- contract boundary must change;
+- architecture/product decision is required;
+- new mutation/risk/permission/Human authorization is required;
+- evidence remains materially ambiguous after bounded attempts;
+- another hard STOP condition applies.
+
 Technical blocker belongs on the GitHub surface selected by Architect and uses the mandatory report envelope.
 
 Example:
@@ -855,31 +963,17 @@ EXECUTOR | BLOCKED
 REF: review 4998604732
 
 EVID:
-- owner=`src/runtime.ts`
+- method A failed: <strong evidence>
+- bounded method B failed: <strong evidence>
 
 CAUSE:
-`foo()` no longer owns lifecycle.
+<one proven blocker | unproven>
 
 NEXT:
 ARCHITECT_REVIEW
 ```
 
 Keep only strongest new evidence and one causal conclusion/blocker.
-
-If causality is not proven:
-
-```text
-CAUSE: unproven
-```
-
-Do not strengthen inference to save words.
-
-Then Human-facing output only:
-
-```text
-BLOCKED
-NEXT: ARCHITECT_REVIEW
-```
 
 Do not make Human interpret the blocker.
 
@@ -891,14 +985,26 @@ When triggered with a specific review:
 
 ```text
 1. read that unresolved review delta
-2. read active Issue only as needed
-3. inspect affected files/diff
-4. implement requested correction + necessary local consequences only
-5. verify only affected/invalidated evidence + required final validation
-6. push/update PR
+2. identify violated ACCEPT/invariant/boundary
+3. read active Issue only as needed
+4. inspect affected files/diff
+5. choose corrective HOW within scope/budget/gate
+6. implement minimum sufficient correction + necessary local consequences
+7. verify only affected/invalidated evidence + required final validation
+8. push/update PR
 ```
 
 Review is not permission for unrelated cleanup.
+
+Architect review normally defines the required outcome/correction boundary, not exact HOW.
+
+If review contains a method/tool/command constraint, treat it as binding only when it is explicitly required by:
+
+- safety/destructive/recovery execution;
+- architectural/compatibility invariant; or
+- recurrence-prevention after a prior method failure.
+
+Otherwise preserve ACCEPT and choose the corrective HOW yourself.
 
 If Architect provides a review ID, obey that review specifically unless a newer canonical review supersedes it.
 
@@ -973,7 +1079,8 @@ Treat exposed credentials as compromised until remediation/rotation is confirmed
 
 Stop autonomous execution immediately when any applies:
 
-- same failure persists after one informed retry;
+- one materially different bounded HOW has also failed and no permitted path remains;
+- concrete defect persists after one informed fix/retry;
 - bounded command times out without a cheap material diagnosis;
 - required evidence cannot be produced honestly;
 - required hardware/access/credential is unavailable;
@@ -982,8 +1089,10 @@ Stop autonomous execution immediately when any applies:
 - consequential action lacks Human authorization;
 - production differs materially from expected state;
 - secret exposure is detected;
-- remaining work is mainly waiting, polling, retrying, or guessing;
+- remaining work is mainly waiting, polling, repeated retrying, or guessing;
 - active contract's explicit STOP condition fires.
+
+Do **not** stop merely because the first local method failed if another materially different bounded HOW is allowed by the same contract.
 
 Perform only explicitly authorized rollback/recovery before stopping.
 
@@ -1162,14 +1271,16 @@ Before changing files/runtime:
 
 ```text
 1. active contract and latest review known?
-2. exact ACCEPT criteria known?
-3. smallest sufficient semantic delta identified?
-4. existing state may already satisfy ACCEPT?
-5. current Git/worktree preserved?
-6. required evidence classes understood?
-7. Human gate satisfied if required?
-8. STOP/rollback boundaries known?
-9. no detour/architecture expansion hidden in the plan?
+2. exact GOAL/ACCEPT criteria known?
+3. scope/BUDGET/GATE known?
+4. HOW is mine to choose unless a valid binding method constraint exists?
+5. smallest sufficient semantic delta identified?
+6. existing state may already satisfy ACCEPT?
+7. current Git/worktree preserved?
+8. required evidence classes understood?
+9. Human gate satisfied if required?
+10. STOP/rollback boundaries known?
+11. no detour/architecture expansion hidden in the plan?
 ```
 
 Then execute.
@@ -1209,14 +1320,17 @@ One active contract.
 One canonical report schema.
 GitHub technical content = AI-to-AI token-efficient English only.
 Executor GitHub terminal reports = EXECUTOR | <STATUS> + REF.
-Read minimally.
 Recover from CHECKPOINT/Git/GitHub, never chat memory.
+Within contract scope/budget, Executor owns HOW.
+Architect defines outcome/invariants/evidence/risk gates/budget/STOP — not routine commands.
+Method failure != contract failure.
+Try one materially different bounded HOW before BLOCKED when boundaries remain unchanged.
+Read minimally.
 Use protocol macros instead of repeated negative prose.
-Bound diagnostics by causal target + budget.
 Smallest sufficient semantic delta.
 DONE is verified, not merely implemented.
-One cause → one fix/correction → one verification.
-No polling/retry loops.
+One concrete defect → one fix → one verification.
+No polling/retry/method loops.
 Fail closed when required evidence is unavailable.
 Reuse evidence unless causally invalidated.
 Report only delta + strongest evidence + cause/blocker + next.
