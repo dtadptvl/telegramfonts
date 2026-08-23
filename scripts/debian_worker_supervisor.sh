@@ -49,6 +49,8 @@ readonly WORKER_ENTRYPOINT="$RELEASE_ROOT/agent/src/main.py"
 readonly RUNTIME_PYTHON="$RUNTIME_ROOT/bin/python"
 readonly ARCHIVE_ROOT="/srv/fontlab/archive"
 readonly TERMUX_PREFIX="/data/data/com.termux/files/usr"
+readonly HOST_ARCHIVE_BRIDGE="/data/data/com.termux/files/home/telefont-archive-bridge"
+readonly STAT_BIN="$TERMUX_PREFIX/bin/stat"
 readonly CONFIG_SOURCE_DEFAULT="/data/data/com.termux/files/home/.telefont.env"
 readonly LOCK_FILE="$TERMUX_PREFIX/var/run/telefont-debian-worker.lock"
 readonly LOG_FILE="$TERMUX_PREFIX/tmp/telefont-debian-worker.log"
@@ -65,6 +67,45 @@ fail_if_not_regular() {
   local label="$2"
   [ -f "$path" ] || fail "$label is unavailable"
   [ ! -L "$path" ] || fail "$label must not be a symlink"
+}
+
+verify_release_contents() {
+  "$CHROOT_BIN" "$DEBIAN_ROOT" /bin/sh -s -- "$1" "$2" <<'EOF'
+set -u
+archive="$1"
+staged="$2"
+scratch="$(/usr/bin/mktemp -d)" || exit 1
+
+cleanup() {
+  /bin/rm -rf "$scratch"
+}
+
+trap cleanup EXIT HUP INT TERM
+
+# Compare the complete non-root path set as well as content. GNU tar --compare
+# ignores files that exist only in the staged tree.
+/usr/bin/tar -tf "$archive" |
+  /usr/bin/sed -e 's#^\./##' -e 's#/$##' |
+  /usr/bin/awk 'length($0) > 0' |
+  LC_ALL=C /usr/bin/sort -u >"$scratch/archive" || exit 1
+/usr/bin/find "$staged" -mindepth 1 -printf '%P\n' |
+  LC_ALL=C /usr/bin/sort -u >"$scratch/staged" || exit 1
+LC_ALL=C /usr/bin/cmp -s "$scratch/archive" "$scratch/staged"
+EOF
+}
+
+verify_archive_filesystem_identity() {
+  local canonical_path="$1"
+  local bridge_path="$2"
+  local canonical_identity
+  local bridge_identity
+
+  [ -x "$STAT_BIN" ] || return 1
+  [ -d "$canonical_path" ] && [ ! -L "$canonical_path" ] || return 1
+  [ -d "$bridge_path" ] && [ ! -L "$bridge_path" ] || return 1
+  canonical_identity="$("$STAT_BIN" -c '%d:%i' "$canonical_path" 2>/dev/null)" || return 1
+  bridge_identity="$("$STAT_BIN" -c '%d:%i' "$bridge_path" 2>/dev/null)" || return 1
+  [ -n "$canonical_identity" ] && [ "$canonical_identity" = "$bridge_identity" ]
 }
 
 log() {
@@ -86,6 +127,8 @@ release_archive_hash="$("$CHROOT_BIN" "$DEBIAN_ROOT" /usr/bin/sha256sum "$RELEAS
 read -r release_archive_hash _ <<<"$release_archive_hash"
 [ "$release_archive_hash" = "$RELEASE_ARCHIVE_SHA256" ] \
   || fail "release identity archive hash mismatch"
+verify_release_contents "$RELEASE_ARCHIVE" "$RELEASE_ROOT" \
+  || fail "staged release path set differs from the clean release"
 "$CHROOT_BIN" "$DEBIAN_ROOT" /usr/bin/tar -d -f "$RELEASE_ARCHIVE" -C "$RELEASE_ROOT" \
   >/dev/null 2>&1 || fail "staged release contents differ from the clean release"
 
@@ -170,6 +213,8 @@ root_device="$("$CHROOT_BIN" "$DEBIAN_ROOT" /usr/bin/stat -c %d / 2>/dev/null)" 
   || fail "Debian root device cannot be read"
 [ -n "$archive_device" ] && [ "$archive_device" != "$root_device" ] \
   || fail "canonical archive resolves to the Debian root device"
+verify_archive_filesystem_identity "$DEBIAN_ROOT$ARCHIVE_ROOT" "$HOST_ARCHIVE_BRIDGE" \
+  || fail "canonical archive is not the accepted external archive filesystem"
 
 [ -n "$FLOCK_BIN" ] || fail "flock is unavailable"
 
