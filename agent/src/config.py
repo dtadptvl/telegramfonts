@@ -66,6 +66,10 @@ class Settings(BaseSettings):
         default=Path("./scratch"),
         description="Directory root for local computation and staging",
     )
+    FONT_ARCHIVE_ROOT: Path | None = Field(
+        default=None,
+        description="External ext4 root for immutable validated OTF/TTF final-font artifacts",
+    )
     HTTP_TIMEOUT_SECONDS: float = Field(
         default=30.0,
         ge=1.0,

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -10,8 +11,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from compute.archive import ARCHIVEABLE_FORMATS, ArchiveIdentity, FinalFontArchive
 from compute.font_builder import FontBuilderService
-from compute.models import GeneratedFontFile, JobPackageManifest, SourcePayload
+from compute.models import ArchiveSourceContext, GeneratedFontFile, JobPackageManifest, SourcePayload
 from compute.packager import PackagerService
 from compute.source import SourceAcquirer
 from compute.validator import validate_font_file
@@ -52,6 +54,7 @@ class JobRunner:
         source_acquirer: SourceAcquirer | None = None,
         font_builder: FontBuilderService | None = None,
         packager: PackagerService | None = None,
+        archive: FinalFontArchive | None = None,
     ) -> None:
         self.settings = settings
         self.queue_client = queue_client
@@ -65,6 +68,7 @@ class JobRunner:
             observation_store_dir=self.source_acquirer.store_dir
         )
         self.packager = packager or PackagerService()
+        self.archive = archive if archive is not None else FinalFontArchive.from_settings(settings)
 
     async def _heartbeat_loop(
         self,
@@ -97,42 +101,125 @@ class JobRunner:
             else:
                 logger.warning(f"Heartbeat transient failure for job {job_id}")
 
+    @staticmethod
+    def _family_name_from_url(source_url: str) -> str:
+        parsed = urlparse(source_url.strip())
+        path_parts = [p for p in parsed.path.split("/") if p]
+        return path_parts[-1].replace("-", " ").title() if path_parts else "TeleFont"
+
+    def _get_archive_context(self, job: ClaimedJob) -> ArchiveSourceContext | None:
+        context_getter = getattr(self.source_acquirer, "get_archive_context", None)
+        if not callable(context_getter):
+            return None
+        return context_getter(job.source_url, job.styles)
+
+    def _make_archive_identity(
+        self,
+        job: ClaimedJob,
+        family_name: str,
+        style_id: str,
+        style_name: str,
+        format_type: str,
+        context: ArchiveSourceContext,
+    ) -> ArchiveIdentity:
+        return ArchiveIdentity(
+            source_identity=context.source_identity,
+            family_name=family_name,
+            style_id=style_id,
+            style_name=style_name,
+            mode=job.mode,
+            format=format_type,
+            observation_identity=context.observation_identity_for(style_id),
+            config_version=context.config_version,
+        )
+
+    def _get_archive_hit(
+        self,
+        job: ClaimedJob,
+        family_name: str,
+        context: ArchiveSourceContext | None,
+    ) -> list[GeneratedFontFile] | None:
+        """Return all requested files only when every requested format is a verified hit."""
+        if self.archive is None or context is None:
+            return None
+        if not job.formats or any(fmt not in ARCHIVEABLE_FORMATS for fmt in job.formats):
+            return None
+
+        cached_files: list[GeneratedFontFile] = []
+        for style in job.styles:
+            for fmt in job.formats:
+                identity = self._make_archive_identity(
+                    job,
+                    family_name,
+                    style.id,
+                    style.display_name,
+                    fmt,
+                    context,
+                )
+                entry = self.archive.get(identity)
+                if entry is None:
+                    return None
+                cached_files.append(entry.to_generated_font_file())
+        return cached_files or None
+
     def _sync_build_validate_and_package(
         self,
-        source_payload: SourcePayload,
+        source_payload: SourcePayload | None,
         job: ClaimedJob,
         job_dir: Path,
         fenced_event: asyncio.Event,
         expiry_holder: list[int],
+        archive_context: ArchiveSourceContext | None = None,
+        cached_files: list[GeneratedFontFile] | None = None,
     ) -> JobPackageManifest:
-        """Synchronous CPU-bound pipeline running in a worker thread."""
-        family_name = job.family_name or source_payload.family_name
+        """Build/validate/archive on a miss, or package verified archive files on a hit."""
+        family_name = job.family_name or (
+            source_payload.family_name if source_payload is not None else self._family_name_from_url(job.source_url)
+        )
         build_dir = job_dir / "build"
         build_dir.mkdir(parents=True, exist_ok=True)
 
-        generated_files: list[GeneratedFontFile] = []
+        if cached_files is not None:
+            generated_files = list(cached_files)
+        else:
+            if source_payload is None:
+                raise RuntimeError("MISSING_SOURCE_PAYLOAD")
+            generated_files = []
+            for style in job.styles:
+                style_data = source_payload.styles.get(style.id)
+                if not style_data:
+                    raise ValueError(f"STYLE_MISSING_IN_SOURCE_{style.id}")
 
-        for style in job.styles:
-            style_data = source_payload.styles.get(style.id)
-            if not style_data:
-                raise ValueError(f"STYLE_MISSING_IN_SOURCE_{style.id}")
+                for fmt in job.formats:
+                    now_ms = int(time.time() * 1000)
+                    if fenced_event.is_set() or (now_ms + LEASE_SAFETY_MARGIN_MS >= expiry_holder[0]):
+                        raise RuntimeError("LEASE_FENCED_OR_EXPIRED")
 
-            for fmt in job.formats:
-                now_ms = int(time.time() * 1000)
-                if fenced_event.is_set() or (now_ms + LEASE_SAFETY_MARGIN_MS >= expiry_holder[0]):
-                    raise RuntimeError("LEASE_FENCED_OR_EXPIRED")
+                    font_file = self.font_builder.build_font(
+                        style_data,
+                        family_name,
+                        fmt,
+                        build_dir,
+                    )
 
-                font_file = self.font_builder.build_font(
-                    style_data,
-                    family_name,
-                    fmt,
-                    build_dir,
-                )
+                    if not validate_font_file(font_file.file_path, fmt):
+                        raise ValueError(f"GENERATED_FONT_INVALID_{fmt}")
 
-                if not validate_font_file(font_file.file_path, fmt):
-                    raise ValueError(f"GENERATED_FONT_INVALID_{fmt}")
+                    if self.archive is not None and archive_context is not None and fmt in ARCHIVEABLE_FORMATS:
+                        identity = self._make_archive_identity(
+                            job,
+                            family_name,
+                            style.id,
+                            style.display_name,
+                            fmt,
+                            archive_context,
+                        )
+                        try:
+                            self.archive.put(identity, font_file)
+                        except (OSError, sqlite3.Error) as exc:
+                            raise RuntimeError("FINAL_FONT_ARCHIVE_WRITE_FAILED") from exc
 
-                generated_files.append(font_file)
+                    generated_files.append(font_file)
 
         if not generated_files:
             raise ValueError("NO_FILES_GENERATED")
@@ -200,12 +287,20 @@ class JobRunner:
         )
 
         try:
-            # Step A: Validate and acquire source payload from real preview content
-            source_payload = await self.source_acquirer.acquire_source(
-                source_url=job.source_url,
-                styles=job.styles,
-                preview_input=preview_input,
-            )
+            # Step A: Use a complete verified archive hit, otherwise acquire source and compute.
+            family_name = job.family_name or self._family_name_from_url(job.source_url)
+            archive_context = self._get_archive_context(job)
+            cached_files = self._get_archive_hit(job, family_name, archive_context)
+            if cached_files is not None:
+                logger.info("Final-font archive hit for job %s (%d files)", job.job_id, len(cached_files))
+                source_payload = None
+            else:
+                source_payload = await self.source_acquirer.acquire_source(
+                    source_url=job.source_url,
+                    styles=job.styles,
+                    preview_input=preview_input,
+                )
+                archive_context = source_payload.archive_context or archive_context
 
             # Step B & C: Build fonts, validate, and package in a worker thread off the event loop
             manifest = await asyncio.to_thread(
@@ -215,6 +310,8 @@ class JobRunner:
                 job_dir,
                 fenced_event,
                 expiry_holder,
+                archive_context,
+                cached_files,
             )
 
             # Step D: Upload ZIP artifact(s) to private R2 storage endpoint

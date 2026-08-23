@@ -25,6 +25,7 @@ class ClaimedJob:
     foundry: str | None
     styles: list[ClaimStyle]
     formats: list[str]
+    mode: str = "ORIGINAL"
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ClaimedJob:
@@ -93,6 +94,11 @@ class ClaimedJob:
             if clean_f not in formats:
                 formats.append(clean_f)
 
+        raw_mode = data.get("mode", "ORIGINAL")
+        if not isinstance(raw_mode, str) or raw_mode.strip().upper() not in {"ORIGINAL", "VIETNAMESE"}:
+            raise ValueError("UNSUPPORTED_MODE")
+        mode = raw_mode.strip().upper()
+
         raw_family = data.get("family_name")
         family_name = str(raw_family).strip() if (isinstance(raw_family, str) and raw_family.strip()) else None
 
@@ -109,6 +115,7 @@ class ClaimedJob:
             foundry=foundry,
             styles=styles,
             formats=formats,
+            mode=mode,
         )
 
 

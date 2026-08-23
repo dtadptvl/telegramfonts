@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -31,11 +32,27 @@ class StyleSourceData:
     observation_style_id: str | None = None
 
 
+@dataclass(frozen=True)
+class ArchiveSourceContext:
+    """Stable source/observation identity used for final-font archive lookups."""
+
+    source_identity: str
+    style_observation_identities: tuple[tuple[str, str], ...]
+    config_version: str
+
+    def observation_identity_for(self, style_id: str) -> str:
+        for candidate_style_id, identity in self.style_observation_identities:
+            if candidate_style_id == style_id:
+                return identity
+        raise ValueError(f"MISSING_ARCHIVE_OBSERVATION_IDENTITY_{style_id}")
+
+
 @dataclass
 class SourcePayload:
     source_url: str
     family_name: str
     styles: dict[str, StyleSourceData] = field(default_factory=dict)
+    archive_context: ArchiveSourceContext | None = None
 
 
 @dataclass(frozen=True)

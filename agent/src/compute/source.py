@@ -14,7 +14,8 @@ from urllib.parse import urljoin, urlparse
 import httpx
 from PIL import Image, ImageDraw
 
-from compute.models import ClaimStyle, GlyphVector, SourcePayload, StyleSourceData
+from compute.archive import canonical_source_identity
+from compute.models import ArchiveSourceContext, ClaimStyle, GlyphVector, SourcePayload, StyleSourceData
 from measurement.browser_session import ChromiumSession
 from measurement.collector import ObservationCollector
 from measurement.models import ObservationConfig
@@ -336,6 +337,74 @@ class SourceAcquirer:
         self.observation_config = observation_config or ObservationConfig()
         self.solver = MaxReconstructionSolver(config=ReconstructionConfig())
 
+    def get_archive_context(
+        self,
+        source_url: str,
+        styles: list[ClaimStyle],
+    ) -> ArchiveSourceContext | None:
+        """Resolve cheap local observation identity without browser acquisition or reconstruction."""
+        if not validate_myfonts_url(source_url) or not styles or self.store is None:
+            return None
+
+        parsed = urlparse(source_url.strip())
+        path_parts = [p for p in parsed.path.split("/") if p]
+        family_name = path_parts[-1].replace("-", " ").lower() if path_parts else "custom_font"
+        family_key = family_name.replace(" ", "_").replace("-", "_")
+
+        manifest: dict[str, Any] = {}
+        manifest_path = self.store_dir / "manifest.json"
+        if manifest_path.exists():
+            try:
+                raw_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                if isinstance(raw_manifest, dict):
+                    manifest = raw_manifest
+            except (OSError, ValueError):
+                manifest = {}
+
+        manifest_identity = {
+            key: manifest.get(key, "")
+            for key in (
+                "git_commit",
+                "git_is_dirty",
+                "config_hash",
+                "chromium_version",
+                "fonttools_version",
+            )
+        }
+        observation_config_hash = self.observation_config.compute_hash()
+        style_observation_identities: list[tuple[str, str]] = []
+        for style in styles:
+            style_key = style.id.lower().replace(" ", "_").replace("-", "_")
+            coverage = self.store.get_coverage(family_key, style_key)
+            if not coverage:
+                return None
+            style_identity_payload = {
+                "family_key": family_key,
+                "requested_style_id": style.id,
+                "requested_style_name": style.display_name,
+                "resolved_style_id": style_key,
+                "coverage_sha256": hashlib.sha256(
+                    json.dumps(coverage, separators=(",", ":")).encode("utf-8")
+                ).hexdigest(),
+                "manifest": manifest_identity,
+                "observation_config_hash": observation_config_hash,
+            }
+            style_observation_identities.append(
+                (
+                    style.id,
+                    hashlib.sha256(
+                        json.dumps(style_identity_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                    ).hexdigest(),
+                )
+            )
+
+        config_version = str(manifest.get("config_hash") or observation_config_hash)
+        return ArchiveSourceContext(
+            source_identity=canonical_source_identity(source_url),
+            style_observation_identities=tuple(sorted(style_observation_identities)),
+            config_version=config_version,
+        )
+
     async def close(self) -> None:
         if not self._external_client:
             await self.client.aclose()
@@ -521,6 +590,7 @@ class SourceAcquirer:
                 source_url=source_url.strip(),
                 family_name=family_name,
                 styles=style_data_map,
+                archive_context=self.get_archive_context(source_url, styles),
             )
 
         # 4. Web scraping fallback (explicitly enabled for test_source.py web preview tests only)
@@ -561,6 +631,7 @@ class SourceAcquirer:
         raw_preview_bytes: bytes,
     ) -> SourcePayload:
         """Helper to build test payloads from explicit test raster preview bytes."""
+        preview_identity = hashlib.sha256(raw_preview_bytes).hexdigest()
         style_data_map: dict[str, StyleSourceData] = {}
         for s in styles:
             s_lower = s.display_name.lower()
@@ -631,6 +702,29 @@ class SourceAcquirer:
             source_url=source_url.strip(),
             family_name=family_name,
             styles=style_data_map,
+            archive_context=ArchiveSourceContext(
+                source_identity=canonical_source_identity(source_url),
+                style_observation_identities=tuple(
+                    sorted(
+                        (
+                            style.id,
+                            hashlib.sha256(
+                                json.dumps(
+                                    {
+                                        "preview_identity": preview_identity,
+                                        "style_id": style.id,
+                                        "style_name": style.display_name,
+                                    },
+                                    sort_keys=True,
+                                    separators=(",", ":"),
+                                ).encode("utf-8")
+                            ).hexdigest(),
+                        )
+                        for style in styles
+                    )
+                ),
+                config_version="preview-v1",
+            ),
         )
 
     def parse_raster_preview(self, image_bytes: bytes) -> dict[str, Any]:
@@ -656,6 +750,9 @@ class SourceAcquirer:
             raise ValueError("MALFORMED_SOURCE_INPUT_INVALID_URL")
 
         family_name = str(fixture_dict.get("family_name", "Fixture Font")).strip()
+        fixture_identity = hashlib.sha256(
+            json.dumps(fixture_dict, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+        ).hexdigest()
         raw_styles = fixture_dict.get("styles")
         if not isinstance(raw_styles, list) or len(raw_styles) == 0:
             raise ValueError("MALFORMED_SOURCE_INPUT_NO_STYLES")
@@ -720,4 +817,31 @@ class SourceAcquirer:
                 reconstructed_glyphs=reconstructed_glyphs,
             )
 
-        return SourcePayload(source_url=source_url, family_name=family_name, styles=styles_map)
+        return SourcePayload(
+            source_url=source_url,
+            family_name=family_name,
+            styles=styles_map,
+            archive_context=ArchiveSourceContext(
+                source_identity=canonical_source_identity(source_url),
+                style_observation_identities=tuple(
+                    sorted(
+                        (
+                            style_id,
+                            hashlib.sha256(
+                                json.dumps(
+                                    {
+                                        "fixture_identity": fixture_identity,
+                                        "style_id": style_id,
+                                        "style_name": style_data.style_name,
+                                    },
+                                    sort_keys=True,
+                                    separators=(",", ":"),
+                                ).encode("utf-8")
+                            ).hexdigest(),
+                        )
+                        for style_id, style_data in styles_map.items()
+                    )
+                ),
+                config_version="fixture-v1",
+            ),
+        )

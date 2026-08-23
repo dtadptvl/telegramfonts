@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import re
+import shutil
 import zipfile
 from pathlib import Path
 
@@ -19,6 +20,15 @@ MAX_ARTIFACT_PART_BYTES = 49_000_000  # 49 MB per-document Telegram safe cap
 class PackagerService:
     def __init__(self, max_part_bytes: int = MAX_ARTIFACT_PART_BYTES) -> None:
         self.max_part_bytes = max_part_bytes
+
+    @staticmethod
+    def _write_font_to_zip(zf: zipfile.ZipFile, font_file: GeneratedFontFile) -> None:
+        """Copy a font through bounded sequential I/O without loading it wholly in memory."""
+        zinfo = zipfile.ZipInfo(filename=font_file.filename, date_time=FIXED_ZIP_DATETIME)
+        zinfo.compress_type = zipfile.ZIP_DEFLATED
+        zinfo.external_attr = 0o644 << 16
+        with font_file.file_path.open("rb") as source, zf.open(zinfo, mode="w") as target:
+            shutil.copyfileobj(source, target, length=1024 * 1024)
 
     def package_job_output(
         self,
@@ -81,12 +91,7 @@ class PackagerService:
 
             with zipfile.ZipFile(zip_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
                 for font_file in sorted_files:
-                    arcname = font_file.filename
-                    zinfo = zipfile.ZipInfo(filename=arcname, date_time=FIXED_ZIP_DATETIME)
-                    zinfo.compress_type = zipfile.ZIP_DEFLATED
-                    zinfo.external_attr = 0o644 << 16
-                    file_bytes = font_file.file_path.read_bytes()
-                    zf.writestr(zinfo, file_bytes)
+                    self._write_font_to_zip(zf, font_file)
 
             zip_bytes = zip_path.read_bytes()
             if len(zip_bytes) > part_cap:
@@ -117,12 +122,7 @@ class PackagerService:
 
                 with zipfile.ZipFile(part_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
                     for font_file in group_files:
-                        arcname = font_file.filename
-                        zinfo = zipfile.ZipInfo(filename=arcname, date_time=FIXED_ZIP_DATETIME)
-                        zinfo.compress_type = zipfile.ZIP_DEFLATED
-                        zinfo.external_attr = 0o644 << 16
-                        file_bytes = font_file.file_path.read_bytes()
-                        zf.writestr(zinfo, file_bytes)
+                        self._write_font_to_zip(zf, font_file)
 
                 part_bytes = part_path.read_bytes()
                 if len(part_bytes) > part_cap:
