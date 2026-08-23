@@ -1,21 +1,22 @@
-﻿import os
+"""Compatibility launcher for the canonical Debian worker supervisor."""
+
+from pathlib import Path
+import shutil
 import subprocess
-import sys
 
-env = os.environ.copy()
-env["PYTHONPATH"] = "/data/data/com.termux/files/home/telefont/agent/src"
 
-log_path = "/data/data/com.termux/files/usr/tmp/telefont.log" if os.path.exists("/data/data/com.termux/files/usr/tmp") else "/tmp/telefont.log"
-os.makedirs(os.path.dirname(log_path), exist_ok=True)
+supervisor = Path(__file__).with_name("debian_worker_supervisor.sh")
+if not supervisor.is_file():
+    raise SystemExit("telefont-launch: Debian supervisor is unavailable")
 
-with open(log_path, "a") as log:
-    p = subprocess.Popen(
-        [sys.executable, "/data/data/com.termux/files/home/telefont/agent/src/main.py"],
-        start_new_session=True,
-        stdin=subprocess.DEVNULL,
-        stdout=log,
-        stderr=subprocess.STDOUT,
-        env=env,
-        close_fds=True,
-    )
-print(f"LAUNCHED_PID_{p.pid}")
+bash = shutil.which("bash")
+if bash is None:
+    raise SystemExit("telefont-launch: bash is unavailable")
+
+p = subprocess.Popen(
+    [bash, str(supervisor)],
+    start_new_session=True,
+    stdin=subprocess.DEVNULL,
+    close_fds=True,
+)
+print(f"LAUNCHED_SUPERVISOR_PID_{p.pid}")

@@ -61,10 +61,10 @@ This document specifies secret separation boundaries, permission scoping, networ
 
 ### 3. Rotating `A23_NODE_SECRET`
 1. Generate fresh cryptographically random 32-byte hex token: `NEW_SECRET=$(openssl rand -hex 32)`.
-2. Stop A23 compute agent: `kill -SIGINT $(pgrep -f "python.*agent/src/main.py")`.
+2. Stop the D12 supervisor using its recorded supervisor PID; do not target a Termux Python process directly.
 3. Update Worker secret: `npx wrangler secret put A23_NODE_SECRET --config edge/wrangler.jsonc`.
 4. Update `~/.telefont.env` with `A23_NODE_SECRET=$NEW_SECRET`.
-5. Restart A23 compute agent: `python agent/src/main.py`.
+5. Restart A23 through the canonical boundary: `bash scripts/debian_worker_supervisor.sh`.
 6. Verify test job claim and completion.
 
 ### 4. Rotating `DOWNLOAD_SIGNING_SECRET`
