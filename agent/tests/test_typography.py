@@ -1,7 +1,6 @@
 """Authoritative test suite for evidence-driven kerning inference and OpenType GPOS table generation (Issue #43)."""
 from __future__ import annotations
 
-import io
 from pathlib import Path
 import pytest
 from fontTools.ttLib import TTFont
@@ -121,7 +120,6 @@ def test_deterministic_gpos_output(tmp_path):
 
     assert res1.otf.sha256_hex == res2.otf.sha256_hex
     assert res1.ttf.sha256_hex == res2.ttf.sha256_hex
-    assert res1.woff2.sha256_hex == res2.woff2.sha256_hex
 
     # Verify GPOS table present in both OTF and TTF
     otf_tt = TTFont(res1.otf.file_path)
@@ -131,7 +129,7 @@ def test_deterministic_gpos_output(tmp_path):
 
 
 def test_shared_canonical_typography_shaping(tmp_path):
-    """Verify OTF, TTF, and WOFF2 share identical GPOS shaping behavior in HarfBuzz."""
+    """Verify OTF and TTF share identical GPOS shaping behavior in HarfBuzz."""
     glyphs = [
         _make_glyph(65, "A", 736.0),
         _make_glyph(79, "O", 826.0),
@@ -146,17 +144,9 @@ def test_shared_canonical_typography_shaping(tmp_path):
     builder = MaxCandidateFontBuilder(family_name="TestFont MAX", style_name="Regular")
     res = builder.build_candidate_family(glyphs, tmp_path, typography=typography)
 
-    # Test HarfBuzz shaping across all three formats
-    for art in (res.otf, res.ttf, res.woff2):
-        if art.format == "WOFF2":
-            # Decompress WOFF2 to SFNT for HarfBuzz
-            tt_woff2 = TTFont(art.file_path)
-            tt_woff2.flavor = None
-            buf = io.BytesIO()
-            tt_woff2.save(buf)
-            raw_bytes = buf.getvalue()
-        else:
-            raw_bytes = art.file_path.read_bytes()
+    # Test HarfBuzz shaping across both canonical formats.
+    for art in (res.otf, res.ttf):
+        raw_bytes = art.file_path.read_bytes()
 
         blob = hb.Blob(raw_bytes)
         font = hb.Font(hb.Face(blob))

@@ -750,7 +750,7 @@ describe('Phase 4: A23 Internal Node Job Claim, Lease Fencing & Protocols', () =
         .bind(
           JSON.stringify({
             source_url: 'https://www.myfonts.com/collections/roboto-flex',
-            selected_formats: ['EXE', 'BAT'],
+            selected_formats: ['WOFF2'],
           }),
           job3.orderId
         )

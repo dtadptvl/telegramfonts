@@ -11,10 +11,40 @@ import pytest
 from PIL import Image
 
 from measurement.benchmark_runner import GroundTruthBenchmarkRunner, get_peak_rss_mb
+from measurement.browser_session import ChromiumSession
 from measurement.discovery import ObservableGlyphDiscovery
 from measurement.manifest import create_reproducibility_manifest
 from measurement.models import DirectMetrics, ObservationConfig, ObservationRecord
 from measurement.store import ObservationStore
+
+
+@pytest.mark.asyncio
+async def test_observable_source_waits_for_page_load_before_selecting_face(monkeypatch):
+    session = ChromiumSession(executable_path="unused", timeout_seconds=1.0)
+
+    async def fake_start():
+        return None
+
+    async def fake_send(method, params=None):
+        assert method == "Page.navigate"
+        waiter = session.event_waiters["Page.loadEventFired"][0]
+        waiter.set_result({})
+        return {"frameId": "test"}
+
+    async def fake_evaluate(expression):
+        assert "SOURCE_NAVIGATION_LEFT_MYFONTS" in expression
+        return [{"family": "Example", "style": "normal", "weight": "400", "stretch": "normal"}]
+
+    monkeypatch.setattr(session, "start", fake_start)
+    monkeypatch.setattr(session, "send_command", fake_send)
+    monkeypatch.setattr(session, "evaluate_script", fake_evaluate)
+
+    selected = await session.observe_source_font(
+        "https://www.myfonts.com/collections/example",
+        "Regular",
+        "Example",
+    )
+    assert selected.family == "Example"
 
 
 def test_observation_config_hash_determinism():

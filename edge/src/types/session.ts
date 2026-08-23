@@ -6,9 +6,9 @@ export type SessionStatus =
   | 'CONFIRMING'
   | 'ORDER_CREATED';
 
-export type FontFormat = 'TTF' | 'OTF' | 'WOFF2';
+export type FontFormat = 'TTF' | 'OTF';
 
-export const SUPPORTED_FORMATS: FontFormat[] = ['TTF', 'OTF', 'WOFF2'];
+export const SUPPORTED_FORMATS: FontFormat[] = ['TTF', 'OTF'];
 
 export interface TelegramSessionRecord {
   id: string;

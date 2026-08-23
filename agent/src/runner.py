@@ -61,7 +61,9 @@ class JobRunner:
             timeout=settings.HTTP_TIMEOUT_SECONDS,
             cache_dir=self.scratch_manager.root / "source_cache",
         )
-        self.font_builder = font_builder or FontBuilderService()
+        self.font_builder = font_builder or FontBuilderService(
+            observation_store_dir=self.source_acquirer.store_dir
+        )
         self.packager = packager or PackagerService()
 
     async def _heartbeat_loop(

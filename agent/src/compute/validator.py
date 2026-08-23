@@ -2,10 +2,8 @@
 from __future__ import annotations
 
 import ctypes
-import io
 import logging
 import sys
-import tempfile
 from pathlib import Path
 from fontTools.ttLib import TTFont
 
@@ -42,10 +40,7 @@ def validate_font_file(file_path: Path, expected_format: str) -> bool:
     expected_fmt = expected_format.strip().upper()
 
     # 1. Check strict magic header bytes per format (BLOCK G)
-    if expected_fmt == "WOFF2":
-        if not raw_bytes.startswith(b"wOF2"):
-            return False
-    elif expected_fmt == "OTF":
+    if expected_fmt == "OTF":
         # Real OpenType CFF must have 'OTTO' sfntVersion
         if not raw_bytes.startswith(b"OTTO"):
             return False
@@ -75,9 +70,6 @@ def validate_font_file(file_path: Path, expected_format: str) -> bool:
                 return False
             if "CFF " in tables or "CFF2" in tables:
                 return False
-        elif expected_fmt == "WOFF2":
-            if font.flavor != "woff2":
-                return False
 
         # Validate glyph count
         glyph_order = font.getGlyphOrder()
@@ -105,31 +97,8 @@ def validate_font_file(file_path: Path, expected_format: str) -> bool:
             return False
 
         # 2. Independent consumer / GDI load check
-        if expected_fmt in ("TTF", "OTF"):
-            if not _verify_independent_gdi_load(file_path):
-                return False
-        elif expected_fmt == "WOFF2":
-            # For WOFF2, verify decompressibility to valid SFNT and test load
-            decompressed_font = TTFont(io.BytesIO(raw_bytes))
-            decompressed_font.flavor = None
-            decompressed_buf = io.BytesIO()
-            decompressed_font.save(decompressed_buf)
-            decompressed_bytes = decompressed_buf.getvalue()
-            if not (decompressed_bytes.startswith(b"\x00\x01\x00\x00") or decompressed_bytes.startswith(b"OTTO")):
-                return False
-
-            if sys.platform == "win32":
-                with tempfile.NamedTemporaryFile(suffix=".ttf", delete=False) as tmp_ttf:
-                    tmp_ttf_path = Path(tmp_ttf.name)
-                    tmp_ttf.write(decompressed_bytes)
-                try:
-                    if not _verify_independent_gdi_load(tmp_ttf_path):
-                        return False
-                finally:
-                    try:
-                        tmp_ttf_path.unlink(missing_ok=True)
-                    except Exception:
-                        pass
+        if not _verify_independent_gdi_load(file_path):
+            return False
 
         font.close()
         return True

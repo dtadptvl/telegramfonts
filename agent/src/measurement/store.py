@@ -11,7 +11,12 @@ from pathlib import Path
 from typing import Any
 
 from measurement.manifest import ReproducibilityManifest
-from measurement.models import DirectMetrics, ObservationRecord
+from measurement.models import (
+    DirectMetrics,
+    MetricObservation,
+    ObservationRecord,
+    OpenTypeFeatureObservation,
+)
 
 logger = logging.getLogger("telegramfonts.agent.measurement.store")
 
@@ -119,6 +124,63 @@ class ObservationStore:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS metric_observations (
+                    reference_id TEXT NOT NULL,
+                    style_id TEXT NOT NULL,
+                    code_point INTEGER NOT NULL,
+                    font_size_px REAL NOT NULL,
+                    browser_version TEXT NOT NULL,
+                    config_hash TEXT NOT NULL,
+                    metrics_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (
+                        reference_id, style_id, code_point, font_size_px,
+                        browser_version, config_hash
+                    )
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS feature_observations (
+                    reference_id TEXT NOT NULL,
+                    style_id TEXT NOT NULL,
+                    feature_tag TEXT NOT NULL,
+                    sample_text TEXT NOT NULL,
+                    enabled_advance_upem REAL NOT NULL,
+                    disabled_advance_upem REAL NOT NULL,
+                    enabled_raster_signature TEXT NOT NULL,
+                    disabled_raster_signature TEXT NOT NULL,
+                    effect_observed INTEGER NOT NULL,
+                    provenance TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (reference_id, style_id, feature_tag, sample_text)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS source_collections (
+                    collection_key TEXT PRIMARY KEY,
+                    source_url TEXT NOT NULL,
+                    reference_id TEXT NOT NULL,
+                    style_id TEXT NOT NULL,
+                    config_hash TEXT NOT NULL,
+                    browser_version TEXT NOT NULL,
+                    completed_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS source_collection_attempts (
+                    collection_key TEXT PRIMARY KEY,
+                    started_at TEXT NOT NULL
+                )
+                """
+            )
             # Automatic schema migration for existing databases
             try:
                 conn.execute(
@@ -128,6 +190,137 @@ class ObservationStore:
                 pass
 
             conn.commit()
+
+    def save_metric_observation(self, observation: MetricObservation) -> None:
+        """Persist an immutable direct metric sample for one size."""
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO metric_observations (
+                    reference_id, style_id, code_point, font_size_px,
+                    browser_version, config_hash, metrics_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    observation.reference_id,
+                    observation.style_id,
+                    observation.metrics.code_point,
+                    observation.metrics.font_size_px,
+                    observation.browser_version,
+                    observation.config_hash,
+                    json.dumps(observation.metrics.__dict__, sort_keys=True),
+                    observation.created_at,
+                ),
+            )
+            conn.commit()
+
+    def get_metric_observations(self, reference_id: str, style_id: str) -> list[dict[str, Any]]:
+        """Return persisted multi-size metric samples."""
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM metric_observations
+                WHERE reference_id = ? AND style_id = ?
+                ORDER BY code_point, font_size_px
+                """,
+                (reference_id, style_id),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def save_feature_observation(self, observation: OpenTypeFeatureObservation) -> None:
+        """Persist an immutable browser OpenType feature probe."""
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO feature_observations (
+                    reference_id, style_id, feature_tag, sample_text,
+                    enabled_advance_upem, disabled_advance_upem,
+                    enabled_raster_signature, disabled_raster_signature,
+                    effect_observed, provenance, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    observation.reference_id,
+                    observation.style_id,
+                    observation.feature_tag,
+                    observation.sample_text,
+                    observation.enabled_advance_upem,
+                    observation.disabled_advance_upem,
+                    observation.enabled_raster_signature,
+                    observation.disabled_raster_signature,
+                    1 if observation.effect_observed else 0,
+                    observation.provenance,
+                    observation.created_at,
+                ),
+            )
+            conn.commit()
+
+    def get_feature_observations(self, reference_id: str, style_id: str) -> list[dict[str, Any]]:
+        """Return persisted browser feature probes."""
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM feature_observations
+                WHERE reference_id = ? AND style_id = ?
+                ORDER BY feature_tag, sample_text
+                """,
+                (reference_id, style_id),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def mark_source_collection_complete(
+        self,
+        collection_key: str,
+        source_url: str,
+        reference_id: str,
+        style_id: str,
+        config_hash: str,
+        browser_version: str,
+    ) -> None:
+        """Atomically mark a fully persisted source/style observation collection complete."""
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO source_collections (
+                    collection_key, source_url, reference_id, style_id,
+                    config_hash, browser_version, completed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    collection_key,
+                    source_url,
+                    reference_id,
+                    style_id,
+                    config_hash,
+                    browser_version,
+                    datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                ),
+            )
+            conn.commit()
+
+    def mark_source_collection_started(self, collection_key: str) -> None:
+        """Record a resumable source collection before any partial observations are written."""
+        with self._get_connection() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO source_collection_attempts (collection_key, started_at) VALUES (?, ?)",
+                (collection_key, datetime.datetime.now(datetime.timezone.utc).isoformat()),
+            )
+            conn.commit()
+
+    def is_source_collection_started(self, collection_key: str) -> bool:
+        with self._get_connection() as conn:
+            return conn.execute(
+                "SELECT 1 FROM source_collection_attempts WHERE collection_key = ?",
+                (collection_key,),
+            ).fetchone() is not None
+
+    def is_source_collection_complete(self, collection_key: str) -> bool:
+        """Check the durable no-recrawl completion marker for unchanged inputs."""
+        with self._get_connection() as conn:
+            return conn.execute(
+                "SELECT 1 FROM source_collections WHERE collection_key = ?",
+                (collection_key,),
+            ).fetchone() is not None
 
     def has_observation(self, cache_key: str) -> bool:
         """Check if an observation with the specified cache key already exists (resume check)."""

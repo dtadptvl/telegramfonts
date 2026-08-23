@@ -34,7 +34,7 @@ async def test_package_job_output_deterministic(tmp_path: Path):
     )
 
     file_ttf = builder.build_font(payload.styles["rf_regular_id"], "Roboto Flex", "TTF", tmp_path)
-    file_woff2 = builder.build_font(payload.styles["rf_regular_id"], "Roboto Flex", "WOFF2", tmp_path)
+    file_otf = builder.build_font(payload.styles["rf_regular_id"], "Roboto Flex", "OTF", tmp_path)
 
     # First packaging run
     out_dir_1 = tmp_path / "run_1"
@@ -43,7 +43,7 @@ async def test_package_job_output_deterministic(tmp_path: Path):
         job_id="job_123",
         order_id="ord_456",
         family_name="Roboto Flex",
-        files=[file_ttf, file_woff2],
+        files=[file_ttf, file_otf],
         output_dir=out_dir_1,
     )
 
@@ -54,7 +54,7 @@ async def test_package_job_output_deterministic(tmp_path: Path):
         job_id="job_123",
         order_id="ord_456",
         family_name="Roboto Flex",
-        files=[file_ttf, file_woff2],
+        files=[file_ttf, file_otf],
         output_dir=out_dir_2,
     )
 
@@ -74,7 +74,7 @@ async def test_package_job_output_deterministic(tmp_path: Path):
     with zipfile.ZipFile(manifest_1.zip_file_path, "r") as zf:
         namelist = zf.namelist()
         assert "RobotoFlex-Regular.ttf" in namelist
-        assert "RobotoFlex-Regular.woff2" in namelist
+        assert "RobotoFlex-Regular.otf" in namelist
 
 
 @pytest.mark.asyncio

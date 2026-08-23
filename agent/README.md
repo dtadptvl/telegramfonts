@@ -5,7 +5,7 @@ Private compute worker for TelegramFonts that consumes fulfillment jobs via Clou
 ## Architecture Context
 - **Outbound Network Only**: Acts as an external HTTP-pull consumer of Cloudflare Queues (`/pull`, `/ack`). Requires no inbound public ports, webhooks, tunnels, or open listeners.
 - **Fenced Lease Protocol**: Communicates with Cloudflare Worker `/internal/jobs/{job_id}/claim`, `/heartbeat`, and `/fail` using `A23_NODE_SECRET` Bearer auth.
-- **Deterministic Compute**: Uses FontTools to generate TrueType (`TTF`), OpenType (`OTF`), and `WOFF2` fonts from public-preview / fixture inputs, validating all table structures and glyph sets.
+- **Deterministic Compute**: Uses FontTools to generate TrueType (`TTF`) and OpenType (`OTF`) fonts from observable source data / fixture inputs, validating all table structures and glyph sets.
 - **Deterministic Staging & Streaming**: Packages generated font binaries into a reproducible ZIP bundle with normalized timestamps, writes `manifest.json`, and streams chunks directly to `PUT /internal/jobs/{job_id}/artifact`.
 - **Durable Completion & Final ACK**: Executes atomic D1 completion via `POST /internal/jobs/{job_id}/complete` and acknowledges the Cloudflare Queue message strictly after durable completion.
 - **Graceful Lifecycle**: Handles `SIGINT` / `SIGTERM` signals for clean worker drainage without corrupting in-flight font jobs.

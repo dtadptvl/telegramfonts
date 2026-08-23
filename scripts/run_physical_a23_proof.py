@@ -91,7 +91,7 @@ def run_a23_full_style_proof() -> dict:
     # 4. GPOS Kerning Table Inference
     typography_dataset = inferencer.infer_from_store(store, family_id, style_id)
 
-    # 5. Font Binary Build (OTF, TTF, WOFF2)
+    # 5. Font Binary Build (OTF and TTF)
     output_dir = Path("build/candidate_fonts")
     output_dir.mkdir(parents=True, exist_ok=True)
     build_result = builder.build_candidate_family(
@@ -113,12 +113,6 @@ def run_a23_full_style_proof() -> dict:
             "size_bytes": build_result.ttf.size_bytes,
             "sha256": build_result.ttf.sha256_hex,
             "glyph_count": build_result.ttf.glyph_count,
-        },
-        "WOFF2": {
-            "path": str(build_result.woff2.file_path),
-            "size_bytes": build_result.woff2.size_bytes,
-            "sha256": build_result.woff2.sha256_hex,
-            "glyph_count": build_result.woff2.glyph_count,
         },
     }
 

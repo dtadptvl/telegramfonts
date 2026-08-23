@@ -24,6 +24,12 @@ class ObservationConfig:
     )
     adaptive_expansion_threshold: float = 0.05
     font_size_px: float = 200.0
+    metric_sizes_px: tuple[float, ...] = (32.0, 64.0, 128.0, 200.0)
+    feature_probes: tuple[tuple[str, str], ...] = (
+        ("kern", "AV"),
+        ("liga", "ffi"),
+        ("calt", "->"),
+    )
     upem: int = 1000
     timeout_seconds: float = 10.0
     max_retries: int = 3
@@ -45,6 +51,8 @@ class ObservationConfig:
             "expanded_subpixel_phases": [list(p) for p in self.expanded_subpixel_phases],
             "adaptive_expansion_threshold": self.adaptive_expansion_threshold,
             "font_size_px": self.font_size_px,
+            "metric_sizes_px": list(self.metric_sizes_px),
+            "feature_probes": [list(p) for p in self.feature_probes],
             "upem": self.upem,
             "timeout_seconds": self.timeout_seconds,
             "max_retries": self.max_retries,
@@ -52,6 +60,45 @@ class ObservationConfig:
         }
         serialized = json.dumps(raw_dict, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
+class BrowserFontSelection:
+    """Observable page font descriptors selected without acquiring font binaries."""
+
+    family: str
+    style: str = "normal"
+    weight: str = "400"
+    stretch: str = "normal"
+
+
+@dataclass(frozen=True)
+class MetricObservation:
+    """A direct browser metric sample at one font size."""
+
+    reference_id: str
+    style_id: str
+    browser_version: str
+    config_hash: str
+    metrics: DirectMetrics
+    created_at: str
+
+
+@dataclass(frozen=True)
+class OpenTypeFeatureObservation:
+    """Observable OpenType feature on/off probe from browser shaping and raster output."""
+
+    reference_id: str
+    style_id: str
+    feature_tag: str
+    sample_text: str
+    enabled_advance_upem: float
+    disabled_advance_upem: float
+    enabled_raster_signature: str
+    disabled_raster_signature: str
+    effect_observed: bool
+    provenance: str
+    created_at: str
 
 
 @dataclass

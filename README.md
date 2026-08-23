@@ -17,7 +17,7 @@ Hybrid cloud architecture for automated Vietnamese font processing and fulfillme
 ```
 
 - **Control Plane (`edge/`)**: TypeScript Cloudflare Worker terminating Telegram and SePay webhooks, managing canonical durable state via Cloudflare D1, dispatching transactional outbox events to Cloudflare Queues, exposing fenced internal job control APIs, verifying versioned HMAC-SHA256 download links, and streaming verified ZIP bundles from private R2.
-- **Compute Plane (`agent/`)**: Python A23 compute worker pulling jobs via Cloudflare Queue HTTP-pull consumer API, claiming fenced D1 leases, reconstructing TrueType/OpenType/WOFF2 binaries with FontTools, packaging deterministic ZIPs, and streaming artifacts to private R2 without opening public inbound ports.
+- **Compute Plane (`agent/`)**: Python A23 compute worker pulling jobs via Cloudflare Queue HTTP-pull consumer API, claiming fenced D1 leases, reconstructing TrueType/OpenType binaries with FontTools, packaging deterministic ZIPs, and streaming artifacts to private R2 without opening public inbound ports.
 - **Boundary Note**: Production Cloudflare resources, deployment bindings, and live secrets are strictly operated by human operators per `ops/RUNBOOK.md`. Local tests run against simulated bindings (Miniflare/D1 local SQLite/R2).
 
 ## Repository Layout

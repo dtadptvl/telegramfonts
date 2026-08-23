@@ -2,6 +2,7 @@
 import io
 import httpx
 import pytest
+import shutil
 from pathlib import Path
 from PIL import Image, ImageDraw
 
@@ -12,6 +13,62 @@ from compute.source import (
     extract_preview_url_from_html,
     validate_myfonts_url,
 )
+from measurement.models import BrowserFontSelection, DirectMetrics, ObservationConfig
+
+
+class FakeObservableBrowser:
+    """Observable-source test double with no binary injection surface."""
+
+    browser_version = "Chromium/Test"
+
+    def __init__(self) -> None:
+        self.start_count = 0
+        self.observe_count = 0
+        self.closed = False
+
+    async def start(self) -> None:
+        self.start_count += 1
+
+    async def observe_source_font(self, source_url: str, style_name: str, family_name: str):
+        self.observe_count += 1
+        return BrowserFontSelection(family=family_name, weight="400")
+
+    async def is_glyph_supported_in_font(self, font, code_point: int) -> bool:
+        return code_point in {65, 66, 79}
+
+    async def measure_glyph_direct(self, font_family, code_point: int, font_size_px=200.0, upem=1000):
+        return DirectMetrics.from_browser_measurements(
+            code_point,
+            chr(code_point),
+            font_size_px,
+            {
+                "width": font_size_px * 0.6,
+                "actualBoundingBoxLeft": 0.0,
+                "actualBoundingBoxRight": font_size_px * 0.55,
+                "actualBoundingBoxAscent": font_size_px * 0.7,
+                "actualBoundingBoxDescent": font_size_px * 0.1,
+                "fontBoundingBoxAscent": font_size_px * 0.8,
+                "fontBoundingBoxDescent": font_size_px * 0.2,
+            },
+            upem,
+        )
+
+    async def capture_lossless_raster(self, font_family, code_point: int, resolution_px: int, subpixel_offset=(0.0, 0.0)):
+        return _make_test_image_bytes(20, 60)
+
+    async def measure_text_advance(self, font, text: str, font_size_px=200.0, upem=1000):
+        return len(text) * 600.0
+
+    async def probe_opentype_feature(self, font, feature_tag: str, sample_text: str, font_size_px=200.0, upem=1000):
+        return {
+            "enabled_advance_upem": 1000.0,
+            "disabled_advance_upem": 1000.0,
+            "enabled_raster_signature": f"{feature_tag}-on",
+            "disabled_raster_signature": f"{feature_tag}-off",
+        }
+
+    def close(self) -> None:
+        self.closed = True
 
 
 def _make_test_image_bytes(stroke_x0: int, stroke_x1: int) -> bytes:
@@ -103,23 +160,37 @@ async def test_live_preview_missing_or_blocked_fails_closed():
 
 
 @pytest.mark.asyncio
-async def test_production_acquire_source_fails_closed_without_max_observations(tmp_path: Path):
+async def test_production_cache_miss_collects_persists_and_reconstructs_without_font_binary(tmp_path: Path):
     styles = [ClaimStyle(id="reg", display_name="Regular")]
-    # Empty store without observations
-    empty_store_dir = tmp_path / "empty_store"
-    empty_store_dir.mkdir()
+    browser = FakeObservableBrowser()
+    config = ObservationConfig(
+        resolutions=(32,),
+        base_subpixel_phases=((0.0, 0.0),),
+        expanded_subpixel_phases=((0.0, 0.0),),
+        metric_sizes_px=(32.0, 64.0),
+        feature_probes=(("kern", "AV"),),
+    )
+    acquirer = SourceAcquirer(
+        observation_store_dir=tmp_path / "runtime_observations",
+        browser_session_factory=lambda: browser,
+        observation_config=config,
+    )
 
-    def handler_ok(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, text="<html><body>OK</body></html>", headers={"content-type": "text/html"})
+    payload = await acquirer.acquire_source(
+        "https://www.myfonts.com/collections/unknown-font", styles
+    )
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler_ok)) as http_client:
-        acquirer = SourceAcquirer(observation_store_dir=empty_store_dir, client=http_client)
-        with pytest.raises(ValueError, match="NO_MAX_OBSERVATIONS_FOUND_FOR_Unknown Font"):
-            await acquirer.acquire_source("https://www.myfonts.com/collections/unknown-font", styles)
+    assert set(payload.styles["reg"].reconstructed_glyphs) == {65, 66, 79}
+    assert browser.observe_count == 1
+    assert browser.closed is True
+    assert len(acquirer.store.get_metric_observations("unknown_font", "reg")) == 6
+    assert len(acquirer.store.get_pair_observations("unknown_font", "reg")) > 0
+    assert len(acquirer.store.get_feature_observations("unknown_font", "reg")) == 1
+    assert not hasattr(browser, "load_font_data")
 
 
 @pytest.mark.asyncio
-async def test_production_acquire_source_known_store_hit_zero_http_calls():
+async def test_production_acquire_source_known_store_hit_zero_http_calls(tmp_path: Path):
     """Verify that a known store hit makes exactly 0 HTTP requests (REQ2 zero-recrawl preservation)."""
     http_call_count = 0
 
@@ -129,7 +200,17 @@ async def test_production_acquire_source_known_store_hit_zero_http_calls():
         raise AssertionError(f"Unexpected HTTP request made to {request.url}")
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(fail_on_http)) as http_client:
-        acquirer = SourceAcquirer(client=http_client)
+        fixture_store = tmp_path / "benchmark_fixture"
+        fixture_store.mkdir()
+        shutil.copy2("observations/benchmark/index.sqlite3", fixture_store / "index.sqlite3")
+        shutil.copy2(
+            "observations/benchmark/reconstructed_be_vietnam_pro_regular.pkl",
+            fixture_store / "reconstructed_be_vietnam_pro_regular.pkl",
+        )
+        acquirer = SourceAcquirer(
+            client=http_client,
+            observation_store_dir=fixture_store,
+        )
         styles = [ClaimStyle(id="regular", display_name="Regular")]
         payload = await acquirer.acquire_source(
             "https://www.myfonts.com/collections/be-vietnam-pro",
@@ -142,46 +223,37 @@ async def test_production_acquire_source_known_store_hit_zero_http_calls():
 
 
 @pytest.mark.asyncio
-async def test_production_acquire_source_unknown_family_non_empty_store_fails_closed():
-    """Verify that an unknown family in a non-empty store fails closed and does not fall back to another family."""
-    http_call_count = 0
+async def test_completed_source_collection_reuses_cache_without_browser_recrawl(tmp_path: Path):
+    browser = FakeObservableBrowser()
+    config = ObservationConfig(
+        resolutions=(32,),
+        base_subpixel_phases=((0.0, 0.0),),
+        expanded_subpixel_phases=((0.0, 0.0),),
+        metric_sizes_px=(32.0,),
+        feature_probes=(("kern", "AV"),),
+    )
+    store_dir = tmp_path / "runtime_observations"
+    styles = [ClaimStyle(id="regular", display_name="Regular")]
+    first = SourceAcquirer(
+        observation_store_dir=store_dir,
+        browser_session_factory=lambda: browser,
+        observation_config=config,
+    )
+    await first.acquire_source("https://www.myfonts.com/collections/cache-font", styles)
 
-    def fail_on_http(request: httpx.Request) -> httpx.Response:
-        nonlocal http_call_count
-        http_call_count += 1
-        raise AssertionError(f"Unexpected HTTP request made to {request.url}")
+    def fail_if_recrawled():
+        raise AssertionError("completed source was recrawled")
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(fail_on_http)) as http_client:
-        acquirer = SourceAcquirer(client=http_client)
-        styles = [ClaimStyle(id="regular", display_name="Regular")]
-        with pytest.raises(ValueError, match="NO_MAX_OBSERVATIONS_FOUND_FOR_Helvetica"):
-            await acquirer.acquire_source(
-                "https://www.myfonts.com/collections/helvetica",
-                styles,
-            )
-        assert http_call_count == 0
-
-
-@pytest.mark.asyncio
-async def test_production_acquire_source_known_family_unknown_style_fails_closed():
-    """Verify that a known family with an unknown requested style fails closed and makes 0 HTTP calls."""
-    http_call_count = 0
-
-    def fail_on_http(request: httpx.Request) -> httpx.Response:
-        nonlocal http_call_count
-        http_call_count += 1
-        raise AssertionError(f"Unexpected HTTP request made to {request.url}")
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(fail_on_http)) as http_client:
-        acquirer = SourceAcquirer(client=http_client)
-        # Request non-existent 'black_italic' style on known 'be_vietnam_pro'
-        styles = [ClaimStyle(id="black_italic", display_name="Black Italic")]
-        with pytest.raises(ValueError, match="NO_MAX_COVERAGE_FOR_be_vietnam_pro_black_italic"):
-            await acquirer.acquire_source(
-                "https://www.myfonts.com/collections/be-vietnam-pro",
-                styles,
-            )
-        assert http_call_count == 0
+    second = SourceAcquirer(
+        observation_store_dir=store_dir,
+        browser_session_factory=fail_if_recrawled,
+        observation_config=config,
+    )
+    payload = await second.acquire_source(
+        "https://www.myfonts.com/collections/cache-font", styles
+    )
+    assert len(payload.styles["regular"].reconstructed_glyphs) == 3
+    assert second.last_cache_hit is True
 
 
 @pytest.mark.asyncio

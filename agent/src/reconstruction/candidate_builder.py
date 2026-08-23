@@ -1,7 +1,7 @@
 """Candidate Font Builder (MAX Pipeline C).
 
-Constructs canonical OpenType (OTF/CFF), TrueType (TTF via cu2qu), and WOFF2
-candidate font binaries directly from Phase-B reconstructed cubic master glyphs.
+Constructs canonical OpenType (OTF/CFF) and TrueType (TTF via cu2qu) candidate
+font binaries directly from Phase-B reconstructed cubic master glyphs.
 """
 from __future__ import annotations
 
@@ -16,7 +16,6 @@ from fontTools.fontBuilder import FontBuilder
 from fontTools.pens.cu2quPen import Cu2QuPen
 from fontTools.pens.t2CharStringPen import T2CharStringPen
 from fontTools.pens.ttGlyphPen import TTGlyphPen
-from fontTools.ttLib import TTFont
 
 from reconstruction.models import (
     Contour,
@@ -48,7 +47,6 @@ class CandidateFamilyBuildResult:
     """Set of candidate font binaries derived from the same cubic master."""
     otf: CandidateFontArtifact
     ttf: CandidateFontArtifact
-    woff2: CandidateFontArtifact
     glyph_count: int
     family_name: str
     style_name: str
@@ -123,7 +121,7 @@ def draw_reconstructed_glyph_to_pen(glyph: ReconstructedGlyph, pen: Any) -> None
 
 
 class MaxCandidateFontBuilder:
-    """Deterministic candidate font builder producing OTF (CFF), TTF (cu2qu), and WOFF2 binaries."""
+    """Deterministic candidate font builder producing OTF/CFF and TTF/glyf binaries."""
 
     def __init__(
         self,
@@ -145,7 +143,7 @@ class MaxCandidateFontBuilder:
         output_dir: Path | str,
         typography: TypographyDataset | None = None,
     ) -> CandidateFamilyBuildResult:
-        """Build OTF, TTF, and WOFF2 candidate fonts from the same cubic masters."""
+        """Build OTF and TTF candidate fonts from the same cubic masters."""
         out_dir = Path(output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -153,12 +151,10 @@ class MaxCandidateFontBuilder:
 
         otf_art = self.build_candidate_otf(glyph_map, out_dir, typography=typography)
         ttf_art = self.build_candidate_ttf(glyph_map, out_dir, typography=typography)
-        woff2_art = self.derive_candidate_woff2(ttf_art.file_path, out_dir)
 
         return CandidateFamilyBuildResult(
             otf=otf_art,
             ttf=ttf_art,
-            woff2=woff2_art,
             glyph_count=len(glyph_map),
             family_name=self.family_name,
             style_name=self.style_name,
@@ -353,39 +349,6 @@ class MaxCandidateFontBuilder:
             sha256_hex=hashlib.sha256(raw_bytes).hexdigest(),
             glyph_count=len(glyph_order),
             units_per_em=self.units_per_em,
-        )
-
-    def derive_candidate_woff2(
-        self,
-        sfnt_path: Path,
-        output_dir: Path,
-    ) -> CandidateFontArtifact:
-        """Derive compressed WOFF2 candidate font from validated SFNT binary."""
-        font = TTFont(sfnt_path)
-        font.flavor = "woff2"
-        if "head" in font:
-            font["head"].created = 0
-            font["head"].modified = 0
-
-        ps_name = f"{self.family_name.replace(' ', '')}-{self.style_name.replace(' ', '')}"
-        filename = f"{ps_name}.woff2"
-        out_path = output_dir / filename
-
-        buffer = io.BytesIO()
-        font.save(buffer)
-        raw_bytes = buffer.getvalue()
-        out_path.write_bytes(raw_bytes)
-
-        glyph_order = font.getGlyphOrder()
-
-        return CandidateFontArtifact(
-            format="WOFF2",
-            filename=filename,
-            file_path=out_path,
-            size_bytes=len(raw_bytes),
-            sha256_hex=hashlib.sha256(raw_bytes).hexdigest(),
-            glyph_count=len(glyph_order),
-            units_per_em=font["head"].unitsPerEm,
         )
 
     def _setup_standard_tables(
