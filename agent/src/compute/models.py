@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -31,11 +32,21 @@ class StyleSourceData:
     observation_style_id: str | None = None
 
 
+@dataclass(frozen=True)
+class ArchiveSourceContext:
+    """Stable source/observation identity used for final-font archive lookups."""
+
+    source_identity: str
+    observation_identity: str
+    config_version: str
+
+
 @dataclass
 class SourcePayload:
     source_url: str
     family_name: str
     styles: dict[str, StyleSourceData] = field(default_factory=dict)
+    archive_context: ArchiveSourceContext | None = None
 
 
 @dataclass(frozen=True)
