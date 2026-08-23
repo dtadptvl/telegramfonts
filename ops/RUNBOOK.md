@@ -179,11 +179,16 @@ Set runtime variables in `edge/wrangler.jsonc` `[vars]` or deploy secrets:
    ```
    *Verify*: Benchmark passes with 0 failures and records on-device ARM64 hardware identity.
 
-5. Start the A23 Worker Daemon:
+5. Start the A23 Worker through the authorized D12 Debian boundary:
    ```bash
-   set -a && source ~/.telefont.env && set +a
-   python agent/src/main.py
+   bash scripts/debian_worker_supervisor.sh
    ```
+   The supervisor loads `~/.telefont.env` without echoing it, enters the
+   explicit Debian release/runtime, propagates `FONT_ARCHIVE_ROOT=/srv/fontlab/archive`,
+   verifies the pinned release artifact, runtime fingerprint, and external
+   Ext4 mount, and fails closed instead of falling back to Termux Python or a dirty checkout.
+   The authorized Debian stage must retain the pinned release tar beside the
+   release and the runtime identity manifest beside the runtime.
 
 ---
 
@@ -218,9 +223,9 @@ npx wrangler tail --config edge/wrangler.jsonc --format=json
 ```
 
 ### Tail A23 Agent Logs
-- In Termux / Linux daemon:
+- In the Debian-bound supervisor:
   ```bash
-  tail -f /data/data/com.termux/files/usr/tmp/telefont.log
+  tail -f /data/data/com.termux/files/usr/tmp/telefont-debian-worker.log
   ```
 
 ---
