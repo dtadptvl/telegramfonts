@@ -185,7 +185,10 @@ Set runtime variables in `edge/wrangler.jsonc` `[vars]` or deploy secrets:
    ```
    The supervisor loads `~/.telefont.env` without echoing it, enters the
    explicit Debian release/runtime, propagates `FONT_ARCHIVE_ROOT=/srv/fontlab/archive`,
-   and fails closed instead of falling back to Termux Python or a dirty checkout.
+   verifies the pinned release artifact, runtime fingerprint, and external
+   Ext4 mount, and fails closed instead of falling back to Termux Python or a dirty checkout.
+   The authorized Debian stage must retain the pinned release tar beside the
+   release and the runtime identity manifest beside the runtime.
 
 ---
 
