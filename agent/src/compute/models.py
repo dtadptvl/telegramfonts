@@ -37,8 +37,14 @@ class ArchiveSourceContext:
     """Stable source/observation identity used for final-font archive lookups."""
 
     source_identity: str
-    observation_identity: str
+    style_observation_identities: tuple[tuple[str, str], ...]
     config_version: str
+
+    def observation_identity_for(self, style_id: str) -> str:
+        for candidate_style_id, identity in self.style_observation_identities:
+            if candidate_style_id == style_id:
+                return identity
+        raise ValueError(f"MISSING_ARCHIVE_OBSERVATION_IDENTITY_{style_id}")
 
 
 @dataclass

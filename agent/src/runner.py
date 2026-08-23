@@ -129,7 +129,7 @@ class JobRunner:
             style_name=style_name,
             mode=job.mode,
             format=format_type,
-            observation_identity=context.observation_identity,
+            observation_identity=context.observation_identity_for(style_id),
             config_version=context.config_version,
         )
 

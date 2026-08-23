@@ -361,23 +361,6 @@ class SourceAcquirer:
             except (OSError, ValueError):
                 manifest = {}
 
-        style_context: list[dict[str, Any]] = []
-        for style in styles:
-            style_key = style.id.lower().replace(" ", "_").replace("-", "_")
-            coverage = self.store.get_coverage(family_key, style_key)
-            if not coverage:
-                return None
-            style_context.append(
-                {
-                    "requested_style_id": style.id,
-                    "requested_style_name": style.display_name,
-                    "resolved_style_id": style_key,
-                    "coverage_sha256": hashlib.sha256(
-                        json.dumps(coverage, separators=(",", ":")).encode("utf-8")
-                    ).hexdigest(),
-                }
-            )
-
         manifest_identity = {
             key: manifest.get(key, "")
             for key in (
@@ -388,19 +371,37 @@ class SourceAcquirer:
                 "fonttools_version",
             )
         }
-        identity_payload = {
-            "family_key": family_key,
-            "styles": style_context,
-            "manifest": manifest_identity,
-            "observation_config_hash": self.observation_config.compute_hash(),
-        }
-        observation_identity = hashlib.sha256(
-            json.dumps(identity_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        ).hexdigest()
-        config_version = str(manifest.get("config_hash") or self.observation_config.compute_hash())
+        observation_config_hash = self.observation_config.compute_hash()
+        style_observation_identities: list[tuple[str, str]] = []
+        for style in styles:
+            style_key = style.id.lower().replace(" ", "_").replace("-", "_")
+            coverage = self.store.get_coverage(family_key, style_key)
+            if not coverage:
+                return None
+            style_identity_payload = {
+                "family_key": family_key,
+                "requested_style_id": style.id,
+                "requested_style_name": style.display_name,
+                "resolved_style_id": style_key,
+                "coverage_sha256": hashlib.sha256(
+                    json.dumps(coverage, separators=(",", ":")).encode("utf-8")
+                ).hexdigest(),
+                "manifest": manifest_identity,
+                "observation_config_hash": observation_config_hash,
+            }
+            style_observation_identities.append(
+                (
+                    style.id,
+                    hashlib.sha256(
+                        json.dumps(style_identity_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                    ).hexdigest(),
+                )
+            )
+
+        config_version = str(manifest.get("config_hash") or observation_config_hash)
         return ArchiveSourceContext(
             source_identity=canonical_source_identity(source_url),
-            observation_identity=observation_identity,
+            style_observation_identities=tuple(sorted(style_observation_identities)),
             config_version=config_version,
         )
 
@@ -703,7 +704,25 @@ class SourceAcquirer:
             styles=style_data_map,
             archive_context=ArchiveSourceContext(
                 source_identity=canonical_source_identity(source_url),
-                observation_identity=f"preview:{preview_identity}",
+                style_observation_identities=tuple(
+                    sorted(
+                        (
+                            style.id,
+                            hashlib.sha256(
+                                json.dumps(
+                                    {
+                                        "preview_identity": preview_identity,
+                                        "style_id": style.id,
+                                        "style_name": style.display_name,
+                                    },
+                                    sort_keys=True,
+                                    separators=(",", ":"),
+                                ).encode("utf-8")
+                            ).hexdigest(),
+                        )
+                        for style in styles
+                    )
+                ),
                 config_version="preview-v1",
             ),
         )
@@ -804,7 +823,25 @@ class SourceAcquirer:
             styles=styles_map,
             archive_context=ArchiveSourceContext(
                 source_identity=canonical_source_identity(source_url),
-                observation_identity=f"fixture:{fixture_identity}",
+                style_observation_identities=tuple(
+                    sorted(
+                        (
+                            style_id,
+                            hashlib.sha256(
+                                json.dumps(
+                                    {
+                                        "fixture_identity": fixture_identity,
+                                        "style_id": style_id,
+                                        "style_name": style_data.style_name,
+                                    },
+                                    sort_keys=True,
+                                    separators=(",", ":"),
+                                ).encode("utf-8")
+                            ).hexdigest(),
+                        )
+                        for style_id, style_data in styles_map.items()
+                    )
+                ),
                 config_version="fixture-v1",
             ),
         )

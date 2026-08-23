@@ -3,20 +3,36 @@ import asyncio
 import hashlib
 from pathlib import Path
 
+import pytest
+
 from compute.archive import ArchiveIdentity, FinalFontArchive
 from compute.models import ArchiveSourceContext, ClaimStyle, GeneratedFontFile
+from compute.source import SourceAcquirer
 from config import Settings
-from runner import JobRunner
-from worker_client import ClaimedJob
+from queue_client import QueueMessage
+from runner import JobRunner, RunnerAction
+from worker_client import (
+    ClaimResult,
+    ClaimedJob,
+    CompleteResult,
+    HeartbeatResult,
+    UploadResult,
+)
 
 
-def _font_file(path: Path, content: bytes = b"validated-font") -> GeneratedFontFile:
+def _font_file(
+    path: Path,
+    content: bytes = b"validated-font",
+    style_id: str = "regular",
+    style_name: str = "Regular",
+    filename: str = "Demo-Regular.ttf",
+) -> GeneratedFontFile:
     path.write_bytes(content)
     return GeneratedFontFile(
-        style_id="regular",
-        style_name="Regular",
+        style_id=style_id,
+        style_name=style_name,
         format="TTF",
-        filename="Demo-Regular.ttf",
+        filename=filename,
         file_path=path,
         size_bytes=len(content),
         sha256_hex=hashlib.sha256(content).hexdigest(),
@@ -96,7 +112,7 @@ def test_runner_packages_verified_archive_hit_without_builder(test_settings: Set
     source_file = _font_file(tmp_path / "source.ttf")
     context = ArchiveSourceContext(
         source_identity="https://www.myfonts.com/collections/demo",
-        observation_identity="observations-v1",
+        style_observation_identities=(("regular", "observations-v1"),),
         config_version="config-v1",
     )
     job = ClaimedJob(
@@ -117,7 +133,7 @@ def test_runner_packages_verified_archive_hit_without_builder(test_settings: Set
         style_name="Regular",
         mode=job.mode,
         format="TTF",
-        observation_identity=context.observation_identity,
+        observation_identity=context.observation_identity_for("regular"),
         config_version=context.config_version,
     )
     archive.put(identity, source_file)
@@ -145,3 +161,175 @@ def test_runner_packages_verified_archive_hit_without_builder(test_settings: Set
         cached_files=hit,
     )
     assert manifest.files[0].file_path == archive.get(identity).file_path
+
+
+def test_archive_context_is_per_style_and_order_independent(tmp_path: Path):
+    source = SourceAcquirer(observation_store_dir=tmp_path / "observations")
+    source_url = "https://www.myfonts.com/collections/demo"
+    regular = ClaimStyle("regular", "Regular")
+    bold = ClaimStyle("bold", "Bold")
+
+    try:
+        source.store.save_coverage("demo", "regular", [65])
+        source.store.save_coverage("demo", "bold", [65, 66])
+
+        full = source.get_archive_context(source_url, [regular, bold])
+        subset = source.get_archive_context(source_url, [regular])
+        reordered = source.get_archive_context(source_url, [bold, regular])
+
+        assert full is not None
+        assert subset is not None
+        assert reordered is not None
+        assert full.observation_identity_for("regular") == subset.observation_identity_for("regular")
+        assert full.observation_identity_for("regular") == reordered.observation_identity_for("regular")
+        assert full.observation_identity_for("bold") == reordered.observation_identity_for("bold")
+        assert full.observation_identity_for("regular") != full.observation_identity_for("bold")
+    finally:
+        asyncio.run(source.close())
+
+
+@pytest.mark.asyncio
+async def test_runner_subset_and_reordered_styles_hit_two_style_archive(
+    test_settings: Settings,
+    tmp_path: Path,
+    monkeypatch,
+):
+    archive = FinalFontArchive(tmp_path / "external", test_settings.SCRATCH_DIR / "archive.sqlite3")
+    source_identity = "https://www.myfonts.com/collections/demo"
+    style_observations = {"regular": "observations-regular", "bold": "observations-bold"}
+    style_names = {"regular": "Regular", "bold": "Bold"}
+
+    # Seed the result of the first validated two-style run.
+    for style_id, content in (("regular", b"regular-font"), ("bold", b"bold-font")):
+        source_file = _font_file(
+            tmp_path / f"{style_id}.ttf",
+            content=content,
+            style_id=style_id,
+            style_name=style_names[style_id],
+            filename=f"Demo-{style_names[style_id]}.ttf",
+        )
+        archive.put(
+            ArchiveIdentity(
+                source_identity=source_identity,
+                family_name="Demo",
+                style_id=style_id,
+                style_name=style_names[style_id],
+                mode="ORIGINAL",
+                format="TTF",
+                observation_identity=style_observations[style_id],
+                config_version="config-v1",
+            ),
+            source_file,
+        )
+
+    class QueueStub:
+        def __init__(self):
+            self.acks: list[str] = []
+
+        async def acknowledge_messages(self, lease_ids):
+            self.acks.extend(lease_ids)
+
+        async def retry_messages(self, _retries):
+            raise AssertionError("archive hit must not retry the queue message")
+
+    class TrackingSource:
+        store_dir = tmp_path / "source"
+
+        def __init__(self):
+            self.context_requests: list[list[str]] = []
+            self.acquire_calls = 0
+
+        def get_archive_context(self, _source_url, styles):
+            self.context_requests.append([style.id for style in styles])
+            return ArchiveSourceContext(
+                source_identity=source_identity,
+                style_observation_identities=tuple(
+                    (style.id, style_observations[style.id]) for style in styles
+                ),
+                config_version="config-v1",
+            )
+
+        async def acquire_source(self, **_kwargs):
+            self.acquire_calls += 1
+            raise AssertionError("archive hit must bypass source acquisition and MAX")
+
+    class FailingBuilder:
+        def build_font(self, *_args, **_kwargs):
+            raise AssertionError("archive hit must bypass font building")
+
+    class WorkerStub:
+        def __init__(self, job):
+            self.job = job
+            self.upload_calls = 0
+            self.complete_calls = 0
+
+        async def claim(self, _job_id):
+            return ClaimResult(status="CLAIMED", queue_action="claimed", job=self.job)
+
+        async def heartbeat(self, *_args):
+            return HeartbeatResult(success=True, fenced=False, lease_expires_at=self.job.lease_expires_at)
+
+        async def upload_artifact(self, job_id, lease_token, zip_path, sha256_hex):
+            self.upload_calls += 1
+            return UploadResult(
+                success=True,
+                fenced=False,
+                artifact_key=f"archive/{job_id}.zip",
+                sha256=sha256_hex,
+                size=zip_path.stat().st_size,
+            )
+
+        async def complete(self, *_args, **_kwargs):
+            self.complete_calls += 1
+            return CompleteResult(success=True, status="COMPLETED", queue_action="ack")
+
+        async def fail(self, *_args, **_kwargs):
+            raise AssertionError("archive hit must not fail the job")
+
+    def fail_validation(*_args, **_kwargs):
+        raise AssertionError("archive hit must bypass validation")
+
+    monkeypatch.setattr("runner.validate_font_file", fail_validation)
+    source = TrackingSource()
+
+    async def run_cached_job(job_id: str, styles: list[ClaimStyle]):
+        job = ClaimedJob(
+            job_id=job_id,
+            order_id=job_id,
+            lease_token="12345678-1234-1234-1234-123456789abc",
+            lease_expires_at=9999999999999,
+            source_url=source_identity,
+            family_name="Demo",
+            foundry=None,
+            styles=styles,
+            formats=["TTF"],
+        )
+        queue = QueueStub()
+        worker = WorkerStub(job)
+        runner = JobRunner(
+            test_settings,
+            queue_client=queue,
+            worker_client=worker,
+            source_acquirer=source,
+            font_builder=FailingBuilder(),
+            archive=archive,
+        )
+        result = await runner.process_message(
+            QueueMessage(
+                id=f"message-{job_id}",
+                lease_id=f"lease-{job_id}",
+                body_raw=f'{{"job_id":"{job_id}"}}',
+                attempts=1,
+                job_id=job_id,
+            )
+        )
+        assert result.action == RunnerAction.ACKED
+        assert queue.acks == [f"lease-{job_id}"]
+        assert worker.upload_calls == 1
+        assert worker.complete_calls == 1
+
+    await run_cached_job("job_subset", [ClaimStyle("regular", "Regular")])
+    await run_cached_job("job_reordered", [ClaimStyle("bold", "Bold"), ClaimStyle("regular", "Regular")])
+
+    assert source.acquire_calls == 0
+    assert source.context_requests == [["regular"], ["bold", "regular"]]
