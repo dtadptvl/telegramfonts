@@ -24,7 +24,9 @@ from runner import (  # noqa: E402
     CodexTransport,
     TransportError,
     classify_process_failure,
+    identity_constrained_schema,
     route_architect,
+    validate_json_schema,
     validate_architect,
     validate_executor,
 )
@@ -76,7 +78,7 @@ class FakeTransport:
         self.write_first = write_first
         self.mutate_architect = mutate_architect
 
-    def invoke(self, role, workspace, prompt, timeout_seconds):
+    def invoke(self, role, workspace, prompt, timeout_seconds, expected_ref=None, expected_head=None):
         self.calls.append(role)
         event = copy.deepcopy(self.events.pop(0))
         if role == "architect" and self.mutate_architect:
@@ -119,6 +121,50 @@ class RunnerTests(unittest.TestCase):
         bad_gate = executor_event("READY_HUMAN_AUTH", blocker=None)
         with self.assertRaises(ProtocolError):
             validate_executor(bad_gate, BASE_CONTRACT["ref"], HEAD, BASE_CONTRACT)
+
+    def test_identity_constrained_schemas_accept_only_supplied_routing_identity(self):
+        for role, payload in (
+            ("architect", architect_event("READY")),
+            ("executor", executor_event("DONE")),
+        ):
+            schema = identity_constrained_schema(role, BASE_CONTRACT["ref"], HEAD)
+            validate_json_schema(payload, schema)
+            for key, value in (
+                ("ref", "SELF"),
+                ("ref", "issue:56"),
+                ("head", "deadbeef"),
+                ("head", None),
+            ):
+                invalid = copy.deepcopy(payload)
+                invalid[key] = value
+                with self.assertRaises(ProtocolError, msg=f"{role} accepted {key}={value!r}"):
+                    validate_json_schema(invalid, schema)
+
+    def test_generated_identity_schema_is_used_for_both_role_commands(self):
+        captured_commands = []
+
+        def fake_run(command, **kwargs):
+            if command[0] == "git":
+                return subprocess.CompletedProcess(command, 0, "", "")
+            captured_commands.append(command)
+            role = "architect" if "gpt-5.6-sol" in command else "executor"
+            payload = architect_event("READY") if role == "architect" else executor_event("DONE")
+            event = {"type": "item.completed", "item": {"text": json.dumps(payload)}}
+            return subprocess.CompletedProcess(command, 0, json.dumps(event) + "\n", "")
+
+        transport = CodexTransport(command="codex.cmd")
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            with patch("runner.subprocess.run", side_effect=fake_run):
+                for role in ("architect", "executor"):
+                    transport.invoke(role, workspace, "fixture", 1, BASE_CONTRACT["ref"], HEAD)
+
+        self.assertEqual(len(captured_commands), 2)
+        for role, command in zip(("architect", "executor"), captured_commands):
+            schema_path = Path(command[command.index("--output-schema") + 1])
+            self.assertEqual(schema_path.name, f"{role}.json")
+            self.assertFalse(schema_path.exists())
+            self.assertNotIn(".orchestra", schema_path.parts)
 
     def test_happy_path_is_finite_and_checks_scoped_change(self):
         transport = FakeTransport(
@@ -251,7 +297,7 @@ class RunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with patch("runner.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="codex", timeout=1)):
                 with self.assertRaises(TransportError) as context:
-                    transport.invoke("architect", Path(directory), "fixture", 1)
+                    transport.invoke("architect", Path(directory), "fixture", 1, BASE_CONTRACT["ref"], HEAD)
         self.assertEqual(context.exception.code, "subprocess_timeout")
 
 

@@ -9,6 +9,7 @@ model call.  The host supplies the bounded contract and workspace.
 from __future__ import annotations
 
 import argparse
+import copy
 import fnmatch
 import hashlib
 import json
@@ -190,6 +191,34 @@ def _read_schema(path: Path) -> dict[str, Any]:
     return value
 
 
+def identity_constrained_schema(role: str, expected_ref: str, expected_head: str | None) -> dict[str, Any]:
+    """Clone a role schema and bind its routing identity for one invocation."""
+
+    if role not in {"architect", "executor"}:
+        _fail("unknown_role")
+    if not isinstance(expected_ref, str) or REF_RE.fullmatch(expected_ref) is None:
+        _fail("identity_schema_ref")
+    schema_path = ARCHITECT_SCHEMA if role == "architect" else EXECUTOR_SCHEMA
+    schema = copy.deepcopy(_read_schema(schema_path))
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        _fail("identity_schema_properties")
+
+    ref_schema = properties.get("ref")
+    if not isinstance(ref_schema, dict):
+        _fail("identity_schema_ref_property")
+    ref_schema["pattern"] = f"^{re.escape(expected_ref)}$"
+
+    if expected_head is None:
+        properties["head"] = {"type": "null"}
+    else:
+        properties["head"] = {
+            "type": "string",
+            "pattern": f"^{re.escape(expected_head)}$",
+        }
+    return schema
+
+
 def _require_keys(value: Mapping[str, Any], required: set[str], allowed: set[str], code: str) -> None:
     if set(value) != allowed:
         missing = required - set(value)
@@ -251,12 +280,19 @@ def validate_transport_contract(contract: Any) -> dict[str, Any]:
     return contract
 
 
-def _validate_ref_head(payload: Mapping[str, Any], expected_ref: str | None, expected_head: str | None) -> None:
+_UNSET = object()
+
+
+def _validate_ref_head(
+    payload: Mapping[str, Any],
+    expected_ref: str | None,
+    expected_head: str | None | object = _UNSET,
+) -> None:
     if not isinstance(payload.get("ref"), str) or REF_RE.fullmatch(payload["ref"]) is None:
         _fail("invalid_ref")
     if expected_ref is not None and payload["ref"] != expected_ref:
         _fail("stale_ref")
-    if expected_head is not None and payload.get("head") != expected_head:
+    if expected_head is not _UNSET and payload.get("head") != expected_head:
         _fail("stale_head")
 
 
@@ -280,7 +316,7 @@ def _contract_within(base: Mapping[str, Any], candidate: Mapping[str, Any]) -> N
 def validate_architect(
     payload: Any,
     expected_ref: str | None = None,
-    expected_head: str | None = None,
+    expected_head: str | None | object = _UNSET,
     base_contract: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not isinstance(payload, dict):
@@ -312,7 +348,7 @@ def _path_matches(path: str, patterns: Sequence[str]) -> bool:
 def validate_executor(
     payload: Any,
     expected_ref: str | None = None,
-    expected_head: str | None = None,
+    expected_head: str | None | object = _UNSET,
     contract: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not isinstance(payload, dict):
@@ -575,12 +611,27 @@ class CodexTransport:
         command.append(prompt)
         return command
 
-    def invoke(self, role: str, workspace: Path, prompt: str, timeout_seconds: int) -> InvocationResult:
-        schema_path = ARCHITECT_SCHEMA if role == "architect" else EXECUTOR_SCHEMA
+    def invoke(
+        self,
+        role: str,
+        workspace: Path,
+        prompt: str,
+        timeout_seconds: int,
+        expected_ref: str | None = None,
+        expected_head: str | None = None,
+    ) -> InvocationResult:
         config = ROLE_CONFIG.get(role)
         if config is None:
             _fail("unknown_role")
+        if expected_ref is None:
+            _fail("identity_required")
+        schema = identity_constrained_schema(role, expected_ref, expected_head)
         with tempfile.TemporaryDirectory(prefix="orchestra-transport-") as temporary:
+            schema_path = Path(temporary) / f"{role}.json"
+            try:
+                schema_path.write_text(json.dumps(schema, ensure_ascii=True, sort_keys=True), encoding="utf-8")
+            except OSError:
+                raise TransportError("identity_schema_write_failure") from None
             output_path = Path(temporary) / "final.json"
             command = self.build_command(role, workspace, schema_path, output_path, prompt)
             environment = os.environ.copy()
@@ -606,7 +657,6 @@ class CodexTransport:
             if result.returncode != 0:
                 raise TransportError(classify_process_failure(result.stderr, result.stdout))
             payload, event_types, output_source = extract_structured_output(output_path, result.stdout)
-            schema = _read_schema(schema_path)
             try:
                 validate_json_schema(payload, schema)
             except ProtocolError:
@@ -708,7 +758,14 @@ class DeterministicRunner:
             _fail("call_budget_exhausted")
         self.calls += 1
         try:
-            result = self.transport.invoke(role, self.workspace, prompt, self._budget("timeout_seconds"))
+            result = self.transport.invoke(
+                role,
+                self.workspace,
+                prompt,
+                self._budget("timeout_seconds"),
+                expected_ref=self.ref,
+                expected_head=self.contract.get("head"),
+            )
         except TransportError as error:
             config = ROLE_CONFIG[role]
             self.invocations.append(
