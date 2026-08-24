@@ -88,21 +88,41 @@ class ConsumerEvidenceBundle:
             errors.append(f"BUNDLE_CONFIG_HASH_MISMATCH: {self.config_hash} != {expected_config_hash}")
         if self.held_out_fingerprint != expected_held_out_fingerprint:
             errors.append(f"BUNDLE_HELD_OUT_FP_MISMATCH: {self.held_out_fingerprint} != {expected_held_out_fingerprint}")
-        if not self.candidate_artifact_sha or len(self.candidate_artifact_sha) != 64:
-            errors.append("BUNDLE_INVALID_CANDIDATE_ARTIFACT_SHA")
+        if (
+            not self.candidate_artifact_sha
+            or len(self.candidate_artifact_sha) != 64
+            or not all(c in "0123456789abcdefABCDEF" for c in self.candidate_artifact_sha)
+        ):
+            errors.append(f"BUNDLE_INVALID_CANDIDATE_ARTIFACT_SHA: '{self.candidate_artifact_sha}'")
+        elif self.candidate_artifact_sha != self.fonttools_result.sha256_hex:
+            errors.append(
+                f"BUNDLE_ARTIFACT_SHA_MISMATCH: {self.candidate_artifact_sha} != fonttools {self.fonttools_result.sha256_hex}"
+            )
         return errors
 
     def compute_bundle_hash(self) -> str:
+        """Compute deterministic SHA-256 digest of the consumer evidence bundle, excluding host paths."""
+        def _strip_host_paths(val: Any) -> Any:
+            if isinstance(val, dict):
+                return {
+                    k: _strip_host_paths(v)
+                    for k, v in val.items()
+                    if k not in ("file_path", "font_path", "path", "timestamp", "created_at", "evaluation_timestamp_utc")
+                }
+            if isinstance(val, (list, tuple)):
+                return [_strip_host_paths(item) for item in val]
+            return val
+
         d = {
             "schema_version": self.schema_version,
             "model_canonical_hash": self.model_canonical_hash,
             "config_hash": self.config_hash,
             "held_out_fingerprint": self.held_out_fingerprint,
             "candidate_artifact_sha": self.candidate_artifact_sha,
-            "fonttools": asdict(self.fonttools_result),
-            "freetype": asdict(self.freetype_result),
-            "harfbuzz": asdict(self.harfbuzz_result),
-            "chromium": asdict(self.chromium_result),
+            "fonttools": _strip_host_paths(asdict(self.fonttools_result)),
+            "freetype": _strip_host_paths(asdict(self.freetype_result)),
+            "harfbuzz": _strip_host_paths(asdict(self.harfbuzz_result)),
+            "chromium": _strip_host_paths(asdict(self.chromium_result)),
         }
         serialized = json.dumps(d, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(serialized.encode("utf-8")).hexdigest()

@@ -343,10 +343,24 @@ class ObservationStore:
             ).fetchone() is not None
 
     def has_observation(self, cache_key: str) -> bool:
-        """Check if an observation with the specified cache key already exists (resume check)."""
-        with self._get_connection() as conn:
-            cur = conn.execute("SELECT 1 FROM observations WHERE cache_key = ?", (cache_key,))
-            return cur.fetchone() is not None
+        """Check if a fully verified observation with the specified cache key exists on disk and in database."""
+        rec = self.get_observation(cache_key)
+        if rec is None:
+            return False
+        if not rec.validate_cache_key():
+            return False
+        png_path = self.base_dir / rec.raster_relative_path
+        if not png_path.exists():
+            return False
+        try:
+            png_bytes = png_path.read_bytes()
+            if len(png_bytes) != rec.raster_size_bytes:
+                return False
+            if hashlib.sha256(png_bytes).hexdigest() != rec.raster_sha256:
+                return False
+        except Exception:
+            return False
+        return True
 
     def get_observation(self, cache_key: str) -> ObservationRecord | None:
         """Fetch an observation record by cache key."""
@@ -354,6 +368,11 @@ class ObservationStore:
             cur = conn.execute("SELECT * FROM observations WHERE cache_key = ?", (cache_key,))
             row = cur.fetchone()
             if not row:
+                return None
+
+            browser_ver = row["browser_version"] if "browser_version" in row.keys() else ""
+            cfg_hash = row["config_hash"] if "config_hash" in row.keys() else ""
+            if not browser_ver or not cfg_hash:
                 return None
 
             metrics = DirectMetrics(
@@ -378,12 +397,7 @@ class ObservationStore:
                 confidence=row["confidence"],
             )
 
-            browser_ver = row["browser_version"] if "browser_version" in row.keys() else ""
-            cfg_hash = row["config_hash"] if "config_hash" in row.keys() else ""
-            if not browser_ver or not cfg_hash:
-                return None
-
-            return ObservationRecord(
+            rec = ObservationRecord(
                 cache_key=row["cache_key"],
                 reference_id=row["reference_id"],
                 style_id=row["style_id"],
@@ -399,6 +413,9 @@ class ObservationStore:
                 browser_version=browser_ver,
                 config_hash=cfg_hash,
             )
+            if not rec.validate_cache_key():
+                return None
+            return rec
 
     def get_glyph_observations(
         self, reference_id: str, style_id: str, code_point: int
@@ -457,13 +474,36 @@ class ObservationStore:
                     browser_version=browser_ver,
                     config_hash=cfg_hash,
                 )
+                if not rec.validate_cache_key():
+                    continue
                 png_path = self.base_dir / rec.raster_relative_path
-                png_bytes = png_path.read_bytes() if png_path.exists() else b""
+                if not png_path.exists():
+                    continue
+                png_bytes = png_path.read_bytes()
+                if len(png_bytes) != rec.raster_size_bytes or hashlib.sha256(png_bytes).hexdigest() != rec.raster_sha256:
+                    continue
                 results.append((rec, png_bytes))
             return results
 
     def save_observation(self, record: ObservationRecord, png_bytes: bytes) -> None:
-        """Save raster PNG to filesystem and write metadata record to SQLite index."""
+        """Save raster PNG to filesystem and write metadata record to SQLite index with strict validation."""
+        if not isinstance(png_bytes, (bytes, bytearray)) or len(png_bytes) == 0:
+            raise ValueError(f"Invalid non-empty raster PNG bytes for observation: {record.cache_key}")
+        if len(png_bytes) != record.raster_size_bytes:
+            raise ValueError(
+                f"Raster byte size mismatch: provided {len(png_bytes)} bytes != declared {record.raster_size_bytes} for {record.cache_key}"
+            )
+        actual_sha256 = hashlib.sha256(png_bytes).hexdigest()
+        if actual_sha256 != record.raster_sha256:
+            raise ValueError(
+                f"Raster SHA256 mismatch: calculated {actual_sha256} != declared {record.raster_sha256} for {record.cache_key}"
+            )
+        if not record.validate_cache_key():
+            raise ValueError(f"Cache key validation failed for observation record: {record.cache_key}")
+        for name, val in [("config_hash", record.config_hash), ("raster_sha256", record.raster_sha256)]:
+            if not isinstance(val, str) or len(val) != 64 or not all(c in "0123456789abcdefABCDEF" for c in val):
+                raise ValueError(f"ObservationRecord {name} must be a 64-char hex string, got: '{val}'")
+
         target_path = self.base_dir / record.raster_relative_path
         target_path.parent.mkdir(parents=True, exist_ok=True)
         target_path.write_bytes(png_bytes)

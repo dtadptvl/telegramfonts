@@ -205,9 +205,12 @@ class FidelityEvaluator:
                 failure_reasons.append(f"CALIBRATION_RECOMPUTATION_ERROR: {e}")
 
         # Typography pair validation
+        expected_pair_prov = f"chromium:{model.browser_version}:canvas_text_metrics"
         for p in list(fit_pairs) + list(held_out_pairs):
-            if p.provenance == "untrusted" or not p.provenance:
-                failure_reasons.append(f"UNTRUSTED_TYPOGRAPHY: Pair ({p.left_cp}, {p.right_cp}) has untrusted provenance '{p.provenance}'")
+            if p.provenance != expected_pair_prov:
+                failure_reasons.append(
+                    f"UNTRUSTED_TYPOGRAPHY: Pair ({p.left_cp}, {p.right_cp}) provenance '{p.provenance}' does not match expected production provenance '{expected_pair_prov}'"
+                )
             if p.left_char != chr(p.left_cp) or p.right_char != chr(p.right_cp):
                 failure_reasons.append(f"INVALID_TYPOGRAPHY_PAIR: Character/codepoint mismatch ({p.left_cp}:{p.left_char}, {p.right_cp}:{p.right_char})")
             if not (math.isfinite(p.left_advance_upem) and math.isfinite(p.right_advance_upem) and math.isfinite(p.measured_pair_advance_upem) and math.isfinite(p.inferred_kerning_upem)):
@@ -520,16 +523,36 @@ class FidelityEvaluator:
             else:
                 bundle_hash = consumer_bundle.compute_bundle_hash()
                 ft = consumer_bundle.fonttools_result
-                ft_pass = bool(ft.is_direct_loadable_fonttools and ft.has_valid_cmap and ft.has_valid_metrics)
+                ft_pass = bool(
+                    ft.is_direct_loadable_fonttools
+                    and ft.has_valid_cmap
+                    and ft.has_valid_metrics
+                    and ft.decompression_round_trip
+                    and getattr(ft, "validation_error", None) is None
+                )
 
                 fr = consumer_bundle.freetype_result
-                freetype_pass = bool(fr.render_error is None and fr.raster_iou >= thresholds.min_raster_iou)
+                freetype_pass = bool(
+                    fr.render_error is None
+                    and fr.raster_iou >= thresholds.min_raster_iou
+                )
 
                 hb = consumer_bundle.harfbuzz_result
-                hb_pass = bool(hb.glyph_sequence_match)
+                hb_pass = bool(
+                    hb.in_candidate_cmap
+                    and hb.glyph_sequence_match
+                )
 
                 cr = consumer_bundle.chromium_result
-                chromium_pass = bool(cr.is_direct_loadable_chromium and cr.fallback_rejection_verified)
+                chromium_pass = bool(
+                    cr.is_available
+                    and cr.is_direct_loadable_chromium
+                    and cr.fallback_rejection_verified
+                    and cr.rendered_canvas_valid
+                    and cr.error_message is None
+                    and cr.measured_glyph_count > 0
+                    and cr.held_out_pairs_non_regression
+                )
 
                 if ft_pass and freetype_pass and hb_pass and chromium_pass:
                     consumer_status = "PASS"
