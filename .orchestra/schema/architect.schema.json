@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Codex Orchestra Architect event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["state", "ref", "head", "review"],
+  "properties": {
+    "state": {
+      "type": "string",
+      "enum": [
+        "READY",
+        "EXECUTING",
+        "ARCHITECT_REVIEW",
+        "FIX_REQUIRED",
+        "MERGE_READY",
+        "MERGED",
+        "COMPLETE",
+        "HUMAN_AUTH",
+        "EXECUTING_AUTHORIZED",
+        "BLOCKED",
+        "SECURITY_BLOCKED"
+      ]
+    },
+    "ref": {
+      "type": "string",
+      "pattern": "^(SELF|(issue|review|pr):[A-Za-z0-9._-]+)$"
+    },
+    "head": {
+      "type": ["string", "null"]
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["decision", "summary"],
+      "properties": {
+        "decision": {
+          "type": "string",
+          "enum": [
+            "READY",
+            "EXECUTING",
+            "ARCHITECT_REVIEW",
+            "FIX_REQUIRED",
+            "MERGE_READY",
+            "MERGED",
+            "COMPLETE",
+            "HUMAN_AUTH",
+            "EXECUTING_AUTHORIZED",
+            "BLOCKED",
+            "SECURITY_BLOCKED"
+          ]
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}

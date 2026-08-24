@@ -1215,6 +1215,37 @@ TIMESTAMP
 
 Those values are not project evidence and must not be written back as technical truth unless explicitly useful for transport diagnostics.
 
+## 27B. Codex-Native Bootstrap (Issue #55)
+
+The existing Desktop trigger, GitHub recovery path, and `ORCH|v1` footer remain
+canonical. The local `.orchestra/runner.py` is an additional bounded machine
+transport, not a replacement for that workflow.
+
+When this bootstrap is used:
+
+```text
+Architect = gpt-5.6-sol + high + read-only
+Executor  = gpt-5.6-luna + max + workspace-write
+```
+
+The host must pass explicit CLI model, reasoning-effort, sandbox, approval,
+ephemeral, strict-config, and structured-output settings. If the exact model,
+effort, sandbox, or schema cannot be verified, stop; do not silently fall back.
+
+The runner may only invoke, validate, route, deduplicate, bound, and stop
+structured events. It MUST NOT edit contracts or code, decide PASS, invent
+evidence, authorize, merge, deploy, or repair. Architect JSON contains only
+state/ref/head plus the bounded review decision/delta. The validated host
+contract remains authoritative, is not echoed by Architect, and is passed
+unchanged by the runner to Executor. The runner routes structured JSON and
+never uses prose or the Desktop footer as its decision input.
+
+The Architect remains responsible for WHAT, acceptance, evidence, gates, and
+the technical state decision. Human remains responsible for consequential
+authorization and final merge. Any HUMAN_AUTH, MERGE_READY, BLOCKED, or
+SECURITY_BLOCKED event stops the machine path for the appropriate Human or
+Architect route.
+
 ## 28. Completion Rule
 
 Before `MERGE_READY`, verify:

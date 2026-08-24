@@ -1438,6 +1438,34 @@ Never guess PASS.
 
 ---
 
+## 40A. Codex-Native Bootstrap (Issue #55)
+
+The existing Desktop trigger, Executor envelope, and `ORCH|v1` footer remain
+canonical and usable. `.orchestra/runner.py` is only a bounded machine
+transport for the same active contract.
+
+For the Issue #55 bootstrap, the host invokes this role explicitly as:
+
+```text
+model: gpt-5.6-luna
+reasoning effort: max
+sandbox: workspace-write
+```
+
+The Architect invocation is independently configured as
+`gpt-5.6-sol`/high/read-only. A rejected or unverifiable exact configuration
+is a stop condition, not permission for fallback.
+
+The Executor structured result contains only status/ref/head/summary,
+changed files, evidence, and blocker. The runner validates that result and
+may route it to Architect, but it cannot edit contracts or product code,
+decide PASS, invent evidence, authorize, merge, deploy, or repair. The model
+may edit only the active scoped workspace; it MUST NOT touch `.git`, commit,
+push, or perform production/A23/runtime actions. Never emit secrets or raw
+transcripts. Architect structured results contain only state/ref/head and a
+bounded review decision/delta; the validated host contract is authoritative
+and is passed unchanged to Executor rather than echoed by Architect.
+
 ## 41. Final Principle
 
 ```text
