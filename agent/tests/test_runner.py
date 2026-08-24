@@ -405,6 +405,81 @@ async def test_runner_claim_ack_and_retry_paths(test_settings: Settings):
 
 
 @pytest.mark.asyncio
+async def test_runner_unexpected_exception_after_claim_fails_and_retries(test_settings: Settings):
+    failed_payloads = []
+    retried_leases = []
+
+    def queue_handler(request: httpx.Request) -> httpx.Response:
+        data = json.loads(request.content)
+        if "retries" in data:
+            retried_leases.extend([item["lease_id"] for item in data["retries"]])
+        return httpx.Response(200, json={"success": True})
+
+    def worker_handler(request: httpx.Request) -> httpx.Response:
+        if "claim" in request.url.path:
+            return httpx.Response(
+                200,
+                json={
+                    "job_id": "job_unexpected_exception",
+                    "order_id": "ord_unexpected_exception",
+                    "lease_token": "12345678-1234-1234-1234-123456789abc",
+                    "lease_expires_at": int(time.time() * 1000) + 300000,
+                    "source_url": "https://www.myfonts.com/collections/be-vietnam-pro",
+                    "styles": [{"id": "regular", "display_name": "Regular"}],
+                    "formats": ["TTF"],
+                },
+            )
+        if "heartbeat" in request.url.path:
+            return httpx.Response(
+                200,
+                json={"success": True, "lease_expires_at": int(time.time() * 1000) + 300000},
+            )
+        if "fail" in request.url.path:
+            failed_payloads.append(json.loads(request.content))
+            return httpx.Response(
+                200,
+                json={"success": True, "status": "RETRY", "queue_action": "retry", "delay_seconds": 17},
+            )
+        return httpx.Response(404)
+
+    class UnexpectedSourceAcquirer(SourceAcquirer):
+        async def acquire_source(self, source_url, styles, preview_input=None, allow_web_fallback=False):
+            raise TypeError("unexpected source payload containing untrusted details")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(queue_handler)) as q_http, \
+               httpx.AsyncClient(transport=httpx.MockTransport(worker_handler)) as w_http:
+        q_client = CloudflareQueueClient(test_settings, client=q_http)
+        w_client = WorkerJobClient(test_settings, client=w_http)
+        runner = A23Runner(
+            test_settings,
+            q_client,
+            w_client,
+            source_acquirer=UnexpectedSourceAcquirer(),
+        )
+
+        msg = QueueMessage(
+            id="m_unexpected",
+            lease_id="l_unexpected",
+            body_raw='{"job_id":"job_unexpected_exception"}',
+            attempts=1,
+            job_id="job_unexpected_exception",
+        )
+        result = await runner.process_message(msg)
+
+        assert result.action == RunnerAction.RETRIED
+        assert result.reason == "UNEXPECTED_RUNTIME_ERROR"
+        assert failed_payloads == [
+            {
+                "worker_id": test_settings.A23_WORKER_ID,
+                "lease_token": "12345678-1234-1234-1234-123456789abc",
+                "retryable": True,
+                "reason_code": "UNEXPECTED_RUNTIME_ERROR",
+            }
+        ]
+        assert retried_leases == ["l_unexpected"]
+
+
+@pytest.mark.asyncio
 async def test_runner_fenced_heartbeat_during_build_aborts(test_settings: Settings):
     preview_bytes = _make_test_image_bytes(20, 50)
 

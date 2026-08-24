@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -26,6 +27,28 @@ QueueClient = CloudflareQueueClient
 logger = logging.getLogger("telegramfonts.agent.runner")
 
 LEASE_SAFETY_MARGIN_MS = 15000  # 15s deadline safety margin
+
+TERMINAL_ERROR_CODES = {
+    "INVALID_SOURCE_URL",
+    "NO_PUBLIC_PREVIEW_FOUND",
+    "SOURCE_ACQUISITION_BLOCKED_403",
+    "SOURCE_ACQUISITION_BLOCKED_429",
+    "SOURCE_PREVIEW_PARSE_FAILED",
+    "MALFORMED_SOURCE_INPUT",
+    "CORRUPT_SOURCE_IMAGE",
+    "UNSUPPORTED_FORMAT",
+    "NO_FILES_GENERATED",
+}
+
+
+def _safe_error_code(exc: Exception) -> str:
+    """Return only a bounded uppercase error code, never raw exception text."""
+    match = re.match(r"^\s*([A-Z][A-Z0-9_]{2,63})(?::|\s|$)", str(exc))
+    if match:
+        code = match.group(1).rstrip("_")
+        if code not in {"ERROR", "FAILED"}:
+            return code
+    return "UNEXPECTED_RUNTIME_ERROR"
 
 
 class RunnerAction(str, Enum):
@@ -90,7 +113,17 @@ class JobRunner:
             if stop_event.is_set():
                 break
 
-            hb_res = await self.worker_client.heartbeat(job_id, lease_token)
+            try:
+                hb_res = await self.worker_client.heartbeat(job_id, lease_token)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "Heartbeat exception for %s; class=%s",
+                    job_id,
+                    type(exc).__name__,
+                )
+                continue
             if hb_res.success and hb_res.lease_expires_at:
                 expiry_holder[0] = hb_res.lease_expires_at
                 logger.debug(f"Heartbeat renewed for job {job_id}, new expiry={hb_res.lease_expires_at}")
@@ -407,26 +440,22 @@ class JobRunner:
                 await self.queue_client.retry_messages([(msg.lease_id, 30)])
                 return ProcessResult(action=RunnerAction.RETRIED, job_id=job.job_id, reason=complete_res.reason)
 
-        except (ValueError, RuntimeError) as exc:
-            err_code = str(exc)
-            logger.warning(f"Error during compute execution for {job.job_id}: {err_code}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            err_code = _safe_error_code(exc)
+            logger.warning(
+                "Error during compute execution for %s: class=%s code=%s",
+                job.job_id,
+                type(exc).__name__,
+                err_code,
+            )
 
             if "LEASE_FENCED" in err_code:
                 self.scratch_manager.cleanup_job_dir(job_dir)
                 return ProcessResult(action=RunnerAction.FENCED_ABORT, job_id=job.job_id, reason="fenced")
 
-            terminal_codes = {
-                "INVALID_SOURCE_URL",
-                "NO_PUBLIC_PREVIEW_FOUND",
-                "SOURCE_ACQUISITION_BLOCKED_403",
-                "SOURCE_ACQUISITION_BLOCKED_429",
-                "SOURCE_PREVIEW_PARSE_FAILED",
-                "MALFORMED_SOURCE_INPUT",
-                "CORRUPT_SOURCE_IMAGE",
-                "UNSUPPORTED_FORMAT",
-                "NO_FILES_GENERATED",
-            }
-            is_terminal = any(tc in err_code for tc in terminal_codes)
+            is_terminal = any(tc in err_code for tc in TERMINAL_ERROR_CODES)
 
             fail_res = await self.worker_client.fail(
                 job_id=job.job_id,
