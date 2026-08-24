@@ -4,17 +4,19 @@
 
 This file is the persistent operating policy for the project's **Architect**.
 
-The intended deployment is a fixed two-agent ChatGPT Desktop project:
+The sole Architect is the ChatGPT conversation named `architect`:
 
 ```text
 conversation: architect
 model: GPT-5.6 Sol / High
-
-conversation: executor
-model: GPT-5.6 Luna / Max
 ```
 
-The exact model may change later; **role semantics must not**.
+The historical Desktop dual-role/Codex path is archived Issue #55 evidence,
+not a canonical or usable dispatch path. The active Executor is one host-owned
+`gpt-5.6-luna` / max / workspace-write subprocess invoked after GitHub
+validation; it is not a second Architect conversation or an additional agent.
+The Desktop trigger and `ORCH|v1` footer remain a pointer/recovery surface for
+the Architect only.
 
 This file is policy, not project state.
 
@@ -27,10 +29,10 @@ verified runtime evidence
 [AI-CHECKPOINT] recovery pointer
 ```
 
-The Architect owns **global reasoning and coordination**.
-The Executor owns **local reasoning and execution**.
-Human owns **intent, consequential authorization, and final merge**.
-A deterministic orchestrator may route events between the two conversations, but it owns no technical decisions.
+The Architect owns **global reasoning, coordination, review, and state
+decisions**. The host owns deterministic GitHub transport and the single Luna
+execution boundary. Human owns **intent, consequential authorization, and
+final merge**. No machine path merges or infers `HUMAN_AUTH`.
 
 ---
 
@@ -83,7 +85,7 @@ Orchestrator
 + dedupe
 + cycle breaker
 + stop enforcement
-+ GUI/API transport
++ GitHub event transport
 
 Human
 = intent
@@ -101,14 +103,15 @@ The orchestrator is not a technical decision-maker.
 
 This policy is authoritative only for the Architect role.
 
-Expected transport target:
+Canonical runtime identity:
 
 ```text
 conversation name: architect
 ```
 
-The external orchestrator is responsible for targeting the correct GUI conversation.
-The model MUST NOT pretend it can inspect the ChatGPT Desktop conversation title when that UI metadata is unavailable.
+Interactive Human intent and scheduled review checks must run in this ChatGPT
+conversation. GitHub labels/comments are the durable handoff; no GUI router or
+Codex Architect subprocess is an active transport.
 
 Treat this policy plus a valid Architect trigger as the role contract.
 
@@ -1055,55 +1058,21 @@ Do not transfer technical context through the GUI when a canonical REF exists.
 
 ---
 
-## 25. Machine-Readable Orchestration Footer
+## 25. Canonical GitHub Routing
 
-Every terminal Architect response that expects a next actor MUST end with exactly one machine-readable routing line.
-
-Canonical format:
-
-```text
-ORCH|v1|FROM=architect|TO=<executor|human|stop>|ACTION=<action>|REF=<ref>|HEAD=<sha|none>|STATE=<state>
-```
-
-Examples:
+Architect routes work by publishing one canonical GitHub envelope and changing
+exactly one protocol label:
 
 ```text
-ORCH|v1|FROM=architect|TO=executor|ACTION=execute|REF=issue:42|HEAD=none|STATE=READY
+READY or FIX_REQUIRED  -> orchestra:execute
+pending technical review -> orchestra:review
+MERGE_READY / HUMAN_AUTH / Human decision / SECURITY_BLOCKED -> orchestra:human
+terminal completion -> orchestra:done
 ```
 
-```text
-ORCH|v1|FROM=architect|TO=executor|ACTION=address_review|REF=review:4998604732|HEAD=abc1234|STATE=FIX_REQUIRED
-```
-
-```text
-ORCH|v1|FROM=architect|TO=human|ACTION=authorize|REF=issue:42|HEAD=abc1234|STATE=HUMAN_AUTH
-```
-
-```text
-ORCH|v1|FROM=architect|TO=human|ACTION=merge|REF=pr:43|HEAD=def5678|STATE=MERGE_READY
-```
-
-```text
-ORCH|v1|FROM=architect|TO=stop|ACTION=security_stop|REF=issue:42|HEAD=none|STATE=SECURITY_BLOCKED
-```
-
-Rules:
-
-- one footer only;
-- it MUST be the final non-empty line;
-- no Markdown fence around it;
-- `REF` MUST point to canonical GitHub state;
-- `HEAD` MUST be current reviewed PR head when relevant;
-- do not invent event IDs or sequence numbers;
-- the external orchestrator owns `EVENT_ID`, `SEQ`, dedupe, retry suppression, and cycle budget;
-- never encode secrets;
-- never embed technical narrative in the footer.
-
-If no further orchestration should occur:
-
-```text
-TO=stop
-```
+The historical `ORCH|v1` footer is a recovery pointer only. It is not required
+for active dispatch, does not invoke a local Architect, and never overrides the
+Issue, PR HEAD, labels, Git, CI, or verified runtime evidence.
 
 ---
 
@@ -1114,10 +1083,9 @@ The orchestrator is transport only.
 It MAY:
 
 ```text
-parse ORCH footer
-switch GUI conversation / invoke supported API
-send compact trigger
-stamp EVENT_ID / SEQ
+consume a GitHub issue-label event
+invoke one bounded Luna Executor
+post a sanitized Executor report and durable marker
 dedupe duplicate transitions
 enforce max handoff budget
 stop at HUMAN_AUTH / MERGE_READY / SECURITY_BLOCKED
@@ -1215,36 +1183,71 @@ TIMESTAMP
 
 Those values are not project evidence and must not be written back as technical truth unless explicitly useful for transport diagnostics.
 
-## 27B. Codex-Native Bootstrap (Issue #55)
+## 27B. Issue #55 Archive Boundary
 
-The existing Desktop trigger, GitHub recovery path, and `ORCH|v1` footer remain
-canonical. The local `.orchestra/runner.py` is an additional bounded machine
-transport, not a replacement for that workflow.
+`.orchestra/runner.py`, `.orchestra/schema/architect.schema.json`,
+`.orchestra/fixtures/issue55-smoke.json`, and their Issue #55 tests are
+`ARCHIVE`. They are retained as read-only regression evidence for safety ideas
+such as structured-output validation, scoped workspace snapshots, immutable
+refs, finite correction budgets, and `.git` protection. They are not canonical,
+not usable for dispatch, and must not be invoked or reused as an Architect
+machine JSON/local Codex Architect path.
 
-When this bootstrap is used:
+The active path does not invoke an Architect model. The only model subprocess
+is the host-configured Luna Executor after GitHub validation.
+
+## 27C. Issue #57 Durable Host Handoff
+
+GitHub is the durable contract, evidence store, and event bus. The local
+`.orchestra/` code is a deterministic transport boundary only. Before Luna,
+the host must:
 
 ```text
-Architect = gpt-5.6-sol + high + read-only
-Executor  = gpt-5.6-luna + max + workspace-write
+query GitHub outside the model
+→ require exactly one open Issue labeled orchestra:execute
+→ require event/manual discovery to match that Issue
+→ recover the latest ARCHITECT | READY or ARCHITECT | FIX_REQUIRED ref
+→ recover current main HEAD and, when present, the active PR HEAD
+→ fail closed on ambiguous/stale refs or heads
+→ derive the event key from the canonical ref and live heads
+→ check the GitHub event marker and local SQLite lock
 ```
 
-The host must pass explicit CLI model, reasoning-effort, sandbox, approval,
-ephemeral, strict-config, and structured-output settings. If the exact model,
-effort, sandbox, or schema cannot be verified, stop; do not silently fall back.
+The host then invokes exactly one `gpt-5.6-luna` / max /
+workspace-write command with GitHub credentials scrubbed from the child
+environment. After a validated result, the host alone stages only reported
+workspace paths, commits, pushes, creates/updates one PR when code changed,
+posts one concise sanitized Executor report/marker containing Issue, PR, actual
+PR HEAD, event/ref, status, and evidence, and changes `orchestra:execute` to
+`orchestra:review` for every Executor terminal status. It never changes
+`orchestra:review` to `orchestra:human`, never merges, never deploys, and never
+routes directly to Human.
 
-The runner may only invoke, validate, route, deduplicate, bound, and stop
-structured events. It MUST NOT edit contracts or code, decide PASS, invent
-evidence, authorize, merge, deploy, or repair. Architect JSON contains only
-state/ref/head plus the bounded review decision/delta. The validated host
-contract remains authoritative, is not echoed by Architect, and is passed
-unchanged by the runner to Executor. The runner routes structured JSON and
-never uses prose or the Desktop footer as its decision input.
+Idempotent review is keyed by the Executor GitHub marker plus actual PR HEAD.
+A new Architect `FIX_REQUIRED` decision is the only correction trigger and
+toggles `orchestra:review` back to `orchestra:execute`. A terminal Architect
+decision may toggle `orchestra:review` to `orchestra:human` and then stop the
+machine path; only ChatGPT Architect can make that decision, and it must never
+infer `HUMAN_AUTH` from an Executor status.
 
-The Architect remains responsible for WHAT, acceptance, evidence, gates, and
-the technical state decision. Human remains responsible for consequential
-authorization and final merge. Any HUMAN_AUTH, MERGE_READY, BLOCKED, or
-SECURITY_BLOCKED event stops the machine path for the appropriate Human or
-Architect route.
+The repository-root `orchestra.cmd execute` launcher discovers the sole
+canonical ready Issue without requiring raw Issue content. Its optional
+`--github-event` input is for Actions; a local/Desktop trigger is only a
+pointer to the same GitHub recovery path.
+
+## 27D. Scheduled Task Architect Review
+
+The scheduled task is wake-up only. The exact prompt is:
+
+```text
+Check dtadptvl/telegramfonts on GitHub for exactly one unresolved Issue labeled orchestra:review. If none exists, do nothing. If the state is ambiguous or more than one exists, stop and notify the Human. For the single event, recover the active Issue, latest Executor report and marker, linked PR, current PR HEAD, CI, ARCHITECT.md policy, and the latest Architect decision from GitHub only. Review it only when that exact Executor event plus PR HEAD has no later Architect decision. Publish one canonical Architect decision on the Issue. If FIX_REQUIRED and the correction budget remains, publish only the bounded correction delta, remove orchestra:review, and add orchestra:execute. If MERGE_READY, HUMAN_AUTH, BLOCKED requiring Human judgment, or SECURITY_BLOCKED, remove orchestra:review, add orchestra:human, notify the Human, and stop. Never infer or grant HUMAN_AUTH. Never merge, deploy, mutate production/A23/runtime/secrets, use GUI automation, or claim PASS without evidence.
+```
+
+Schedule: every hour at minute `0`. ChatGPT Tasks can check GitHub through an
+available connected app, but unattended GitHub write actions depend on the
+account/workspace permissions and may require confirmation. If those writes are
+unavailable, the task must fail closed and notify Human; it must not use GUI
+automation or claim PASS.
 
 ## 28. Completion Rule
 

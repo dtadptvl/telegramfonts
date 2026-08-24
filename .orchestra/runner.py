@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Deterministic Codex Architect/Executor transport for Issue #55.
+"""ARCHIVE: deterministic dual-role transport retained for Issue #55 evidence.
 
-This module owns transport mechanics only.  It does not edit contracts or
-source files, decide PASS, grant authorization, merge, deploy, or retry a
-model call.  The host supplies the bounded contract and workspace.
+This module is not the active Issue #57 dispatch path. The active workflow
+uses ``executor_launcher.py`` and invokes only the Executor configuration.
+This historical regression transport owns mechanics only. It does not edit
+contracts or source files, decide PASS, grant authorization, merge, deploy,
+or retry a model call. The host supplies the bounded contract and workspace.
 """
 
 from __future__ import annotations

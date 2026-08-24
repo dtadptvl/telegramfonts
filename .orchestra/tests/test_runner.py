@@ -1,4 +1,8 @@
-"""Focused deterministic transport tests; stdlib-only so CI needs no new dependency."""
+"""ARCHIVE: Issue #55 deterministic transport regression tests.
+
+They preserve safety concepts only; they are not active Issue #57 dispatch
+evidence.
+"""
 
 from __future__ import annotations
 
