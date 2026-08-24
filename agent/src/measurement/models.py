@@ -200,6 +200,17 @@ class ObservationRecord:
     raster_size_bytes: int
     metrics: DirectMetrics
     created_at: str
+    browser_version: str
+    config_hash: str
+
+    def __post_init__(self) -> None:
+        if not self.browser_version:
+            raise ValueError("ObservationRecord browser_version cannot be empty")
+        for name, val in [("config_hash", self.config_hash), ("raster_sha256", self.raster_sha256), ("cache_key", self.cache_key)]:
+            if not isinstance(val, str) or len(val) != 64 or not all(c in "0123456789abcdefABCDEF" for c in val):
+                raise ValueError(f"ObservationRecord {name} must be a 64-char hexadecimal SHA256 digest, got: '{val}'")
+        if self.raster_size_bytes <= 0:
+            raise ValueError(f"ObservationRecord raster_size_bytes must be positive, got: {self.raster_size_bytes}")
 
     @staticmethod
     def build_cache_key(
@@ -215,6 +226,22 @@ class ObservationRecord:
         """Compute authoritative deterministic cache key."""
         payload = f"{reference_id}:{style_id}:{code_point}:{browser_version}:{resolution}:{subpixel_x:.4f}:{subpixel_y:.4f}:{config_hash}"
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def validate_cache_key(self) -> bool:
+        """Verify that cache_key matches recomputed key from record fields."""
+        if not self.config_hash or not self.browser_version:
+            return False
+        expected = self.build_cache_key(
+            reference_id=self.reference_id,
+            style_id=self.style_id,
+            code_point=self.code_point,
+            browser_version=self.browser_version,
+            resolution=self.resolution,
+            subpixel_x=self.subpixel_x,
+            subpixel_y=self.subpixel_y,
+            config_hash=self.config_hash,
+        )
+        return self.cache_key == expected
 
 
 @dataclass

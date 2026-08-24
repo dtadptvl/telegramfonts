@@ -18,6 +18,11 @@ from reconstruction.candidate_validator import (
     ShapingTestResult,
 )
 from reconstruction.evaluator import GroundTruthGeometryEvaluator
+from reconstruction.font_model import (
+    CalibratedGlyph,
+    CanonicalFontModel,
+    GlobalFontMetrics,
+)
 from reconstruction.models import (
     Contour,
     CubicSegment,
@@ -39,6 +44,9 @@ __all__ = [
     "ReconstructedGlyph",
     "ReconstructionConfig",
     "GeometricScoreResult",
+    "CalibratedGlyph",
+    "GlobalFontMetrics",
+    "CanonicalFontModel",
     "compute_observation_sdf",
     "fuse_observation_sdfs",
     "extract_zero_crossing_contours",

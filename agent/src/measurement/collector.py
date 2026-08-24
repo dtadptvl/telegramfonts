@@ -148,6 +148,8 @@ class ObservationCollector:
                         raster_size_bytes=len(png_bytes),
                         metrics=direct_metrics,
                         created_at=now_iso,
+                        browser_version=self.session.browser_version,
+                        config_hash=config_hash,
                     )
 
                     self.store.save_observation(record, png_bytes)

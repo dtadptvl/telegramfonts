@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import json
 import sqlite3
@@ -160,10 +161,12 @@ def test_observation_store_persistence_and_resume(tmp_path: Path):
         subpixel_x=0.0,
         subpixel_y=0.0,
         raster_relative_path="ref1/regular/0041/128px_0.00_0.00.png",
-        raster_sha256="dummy_sha256",
+        raster_sha256=hashlib.sha256(png_bytes).hexdigest(),
         raster_size_bytes=len(png_bytes),
         metrics=metrics,
         created_at="2026-08-21T00:00:00Z",
+        browser_version="Chrome/133",
+        config_hash=config.compute_hash(),
     )
 
     # Initial check -> not present
