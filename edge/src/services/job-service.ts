@@ -81,6 +81,121 @@ export interface CompleteJobResult {
   reason?: string;
 }
 
+export type QueueRearmStatus = 'REARMED' | 'ALREADY_REARMED' | 'CONFLICT';
+
+export interface QueueRearmResult {
+  status: QueueRearmStatus;
+}
+
+export interface QueueRearmParams {
+  jobId: string;
+  orderId: string;
+  outboxId: string;
+  leaseOwner: string;
+  leaseExpiresAt: number;
+  attemptCount: number;
+  dispatchAttempts: number;
+}
+
+export const QUEUE_REARM_AUDIT_REASON = 'QUEUE_RETENTION_EXPIRED_RECOVERY';
+
+const SAFE_INTERNAL_ID = /^[a-zA-Z0-9_-]{1,64}$/;
+const MAX_REARM_ATTEMPT_COUNT = 1000;
+const MAX_REARM_DISPATCH_ATTEMPTS = 1_000_000;
+
+function validQueueRearmParams(params: QueueRearmParams): boolean {
+  return (
+    SAFE_INTERNAL_ID.test(params.jobId) &&
+    SAFE_INTERNAL_ID.test(params.orderId) &&
+    SAFE_INTERNAL_ID.test(params.outboxId) &&
+    SAFE_INTERNAL_ID.test(params.leaseOwner) &&
+    Number.isSafeInteger(params.leaseExpiresAt) &&
+    params.leaseExpiresAt >= 0 &&
+    Number.isInteger(params.attemptCount) &&
+    params.attemptCount >= 0 &&
+    params.attemptCount <= MAX_REARM_ATTEMPT_COUNT &&
+    Number.isInteger(params.dispatchAttempts) &&
+    params.dispatchAttempts >= 0 &&
+    params.dispatchAttempts <= MAX_REARM_DISPATCH_ATTEMPTS
+  );
+}
+
+function queueRearmGuard(status: 'SENT' | 'PENDING'): string {
+  return `
+    e.id = ?
+    AND e.event_type = 'JOB_READY'
+    AND e.aggregate_type = 'ORDER'
+    AND e.aggregate_id = ?
+    AND e.status = '${status}'
+    AND e.dispatch_attempts = ?
+    AND CASE
+      WHEN json_valid(e.payload) = 1 THEN json_extract(e.payload, '$.job_id')
+      ELSE NULL
+    END = ?
+    AND (
+      SELECT COUNT(*)
+      FROM outbox_events AS sole_event
+      WHERE sole_event.event_type = 'JOB_READY'
+        AND sole_event.aggregate_type = 'ORDER'
+        AND sole_event.aggregate_id = ?
+    ) = 1
+    AND EXISTS (
+      SELECT 1
+      FROM fulfillment_jobs AS j
+      WHERE j.id = ?
+        AND j.order_id = ?
+        AND j.status = 'PROCESSING'
+        AND j.lease_owner = ?
+        AND j.lease_expires_at IS NOT NULL
+        AND j.lease_expires_at = ?
+        AND j.lease_expires_at < ?
+        AND j.attempt_count = ?
+        AND j.attempt_count < j.max_attempts
+        AND j.artifact_key IS NULL
+        AND j.artifact_sha256 IS NULL
+        AND j.artifact_size_bytes IS NULL
+        AND j.artifact_parts IS NULL
+    )
+    AND EXISTS (
+      SELECT 1
+      FROM orders AS o
+      WHERE o.id = ?
+        AND o.status = 'PROCESSING'
+    )
+    AND NOT EXISTS (
+      SELECT 1
+      FROM fulfillment_receipts AS r
+      WHERE r.job_id = ? OR r.order_id = ?
+    )
+    AND NOT EXISTS (
+      SELECT 1
+      FROM artifacts AS a
+      WHERE a.order_id = ? OR a.job_id = ?
+    )
+  `;
+}
+
+function queueRearmGuardBindings(params: QueueRearmParams, now: number): unknown[] {
+  return [
+    params.outboxId,
+    params.orderId,
+    params.dispatchAttempts,
+    params.jobId,
+    params.orderId,
+    params.jobId,
+    params.orderId,
+    params.leaseOwner,
+    params.leaseExpiresAt,
+    now,
+    params.attemptCount,
+    params.orderId,
+    params.jobId,
+    params.orderId,
+    params.orderId,
+    params.jobId,
+  ];
+}
+
 export function buildArtifactStorageKey(orderId: string, jobId: string, sha256Hex: string): string {
   const cleanOrder = orderId.trim().replace(/[^a-zA-Z0-9_-]/g, '');
   const cleanJob = jobId.trim().replace(/[^a-zA-Z0-9_-]/g, '');
@@ -112,6 +227,63 @@ export class JobService {
       .prepare('SELECT * FROM fulfillment_receipts WHERE order_id = ?')
       .bind(orderId)
       .first<FulfillmentReceiptRecord>();
+  }
+
+  async rearmExpiredQueueEvent(params: QueueRearmParams): Promise<QueueRearmResult> {
+    const cleanParams: QueueRearmParams = {
+      jobId: params.jobId.trim(),
+      orderId: params.orderId.trim(),
+      outboxId: params.outboxId.trim(),
+      leaseOwner: params.leaseOwner.trim(),
+      leaseExpiresAt: params.leaseExpiresAt,
+      attemptCount: params.attemptCount,
+      dispatchAttempts: params.dispatchAttempts,
+    };
+
+    if (!validQueueRearmParams(cleanParams)) {
+      return { status: 'CONFLICT' };
+    }
+
+    // Server time is captured once and is the only expiry authority for this CAS.
+    const now = Date.now();
+    const guard = queueRearmGuard('SENT');
+    const updateResult = await this.db
+      .prepare(
+        `UPDATE outbox_events AS e
+         SET status = 'PENDING',
+             dispatched_at = NULL,
+             dispatch_lease_token = NULL,
+             dispatch_leased_at = NULL,
+             dispatch_lease_expires_at = NULL,
+             next_dispatch_at = NULL,
+             last_dispatch_error = ?
+         WHERE ${guard}`
+      )
+      .bind(QUEUE_REARM_AUDIT_REASON, ...queueRearmGuardBindings(cleanParams, now))
+      .run();
+
+    if (updateResult.meta.changes && updateResult.meta.changes === 1) {
+      return { status: 'REARMED' };
+    }
+
+    // A replay is accepted only when the exact guarded row is PENDING and carries
+    // the bounded recovery marker; broad status inference is intentionally avoided.
+    const alreadyRearmed = await this.db
+      .prepare(
+        `SELECT 1 AS matched
+         FROM outbox_events AS e
+         WHERE ${queueRearmGuard('PENDING')}
+           AND e.dispatched_at IS NULL
+           AND e.dispatch_lease_token IS NULL
+           AND e.dispatch_leased_at IS NULL
+           AND e.dispatch_lease_expires_at IS NULL
+           AND e.next_dispatch_at IS NULL
+           AND e.last_dispatch_error = ?`
+      )
+      .bind(...queueRearmGuardBindings(cleanParams, now), QUEUE_REARM_AUDIT_REASON)
+      .first<{ matched: number }>();
+
+    return alreadyRearmed ? { status: 'ALREADY_REARMED' } : { status: 'CONFLICT' };
   }
 
   async validateLeaseForArtifactUpload(

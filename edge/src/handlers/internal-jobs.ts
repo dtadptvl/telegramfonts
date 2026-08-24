@@ -71,7 +71,7 @@ export async function handleInternalJobs(
   const path = url.pathname;
 
   // Match /internal/jobs/:job_id/:action
-  const match = path.match(/^\/internal\/jobs\/([a-zA-Z0-9_-]+)\/(claim|heartbeat|fail|artifact|complete)$/);
+  const match = path.match(/^\/internal\/jobs\/([a-zA-Z0-9_-]+)\/(claim|heartbeat|fail|artifact|complete|rearm)$/);
   if (!match) {
     return new Response(JSON.stringify({ error: 'Not Found' }), {
       status: 404,
@@ -515,6 +515,93 @@ export async function handleInternalJobs(
       status: 400,
       headers: { 'Content-Type': 'application/json' },
     });
+  }
+
+  // Route: POST /internal/jobs/:job_id/rearm (authenticated stale-Queue recovery CAS)
+  if (action === 'rearm') {
+    if (!/^[a-zA-Z0-9_-]{1,64}$/.test(jobId)) {
+      return new Response(JSON.stringify({ error: 'Valid job_id is required' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    const expectedKeys = [
+      'order_id',
+      'outbox_id',
+      'lease_owner',
+      'lease_expires_at',
+      'attempt_count',
+      'dispatch_attempts',
+    ];
+    const bodyKeys = Object.keys(body);
+    if (
+      bodyKeys.length !== expectedKeys.length ||
+      expectedKeys.some((key) => !Object.prototype.hasOwnProperty.call(body, key))
+    ) {
+      return new Response(JSON.stringify({ error: 'Exact rearm request fields required' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    const orderId = typeof body.order_id === 'string' ? body.order_id.trim() : '';
+    const outboxId = typeof body.outbox_id === 'string' ? body.outbox_id.trim() : '';
+    const leaseOwner = typeof body.lease_owner === 'string' ? body.lease_owner.trim() : '';
+    const leaseExpiresAt = body.lease_expires_at;
+    const attemptCount = body.attempt_count;
+    const dispatchAttempts = body.dispatch_attempts;
+
+    if (
+      !/^[a-zA-Z0-9_-]{1,64}$/.test(orderId) ||
+      !/^[a-zA-Z0-9_-]{1,64}$/.test(outboxId) ||
+      !/^[a-zA-Z0-9_-]{1,64}$/.test(leaseOwner) ||
+      typeof leaseExpiresAt !== 'number' ||
+      !Number.isSafeInteger(leaseExpiresAt) ||
+      leaseExpiresAt < 0 ||
+      typeof attemptCount !== 'number' ||
+      !Number.isInteger(attemptCount) ||
+      attemptCount < 0 ||
+      attemptCount > 1000 ||
+      typeof dispatchAttempts !== 'number' ||
+      !Number.isInteger(dispatchAttempts) ||
+      dispatchAttempts < 0 ||
+      dispatchAttempts > 1_000_000
+    ) {
+      return new Response(JSON.stringify({ error: 'Invalid rearm request bounds' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    try {
+      const result = await jobService.rearmExpiredQueueEvent({
+        jobId,
+        orderId,
+        outboxId,
+        leaseOwner,
+        leaseExpiresAt,
+        attemptCount,
+        dispatchAttempts,
+      });
+
+      if (result.status === 'REARMED' || result.status === 'ALREADY_REARMED') {
+        return new Response(JSON.stringify({ success: true, status: result.status }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      return new Response(JSON.stringify({ error: 'Rearm preconditions not met', status: 'CONFLICT' }), {
+        status: 409,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    } catch {
+      return new Response(JSON.stringify({ error: 'Rearm failed' }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
   }
 
   // Route: POST /internal/jobs/:job_id/claim
