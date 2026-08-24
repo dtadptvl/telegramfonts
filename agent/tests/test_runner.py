@@ -13,7 +13,7 @@ from compute.packager import PackagerService
 from compute.source import SourceAcquirer
 from config import Settings
 from queue_client import CloudflareQueueClient, QueueMessage
-from runner import A23Runner, RunnerAction
+from runner import A23Runner, RunnerAction, _safe_error_code
 from worker_client import WorkerJobClient
 
 
@@ -40,6 +40,14 @@ class FixtureSourceAcquirer(SourceAcquirer):
             preview_input=self.preview_bytes,
             allow_web_fallback=allow_web_fallback,
         )
+
+
+def test_safe_error_code_allows_only_known_canonical_values():
+    assert _safe_error_code(RuntimeError("LEASE_FENCED_OR_EXPIRED")) == "LEASE_FENCED_OR_EXPIRED"
+    assert _safe_error_code(RuntimeError("LEASE_FENCED_OR_EXPIRED_SUPERSET")) == "UNEXPECTED_RUNTIME_ERROR"
+    assert _safe_error_code(RuntimeError("UNSUPPORTED_FORMAT_SUPERSET")) == "UNEXPECTED_RUNTIME_ERROR"
+    assert _safe_error_code(RuntimeError("STYLE_MISSING_IN_SOURCE_private-style")) == "STYLE_MISSING_IN_SOURCE"
+    assert _safe_error_code(RuntimeError("source URL https://private.invalid/style")) == "UNEXPECTED_RUNTIME_ERROR"
 
 
 @pytest.mark.asyncio

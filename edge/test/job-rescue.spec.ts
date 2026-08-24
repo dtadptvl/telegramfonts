@@ -6,6 +6,7 @@ import {
   MAX_ATTEMPTS_EXHAUSTED_REASON,
   MAX_ATTEMPTS_EXHAUSTED_RESCUE_REASON,
 } from '../src/services/job-service';
+import { OutboxService } from '../src/services/outbox-service';
 
 const NODE_SECRET = 'a23_rescue_test_secret_999';
 const testEnv: Env = {
@@ -23,9 +24,12 @@ type FixtureOptions = {
   lastError?: string | null;
   outboxStatus?: 'SENT' | 'PENDING';
   includeOutbox?: boolean;
+  includeSecondOutbox?: boolean;
   payloadJobId?: string;
   includeReceipt?: boolean;
   includeArtifact?: boolean;
+  paymentAmount?: number;
+  paymentCurrency?: string;
 };
 
 type Fixture = {
@@ -58,6 +62,8 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
   const leaseExpiresAt = options.leaseExpiresAt ?? now - 60_000;
   const attemptCount = options.attemptCount ?? 3;
   const maxAttempts = options.maxAttempts ?? 3;
+  const paymentAmount = options.paymentAmount ?? 100000;
+  const paymentCurrency = options.paymentCurrency ?? 'VND';
   const jobStatus = options.jobStatus ?? 'PROCESSING';
   const orderStatus = options.orderStatus ?? 'PROCESSING';
   const lastError = options.lastError === undefined
@@ -79,8 +85,8 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
   ).bind(unique('item'), orderId, now).run();
   await env.DB.prepare(
     `INSERT INTO payments (id, order_id, provider, transaction_id, amount, currency, status, created_at, updated_at)
-     VALUES (?, ?, 'SEPAY', ?, 100000, 'VND', 'VERIFIED', ?, ?)`
-  ).bind(paymentId, orderId, paymentTransactionId, now, now).run();
+      VALUES (?, ?, 'SEPAY', ?, ?, ?, 'VERIFIED', ?, ?)`
+  ).bind(paymentId, orderId, paymentTransactionId, paymentAmount, paymentCurrency, now, now).run();
   await env.DB.prepare(
     `INSERT INTO fulfillment_jobs (
        id, order_id, status, leased_at, lease_expires_at, lease_owner, lease_token,
@@ -118,6 +124,22 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
       now - 30_000,
       now - 60_000,
     ).run();
+
+    if (options.includeSecondOutbox) {
+      await env.DB.prepare(
+        `INSERT INTO outbox_events (
+           id, event_type, aggregate_type, aggregate_id, payload, status, dispatched_at, created_at,
+           dispatch_lease_token, dispatch_leased_at, dispatch_lease_expires_at,
+           dispatch_attempts, next_dispatch_at, last_dispatch_error
+         ) VALUES (?, 'JOB_READY', 'ORDER_DUPLICATE', ?, ?, 'SENT', ?, ?, NULL, NULL, NULL, 2, NULL, NULL)`
+      ).bind(
+        unique('outbox'),
+        orderId,
+        JSON.stringify({ job_id: jobId }),
+        now - 30_000,
+        now - 20_000,
+      ).run();
+    }
   }
 
   if (options.includeReceipt) {
@@ -189,6 +211,67 @@ async function callRescue(
 }
 
 describe('exact exhausted fulfillment rescue', () => {
+  it('lets a winning heartbeat prevent scheduled finalization', async () => {
+    const fixture = await createFixture({ leaseExpiresAt: Date.now() + 60_000 });
+    const service = new JobService(env.DB);
+
+    expect((await service.heartbeat(
+      fixture.jobId,
+      fixture.leaseOwner,
+      fixture.leaseToken,
+    )).status).toBe('EXTENDED');
+    expect(await service.finalizeExpiredExhaustedJobs(Date.now())).toEqual({
+      finalizedJobs: 0,
+      transitionedOrders: 0,
+    });
+
+    const job = await env.DB.prepare('SELECT status, lease_expires_at FROM fulfillment_jobs WHERE id = ?')
+      .bind(fixture.jobId).first<{ status: string; lease_expires_at: number }>();
+    const order = await env.DB.prepare('SELECT status FROM orders WHERE id = ?')
+      .bind(fixture.orderId).first<{ status: string }>();
+    expect(job?.status).toBe('PROCESSING');
+    expect(job?.lease_expires_at).toBeGreaterThan(Date.now());
+    expect(order?.status).toBe('PROCESSING');
+  });
+
+  it('lets completion win against scheduled finalization with one receipt, artifact, and delivery event', async () => {
+    const fixture = await createFixture({ leaseExpiresAt: Date.now() + 60_000 });
+    const service = new JobService(env.DB);
+    const artifactKey = `artifacts/${fixture.orderId}/${fixture.jobId}/complete.zip`;
+    const result = await service.completeJob({
+      jobId: fixture.jobId,
+      workerId: fixture.leaseOwner,
+      leaseToken: fixture.leaseToken,
+      artifactKey,
+      artifactSha256: 'b'.repeat(64),
+      artifactSizeBytes: 4,
+    });
+
+    expect(result.status).toBe('COMPLETED');
+    expect(await service.finalizeExpiredExhaustedJobs(Date.now())).toEqual({
+      finalizedJobs: 0,
+      transitionedOrders: 0,
+    });
+
+    const job = await env.DB.prepare('SELECT status FROM fulfillment_jobs WHERE id = ?')
+      .bind(fixture.jobId).first<{ status: string }>();
+    const order = await env.DB.prepare('SELECT status FROM orders WHERE id = ?')
+      .bind(fixture.orderId).first<{ status: string }>();
+    const receipt = await env.DB.prepare('SELECT COUNT(*) AS count FROM fulfillment_receipts WHERE job_id = ?')
+      .bind(fixture.jobId).first<{ count: number }>();
+    const artifact = await env.DB.prepare('SELECT COUNT(*) AS count FROM artifacts WHERE job_id = ?')
+      .bind(fixture.jobId).first<{ count: number }>();
+    const delivery = await env.DB.prepare(
+      "SELECT COUNT(*) AS count FROM outbox_events WHERE aggregate_id = ? AND event_type = 'DELIVERY_READY'"
+    ).bind(fixture.orderId).first<{ count: number }>();
+
+    expect(job?.status).toBe('COMPLETED');
+    expect(order?.status).toBe('COMPLETED');
+    expect(receipt?.count).toBe(1);
+    expect(artifact?.count).toBe(1);
+    expect(delivery?.count).toBe(1);
+  });
+
   it('scheduled maintenance finalizes expired max-attempt jobs and fences stale completion', async () => {
     const fixture = await createFixture();
 
@@ -261,7 +344,7 @@ describe('exact exhausted fulfillment rescue', () => {
     expect(order?.status).toBe('PROCESSING');
     expect(outbox).toMatchObject({
       status: 'PENDING',
-      dispatch_attempts: 3,
+      dispatch_attempts: 2,
       dispatched_at: null,
       last_dispatch_error: MAX_ATTEMPTS_EXHAUSTED_RESCUE_REASON,
     });
@@ -272,6 +355,18 @@ describe('exact exhausted fulfillment rescue', () => {
       .bind(fixture.orderId).first<{ count: number }>())?.count).toBe(1);
     expect((await env.DB.prepare('SELECT COUNT(*) AS count FROM outbox_events WHERE aggregate_id = ?')
       .bind(fixture.orderId).first<{ count: number }>())?.count).toBe(1);
+
+    const queueSentMessages: unknown[] = [];
+    const outboxService = new OutboxService(env.DB, {
+      send: async (message: unknown) => queueSentMessages.push(message),
+      sendBatch: async () => {},
+    } as unknown as Queue<unknown>);
+    await outboxService.dispatchPendingEvents({ batchSize: 50 });
+    const dispatched = await env.DB.prepare(
+      'SELECT status, dispatch_attempts FROM outbox_events WHERE id = ?'
+    ).bind(fixture.outboxId).first<{ status: string; dispatch_attempts: number }>();
+    expect(queueSentMessages).toContainEqual({ job_id: fixture.jobId });
+    expect(dispatched).toEqual({ status: 'SENT', dispatch_attempts: 3 });
 
     const replay = await callRescue(fixture);
     expect(replay.response.status).toBe(409);
@@ -302,9 +397,12 @@ describe('exact exhausted fulfillment rescue', () => {
       { options: { jobStatus: 'FAILED', orderStatus: 'FAILED', includeReceipt: true } },
       { options: { jobStatus: 'FAILED', orderStatus: 'FAILED', includeArtifact: true } },
       { options: { jobStatus: 'FAILED', orderStatus: 'FAILED', includeOutbox: false } },
+      { options: { jobStatus: 'FAILED', orderStatus: 'FAILED', includeSecondOutbox: true } },
       {
         options: { jobStatus: 'FAILED', orderStatus: 'FAILED', payloadJobId: unique('other-job') },
       },
+      { options: { jobStatus: 'FAILED', orderStatus: 'FAILED', paymentAmount: 99999 } },
+      { options: { jobStatus: 'FAILED', orderStatus: 'FAILED', paymentCurrency: 'USD' } },
       {
         options: { jobStatus: 'FAILED', orderStatus: 'FAILED' },
         mutate: (body) => ({ ...body, payment_id: unique('wrong-payment') }),
@@ -330,6 +428,6 @@ describe('exact exhausted fulfillment rescue', () => {
     const outbox = await env.DB.prepare('SELECT status, dispatch_attempts FROM outbox_events WHERE id = ?')
       .bind(fixture.outboxId).first<Record<string, unknown>>();
     expect(job).toEqual({ status: 'RETRY', attempt_count: 3, max_attempts: 4 });
-    expect(outbox).toEqual({ status: 'PENDING', dispatch_attempts: 3 });
+    expect(outbox).toEqual({ status: 'PENDING', dispatch_attempts: 2 });
   });
 });

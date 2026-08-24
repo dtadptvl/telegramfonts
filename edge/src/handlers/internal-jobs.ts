@@ -2,6 +2,21 @@ import type { Env } from '../env';
 import { JobService, buildArtifactStorageKey } from '../services/job-service';
 import { emitStructuredLog } from '../utils/logger';
 
+const INTERNAL_AUTH_COMPARE_BYTES = 1024;
+const INTERNAL_AUTH_LENGTH_BYTES = 4;
+const INTERNAL_AUTH_PAYLOAD_BYTES = INTERNAL_AUTH_COMPARE_BYTES - INTERNAL_AUTH_LENGTH_BYTES;
+
+function fixedAuthValue(value: string, encoder: TextEncoder): { bytes: Uint8Array; withinLimit: boolean } {
+  const encoded = encoder.encode(value);
+  const bytes = new Uint8Array(INTERNAL_AUTH_COMPARE_BYTES);
+  new DataView(bytes.buffer).setUint32(0, encoded.byteLength, false);
+  bytes.set(encoded.subarray(0, INTERNAL_AUTH_PAYLOAD_BYTES), INTERNAL_AUTH_LENGTH_BYTES);
+  return {
+    bytes,
+    withinLimit: encoded.byteLength <= INTERNAL_AUTH_PAYLOAD_BYTES,
+  };
+}
+
 export function verifyInternalAuth(request: Request, secret: string | undefined): boolean {
   if (!secret || !secret.trim()) return false;
   const authHeader = request.headers.get('Authorization');
@@ -11,15 +26,10 @@ export function verifyInternalAuth(request: Request, secret: string | undefined)
   if (!token) return false;
 
   const enc = new TextEncoder();
-  const tokenBytes = enc.encode(token);
-  const secretBytes = enc.encode(secret.trim());
-
-  if (tokenBytes.byteLength !== secretBytes.byteLength) return false;
-  let diff = 0;
-  for (let i = 0; i < tokenBytes.byteLength; i++) {
-    diff |= tokenBytes[i] ^ secretBytes[i];
-  }
-  return diff === 0;
+  const tokenValue = fixedAuthValue(token, enc);
+  const secretValue = fixedAuthValue(secret.trim(), enc);
+  const equal = crypto.subtle.timingSafeEqual(tokenValue.bytes, secretValue.bytes);
+  return tokenValue.withinLimit && secretValue.withinLimit && equal;
 }
 
 export function hexToArrayBuffer(hex: string): ArrayBuffer {

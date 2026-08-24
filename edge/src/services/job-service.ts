@@ -507,14 +507,19 @@ export class JobService {
                  AND o.status = 'FAILED'
                  AND o.payment_code = ?
              )
-             AND EXISTS (
-               SELECT 1 FROM payments AS p
-               WHERE p.id = ?
-                 AND p.order_id = ?
-                 AND p.provider = 'SEPAY'
-                 AND p.status = 'VERIFIED'
-                 AND p.transaction_id = ?
-             )
+              AND EXISTS (
+                SELECT 1
+                FROM payments AS p
+                JOIN orders AS payment_order ON payment_order.id = p.order_id
+                WHERE p.id = ?
+                  AND p.order_id = ?
+                  AND payment_order.id = ?
+                  AND p.provider = 'SEPAY'
+                  AND p.status = 'VERIFIED'
+                  AND p.transaction_id = ?
+                  AND p.amount = payment_order.total_amount
+                  AND p.currency = payment_order.currency
+              )
              AND (
                SELECT COUNT(*) FROM payments
                WHERE order_id = ? AND provider = 'SEPAY' AND status = 'VERIFIED'
@@ -538,7 +543,6 @@ export class JobService {
              AND (
                SELECT COUNT(*) FROM outbox_events
                WHERE event_type = 'JOB_READY'
-                 AND aggregate_type = 'ORDER'
                  AND aggregate_id = ?
              ) = 1`
         )
@@ -554,10 +558,11 @@ export class JobService {
           now,
           cleanParams.lastError,
           cleanParams.orderId,
-          cleanParams.paymentCode,
-          cleanParams.paymentId,
-          cleanParams.orderId,
-          cleanParams.paymentTransactionId,
+           cleanParams.paymentCode,
+           cleanParams.paymentId,
+           cleanParams.orderId,
+           cleanParams.orderId,
+           cleanParams.paymentTransactionId,
           cleanParams.orderId,
           cleanParams.outboxId,
           cleanParams.orderId,
@@ -582,14 +587,16 @@ export class JobService {
                  AND j.last_error = ?
                  AND j.updated_at = ?
              )
-             AND EXISTS (
-               SELECT 1 FROM payments AS p
-               WHERE p.id = ?
-                 AND p.order_id = o.id
-                 AND p.provider = 'SEPAY'
-                 AND p.status = 'VERIFIED'
-                 AND p.transaction_id = ?
-             )
+           AND EXISTS (
+              SELECT 1 FROM payments AS p
+              WHERE p.id = ?
+                AND p.order_id = o.id
+                AND p.provider = 'SEPAY'
+                AND p.status = 'VERIFIED'
+                AND p.transaction_id = ?
+                AND p.amount = o.total_amount
+                AND p.currency = o.currency
+              )
              AND (
                SELECT COUNT(*) FROM payments
                WHERE order_id = o.id AND provider = 'SEPAY' AND status = 'VERIFIED'
@@ -617,7 +624,6 @@ export class JobService {
                dispatch_leased_at = NULL,
                dispatch_lease_expires_at = NULL,
                next_dispatch_at = NULL,
-               dispatch_attempts = dispatch_attempts + 1,
                last_dispatch_error = ?
            WHERE e.id = ?
              AND e.event_type = 'JOB_READY'
