@@ -1234,10 +1234,11 @@ effort, sandbox, or schema cannot be verified, stop; do not silently fall back.
 
 The runner may only invoke, validate, route, deduplicate, bound, and stop
 structured events. It MUST NOT edit contracts or code, decide PASS, invent
-evidence, authorize, merge, deploy, or repair. Architect JSON contains the
-state/ref/head plus the executable contract and review delta needed for that
-state; the runner routes the JSON and never uses prose or the Desktop footer
-as its decision input.
+evidence, authorize, merge, deploy, or repair. Architect JSON contains only
+state/ref/head plus the bounded review decision/delta. The validated host
+contract remains authoritative, is not echoed by Architect, and is passed
+unchanged by the runner to Executor. The runner routes structured JSON and
+never uses prose or the Desktop footer as its decision input.
 
 The Architect remains responsible for WHAT, acceptance, evidence, gates, and
 the technical state decision. Human remains responsible for consequential

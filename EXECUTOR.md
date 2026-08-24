@@ -1462,7 +1462,9 @@ may route it to Architect, but it cannot edit contracts or product code,
 decide PASS, invent evidence, authorize, merge, deploy, or repair. The model
 may edit only the active scoped workspace; it MUST NOT touch `.git`, commit,
 push, or perform production/A23/runtime actions. Never emit secrets or raw
-transcripts.
+transcripts. Architect structured results contain only state/ref/head and a
+bounded review decision/delta; the validated host contract is authoritative
+and is passed unchanged to Executor rather than echoed by Architect.
 
 ## 41. Final Principle
 

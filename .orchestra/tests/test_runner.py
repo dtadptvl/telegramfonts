@@ -23,6 +23,7 @@ from runner import (  # noqa: E402
     ROLE_CONFIG,
     CodexTransport,
     TransportError,
+    architect_prompt,
     classify_process_failure,
     identity_constrained_schema,
     route_architect,
@@ -54,7 +55,6 @@ def architect_event(state: str) -> dict:
         "state": state,
         "ref": BASE_CONTRACT["ref"],
         "head": BASE_CONTRACT["head"],
-        "contract": copy.deepcopy({key: BASE_CONTRACT[key] for key in BASE_CONTRACT if key not in {"ref", "head"}}),
         "review": {"decision": state, "summary": f"fixture {state}"},
     }
 
@@ -75,11 +75,13 @@ class FakeTransport:
     def __init__(self, events, write_first=False, mutate_architect=False):
         self.events = list(events)
         self.calls = []
+        self.prompts = []
         self.write_first = write_first
         self.mutate_architect = mutate_architect
 
     def invoke(self, role, workspace, prompt, timeout_seconds, expected_ref=None, expected_head=None):
         self.calls.append(role)
+        self.prompts.append((role, prompt))
         event = copy.deepcopy(self.events.pop(0))
         if role == "architect" and self.mutate_architect:
             (workspace / "unexpected.txt").write_text("mutation", encoding="utf-8")
@@ -106,13 +108,20 @@ class FakeTransport:
 
 class RunnerTests(unittest.TestCase):
     def test_schemas_and_semantic_required_fields(self):
-        validate_architect(architect_event("READY"), BASE_CONTRACT["ref"], HEAD, BASE_CONTRACT)
+        validate_architect(architect_event("READY"), BASE_CONTRACT["ref"], HEAD)
         validate_executor(executor_event("DONE"), BASE_CONTRACT["ref"], HEAD, BASE_CONTRACT)
 
         bad_architect = architect_event("READY")
         bad_architect["unexpected"] = True
         with self.assertRaises(ProtocolError):
-            validate_architect(bad_architect, BASE_CONTRACT["ref"], HEAD, BASE_CONTRACT)
+            validate_architect(bad_architect, BASE_CONTRACT["ref"], HEAD)
+
+        bad_contract = architect_event("READY")
+        bad_contract["contract"] = copy.deepcopy(
+            {key: BASE_CONTRACT[key] for key in BASE_CONTRACT if key not in {"ref", "head"}}
+        )
+        with self.assertRaises(ProtocolError):
+            validate_architect(bad_contract, BASE_CONTRACT["ref"], HEAD)
 
         bad_executor = executor_event("DONE", blocker="must be null")
         with self.assertRaises(ProtocolError):
@@ -139,6 +148,40 @@ class RunnerTests(unittest.TestCase):
                 invalid[key] = value
                 with self.assertRaises(ProtocolError, msg=f"{role} accepted {key}={value!r}"):
                     validate_json_schema(invalid, schema)
+
+    def test_architect_prompt_uses_host_contract_reference_not_a_contract_copy(self):
+        contract_path = Path("C:/tmp/contract.json")
+        prompt = architect_prompt(contract_path, "initial")
+        self.assertIn(str(contract_path), prompt)
+        self.assertNotIn("CONTRACT JSON", prompt)
+        self.assertNotIn('"allowed_paths"', prompt)
+        self.assertNotIn('"budget"', prompt)
+
+    def test_host_contract_is_unchanged_through_review_and_correction(self):
+        transport = FakeTransport(
+            [
+                architect_event("READY"),
+                executor_event("DONE", ["result.txt"]),
+                architect_event("FIX_REQUIRED"),
+                executor_event("NO_CHANGE"),
+                architect_event("MERGE_READY"),
+            ],
+            write_first=True,
+        )
+        original = copy.deepcopy(BASE_CONTRACT)
+        with tempfile.TemporaryDirectory() as directory:
+            runner = DeterministicRunner(original, Path(directory), transport)
+            result = runner.run()
+
+        self.assertEqual(result["terminal"], "MERGE_READY")
+        self.assertEqual(runner.contract, original)
+        executor_prompts = [prompt for role, prompt in transport.prompts if role == "executor"]
+        expected_contract = json.dumps(original, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        self.assertEqual(len(executor_prompts), 2)
+        self.assertTrue(all(expected_contract in prompt for prompt in executor_prompts))
+        self.assertIn("ARCHITECT REVIEW DELTA JSON", executor_prompts[1])
+        self.assertIn('"decision":"FIX_REQUIRED"', executor_prompts[1])
+        self.assertNotIn('"allowed_paths":["other.txt"]', executor_prompts[1])
 
     def test_generated_identity_schema_is_used_for_both_role_commands(self):
         captured_commands = []
@@ -245,7 +288,7 @@ class RunnerTests(unittest.TestCase):
         stale = architect_event("READY")
         stale["head"] = "deadbeef"
         with self.assertRaises(ProtocolError):
-            validate_architect(stale, BASE_CONTRACT["ref"], HEAD, BASE_CONTRACT)
+            validate_architect(stale, BASE_CONTRACT["ref"], HEAD)
 
         transport = FakeTransport([architect_event("READY"), executor_event("DONE", ["other.txt"])], write_first=False)
         with tempfile.TemporaryDirectory() as directory:
