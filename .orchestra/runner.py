@@ -710,49 +710,39 @@ def _bounded_executor_delta(payload: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _host_contract_instruction(contract_path: Path | None) -> str:
-    if contract_path is None:
-        return (
-            "The host has already validated the active contract and remains its sole authority. "
-            "Do not reconstruct, replace, or echo the contract."
-        )
-    return (
-        "The host has already validated the active contract. Read that authoritative contract "
-        f"from this exact read-only path: {contract_path}. Do not modify, reconstruct, replace, "
-        "or echo the contract in your response."
-    )
-
-
 def architect_prompt(
-    contract_path: Path | None,
+    contract: Mapping[str, Any],
     stage: str,
     executor_event: Mapping[str, Any] | None = None,
 ) -> str:
-    contract_instruction = _host_contract_instruction(contract_path)
+    contract_json = _compact(contract)
     if stage == "initial":
         return (
             "You are the Architect in a bounded local Codex orchestration smoke. "
             "Read the current workspace and assess the host contract honestly, but do not edit "
-            "anything. "
-            + contract_instruction
+            "anything. The host has already validated the following authoritative contract; use "
+            "it as input, do not modify it, reconstruct it, or echo it in your output. "
             + " Return exactly one JSON object matching the Architect schema: no Markdown, prose, "
             "footer, or extra keys. Emit only state, ref, head, and review. Preserve the supplied "
             "identity exactly. The review decision must equal state and its summary must be only "
             "the bounded decision/action delta. Emit READY only if the bounded local action is "
             "executable; otherwise emit the semantically correct terminal state. Do not invent "
-            "evidence or authorize, merge, deploy, or repair."
+            "evidence or authorize, merge, deploy, or repair.\n\nHOST CONTRACT JSON:\n"
+            + contract_json
         )
     return (
         "You are the Architect reviewing one bounded local Executor event. Read the current "
-        "workspace and compare the observed change with the host contract. "
-        + contract_instruction
+        "workspace and compare the observed change with the following authoritative host contract. "
+        "Use it as input, do not modify it, reconstruct it, or echo it in your output. "
         + " Return exactly one JSON object matching the Architect schema: no Markdown, prose, "
         "footer, or extra keys. Emit only state, ref, head, and review. Preserve the supplied "
         "identity exactly. The review decision must equal state and its summary must be only the "
         "bounded decision/action delta. Emit MERGE_READY only when the host contract and evidence "
         "are actually satisfied; otherwise emit FIX_REQUIRED, BLOCKED, HUMAN_AUTH, or "
         "SECURITY_BLOCKED as applicable. Do not edit, authorize, merge, deploy, repair, or invent "
-        "evidence.\n\nEXECUTOR JSON:\n"
+        "evidence.\n\nHOST CONTRACT JSON:\n"
+        + contract_json
+        + "\n\nEXECUTOR JSON:\n"
         + _compact(executor_event or {})
     )
 
@@ -781,12 +771,10 @@ class DeterministicRunner:
         contract: Mapping[str, Any],
         workspace: Path,
         transport: Any | None = None,
-        contract_path: Path | None = None,
     ):
         self.contract = validate_transport_contract(copy.deepcopy(dict(contract)))
         self.workspace = workspace.resolve()
         self.transport = transport or CodexTransport()
-        self.contract_path = contract_path.resolve() if contract_path is not None else None
         self.calls = 0
         self.handoffs = 0
         self.correction_used = False
@@ -906,7 +894,7 @@ class DeterministicRunner:
         before_files = workspace_snapshot(self.workspace)
         before_identity = tracked_workspace_identity(self.workspace)
         try:
-            result = self._invoke("architect", architect_prompt(self.contract_path, stage, executor_event))
+            result = self._invoke("architect", architect_prompt(self.contract, stage, executor_event))
         except ProtocolError:
             after_files = workspace_snapshot(self.workspace)
             after_identity = tracked_workspace_identity(self.workspace)
@@ -1048,7 +1036,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         contract = _load_contract(args.contract.resolve())
         transport = CodexTransport(args.codex)
-        runner = DeterministicRunner(contract, args.workspace, transport, contract_path=args.contract.resolve())
+        runner = DeterministicRunner(contract, args.workspace, transport)
         result = runner.run()
     except ProtocolError as error:
         if runner is not None:

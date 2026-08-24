@@ -162,13 +162,18 @@ class RunnerTests(unittest.TestCase):
                 with self.assertRaises(ProtocolError, msg=f"{role} accepted {key}={value!r}"):
                     validate_json_schema(invalid, schema)
 
-    def test_architect_prompt_uses_host_contract_reference_not_a_contract_copy(self):
-        contract_path = Path("C:/tmp/contract.json")
-        prompt = architect_prompt(contract_path, "initial")
-        self.assertIn(str(contract_path), prompt)
-        self.assertNotIn("CONTRACT JSON", prompt)
-        self.assertNotIn('"allowed_paths"', prompt)
-        self.assertNotIn('"budget"', prompt)
+    def test_architect_prompt_contains_host_contract_once_without_output_copy(self):
+        contract_json = json.dumps(RUNNER_CONTRACT, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        prompt = architect_prompt(RUNNER_CONTRACT, "initial")
+        self.assertEqual(prompt.count(contract_json), 1)
+        review_prompt = architect_prompt(
+            RUNNER_CONTRACT,
+            "review",
+            executor_event("DONE", ["result.txt"], contract=RUNNER_CONTRACT),
+        )
+        self.assertEqual(review_prompt.count(contract_json), 1)
+        self.assertNotIn("read-only path", prompt)
+        self.assertIn("Emit only state, ref, head, and review", prompt)
 
     def test_host_contract_is_unchanged_through_review_and_correction(self):
         original = copy.deepcopy(RUNNER_CONTRACT)
@@ -192,6 +197,7 @@ class RunnerTests(unittest.TestCase):
         expected_contract = json.dumps(original, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
         self.assertEqual(len(executor_prompts), 2)
         self.assertTrue(all(expected_contract in prompt for prompt in executor_prompts))
+        self.assertNotIn(expected_contract, json.dumps(result, ensure_ascii=True, sort_keys=True))
         self.assertIn("ARCHITECT REVIEW DELTA JSON", executor_prompts[1])
         self.assertIn('"decision":"FIX_REQUIRED"', executor_prompts[1])
         self.assertNotIn('"allowed_paths":["other.txt"]', executor_prompts[1])
