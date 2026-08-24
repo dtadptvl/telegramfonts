@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -452,6 +453,10 @@ class RunnerTests(unittest.TestCase):
                     self.assertIn("--strict-config", command)
                     self.assertIn("--ignore-user-config", command)
                     self.assertIn("--ignore-rules", command)
+                    if os.name == "nt":
+                        self.assertIn('windows.sandbox="elevated"', command)
+                    else:
+                        self.assertNotIn('windows.sandbox="elevated"', command)
                     approval_index = command.index("--ask-for-approval")
                     self.assertLess(approval_index, command.index("exec"))
                     self.assertEqual(command[approval_index + 1], "never")
@@ -459,6 +464,16 @@ class RunnerTests(unittest.TestCase):
                     self.assertNotIn("--output-last-message", command)
                     self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", command)
                     self.assertNotIn("--add-dir", command)
+
+        with patch("runner.os.name", "nt"):
+            windows_command = transport.build_command(
+                "executor",
+                Path(tempfile.gettempdir()),
+                ORCHESTRA_DIR / "schema" / "executor.schema.json",
+                Path(tempfile.gettempdir()) / "final.json",
+                "fixture",
+            )
+        self.assertIn('windows.sandbox="elevated"', windows_command)
 
         self.assertEqual(
             classify_process_failure("error: unexpected argument '--ask-for-approval'", ""),

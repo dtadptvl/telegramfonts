@@ -71,6 +71,7 @@ ROLE_CONFIG = {
     "architect": RoleConfig("gpt-5.6-sol", "high", "read-only"),
     "executor": RoleConfig("gpt-5.6-luna", "max", "workspace-write"),
 }
+WINDOWS_SANDBOX_IMPLEMENTATION = "elevated"
 
 
 class ProtocolError(Exception):
@@ -587,20 +588,28 @@ class CodexTransport:
             "--ignore-user-config",
             "--ignore-rules",
             "--strict-config",
-            "--json",
-            "--color",
-            "never",
-            "--output-schema",
-            str(schema_path),
-            "--model",
-            config.model,
-            "--config",
-            f"model_reasoning_effort={json.dumps(config.effort)}",
-            "--sandbox",
-            config.sandbox,
-            "--cd",
-            str(workspace),
         ]
+        if os.name == "nt":
+            command.extend(
+                ["--config", f"windows.sandbox={json.dumps(WINDOWS_SANDBOX_IMPLEMENTATION)}"]
+            )
+        command.extend(
+            [
+                "--json",
+                "--color",
+                "never",
+                "--output-schema",
+                str(schema_path),
+                "--model",
+                config.model,
+                "--config",
+                f"model_reasoning_effort={json.dumps(config.effort)}",
+                "--sandbox",
+                config.sandbox,
+                "--cd",
+                str(workspace),
+            ]
+        )
         if tracked_workspace_identity(workspace) is None:
             command.append("--skip-git-repo-check")
         command.append(prompt)
@@ -666,6 +675,9 @@ class CodexTransport:
                     "approval_policy": "never",
                     "strict_config": True,
                     "ignore_user_config": True,
+                    "windows_sandbox_implementation": (
+                        WINDOWS_SANDBOX_IMPLEMENTATION if os.name == "nt" else None
+                    ),
                     "exit_code": result.returncode,
                     "schema_valid": True,
                     "output_source": output_source,
