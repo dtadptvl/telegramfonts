@@ -27,6 +27,7 @@ from runner import (  # noqa: E402
     classify_process_failure,
     identity_constrained_schema,
     route_architect,
+    tracked_workspace_identity,
     validate_json_schema,
     validate_architect,
     validate_executor,
@@ -48,22 +49,29 @@ BASE_CONTRACT = {
     "gate": ["LOCAL_ONLY", "NO_LOOP"],
     "stop": ["schema failure or scope escape"],
 }
+RUNNER_CONTRACT = copy.deepcopy(BASE_CONTRACT)
+RUNNER_CONTRACT["head"] = None
 
 
-def architect_event(state: str) -> dict:
+def architect_event(state: str, contract: dict = BASE_CONTRACT) -> dict:
     return {
         "state": state,
-        "ref": BASE_CONTRACT["ref"],
-        "head": BASE_CONTRACT["head"],
+        "ref": contract["ref"],
+        "head": contract["head"],
         "review": {"decision": state, "summary": f"fixture {state}"},
     }
 
 
-def executor_event(status: str, changed_files: list[str] | None = None, blocker=None) -> dict:
+def executor_event(
+    status: str,
+    changed_files: list[str] | None = None,
+    blocker=None,
+    contract: dict = BASE_CONTRACT,
+) -> dict:
     return {
         "status": status,
-        "ref": BASE_CONTRACT["ref"],
-        "head": BASE_CONTRACT["head"],
+        "ref": contract["ref"],
+        "head": contract["head"],
         "summary": f"fixture {status}",
         "changed_files": changed_files or [],
         "evidence": ["fixture evidence"],
@@ -158,17 +166,17 @@ class RunnerTests(unittest.TestCase):
         self.assertNotIn('"budget"', prompt)
 
     def test_host_contract_is_unchanged_through_review_and_correction(self):
+        original = copy.deepcopy(RUNNER_CONTRACT)
         transport = FakeTransport(
             [
-                architect_event("READY"),
-                executor_event("DONE", ["result.txt"]),
-                architect_event("FIX_REQUIRED"),
-                executor_event("NO_CHANGE"),
-                architect_event("MERGE_READY"),
+                architect_event("READY", original),
+                executor_event("DONE", ["result.txt"], contract=original),
+                architect_event("FIX_REQUIRED", original),
+                executor_event("NO_CHANGE", contract=original),
+                architect_event("MERGE_READY", original),
             ],
             write_first=True,
         )
-        original = copy.deepcopy(BASE_CONTRACT)
         with tempfile.TemporaryDirectory() as directory:
             runner = DeterministicRunner(original, Path(directory), transport)
             result = runner.run()
@@ -182,6 +190,11 @@ class RunnerTests(unittest.TestCase):
         self.assertIn("ARCHITECT REVIEW DELTA JSON", executor_prompts[1])
         self.assertIn('"decision":"FIX_REQUIRED"', executor_prompts[1])
         self.assertNotIn('"allowed_paths":["other.txt"]', executor_prompts[1])
+        self.assertEqual(result["trace"][2]["review"], {"decision": "FIX_REQUIRED", "summary": "fixture FIX_REQUIRED"})
+        self.assertEqual(
+            result["isolation"][3]["architect_review"],
+            {"decision": "FIX_REQUIRED", "summary": "fixture FIX_REQUIRED"},
+        )
 
     def test_generated_identity_schema_is_used_for_both_role_commands(self):
         captured_commands = []
@@ -211,11 +224,15 @@ class RunnerTests(unittest.TestCase):
 
     def test_happy_path_is_finite_and_checks_scoped_change(self):
         transport = FakeTransport(
-            [architect_event("READY"), executor_event("DONE", ["result.txt"]), architect_event("MERGE_READY")],
+            [
+                architect_event("READY", RUNNER_CONTRACT),
+                executor_event("DONE", ["result.txt"], contract=RUNNER_CONTRACT),
+                architect_event("MERGE_READY", RUNNER_CONTRACT),
+            ],
             write_first=True,
         )
         with tempfile.TemporaryDirectory() as directory:
-            result = DeterministicRunner(BASE_CONTRACT, Path(directory), transport).run()
+            result = DeterministicRunner(RUNNER_CONTRACT, Path(directory), transport).run()
 
         self.assertEqual(result["terminal"], "MERGE_READY")
         self.assertEqual(result["calls"], 3)
@@ -223,20 +240,22 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(transport.calls, ["architect", "executor", "architect"])
         self.assertTrue(all(item["unchanged"] for item in result["isolation"] if item["role"] == "architect"))
         self.assertEqual(result["isolation"][1]["changed_files"], ["result.txt"])
+        self.assertTrue(result["preflight"]["matched"])
+        self.assertFalse(result["preflight"]["tracked_git"])
 
     def test_correction_route_is_one_bounded_rereview(self):
         transport = FakeTransport(
             [
-                architect_event("READY"),
-                executor_event("DONE", ["result.txt"]),
-                architect_event("FIX_REQUIRED"),
-                executor_event("NO_CHANGE"),
-                architect_event("MERGE_READY"),
+                architect_event("READY", RUNNER_CONTRACT),
+                executor_event("DONE", ["result.txt"], contract=RUNNER_CONTRACT),
+                architect_event("FIX_REQUIRED", RUNNER_CONTRACT),
+                executor_event("NO_CHANGE", contract=RUNNER_CONTRACT),
+                architect_event("MERGE_READY", RUNNER_CONTRACT),
             ],
             write_first=True,
         )
         with tempfile.TemporaryDirectory() as directory:
-            result = DeterministicRunner(BASE_CONTRACT, Path(directory), transport).run()
+            result = DeterministicRunner(RUNNER_CONTRACT, Path(directory), transport).run()
 
         self.assertEqual(result["terminal"], "MERGE_READY")
         self.assertTrue(result["correction_used"])
@@ -247,26 +266,26 @@ class RunnerTests(unittest.TestCase):
     def test_correction_budget_stops_without_a_sixth_call(self):
         transport = FakeTransport(
             [
-                architect_event("READY"),
-                executor_event("DONE", ["result.txt"]),
-                architect_event("FIX_REQUIRED"),
-                executor_event("NO_CHANGE"),
-                architect_event("FIX_REQUIRED"),
+                architect_event("READY", RUNNER_CONTRACT),
+                executor_event("DONE", ["result.txt"], contract=RUNNER_CONTRACT),
+                architect_event("FIX_REQUIRED", RUNNER_CONTRACT),
+                executor_event("NO_CHANGE", contract=RUNNER_CONTRACT),
+                architect_event("FIX_REQUIRED", RUNNER_CONTRACT),
             ],
             write_first=True,
         )
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(ProtocolError) as context:
-                DeterministicRunner(BASE_CONTRACT, Path(directory), transport).run()
+                DeterministicRunner(RUNNER_CONTRACT, Path(directory), transport).run()
 
         self.assertEqual(context.exception.code, "duplicate_or_no_progress")
         self.assertEqual(len(transport.calls), 5)
 
     def test_human_and_security_gates_stop_before_executor(self):
         for state in ("HUMAN_AUTH", "SECURITY_BLOCKED", "BLOCKED"):
-            transport = FakeTransport([architect_event(state)])
+            transport = FakeTransport([architect_event(state, RUNNER_CONTRACT)])
             with tempfile.TemporaryDirectory() as directory:
-                result = DeterministicRunner(BASE_CONTRACT, Path(directory), transport).run()
+                result = DeterministicRunner(RUNNER_CONTRACT, Path(directory), transport).run()
             self.assertEqual(result["terminal"], state)
             self.assertEqual(result["calls"], 1)
             self.assertEqual(transport.calls, ["architect"])
@@ -274,13 +293,13 @@ class RunnerTests(unittest.TestCase):
     def test_executor_human_gate_routes_to_architect_then_stops(self):
         transport = FakeTransport(
             [
-                architect_event("READY"),
-                executor_event("READY_HUMAN_AUTH", blocker="human action required"),
-                architect_event("HUMAN_AUTH"),
+                architect_event("READY", RUNNER_CONTRACT),
+                executor_event("READY_HUMAN_AUTH", blocker="human action required", contract=RUNNER_CONTRACT),
+                architect_event("HUMAN_AUTH", RUNNER_CONTRACT),
             ]
         )
         with tempfile.TemporaryDirectory() as directory:
-            result = DeterministicRunner(BASE_CONTRACT, Path(directory), transport).run()
+            result = DeterministicRunner(RUNNER_CONTRACT, Path(directory), transport).run()
         self.assertEqual(result["terminal"], "HUMAN_AUTH")
         self.assertEqual(transport.calls, ["architect", "executor", "architect"])
 
@@ -290,17 +309,79 @@ class RunnerTests(unittest.TestCase):
         with self.assertRaises(ProtocolError):
             validate_architect(stale, BASE_CONTRACT["ref"], HEAD)
 
-        transport = FakeTransport([architect_event("READY"), executor_event("DONE", ["other.txt"])], write_first=False)
+        transport = FakeTransport(
+            [
+                architect_event("READY", RUNNER_CONTRACT),
+                executor_event("DONE", ["other.txt"], contract=RUNNER_CONTRACT),
+            ],
+            write_first=False,
+        )
         with tempfile.TemporaryDirectory() as directory:
             (Path(directory) / "other.txt").write_text("escape", encoding="utf-8")
             with self.assertRaises(ProtocolError):
-                DeterministicRunner(BASE_CONTRACT, Path(directory), transport).run()
+                DeterministicRunner(RUNNER_CONTRACT, Path(directory), transport).run()
 
     def test_architect_mutation_is_rejected(self):
-        transport = FakeTransport([architect_event("READY")], mutate_architect=True)
+        transport = FakeTransport([architect_event("READY", RUNNER_CONTRACT)], mutate_architect=True)
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(ProtocolError):
-                DeterministicRunner(BASE_CONTRACT, Path(directory), transport).run()
+                DeterministicRunner(RUNNER_CONTRACT, Path(directory), transport).run()
+
+    def test_workspace_head_mismatch_stops_before_transport(self):
+        mismatch = copy.deepcopy(BASE_CONTRACT)
+        mismatch["head"] = "0" * 40
+        transport = FakeTransport([architect_event("READY", mismatch)])
+        runner = DeterministicRunner(mismatch, ORCHESTRA_DIR, transport)
+        with self.assertRaises(ProtocolError) as context:
+            runner.run()
+
+        self.assertEqual(context.exception.code, "workspace_head_mismatch")
+        self.assertEqual(runner.calls, 0)
+        self.assertEqual(runner.handoffs, 0)
+        self.assertFalse(runner.preflight["matched"])
+        self.assertEqual(transport.calls, [])
+
+    def test_matching_workspace_head_proceeds_and_null_head_allows_non_git_fixture(self):
+        identity = tracked_workspace_identity(ORCHESTRA_DIR)
+        self.assertIsNotNone(identity)
+        matched = copy.deepcopy(BASE_CONTRACT)
+        matched["head"] = identity["head"]
+        matched_transport = FakeTransport([architect_event("BLOCKED", matched)])
+        matched_result = DeterministicRunner(matched, ORCHESTRA_DIR, matched_transport).run()
+        self.assertEqual(matched_result["terminal"], "BLOCKED")
+        self.assertEqual(matched_result["calls"], 1)
+        self.assertTrue(matched_result["preflight"]["matched"])
+        self.assertTrue(matched_result["preflight"]["tracked_git"])
+
+        with tempfile.TemporaryDirectory() as directory:
+            null_transport = FakeTransport([architect_event("BLOCKED", RUNNER_CONTRACT)])
+            null_result = DeterministicRunner(RUNNER_CONTRACT, Path(directory), null_transport).run()
+        self.assertEqual(null_result["terminal"], "BLOCKED")
+        self.assertFalse(null_result["preflight"]["required"])
+        self.assertFalse(null_result["preflight"]["tracked_git"])
+        self.assertTrue(null_result["preflight"]["matched"])
+
+    def test_non_git_workspace_with_required_head_stops_before_transport(self):
+        transport = FakeTransport([architect_event("READY")])
+        with tempfile.TemporaryDirectory() as directory:
+            runner = DeterministicRunner(BASE_CONTRACT, Path(directory), transport)
+            with self.assertRaises(ProtocolError) as context:
+                runner.run()
+        self.assertEqual(context.exception.code, "workspace_identity_missing")
+        self.assertEqual(runner.calls, 0)
+        self.assertEqual(runner.handoffs, 0)
+        self.assertFalse(runner.preflight["tracked_git"])
+
+    def test_architect_review_delta_is_bounded_and_sanitized(self):
+        event = architect_event("BLOCKED", RUNNER_CONTRACT)
+        event["review"]["summary"] = "token: do-not-retain " + ("x" * 600)
+        transport = FakeTransport([event])
+        with tempfile.TemporaryDirectory() as directory:
+            result = DeterministicRunner(RUNNER_CONTRACT, Path(directory), transport).run()
+        summary = result["trace"][0]["review"]["summary"]
+        self.assertNotIn("do-not-retain", summary)
+        self.assertIn("[REDACTED]", summary)
+        self.assertLessEqual(len(summary), 512)
 
     def test_route_rejects_invalid_transition_and_builds_exact_role_configs(self):
         with self.assertRaises(ProtocolError):

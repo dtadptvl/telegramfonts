@@ -663,6 +663,22 @@ def _compact(value: Any) -> str:
     return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
 
 
+def _bounded_review_delta(review: Mapping[str, Any]) -> dict[str, str]:
+    summary = review.get("summary")
+    if not isinstance(summary, str):
+        _fail("architect_review_summary")
+    normalized = " ".join(summary.split())
+    secret_pattern = re.compile(
+        r"(?i)\b(?:authorization|bearer|token|secret|password|api[-_]?key)\b"
+        r"(?:\s*[:=]\s*|\s+)[^\s,;]+"
+    )
+    normalized = secret_pattern.sub("[REDACTED]", normalized)
+    if len(normalized) > 512:
+        suffix = "...[TRUNCATED]"
+        normalized = normalized[: 512 - len(suffix)] + suffix
+    return {"decision": str(review["decision"]), "summary": normalized}
+
+
 def _host_contract_instruction(contract_path: Path | None) -> str:
     if contract_path is None:
         return (
@@ -747,6 +763,7 @@ class DeterministicRunner:
         self.trace: list[dict[str, Any]] = []
         self.invocations: list[dict[str, Any]] = []
         self.isolations: list[dict[str, Any]] = []
+        self.preflight: dict[str, Any] = {}
 
     @property
     def ref(self) -> str:
@@ -759,6 +776,24 @@ class DeterministicRunner:
         self.handoffs += 1
         if self.handoffs > self._budget("max_handoffs"):
             _fail("handoff_budget_exhausted")
+
+    def _preflight_workspace_identity(self) -> None:
+        expected_head = self.contract.get("head")
+        identity = tracked_workspace_identity(self.workspace)
+        actual_head = identity.get("head") if identity is not None else None
+        self.preflight = {
+            "contract_head": expected_head,
+            "workspace_head": actual_head,
+            "tracked_git": identity is not None,
+            "required": expected_head is not None,
+            "matched": expected_head is None or actual_head == expected_head,
+        }
+        if expected_head is None:
+            return
+        if identity is None:
+            _fail("workspace_identity_missing")
+        if actual_head != expected_head:
+            _fail("workspace_head_mismatch")
 
     def _invoke(self, role: str, prompt: str) -> InvocationResult:
         if self.calls >= self._budget("max_calls"):
@@ -831,6 +866,8 @@ class DeterministicRunner:
                 "changed_files": list(changed_files),
             }
         )
+        if role == "architect":
+            self.trace[-1]["review"] = _bounded_review_delta(payload["review"])
 
     def _architect_call(self, stage: str, executor_event: Mapping[str, Any] | None = None) -> dict[str, Any]:
         before_files = workspace_snapshot(self.workspace)
@@ -899,8 +936,7 @@ class DeterministicRunner:
         reported_changes = sorted(payload["changed_files"])
         if actual_changes != reported_changes:
             _fail("executor_change_report_mismatch")
-        self.isolations.append(
-            {
+        isolation = {
                 "stage": "executor_correction" if correction is not None else "executor",
                 "role": "executor",
                 "before": before_identity,
@@ -908,7 +944,9 @@ class DeterministicRunner:
                 "changed_files": actual_changes,
                 "allowed": True,
             }
-        )
+        if correction is not None:
+            isolation["architect_review"] = _bounded_review_delta(correction)
+        self.isolations.append(isolation)
         self._record("executor", payload, actual_changes)
         return payload
 
@@ -920,12 +958,14 @@ class DeterministicRunner:
             "calls": self.calls,
             "handoffs": self.handoffs,
             "correction_used": self.correction_used,
+            "preflight": self.preflight,
             "trace": self.trace,
             "invocations": self.invocations,
             "isolation": self.isolations,
         }
 
     def run(self) -> dict[str, Any]:
+        self._preflight_workspace_identity()
         initial = self._architect_call("initial")
         initial_route = route_architect(initial["state"], "initial")
         if initial_route == "stop":
@@ -987,6 +1027,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 {
                     "calls": runner.calls,
                     "handoffs": runner.handoffs,
+                    "preflight": runner.preflight,
                     "invocations": runner.invocations,
                 }
             )
