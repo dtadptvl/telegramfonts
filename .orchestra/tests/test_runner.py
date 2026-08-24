@@ -467,12 +467,13 @@ class RunnerTests(unittest.TestCase):
                     self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", command)
                     self.assertNotIn("--add-dir", command)
 
+        temporary_path = Path(tempfile.gettempdir())
         with patch("runner.os.name", "nt"):
             windows_command = transport.build_command(
                 "executor",
-                Path(tempfile.gettempdir()),
+                temporary_path,
                 ORCHESTRA_DIR / "schema" / "executor.schema.json",
-                Path(tempfile.gettempdir()) / "final.json",
+                temporary_path / "final.json",
                 "fixture",
             )
         self.assertIn('windows.sandbox="elevated"', windows_command)
