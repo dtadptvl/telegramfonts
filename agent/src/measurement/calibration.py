@@ -130,6 +130,9 @@ class CalibratedGlyphMetrics:
     bbox_height_upem: float
     confidence: float
     sample_count: int
+    browser_version: str = "chromium"
+    config_hash: str = ""
+    calibration_fingerprint: str = ""
     resolution_transforms: tuple[CalibrationTransform, ...] = ()
     observation_fingerprints: tuple[str, ...] = ()
 
@@ -146,6 +149,9 @@ class CalibratedGlyphMetrics:
             "bbox_height_upem": round(self.bbox_height_upem, 2),
             "confidence": round(self.confidence, 4),
             "sample_count": self.sample_count,
+            "browser_version": self.browser_version,
+            "config_hash": self.config_hash,
+            "calibration_fingerprint": self.calibration_fingerprint,
             "resolution_transforms": [t.to_dict() for t in self.resolution_transforms],
             "observation_fingerprints": list(self.observation_fingerprints),
         }
@@ -174,6 +180,7 @@ class ObservationCalibrator:
         records: Sequence[ObservationRecord],
         config: ObservationConfig | None = None,
         units_per_em: int = 1000,
+        min_confidence: float = 0.5,
     ) -> CalibratedGlyphMetrics:
         """Calibrate all observation records for a single glyph into unified UPEM design space metrics."""
         if not records:
@@ -185,8 +192,17 @@ class ObservationCalibrator:
         code_point = first_rec.code_point
         reference_id = first_rec.reference_id
         style_id = first_rec.style_id
+        browser_version = first_rec.browser_version
+        config_hash = first_rec.config_hash or (config.compute_hash() if config else "")
 
-        # Validate identity consistency across all records
+        if config is not None:
+            expected_cfg_hash = config.compute_hash()
+            if config_hash and config_hash != expected_cfg_hash:
+                raise ValueError(f"Config hash mismatch in observations: {config_hash} != {expected_cfg_hash}")
+            config_hash = expected_cfg_hash
+
+        # Validate identity consistency and validate cache keys
+        seen_phase_keys: set[tuple[int, float, float]] = set()
         for r in sorted_records:
             if r.code_point != code_point:
                 raise ValueError(f"Code point mismatch in calibration set: {r.code_point} != {code_point}")
@@ -194,20 +210,47 @@ class ObservationCalibrator:
                 raise ValueError(f"Reference ID mismatch: {r.reference_id} != {reference_id}")
             if r.style_id != style_id:
                 raise ValueError(f"Style ID mismatch: {r.style_id} != {style_id}")
+            if r.browser_version != browser_version:
+                raise ValueError(f"Browser version mismatch: {r.browser_version} != {browser_version}")
+            if r.config_hash and r.config_hash != config_hash:
+                raise ValueError(f"Config hash drift across observations: {r.config_hash} != {config_hash}")
             if not r.raster_sha256 or len(r.raster_sha256) != 64:
                 raise ValueError(f"Corrupt or missing raster SHA256 in observation: {r.cache_key}")
+            if r.raster_size_bytes <= 0:
+                raise ValueError(f"Invalid non-positive raster size in observation: {r.raster_size_bytes}")
+            if not r.validate_cache_key():
+                raise ValueError(f"Cache key validation failed for observation record: {r.cache_key}")
+
+            phase_key = (r.resolution, round(r.subpixel_x, 4), round(r.subpixel_y, 4))
+            if phase_key in seen_phase_keys:
+                raise ValueError(f"Duplicate adaptive phase observation at resolution {r.resolution}, phase ({r.subpixel_x}, {r.subpixel_y}) for CP {code_point}")
+            seen_phase_keys.add(phase_key)
+
             if not math.isfinite(r.metrics.advance_width_upem) or r.metrics.advance_width_upem < 0:
                 raise ValueError(f"Invalid non-finite or negative advance width: {r.metrics.advance_width_upem}")
-            if not math.isfinite(r.metrics.ascent_upem) or not math.isfinite(r.metrics.descent_upem):
-                raise ValueError("Non-finite vertical metrics in observation")
+            for val, name in [
+                (r.metrics.lsb_upem, "lsb_upem"),
+                (r.metrics.rsb_upem, "rsb_upem"),
+                (r.metrics.ascent_upem, "ascent_upem"),
+                (r.metrics.descent_upem, "descent_upem"),
+                (r.metrics.bbox_width_upem, "bbox_width_upem"),
+                (r.metrics.bbox_height_upem, "bbox_height_upem"),
+            ]:
+                if not math.isfinite(val):
+                    raise ValueError(f"Non-finite metric field {name} in observation: {val}")
 
-        # Verify required resolution coverage if config specified
-        resolutions_present = {r.resolution for r in sorted_records}
+            if r.metrics.confidence < min_confidence:
+                raise ValueError(f"Observation metric confidence ({r.metrics.confidence}) below minimum threshold ({min_confidence})")
+
+        # Verify complete adaptive phase schedule for every required resolution if config specified
         if config is not None:
-            required_res = set(config.resolutions)
-            missing = required_res - resolutions_present
-            if missing:
-                raise ValueError(f"Missing required observation resolutions for CP {code_point}: {sorted(missing)}")
+            expected_phases = config.get_phases_for_metrics(first_rec.metrics)
+            for req_res in config.resolutions:
+                for px, py in expected_phases:
+                    if (req_res, round(px, 4), round(py, 4)) not in seen_phase_keys:
+                        raise ValueError(
+                            f"Missing required adaptive subpixel phase ({px:.4f}, {py:.4f}) at resolution {req_res} for CP {code_point}"
+                        )
 
         # Build explicit calibration transforms per resolution/phase
         transforms: list[CalibrationTransform] = []
@@ -227,6 +270,7 @@ class ObservationCalibrator:
                 subpixel_x=r.subpixel_x,
                 subpixel_y=r.subpixel_y,
                 units_per_em=units_per_em,
+                browser_version=browser_version,
             )
             transforms.append(t)
             advances.append(r.metrics.advance_width_upem)
@@ -247,11 +291,15 @@ class ObservationCalibrator:
         bbox_w_consensus = float(np.median(bbox_ws)) if len(bbox_ws) > 1 else bbox_ws[0]
         bbox_h_consensus = float(np.median(bbox_hs)) if len(bbox_hs) > 1 else bbox_hs[0]
 
-        # Calculate consensus confidence (penalizing metric variance)
+        # Calculate consensus confidence
         var_adv = float(np.var(advances)) if len(advances) > 1 else 0.0
         confidence = max(0.1, min(1.0, 1.0 - math.sqrt(var_adv) / 100.0))
 
         char_str = chr(code_point) if 0 <= code_point <= 0x10FFFF else "?"
+
+        sorted_fp_tuple = tuple(sorted(fingerprints))
+        calib_fp_payload = f"{code_point}:{reference_id}:{style_id}:{browser_version}:{config_hash}:" + ":".join(sorted_fp_tuple)
+        calibration_fingerprint = hashlib.sha256(calib_fp_payload.encode("utf-8")).hexdigest()
 
         return CalibratedGlyphMetrics(
             code_point=code_point,
@@ -265,8 +313,11 @@ class ObservationCalibrator:
             bbox_height_upem=round(bbox_h_consensus, 2),
             confidence=round(confidence, 4),
             sample_count=len(sorted_records),
+            browser_version=browser_version,
+            config_hash=config_hash,
+            calibration_fingerprint=calibration_fingerprint,
             resolution_transforms=tuple(transforms),
-            observation_fingerprints=tuple(sorted(fingerprints)),
+            observation_fingerprints=sorted_fp_tuple,
         )
 
     @classmethod
@@ -275,6 +326,7 @@ class ObservationCalibrator:
         records: Sequence[ObservationRecord],
         config: ObservationConfig | None = None,
         units_per_em: int = 1000,
+        min_confidence: float = 0.5,
     ) -> dict[int, CalibratedGlyphMetrics]:
         """Group and calibrate observations across all glyphs in deterministic code-point order."""
         if not records:
@@ -288,7 +340,10 @@ class ObservationCalibrator:
         calibrated: dict[int, CalibratedGlyphMetrics] = {}
         for cp in sorted(grouped.keys()):
             calibrated[cp] = cls.calibrate_glyph_observations(
-                grouped[cp], config=config, units_per_em=units_per_em
+                grouped[cp],
+                config=config,
+                units_per_em=units_per_em,
+                min_confidence=min_confidence,
             )
 
         return calibrated

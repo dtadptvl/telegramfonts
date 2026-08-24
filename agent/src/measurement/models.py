@@ -200,6 +200,8 @@ class ObservationRecord:
     raster_size_bytes: int
     metrics: DirectMetrics
     created_at: str
+    browser_version: str = "chromium"
+    config_hash: str = ""
 
     @staticmethod
     def build_cache_key(
@@ -215,6 +217,22 @@ class ObservationRecord:
         """Compute authoritative deterministic cache key."""
         payload = f"{reference_id}:{style_id}:{code_point}:{browser_version}:{resolution}:{subpixel_x:.4f}:{subpixel_y:.4f}:{config_hash}"
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def validate_cache_key(self) -> bool:
+        """Verify that cache_key matches recomputed key from record fields."""
+        if not self.config_hash:
+            return True
+        expected = self.build_cache_key(
+            reference_id=self.reference_id,
+            style_id=self.style_id,
+            code_point=self.code_point,
+            browser_version=self.browser_version,
+            resolution=self.resolution,
+            subpixel_x=self.subpixel_x,
+            subpixel_y=self.subpixel_y,
+            config_hash=self.config_hash,
+        )
+        return self.cache_key == expected
 
 
 @dataclass

@@ -43,9 +43,12 @@ class CalibratedGlyph:
         return sum(1 for c in self.contours if c.is_hole)
 
     def validate(self) -> None:
-        """Validate glyph metrics, code point, and contour topology."""
+        """Strictly validate glyph metrics, code point, character identity, and contour topology."""
         if not (0 <= self.code_point <= 0x10FFFF):
             raise ValueError(f"Invalid Unicode code point: {self.code_point}")
+        if self.character != chr(self.code_point):
+            raise ValueError(f"Glyph character mismatch: '{self.character}' != chr({self.code_point})")
+
         for val, name in [
             (self.advance_width_upem, "advance_width_upem"),
             (self.lsb_upem, "lsb_upem"),
@@ -57,14 +60,35 @@ class CalibratedGlyph:
             if not math.isfinite(val):
                 raise ValueError(f"Non-finite value in glyph {name}: {val}")
 
+        if self.advance_width_upem < 0:
+            raise ValueError(f"Negative advance width: {self.advance_width_upem}")
+        if not (0.1 <= self.confidence <= 1.0):
+            raise ValueError(f"Invalid glyph confidence outside [0.1, 1.0]: {self.confidence}")
+
+        if len(self.bounding_box_upem) != 4:
+            raise ValueError(f"Bounding box must have 4 coordinates, got {len(self.bounding_box_upem)}")
         for b in self.bounding_box_upem:
             if not math.isfinite(b):
                 raise ValueError(f"Non-finite bounding box coordinate in glyph: {b}")
 
+        if not self.observation_fingerprints:
+            raise ValueError(f"Empty observation fingerprints for glyph {self.code_point}")
+        for fp in self.observation_fingerprints:
+            if not isinstance(fp, str) or len(fp) != 64 or not all(c in "0123456789abcdefABCDEF" for c in fp):
+                raise ValueError(f"Malformed observation fingerprint in glyph {self.code_point}: {fp}")
+
+        # Non-whitespace glyphs must have contours
+        if self.code_point != 0x20 and not self.contours:
+            raise ValueError(f"Non-whitespace glyph {self.code_point} must have at least one contour")
+
         for c_idx, c in enumerate(self.contours):
             if not c.segments:
                 raise ValueError(f"Empty contour {c_idx} in glyph {self.code_point}")
+            if not c.is_closed:
+                raise ValueError(f"Unclosed contour {c_idx} in glyph {self.code_point}")
             for s in c.segments:
+                if s.approximate_length() < 1e-4:
+                    raise ValueError(f"Degenerate segment (< 1e-4) in glyph {self.code_point}")
                 if isinstance(s, CubicSegment):
                     for pt in (s.p0, s.p1, s.p2, s.p3):
                         if not math.isfinite(pt.x) or not math.isfinite(pt.y):
@@ -111,6 +135,11 @@ class CalibratedGlyph:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> CalibratedGlyph:
+        required_keys = ["code_point", "character", "advance_width_upem", "lsb_upem", "rsb_upem", "ascent_upem", "descent_upem", "bounding_box_upem", "observation_fingerprints"]
+        for k in required_keys:
+            if k not in d:
+                raise ValueError(f"Missing required field in CalibratedGlyph: {k}")
+
         contours: list[Contour] = []
         for c_data in d.get("contours", []):
             segments: list[CubicSegment | LineSegment] = []
@@ -133,22 +162,24 @@ class CalibratedGlyph:
                 )
             )
 
-        bbox_raw = d.get("bounding_box_upem", [0.0, 0.0, 0.0, 0.0])
+        bbox_raw = d["bounding_box_upem"]
         bbox = (float(bbox_raw[0]), float(bbox_raw[1]), float(bbox_raw[2]), float(bbox_raw[3]))
 
-        return cls(
+        glyph = cls(
             code_point=int(d["code_point"]),
-            character=str(d.get("character", chr(d["code_point"]))),
+            character=str(d["character"]),
             advance_width_upem=float(d["advance_width_upem"]),
-            lsb_upem=float(d.get("lsb_upem", 0.0)),
-            rsb_upem=float(d.get("rsb_upem", 0.0)),
-            ascent_upem=float(d.get("ascent_upem", 0.0)),
-            descent_upem=float(d.get("descent_upem", 0.0)),
+            lsb_upem=float(d["lsb_upem"]),
+            rsb_upem=float(d["rsb_upem"]),
+            ascent_upem=float(d["ascent_upem"]),
+            descent_upem=float(d["descent_upem"]),
             bounding_box_upem=bbox,
             contours=contours,
             confidence=float(d.get("confidence", 1.0)),
-            observation_fingerprints=tuple(d.get("observation_fingerprints", ())),
+            observation_fingerprints=tuple(d["observation_fingerprints"]),
         )
+        glyph.validate()
+        return glyph
 
 
 @dataclass(frozen=True)
@@ -199,7 +230,7 @@ class GlobalFontMetrics:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> GlobalFontMetrics:
-        return cls(
+        metrics = cls(
             units_per_em=int(d.get("units_per_em", 1000)),
             ascent_upem=float(d.get("ascent_upem", 800.0)),
             descent_upem=float(d.get("descent_upem", -200.0)),
@@ -211,6 +242,8 @@ class GlobalFontMetrics:
             underline_position_upem=float(d.get("underline_position_upem", -100.0)),
             underline_thickness_upem=float(d.get("underline_thickness_upem", 50.0)),
         )
+        metrics.validate()
+        return metrics
 
 
 @dataclass
@@ -233,11 +266,28 @@ class CanonicalFontModel:
     fit_provenance: str = "browser_observed_multi_res"
 
     def validate(self) -> None:
-        """Validate entire font model for integrity and completeness."""
-        if not self.family_name:
+        """Strictly validate entire font model for integrity and completeness."""
+        if self.schema_version != "1.0.0":
+            raise ValueError(f"Unsupported schema_version: '{self.schema_version}' (expected '1.0.0')")
+        if not self.family_name or not isinstance(self.family_name, str):
             raise ValueError("FontModel family_name cannot be empty")
-        if not self.style_name:
+        if not self.style_name or not isinstance(self.style_name, str):
             raise ValueError("FontModel style_name cannot be empty")
+        if not self.reference_id or not isinstance(self.reference_id, str):
+            raise ValueError("FontModel reference_id cannot be empty")
+        if not self.style_id or not isinstance(self.style_id, str):
+            raise ValueError("FontModel style_id cannot be empty")
+        if not self.browser_version or not isinstance(self.browser_version, str):
+            raise ValueError("FontModel browser_version cannot be empty")
+        if not self.config_hash or len(self.config_hash) != 64:
+            raise ValueError(f"FontModel config_hash must be a 64-char SHA256 digest, got: '{self.config_hash}'")
+        if not self.calibration_fingerprint or len(self.calibration_fingerprint) != 64:
+            raise ValueError(f"FontModel calibration_fingerprint must be a 64-char SHA256 digest, got: '{self.calibration_fingerprint}'")
+        if self.fit_observations_count <= 0:
+            raise ValueError(f"FontModel fit_observations_count must be positive, got: {self.fit_observations_count}")
+        if not self.glyphs:
+            raise ValueError("FontModel glyphs dictionary cannot be empty")
+
         self.metrics.validate()
         for cp, g in self.glyphs.items():
             if g.code_point != cp:
@@ -291,8 +341,17 @@ class CanonicalFontModel:
 
     @classmethod
     def from_canonical_dict(cls, d: dict[str, Any]) -> CanonicalFontModel:
-        """Deserialize from dictionary representation."""
-        metrics = GlobalFontMetrics.from_dict(d.get("metrics", {}))
+        """Deserialize and strictly validate from dictionary representation."""
+        required_keys = [
+            "schema_version", "family_name", "style_name", "reference_id",
+            "style_id", "metrics", "glyphs", "config_hash",
+            "browser_version", "fit_observations_count", "calibration_fingerprint"
+        ]
+        for k in required_keys:
+            if k not in d or d[k] is None or d[k] == "":
+                raise ValueError(f"Missing required field in CanonicalFontModel: {k}")
+
+        metrics = GlobalFontMetrics.from_dict(d["metrics"])
         glyphs: dict[int, CalibratedGlyph] = {}
         for g_data in d.get("glyphs", []):
             g = CalibratedGlyph.from_dict(g_data)
@@ -304,19 +363,19 @@ class CanonicalFontModel:
             kerning_pairs[pair_key] = int(k_data["kerning_upem"])
 
         model = cls(
-            schema_version=str(d.get("schema_version", "1.0.0")),
-            family_name=str(d.get("family_name", "")),
-            style_name=str(d.get("style_name", "")),
-            reference_id=str(d.get("reference_id", "")),
-            style_id=str(d.get("style_id", "")),
+            schema_version=str(d["schema_version"]),
+            family_name=str(d["family_name"]),
+            style_name=str(d["style_name"]),
+            reference_id=str(d["reference_id"]),
+            style_id=str(d["style_id"]),
             metrics=metrics,
             glyphs=glyphs,
             kerning_pairs=kerning_pairs,
             feature_tags=tuple(d.get("feature_tags", ())),
-            config_hash=str(d.get("config_hash", "")),
-            browser_version=str(d.get("browser_version", "")),
-            fit_observations_count=int(d.get("fit_observations_count", 0)),
-            calibration_fingerprint=str(d.get("calibration_fingerprint", "")),
+            config_hash=str(d["config_hash"]),
+            browser_version=str(d["browser_version"]),
+            fit_observations_count=int(d["fit_observations_count"]),
+            calibration_fingerprint=str(d["calibration_fingerprint"]),
             fit_provenance=str(d.get("fit_provenance", "browser_observed_multi_res")),
         )
         model.validate()

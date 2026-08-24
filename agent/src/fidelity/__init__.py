@@ -1,6 +1,7 @@
 """Fidelity evaluation, quality gates, and canonical verification models (Stage 9A)."""
 from fidelity.evaluator import FidelityEvaluator
 from fidelity.models import (
+    ConsumerGateResult,
     CoverageGateResult,
     FidelityReport,
     FidelityThresholds,
@@ -11,6 +12,7 @@ from fidelity.models import (
 )
 
 __all__ = [
+    "ConsumerGateResult",
     "CoverageGateResult",
     "FidelityEvaluator",
     "FidelityReport",

@@ -21,6 +21,7 @@ class FidelityThresholds:
     max_kerning_delta_upem: float = 15.0
     min_confidence: float = 0.80
     allow_unclosed_contours: bool = False
+    require_consumers: bool = False
 
     def validate(self) -> None:
         if self.min_unicode_coverage_count < 1:
@@ -65,6 +66,8 @@ class GeometryRasterGateResult:
     status: str
     mean_iou: float
     min_iou: float
+    mean_chamfer_upem: float
+    max_chamfer_upem: float
     evaluated_glyphs_count: int
     details: dict[str, Any] = field(default_factory=dict)
 
@@ -88,9 +91,20 @@ class TypographyGateResult:
     details: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class ConsumerGateResult:
+    status: str
+    total_consumers_evaluated: int
+    fonttools_passed: bool = True
+    freetype_passed: bool = True
+    harfbuzz_passed: bool = True
+    chromium_passed: bool = True
+    details: dict[str, Any] = field(default_factory=dict)
+
+
 @dataclass
 class FidelityReport:
-    """Authoritative fail-closed fidelity report covering coverage, topology, geometry, metrics, and typography."""
+    """Authoritative fail-closed fidelity report covering coverage, topology, geometry, metrics, typography, and consumers."""
 
     schema_version: str = "1.0.0"
     report_id: str = ""
@@ -106,13 +120,16 @@ class FidelityReport:
         default_factory=lambda: TopologyGateResult(status="FAIL", total_contours=0, unclosed_contours_count=0, degenerate_segments_count=0, topology_pass_rate=0.0)
     )
     geometry_raster_gate: GeometryRasterGateResult = field(
-        default_factory=lambda: GeometryRasterGateResult(status="FAIL", mean_iou=0.0, min_iou=0.0, evaluated_glyphs_count=0)
+        default_factory=lambda: GeometryRasterGateResult(status="FAIL", mean_iou=0.0, min_iou=0.0, mean_chamfer_upem=0.0, max_chamfer_upem=0.0, evaluated_glyphs_count=0)
     )
     metrics_gate: MetricsGateResult = field(
         default_factory=lambda: MetricsGateResult(status="FAIL", advance_width_mean_delta_upem=0.0, advance_width_max_delta_upem=0.0, advance_width_rms_delta_upem=0.0, evaluated_metrics_count=0)
     )
     typography_gate: TypographyGateResult = field(
         default_factory=lambda: TypographyGateResult(status="FAIL", total_pairs_evaluated=0, max_kerning_delta_upem=0.0, mean_kerning_delta_upem=0.0)
+    )
+    consumer_gate: ConsumerGateResult = field(
+        default_factory=lambda: ConsumerGateResult(status="PASS", total_consumers_evaluated=0)
     )
     failure_reasons: list[str] = field(default_factory=list)
     evaluation_timestamp_utc: str = ""
@@ -138,6 +155,7 @@ class FidelityReport:
             "geometry_raster_gate": asdict(self.geometry_raster_gate),
             "metrics_gate": asdict(self.metrics_gate),
             "typography_gate": asdict(self.typography_gate),
+            "consumer_gate": asdict(self.consumer_gate),
             "failure_reasons": sorted(self.failure_reasons),
             "evaluation_timestamp_utc": self.evaluation_timestamp_utc,
         }
