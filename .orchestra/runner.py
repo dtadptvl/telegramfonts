@@ -585,6 +585,7 @@ class CodexTransport:
             "exec",
             "--ephemeral",
             "--ignore-user-config",
+            "--ignore-rules",
             "--strict-config",
             "--json",
             "--color",

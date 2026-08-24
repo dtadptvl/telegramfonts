@@ -434,25 +434,31 @@ class RunnerTests(unittest.TestCase):
 
         transport = CodexTransport(command="codex.cmd")
         with tempfile.TemporaryDirectory() as directory:
-            command = transport.build_command(
-                "architect",
-                Path(directory),
-                ORCHESTRA_DIR / "schema" / "architect.schema.json",
-                Path(directory) / "final.json",
-                "fixture",
-            )
-        self.assertIn("gpt-5.6-sol", command)
-        self.assertIn("read-only", command)
-        self.assertIn('model_reasoning_effort="high"', command)
-        self.assertIn("--strict-config", command)
-        self.assertIn("--ignore-user-config", command)
-        approval_index = command.index("--ask-for-approval")
-        self.assertLess(approval_index, command.index("exec"))
-        self.assertEqual(command[approval_index + 1], "never")
-        self.assertIn("--json", command)
-        self.assertNotIn("--output-last-message", command)
-        self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", command)
-        self.assertNotIn("--add-dir", command)
+            for role, model, sandbox, effort in (
+                ("architect", "gpt-5.6-sol", "read-only", "high"),
+                ("executor", "gpt-5.6-luna", "workspace-write", "max"),
+            ):
+                with self.subTest(role=role):
+                    command = transport.build_command(
+                        role,
+                        Path(directory),
+                        ORCHESTRA_DIR / "schema" / f"{role}.schema.json",
+                        Path(directory) / "final.json",
+                        "fixture",
+                    )
+                    self.assertIn(model, command)
+                    self.assertIn(sandbox, command)
+                    self.assertIn(f'model_reasoning_effort="{effort}"', command)
+                    self.assertIn("--strict-config", command)
+                    self.assertIn("--ignore-user-config", command)
+                    self.assertIn("--ignore-rules", command)
+                    approval_index = command.index("--ask-for-approval")
+                    self.assertLess(approval_index, command.index("exec"))
+                    self.assertEqual(command[approval_index + 1], "never")
+                    self.assertIn("--json", command)
+                    self.assertNotIn("--output-last-message", command)
+                    self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", command)
+                    self.assertNotIn("--add-dir", command)
 
         self.assertEqual(
             classify_process_failure("error: unexpected argument '--ask-for-approval'", ""),
