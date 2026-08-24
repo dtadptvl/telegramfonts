@@ -26,7 +26,9 @@ Hybrid cloud architecture for automated Vietnamese font processing and fulfillme
 .
 ├── .github/
 │   └── workflows/
-│       └── ci.yml               # Continuous Integration (install, typecheck, preflight, test)
+│       ├── ci.yml               # Continuous Integration (install, typecheck, preflight, test)
+│       └── executor-issue-label.yml # Host-owned orchestra:execute handoff
+├── orchestra.cmd                 # Safe Windows launcher fallback
 ├── agent/                       # Python A23 private compute worker
 │   ├── src/                     # Runner, Queue client, Worker client, compute pipeline
 │   │   ├── compute/             # FontBuilder, Source acquisition, Validator, Packager

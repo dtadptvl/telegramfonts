@@ -1,4 +1,5 @@
 {
+  "classification": "ARCHIVE",
   "ref": "issue:55",
   "head": "3236bae6671728e94929c5fba33fb6a8df44f649",
   "goal": "In the isolated smoke workspace, create result.txt containing exactly orchestra-smoke.",

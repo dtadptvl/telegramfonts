@@ -1,0 +1,80 @@
+{
+  "protocol": "orchestra/event-fixture/v1",
+  "repository": "dtadptvl/telegramfonts",
+  "label": "orchestra:execute",
+  "events": [
+    {
+      "protocol": "orchestra/event/v1",
+      "source": "local",
+      "event_id": "fixture-initial",
+      "repository": "dtadptvl/telegramfonts",
+      "issue_number": 57,
+      "action": "labeled",
+      "label": "orchestra:execute"
+    },
+    {
+      "protocol": "orchestra/event/v1",
+      "source": "local",
+      "event_id": "fixture-correction",
+      "repository": "dtadptvl/telegramfonts",
+      "issue_number": 57,
+      "action": "labeled",
+      "label": "orchestra:execute",
+      "correction_of": "fixture-initial",
+      "correction": {
+        "summary": "Apply one bounded correction and verify the affected acceptance criterion."
+      }
+    },
+    {
+      "protocol": "orchestra/event/v1",
+      "source": "local",
+      "event_id": "fixture-second-correction",
+      "repository": "dtadptvl/telegramfonts",
+      "issue_number": 57,
+      "action": "labeled",
+      "label": "orchestra:execute",
+      "correction_of": "fixture-correction",
+      "correction": {
+        "summary": "This event must stop because the correction budget is exhausted."
+      }
+    }
+  ],
+  "expected": {
+    "invocations": 2,
+    "max_corrections": 1,
+    "third_event_terminal": "STOP",
+    "third_event_reason": "correction_budget_exhausted"
+  },
+  "correction_cycle": [
+    {
+      "state": "READY",
+      "label": "orchestra:execute",
+      "action": "execute"
+    },
+    {
+      "state": "EXECUTOR",
+      "executor_status": "UPDATED",
+      "label_transition": "orchestra:execute -> orchestra:review"
+    },
+    {
+      "state": "ARCHITECT_REVIEW",
+      "label": "orchestra:review",
+      "action": "architect_rereview"
+    },
+    {
+      "state": "FIX_REQUIRED",
+      "label_transition": "orchestra:review -> orchestra:execute",
+      "action": "architect_requests_one_correction"
+    },
+    {
+      "state": "EXECUTOR",
+      "executor_status": "NO_CHANGE",
+      "label_transition": "orchestra:execute -> orchestra:review"
+    },
+    {
+      "state": "ARCHITECT_REVIEW",
+      "label": "orchestra:review",
+      "action": "architect_rereview"
+    }
+  ]
+}
