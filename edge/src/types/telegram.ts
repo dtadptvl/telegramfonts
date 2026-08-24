@@ -55,6 +55,14 @@ export interface SendMessageParams {
   reply_markup?: InlineKeyboardMarkup;
 }
 
+export interface SendPhotoParams {
+  chat_id: number | string;
+  photo: string | Blob | Uint8Array;
+  caption?: string;
+  parse_mode?: 'HTML';
+  reply_markup?: InlineKeyboardMarkup;
+}
+
 export interface EditMessageTextParams {
   chat_id?: number | string;
   message_id?: number;
@@ -62,6 +70,29 @@ export interface EditMessageTextParams {
   text: string;
   parse_mode?: 'HTML';
   reply_markup?: InlineKeyboardMarkup;
+}
+
+export interface EditMessageReplyMarkupParams {
+  chat_id?: number | string;
+  message_id?: number;
+  inline_message_id?: string;
+  reply_markup: InlineKeyboardMarkup;
+}
+
+export interface BotCommand {
+  command: string;
+  description: string;
+}
+
+export interface SetMyCommandsParams {
+  commands: BotCommand[];
+}
+
+export interface SetChatMenuButtonParams {
+  chat_id?: number | string;
+  menu_button: {
+    type: 'commands';
+  };
 }
 
 export interface AnswerCallbackQueryParams {

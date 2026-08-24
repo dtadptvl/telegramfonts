@@ -1,6 +1,10 @@
 import type { Env } from '../env';
 import { PaymentService } from '../services/payment-service';
 import { OrderService } from '../services/order-service';
+import { retireInteractiveMessage } from '../services/telegram-client';
+import { createRetentionAwareTelegramClient } from '../services/telegram-message-retention';
+import { SessionService } from '../services/session-service';
+import { renderOrderCreatedMessage } from './telegram-webhook';
 import { emitStructuredLog } from '../utils/logger';
 
 export interface SePayWebhookPayload {
@@ -73,6 +77,39 @@ export async function verifySePaySignature(
   }
 
   return { isValid: true };
+}
+
+async function notifyPaidOrder(
+  env: Env,
+  orderService: OrderService,
+  orderId: string,
+  userId: string
+): Promise<void> {
+  if (!env.TELEGRAM_BOT_TOKEN) return;
+
+  const sessionService = new SessionService(env.DB);
+  const session = await sessionService.getSessionByUserId(userId);
+  if (!session) return;
+
+  const paidOrder = await orderService.getOrderById(orderId);
+  if (!paidOrder || paidOrder.status !== 'PAID') return;
+
+  const tg = createRetentionAwareTelegramClient(env.TELEGRAM_BOT_TOKEN, env.DB);
+  const isActiveOrder = session.active_order_id === orderId;
+  if (isActiveOrder) {
+    await retireInteractiveMessage(tg, session.chat_id, session.last_message_id);
+  }
+
+  const { text, replyMarkup } = renderOrderCreatedMessage(paidOrder, env);
+  const sent = await tg.sendMessage({
+    chat_id: session.chat_id,
+    text,
+    reply_markup: replyMarkup,
+  }, { retention: 'persistent' });
+
+  if (sent.message_id && isActiveOrder) {
+    await sessionService.setLastMessageId(userId, sent.message_id);
+  }
 }
 
 export async function handleSePayWebhook(
@@ -299,6 +336,12 @@ function resolvePaymentCode(payload: SePayWebhookPayload): { code: string | null
     });
 
     if (result.status === 'PROCESSED') {
+      try {
+        await notifyPaidOrder(env, orderService, order.id, order.user_id);
+      } catch {
+        // Telegram notification failure must not affect the committed payment.
+      }
+
       emitStructuredLog({
         event: 'payment_accepted',
         order_id: order.id,

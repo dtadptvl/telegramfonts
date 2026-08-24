@@ -1,5 +1,6 @@
 import type { Env } from '../env';
-import { TelegramClient } from './telegram-client';
+import { retireInteractiveMessage } from './telegram-client';
+import { createRetentionAwareTelegramClient } from './telegram-message-retention';
 import { escapeHtml } from '../utils/html';
 import { emitStructuredLog } from '../utils/logger';
 import type { ArtifactPartMeta } from './job-service';
@@ -179,7 +180,7 @@ export class OutboxService {
         continue;
       }
 
-      // Route 2: DELIVERY_READY -> Telegram Notification with signed download URL (BLOCK 8)
+      // Route 2: DELIVERY_READY -> direct Telegram document delivery
       if (event.event_type === 'DELIVERY_READY') {
         if (
           !parsed ||
@@ -239,14 +240,14 @@ export class OutboxService {
 
         // Find user chat ID
         const userSession = await this.db
-          .prepare('SELECT chat_id FROM telegram_sessions WHERE user_id = ? ORDER BY updated_at DESC LIMIT 1')
+          .prepare('SELECT chat_id, last_message_id FROM telegram_sessions WHERE user_id = ? ORDER BY updated_at DESC LIMIT 1')
           .bind(order.user_id)
-          .first<{ chat_id: number }>();
+          .first<{ chat_id: number; last_message_id: number | null }>();
 
         const userRecord = userSession || (await this.db
           .prepare('SELECT id as chat_id FROM telegram_users WHERE id = ?')
           .bind(order.user_id)
-          .first<{ chat_id: number }>());
+          .first<{ chat_id: number; last_message_id: null }>());
 
         if (!userRecord || !userRecord.chat_id) {
           failureCount++;
@@ -396,7 +397,11 @@ export class OutboxService {
           }
 
           // 3. Progressive delivery with per-part confirmed progress tracking: load and send at most one part body at a time
-          let payloadObj: { order_id: string; confirmed_parts?: number[] } = {
+          let payloadObj: {
+            order_id: string;
+            confirmed_parts?: number[];
+            delivery_message_sent?: boolean;
+          } = {
             order_id: order.id,
             confirmed_parts: [],
           };
@@ -411,7 +416,17 @@ export class OutboxService {
             ? [...payloadObj.confirmed_parts]
             : [];
 
-          const tg = new TelegramClient(botToken);
+          const tg = createRetentionAwareTelegramClient(botToken, this.db);
+
+          if (userSession?.last_message_id !== null && userSession?.last_message_id !== undefined) {
+            await retireInteractiveMessage(tg, userRecord.chat_id, userSession.last_message_id);
+            await this.db
+              .prepare(
+                'UPDATE telegram_sessions SET last_message_id = NULL, updated_at = ? WHERE user_id = ? AND last_message_id = ?'
+              )
+              .bind(Date.now(), order.user_id, userSession.last_message_id)
+              .run();
+          }
 
           for (const part of parts) {
             if (confirmedParts.includes(part.part_index)) {
@@ -427,7 +442,7 @@ export class OutboxService {
 
             const caption =
               parts.length > 1
-                ? `📦 <b>${escapeHtml(familyName)}</b> (Part ${part.part_index}/${part.total_parts})`
+                ? `📦 <b>${escapeHtml(familyName)}</b> (Phần ${part.part_index}/${part.total_parts})`
                 : `📦 <b>${escapeHtml(familyName)}</b>`;
 
             await tg.sendDocument({
@@ -442,11 +457,47 @@ export class OutboxService {
             // Persist per-part progress so that partial failure won't re-send confirmed parts on retry
             await this.db
               .prepare('UPDATE outbox_events SET payload = ? WHERE id = ?')
-              .bind(JSON.stringify({ order_id: order.id, confirmed_parts: confirmedParts }), event.id)
+              .bind(
+                JSON.stringify({
+                  order_id: order.id,
+                  confirmed_parts: confirmedParts,
+                  delivery_message_sent: Boolean(payloadObj.delivery_message_sent),
+                }),
+                event.id
+              )
               .run();
           }
 
-          // 4. Mark outbox event SENT only after every part is confirmed
+          if (!payloadObj.delivery_message_sent) {
+            const deliveryMessage =
+              parts.length > 1
+                ? `✅ <b>Đã hoàn tất!</b>\n\n${escapeHtml(
+                    familyName
+                  )} đã được gửi trực tiếp vào cuộc trò chuyện này dưới dạng ${parts.length} tệp ZIP. Mỗi phần có thể giải nén độc lập.`
+                : `✅ <b>Đã hoàn tất!</b>\n\n${escapeHtml(
+                    familyName
+                  )} đã được gửi trực tiếp vào cuộc trò chuyện này dưới dạng tệp ZIP.`;
+
+            await tg.sendMessage({
+              chat_id: userRecord.chat_id,
+              text: deliveryMessage,
+            });
+
+            payloadObj.delivery_message_sent = true;
+            await this.db
+              .prepare('UPDATE outbox_events SET payload = ? WHERE id = ?')
+              .bind(
+                JSON.stringify({
+                  order_id: order.id,
+                  confirmed_parts: confirmedParts,
+                  delivery_message_sent: true,
+                }),
+                event.id
+              )
+              .run();
+          }
+
+          // 4. Mark outbox event SENT only after every part and the final notice are confirmed
           const markSentResult = await this.db
             .prepare(
               `UPDATE outbox_events

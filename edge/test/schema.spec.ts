@@ -29,6 +29,9 @@ describe('D1 Database Schema & Constraints', () => {
       expect(
         migrations.results.some((m) => m.name === '0006_artifact_parts.sql')
       ).toBe(true);
+      expect(
+        migrations.results.some((m) => m.name === '0007_telegram_message_retention.sql')
+      ).toBe(true);
     });
   });
 

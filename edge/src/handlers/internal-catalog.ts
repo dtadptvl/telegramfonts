@@ -1,7 +1,8 @@
 import type { Env } from '../env';
 import { CatalogService } from '../services/catalog-service';
 import { SessionService } from '../services/session-service';
-import { TelegramClient } from '../services/telegram-client';
+import { retireInteractiveMessage } from '../services/telegram-client';
+import { createRetentionAwareTelegramClient } from '../services/telegram-message-retention';
 import { renderStyleSelection } from './telegram-webhook';
 import { verifyInternalAuth } from './internal-jobs';
 import { emitStructuredLog } from '../utils/logger';
@@ -195,7 +196,7 @@ export async function handleInternalCatalog(
 
     // 4. Advance every still-relevant waiting session whose request is satisfied by this catalog
     if (env.TELEGRAM_BOT_TOKEN) {
-      const tg = new TelegramClient(env.TELEGRAM_BOT_TOKEN);
+      const tg = createRetentionAwareTelegramClient(env.TELEGRAM_BOT_TOKEN, env.DB);
 
       for (const targetUserId of targetUserIds) {
         const userSession = await env.DB
@@ -234,6 +235,9 @@ export async function handleInternalCatalog(
           // User started a newer request for a different font; do not override with stale resolution!
           continue;
         }
+
+        await retireInteractiveMessage(tg, userSession.chat_id, userSession.last_message_id);
+        await sessionService.setLastMessageId(userSession.user_id, null);
 
         // Update session to SELECTING_STYLES
         await sessionService.updateSessionCatalog(
@@ -339,7 +343,7 @@ export async function handleInternalCatalog(
 
     // Notify waiting Telegram user and unblock session if this is still the active request
     if (env.TELEGRAM_BOT_TOKEN) {
-      const tg = new TelegramClient(env.TELEGRAM_BOT_TOKEN);
+      const tg = createRetentionAwareTelegramClient(env.TELEGRAM_BOT_TOKEN, env.DB);
 
       const userSession = await env.DB
         .prepare(
@@ -369,6 +373,9 @@ export async function handleInternalCatalog(
           .first<{ canonical_key: string }>();
 
         if (!latestReqForUser || latestReqForUser.canonical_key === reqRow.canonical_key) {
+          await retireInteractiveMessage(tg, userSession.chat_id, userSession.last_message_id);
+          await sessionService.setLastMessageId(userSession.user_id, null);
+
           // Reset session back to IDLE
           await sessionService.setStatusUnconditional(userSession.user_id, 'IDLE');
 

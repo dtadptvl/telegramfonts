@@ -281,7 +281,7 @@ describe('Phase 4: Transactional Outbox Dispatcher', () => {
   });
 
   describe('Phase 6: DELIVERY_READY Outbox Dispatcher', () => {
-    it('dispatches DELIVERY_READY to Telegram with signed download URL, never to fulfillment Queue', async () => {
+    it('dispatches DELIVERY_READY as a Telegram document, never to fulfillment Queue', async () => {
       const queueSentMessages: unknown[] = [];
       const mockQueue = {
         send: async (msg: unknown) => {
@@ -379,11 +379,12 @@ describe('Phase 4: Transactional Outbox Dispatcher', () => {
         // Queue was NOT called for DELIVERY_READY
         expect(queueSentMessages.length).toBe(0);
 
-        // Telegram was called with sendDocument
-        expect(fetchCalls.length).toBe(1);
-        expect(fetchCalls[0].url).toContain('/sendDocument');
-        expect(fetchCalls[0].formData.get('chat_id')).toBe('987654321');
-        expect(fetchCalls[0].formData.get('document')).toBeDefined();
+        // Telegram received the document and the Vietnamese completion notice.
+        const documentCalls = fetchCalls.filter((call) => call.url.includes('/sendDocument'));
+        expect(documentCalls.length).toBe(1);
+        expect(documentCalls[0].formData.get('chat_id')).toBe('987654321');
+        expect(documentCalls[0].formData.get('document')).toBeDefined();
+        expect(fetchCalls.some((call) => call.url.includes('/sendMessage'))).toBe(true);
 
         // Outbox event marked SENT
         const row = await env.DB.prepare('SELECT status, dispatched_at FROM outbox_events WHERE id = ?')
