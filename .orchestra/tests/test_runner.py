@@ -198,6 +198,8 @@ class RunnerTests(unittest.TestCase):
         expected_contract = json.dumps(original, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
         self.assertEqual(len(executor_prompts), 2)
         self.assertTrue(all(expected_contract in prompt for prompt in executor_prompts))
+        self.assertTrue(all("do not inspect unrelated files" in prompt for prompt in executor_prompts))
+        self.assertTrue(all("immediately return exactly one JSON object" in prompt for prompt in executor_prompts))
         self.assertNotIn(expected_contract, json.dumps(result, ensure_ascii=True, sort_keys=True))
         self.assertIn("ARCHITECT REVIEW DELTA JSON", executor_prompts[1])
         self.assertIn('"decision":"FIX_REQUIRED"', executor_prompts[1])

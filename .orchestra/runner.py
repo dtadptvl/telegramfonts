@@ -767,7 +767,9 @@ def executor_prompt(contract: Mapping[str, Any], correction: Mapping[str, Any] |
         "allowed paths. Do not edit the contract, policies, schemas, runner, or .git; do not "
         "commit, push, merge, deploy, call production, or create credentials. If the exact "
         "contract cannot be completed, return BLOCKED with truthful evidence instead of claiming "
-        "success. Return exactly one JSON object matching the Executor schema: no Markdown, "
+        "success. This is a tiny bounded action: do not inspect unrelated files or run repo-wide "
+        "tests. Use the minimum commands needed, verify only the stated acceptance criteria, then "
+        "immediately return exactly one JSON object matching the Executor schema: no Markdown, "
         "prose, footer, or extra keys.\n\nCONTRACT JSON:\n"
         + _compact(contract)
     )
