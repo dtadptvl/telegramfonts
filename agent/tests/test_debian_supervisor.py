@@ -243,7 +243,7 @@ def test_no_legacy_termux_worker_fallback_remains() -> None:
 
 
 def test_supervisor_shell_syntax() -> None:
-    bash = shutil.which("bash")
+    bash = _bash_command()
     if bash is None:
         pytest.skip("bash is not available on the validation host")
 
