@@ -23,6 +23,7 @@ from runner import (  # noqa: E402
     ROLE_CONFIG,
     CodexTransport,
     TransportError,
+    classify_process_failure,
     route_architect,
     validate_architect,
     validate_executor,
@@ -231,8 +232,19 @@ class RunnerTests(unittest.TestCase):
         self.assertIn('model_reasoning_effort="high"', command)
         self.assertIn("--strict-config", command)
         self.assertIn("--ignore-user-config", command)
+        approval_index = command.index("--ask-for-approval")
+        self.assertLess(approval_index, command.index("exec"))
+        self.assertEqual(command[approval_index + 1], "never")
+        self.assertIn("--json", command)
+        self.assertNotIn("--output-last-message", command)
         self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", command)
         self.assertNotIn("--add-dir", command)
+
+        self.assertEqual(
+            classify_process_failure("error: unexpected argument '--ask-for-approval'", ""),
+            "cli_parse_or_config_failure",
+        )
+        self.assertEqual(classify_process_failure("service unavailable", ""), "model_or_runtime_failure")
 
     def test_subprocess_timeout_is_bounded_and_not_retried(self):
         transport = CodexTransport(command="codex.cmd")

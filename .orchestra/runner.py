@@ -503,6 +503,26 @@ def _event_metadata(stdout: str) -> dict[str, Any]:
     return metadata
 
 
+def classify_process_failure(stderr: str, stdout: str) -> str:
+    """Classify a nonzero CLI result without retaining or exposing raw output."""
+
+    combined = f"{stderr}\n{stdout}".lower()
+    parse_markers = (
+        "unexpected argument",
+        "unexpected option",
+        "unknown argument",
+        "unknown option",
+        "unrecognized option",
+        "invalid value",
+        "failed to parse",
+        "could not parse",
+        "config error",
+    )
+    if any(marker in combined for marker in parse_markers):
+        return "cli_parse_or_config_failure"
+    return "model_or_runtime_failure"
+
+
 class CodexTransport:
     """One bounded, non-interactive Codex subprocess per invocation."""
 
@@ -530,6 +550,8 @@ class CodexTransport:
         config = ROLE_CONFIG[role]
         command = [
             self.command,
+            "--ask-for-approval",
+            "never",
             "exec",
             "--ephemeral",
             "--ignore-user-config",
@@ -539,16 +561,12 @@ class CodexTransport:
             "never",
             "--output-schema",
             str(schema_path),
-            "--output-last-message",
-            str(output_path),
             "--model",
             config.model,
             "--config",
             f"model_reasoning_effort={json.dumps(config.effort)}",
             "--sandbox",
             config.sandbox,
-            "--ask-for-approval",
-            "never",
             "--cd",
             str(workspace),
         ]
@@ -586,7 +604,7 @@ class CodexTransport:
             except OSError:
                 raise TransportError("subprocess_start_failed") from None
             if result.returncode != 0:
-                raise TransportError("subprocess_nonzero_exit")
+                raise TransportError(classify_process_failure(result.stderr, result.stdout))
             payload, event_types, output_source = extract_structured_output(output_path, result.stdout)
             schema = _read_schema(schema_path)
             try:
@@ -691,7 +709,23 @@ class DeterministicRunner:
         self.calls += 1
         try:
             result = self.transport.invoke(role, self.workspace, prompt, self._budget("timeout_seconds"))
-        except TransportError:
+        except TransportError as error:
+            config = ROLE_CONFIG[role]
+            self.invocations.append(
+                {
+                    "call": self.calls,
+                    "role": role,
+                    "model": config.model,
+                    "reasoning_effort": config.effort,
+                    "sandbox": config.sandbox,
+                    "approval_policy": "never",
+                    "strict_config": True,
+                    "ignore_user_config": True,
+                    "exit_code": "nonzero_or_bounded_failure",
+                    "schema_valid": False,
+                    "transport_error": error.code,
+                }
+            )
             raise
         except ProtocolError:
             raise
@@ -873,16 +907,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--workspace", required=True, type=Path)
     parser.add_argument("--codex", default=None, help="Optional codex executable path")
     args = parser.parse_args(argv)
+    runner: DeterministicRunner | None = None
     try:
         contract = _load_contract(args.contract.resolve())
         transport = CodexTransport(args.codex)
-        result = DeterministicRunner(contract, args.workspace, transport).run()
+        runner = DeterministicRunner(contract, args.workspace, transport)
+        result = runner.run()
     except ProtocolError as error:
         result = {
             "protocol": "orchestra/v1",
             "terminal": "STOP",
             "reason": error.code,
         }
+        if runner is not None:
+            result.update(
+                {
+                    "calls": runner.calls,
+                    "handoffs": runner.handoffs,
+                    "invocations": runner.invocations,
+                }
+            )
         print(json.dumps(result, ensure_ascii=True, sort_keys=True))
         return 2
     print(json.dumps(result, ensure_ascii=True, sort_keys=True))
