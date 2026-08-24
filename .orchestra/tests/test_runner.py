@@ -27,6 +27,7 @@ from runner import (  # noqa: E402
     classify_process_failure,
     identity_constrained_schema,
     route_architect,
+    route_executor_review,
     tracked_workspace_identity,
     validate_json_schema,
     validate_architect,
@@ -117,7 +118,7 @@ class FakeTransport:
 class RunnerTests(unittest.TestCase):
     def test_schemas_and_semantic_required_fields(self):
         validate_architect(architect_event("READY"), BASE_CONTRACT["ref"], HEAD)
-        validate_executor(executor_event("DONE"), BASE_CONTRACT["ref"], HEAD, BASE_CONTRACT)
+        validate_executor(executor_event("DONE", ["result.txt"]), BASE_CONTRACT["ref"], HEAD, BASE_CONTRACT)
 
         bad_architect = architect_event("READY")
         bad_architect["unexpected"] = True
@@ -134,6 +135,10 @@ class RunnerTests(unittest.TestCase):
         bad_executor = executor_event("DONE", blocker="must be null")
         with self.assertRaises(ProtocolError):
             validate_executor(bad_executor, BASE_CONTRACT["ref"], HEAD, BASE_CONTRACT)
+
+        for status in ("DONE", "UPDATED"):
+            with self.assertRaises(ProtocolError):
+                validate_executor(executor_event(status), BASE_CONTRACT["ref"], HEAD, BASE_CONTRACT)
 
         bad_gate = executor_event("READY_HUMAN_AUTH", blocker=None)
         with self.assertRaises(ProtocolError):
@@ -302,6 +307,39 @@ class RunnerTests(unittest.TestCase):
             result = DeterministicRunner(RUNNER_CONTRACT, Path(directory), transport).run()
         self.assertEqual(result["terminal"], "HUMAN_AUTH")
         self.assertEqual(transport.calls, ["architect", "executor", "architect"])
+
+    def test_executor_review_matrix_rejects_incompatible_success_states(self):
+        for status in ("BLOCKED", "READY_HUMAN_AUTH", "SECURITY_BLOCKED"):
+            with self.assertRaises(ProtocolError):
+                route_executor_review(status, "MERGE_READY", correction_available=True)
+        with self.assertRaises(ProtocolError):
+            route_executor_review("READY_HUMAN_AUTH", "BLOCKED", correction_available=True)
+        with self.assertRaises(ProtocolError):
+            route_executor_review("SECURITY_BLOCKED", "HUMAN_AUTH", correction_available=True)
+
+        self.assertEqual(route_executor_review("BLOCKED", "FIX_REQUIRED", correction_available=True), "executor")
+        self.assertEqual(route_executor_review("BLOCKED", "BLOCKED", correction_available=True), "stop")
+        for status in ("DONE", "UPDATED", "NO_CHANGE"):
+            self.assertEqual(route_executor_review(status, "MERGE_READY", correction_available=True), "stop")
+
+    def test_incompatible_review_preserves_bounded_executor_delta_in_stop_report(self):
+        blocked = executor_event("BLOCKED", blocker="no safe change", contract=RUNNER_CONTRACT)
+        transport = FakeTransport(
+            [architect_event("READY", RUNNER_CONTRACT), blocked, architect_event("MERGE_READY", RUNNER_CONTRACT)]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            runner = DeterministicRunner(RUNNER_CONTRACT, Path(directory), transport)
+            with self.assertRaises(ProtocolError) as context:
+                runner.run()
+            report = runner.report("STOP", context.exception.code)
+
+        self.assertEqual(context.exception.code, "executor_review_incompatible")
+        self.assertEqual(report["terminal"], "STOP")
+        self.assertEqual(report["trace"][1]["executor_delta"]["status"], "BLOCKED")
+        self.assertEqual(report["trace"][1]["executor_delta"]["summary"], "fixture BLOCKED")
+        self.assertEqual(report["trace"][1]["executor_delta"]["blocker"], "no safe change")
+        self.assertEqual(report["trace"][1]["executor_delta"]["changed_files"], [])
+        self.assertEqual(report["trace"][2]["review"]["decision"], "MERGE_READY")
 
     def test_stale_reference_and_scope_escape_fail_closed(self):
         stale = architect_event("READY")

@@ -346,6 +346,8 @@ def validate_executor(
             _fail("missing_executor_blocker")
     elif payload["blocker"] is not None:
         _fail("unexpected_executor_blocker")
+    if status in {"DONE", "UPDATED"} and not changed_files:
+        _fail("success_without_changed_file")
     if status == "NO_CHANGE" and changed_files:
         _fail("no_change_with_files")
     if contract is not None:
@@ -380,6 +382,19 @@ def route_executor(status: str) -> str:
     if status not in EXECUTOR_STATUSES:
         _fail("invalid_executor_route")
     return "architect_review"
+
+
+def route_executor_review(executor_status: str, architect_state: str, correction_available: bool) -> str:
+    """Apply the compatibility gate between an Executor result and its review."""
+
+    route_executor(executor_status)
+    if executor_status == "BLOCKED" and architect_state not in {"BLOCKED", "FIX_REQUIRED"}:
+        _fail("executor_review_incompatible")
+    if executor_status == "READY_HUMAN_AUTH" and architect_state != "HUMAN_AUTH":
+        _fail("executor_human_review_incompatible")
+    if executor_status == "SECURITY_BLOCKED" and architect_state != "SECURITY_BLOCKED":
+        _fail("executor_security_review_incompatible")
+    return route_architect(architect_state, "review", correction_available)
 
 
 def _sha256_bytes(value: bytes) -> str:
@@ -663,11 +678,10 @@ def _compact(value: Any) -> str:
     return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
 
 
-def _bounded_review_delta(review: Mapping[str, Any]) -> dict[str, str]:
-    summary = review.get("summary")
-    if not isinstance(summary, str):
-        _fail("architect_review_summary")
-    normalized = " ".join(summary.split())
+def _bounded_text(value: Any, code: str) -> str:
+    if not isinstance(value, str):
+        _fail(code)
+    normalized = " ".join(value.split())
     secret_pattern = re.compile(
         r"(?i)\b(?:authorization|bearer|token|secret|password|api[-_]?key)\b"
         r"(?:\s*[:=]\s*|\s+)[^\s,;]+"
@@ -676,7 +690,24 @@ def _bounded_review_delta(review: Mapping[str, Any]) -> dict[str, str]:
     if len(normalized) > 512:
         suffix = "...[TRUNCATED]"
         normalized = normalized[: 512 - len(suffix)] + suffix
-    return {"decision": str(review["decision"]), "summary": normalized}
+    return normalized
+
+
+def _bounded_review_delta(review: Mapping[str, Any]) -> dict[str, str]:
+    return {
+        "decision": str(review["decision"]),
+        "summary": _bounded_text(review.get("summary"), "architect_review_summary"),
+    }
+
+
+def _bounded_executor_delta(payload: Mapping[str, Any]) -> dict[str, Any]:
+    blocker = payload.get("blocker")
+    return {
+        "status": str(payload["status"]),
+        "summary": _bounded_text(payload.get("summary"), "executor_summary"),
+        "blocker": None if blocker is None else _bounded_text(blocker, "executor_blocker"),
+        "changed_files": list(payload["changed_files"]),
+    }
 
 
 def _host_contract_instruction(contract_path: Path | None) -> str:
@@ -868,6 +899,8 @@ class DeterministicRunner:
         )
         if role == "architect":
             self.trace[-1]["review"] = _bounded_review_delta(payload["review"])
+        else:
+            self.trace[-1]["executor_delta"] = _bounded_executor_delta(payload)
 
     def _architect_call(self, stage: str, executor_event: Mapping[str, Any] | None = None) -> dict[str, Any]:
         before_files = workspace_snapshot(self.workspace)
@@ -943,6 +976,7 @@ class DeterministicRunner:
                 "after": after_identity,
                 "changed_files": actual_changes,
                 "allowed": True,
+                "executor_delta": _bounded_executor_delta(payload),
             }
         if correction is not None:
             isolation["architect_review"] = _bounded_review_delta(correction)
@@ -976,7 +1010,7 @@ class DeterministicRunner:
         route_executor(executor_event["status"])
         self._handoff()
         review = self._architect_call("review", executor_event)
-        review_route = route_architect(review["state"], "review", correction_available=True)
+        review_route = route_executor_review(executor_event["status"], review["state"], correction_available=True)
         if review_route == "executor":
             self.correction_used = True
             self._handoff()
@@ -986,7 +1020,7 @@ class DeterministicRunner:
             review = self._architect_call("rereview", corrected_event)
             if review["state"] == "FIX_REQUIRED":
                 return self.report("STOP", "correction_budget_exhausted")
-            route_architect(review["state"], "review", correction_available=False)
+            route_executor_review(corrected_event["status"], review["state"], correction_available=False)
         return self.report(review["state"], "architect_review_terminal")
 
 
@@ -1017,20 +1051,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         runner = DeterministicRunner(contract, args.workspace, transport, contract_path=args.contract.resolve())
         result = runner.run()
     except ProtocolError as error:
-        result = {
-            "protocol": "orchestra/v1",
-            "terminal": "STOP",
-            "reason": error.code,
-        }
         if runner is not None:
-            result.update(
-                {
-                    "calls": runner.calls,
-                    "handoffs": runner.handoffs,
-                    "preflight": runner.preflight,
-                    "invocations": runner.invocations,
-                }
-            )
+            result = runner.report("STOP", error.code)
+        else:
+            result = {
+                "protocol": "orchestra/v1",
+                "terminal": "STOP",
+                "reason": error.code,
+            }
         print(json.dumps(result, ensure_ascii=True, sort_keys=True))
         return 2
     print(json.dumps(result, ensure_ascii=True, sort_keys=True))
