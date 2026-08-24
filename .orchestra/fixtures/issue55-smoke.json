@@ -1,0 +1,33 @@
+{
+  "ref": "issue:55",
+  "head": "3236bae6671728e94929c5fba33fb6a8df44f649",
+  "goal": "In the isolated smoke workspace, create result.txt containing exactly orchestra-smoke.",
+  "scope": {
+    "allowed_paths": ["result.txt"],
+    "forbidden_paths": [".git", ".git/**", "contract.json", ".orchestra/**"]
+  },
+  "accept": [
+    "result.txt exists with the exact UTF-8 text orchestra-smoke and no other workspace file changes"
+  ],
+  "evidence": [
+    "the Executor structured report names result.txt",
+    "the host observes only result.txt changed and the Git HEAD/index remain unchanged"
+  ],
+  "budget": {
+    "max_calls": 5,
+    "max_handoffs": 4,
+    "timeout_seconds": 180
+  },
+  "gate": [
+    "BOOTSTRAP_LOCAL",
+    "CODEX_SMOKE",
+    "LOCAL_ONLY",
+    "NO_PRODUCTION",
+    "NO_LOOP"
+  ],
+  "stop": [
+    "unexpected workspace or .git change",
+    "schema/config/model/sandbox failure",
+    "timeout, duplicate, stale ref, or invalid transition"
+  ]
+}

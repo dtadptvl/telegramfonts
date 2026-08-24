@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Codex Orchestra Architect event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["state", "ref", "head", "contract", "review"],
+  "properties": {
+    "state": {
+      "type": "string",
+      "enum": [
+        "READY",
+        "EXECUTING",
+        "ARCHITECT_REVIEW",
+        "FIX_REQUIRED",
+        "MERGE_READY",
+        "MERGED",
+        "COMPLETE",
+        "HUMAN_AUTH",
+        "EXECUTING_AUTHORIZED",
+        "BLOCKED",
+        "SECURITY_BLOCKED"
+      ]
+    },
+    "ref": {
+      "type": "string",
+      "pattern": "^(SELF|(issue|review|pr):[A-Za-z0-9._-]+)$"
+    },
+    "head": {
+      "type": ["string", "null"]
+    },
+    "contract": {
+      "$ref": "#/$defs/contract"
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["decision", "summary"],
+      "properties": {
+        "decision": {
+          "type": "string",
+          "enum": [
+            "READY",
+            "EXECUTING",
+            "ARCHITECT_REVIEW",
+            "FIX_REQUIRED",
+            "MERGE_READY",
+            "MERGED",
+            "COMPLETE",
+            "HUMAN_AUTH",
+            "EXECUTING_AUTHORIZED",
+            "BLOCKED",
+            "SECURITY_BLOCKED"
+          ]
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  },
+  "$defs": {
+    "contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "goal",
+        "scope",
+        "accept",
+        "evidence",
+        "budget",
+        "gate",
+        "stop"
+      ],
+      "properties": {
+        "goal": {
+          "type": "string",
+          "minLength": 1
+        },
+        "scope": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["allowed_paths", "forbidden_paths"],
+          "properties": {
+            "allowed_paths": {
+              "type": "array",
+              "minItems": 1,
+              "items": {"type": "string", "minLength": 1}
+            },
+            "forbidden_paths": {
+              "type": "array",
+              "minItems": 1,
+              "items": {"type": "string", "minLength": 1}
+            }
+          }
+        },
+        "accept": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "budget": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["max_calls", "max_handoffs", "timeout_seconds"],
+          "properties": {
+            "max_calls": {"type": "integer", "minimum": 1, "maximum": 5},
+            "max_handoffs": {"type": "integer", "minimum": 1, "maximum": 4},
+            "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 300}
+          }
+        },
+        "gate": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "stop": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        }
+      }
+    }
+  }
+}
