@@ -59,18 +59,70 @@ class FidelityThresholds:
 
 
 @dataclass(frozen=True)
+class BoundFontToolsEvidence:
+    """FontTools format/table validation evidence bound to candidate artifact SHA-256."""
+
+    candidate_artifact_sha: str
+    result: FormatValidationResult
+
+    def __post_init__(self) -> None:
+        if not self.candidate_artifact_sha or len(self.candidate_artifact_sha) != 64:
+            raise ValueError("BoundFontToolsEvidence candidate_artifact_sha must be a 64-char hex digest")
+        if self.candidate_artifact_sha != self.result.sha256_hex:
+            raise ValueError(
+                f"BoundFontToolsEvidence SHA mismatch: {self.candidate_artifact_sha} != result {self.result.sha256_hex}"
+            )
+
+
+@dataclass(frozen=True)
+class BoundFreeTypeEvidence:
+    """FreeType raster comparison evidence bound to candidate artifact SHA-256."""
+
+    candidate_artifact_sha: str
+    result: RasterComparisonResult
+
+    def __post_init__(self) -> None:
+        if not self.candidate_artifact_sha or len(self.candidate_artifact_sha) != 64:
+            raise ValueError("BoundFreeTypeEvidence candidate_artifact_sha must be a 64-char hex digest")
+
+
+@dataclass(frozen=True)
+class BoundHarfBuzzEvidence:
+    """HarfBuzz text shaping evidence bound to candidate artifact SHA-256."""
+
+    candidate_artifact_sha: str
+    result: ShapingTestResult
+
+    def __post_init__(self) -> None:
+        if not self.candidate_artifact_sha or len(self.candidate_artifact_sha) != 64:
+            raise ValueError("BoundHarfBuzzEvidence candidate_artifact_sha must be a 64-char hex digest")
+
+
+@dataclass(frozen=True)
+class BoundChromiumEvidence:
+    """Chromium session/canvas validation evidence bound to candidate artifact SHA-256."""
+
+    candidate_artifact_sha: str
+    result: ChromiumValidationResult
+
+    def __post_init__(self) -> None:
+        if not self.candidate_artifact_sha or len(self.candidate_artifact_sha) != 64:
+            raise ValueError("BoundChromiumEvidence candidate_artifact_sha must be a 64-char hex digest")
+
+
+@dataclass(frozen=True)
 class ConsumerEvidenceBundle:
-    """Versioned, typed consumer evidence bundle bound to model hash, config hash, and held-out evidence."""
+    """Versioned, typed consumer evidence bundle bound to model hash, config hash, and candidate artifact."""
 
     schema_version: str
     model_canonical_hash: str
     config_hash: str
     held_out_fingerprint: str
     candidate_artifact_sha: str
-    fonttools_result: FormatValidationResult
-    freetype_result: RasterComparisonResult
-    harfbuzz_result: ShapingTestResult
-    chromium_result: ChromiumValidationResult
+    fonttools: BoundFontToolsEvidence
+    freetype: BoundFreeTypeEvidence
+    harfbuzz: BoundHarfBuzzEvidence
+    chromium: BoundChromiumEvidence
 
     def validate_bindings(
         self,
@@ -94,10 +146,23 @@ class ConsumerEvidenceBundle:
             or not all(c in "0123456789abcdefABCDEF" for c in self.candidate_artifact_sha)
         ):
             errors.append(f"BUNDLE_INVALID_CANDIDATE_ARTIFACT_SHA: '{self.candidate_artifact_sha}'")
-        elif self.candidate_artifact_sha != self.fonttools_result.sha256_hex:
-            errors.append(
-                f"BUNDLE_ARTIFACT_SHA_MISMATCH: {self.candidate_artifact_sha} != fonttools {self.fonttools_result.sha256_hex}"
-            )
+        else:
+            if self.fonttools.candidate_artifact_sha != self.candidate_artifact_sha:
+                errors.append(
+                    f"CROSS_ARTIFACT_CONSUMER_EVIDENCE: fonttools {self.fonttools.candidate_artifact_sha} != bundle {self.candidate_artifact_sha}"
+                )
+            if self.freetype.candidate_artifact_sha != self.candidate_artifact_sha:
+                errors.append(
+                    f"CROSS_ARTIFACT_CONSUMER_EVIDENCE: freetype {self.freetype.candidate_artifact_sha} != bundle {self.candidate_artifact_sha}"
+                )
+            if self.harfbuzz.candidate_artifact_sha != self.candidate_artifact_sha:
+                errors.append(
+                    f"CROSS_ARTIFACT_CONSUMER_EVIDENCE: harfbuzz {self.harfbuzz.candidate_artifact_sha} != bundle {self.candidate_artifact_sha}"
+                )
+            if self.chromium.candidate_artifact_sha != self.candidate_artifact_sha:
+                errors.append(
+                    f"CROSS_ARTIFACT_CONSUMER_EVIDENCE: chromium {self.chromium.candidate_artifact_sha} != bundle {self.candidate_artifact_sha}"
+                )
         return errors
 
     def compute_bundle_hash(self) -> str:
@@ -119,10 +184,10 @@ class ConsumerEvidenceBundle:
             "config_hash": self.config_hash,
             "held_out_fingerprint": self.held_out_fingerprint,
             "candidate_artifact_sha": self.candidate_artifact_sha,
-            "fonttools": _strip_host_paths(asdict(self.fonttools_result)),
-            "freetype": _strip_host_paths(asdict(self.freetype_result)),
-            "harfbuzz": _strip_host_paths(asdict(self.harfbuzz_result)),
-            "chromium": _strip_host_paths(asdict(self.chromium_result)),
+            "fonttools": _strip_host_paths(asdict(self.fonttools)),
+            "freetype": _strip_host_paths(asdict(self.freetype)),
+            "harfbuzz": _strip_host_paths(asdict(self.harfbuzz)),
+            "chromium": _strip_host_paths(asdict(self.chromium)),
         }
         serialized = json.dumps(d, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(serialized.encode("utf-8")).hexdigest()

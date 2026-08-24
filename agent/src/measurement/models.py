@@ -206,10 +206,9 @@ class ObservationRecord:
     def __post_init__(self) -> None:
         if not self.browser_version:
             raise ValueError("ObservationRecord browser_version cannot be empty")
-        if not self.config_hash or len(self.config_hash) != 64:
-            raise ValueError(f"ObservationRecord config_hash must be a 64-char SHA256 digest, got: '{self.config_hash}'")
-        if not self.raster_sha256 or len(self.raster_sha256) != 64:
-            raise ValueError(f"ObservationRecord raster_sha256 must be a 64-char SHA256 digest, got: '{self.raster_sha256}'")
+        for name, val in [("config_hash", self.config_hash), ("raster_sha256", self.raster_sha256), ("cache_key", self.cache_key)]:
+            if not isinstance(val, str) or len(val) != 64 or not all(c in "0123456789abcdefABCDEF" for c in val):
+                raise ValueError(f"ObservationRecord {name} must be a 64-char hexadecimal SHA256 digest, got: '{val}'")
         if self.raster_size_bytes <= 0:
             raise ValueError(f"ObservationRecord raster_size_bytes must be positive, got: {self.raster_size_bytes}")
 

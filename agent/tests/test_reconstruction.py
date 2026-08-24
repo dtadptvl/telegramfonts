@@ -77,8 +77,18 @@ def sample_observation_data() -> list[tuple[ObservationRecord, bytes]]:
             confidence=1.0,
         )
 
+        cache_key = ObservationRecord.build_cache_key(
+            reference_id="test_font",
+            style_id="regular",
+            code_point=65,
+            browser_version="chromium",
+            resolution=res,
+            subpixel_x=0.0,
+            subpixel_y=0.0,
+            config_hash="a" * 64,
+        )
         rec = ObservationRecord(
-            cache_key=f"test_{res}_0_0",
+            cache_key=cache_key,
             reference_id="test_font",
             style_id="regular",
             code_point=65,

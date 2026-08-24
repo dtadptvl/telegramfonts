@@ -342,148 +342,129 @@ class ObservationStore:
                 (collection_key,),
             ).fetchone() is not None
 
-    def has_observation(self, cache_key: str) -> bool:
-        """Check if a fully verified observation with the specified cache key exists on disk and in database."""
-        rec = self.get_observation(cache_key)
-        if rec is None:
-            return False
-        if not rec.validate_cache_key():
-            return False
-        png_path = self.base_dir / rec.raster_relative_path
-        if not png_path.exists():
-            return False
+    def _row_to_record(self, row: sqlite3.Row | dict[str, Any] | None) -> ObservationRecord | None:
+        """Safely materialize and validate an ObservationRecord from a database row without escaping exceptions."""
+        if not row:
+            return None
         try:
-            png_bytes = png_path.read_bytes()
-            if len(png_bytes) != rec.raster_size_bytes:
-                return False
-            if hashlib.sha256(png_bytes).hexdigest() != rec.raster_sha256:
-                return False
-        except Exception:
-            return False
-        return True
-
-    def get_observation(self, cache_key: str) -> ObservationRecord | None:
-        """Fetch an observation record by cache key."""
-        with self._get_connection() as conn:
-            cur = conn.execute("SELECT * FROM observations WHERE cache_key = ?", (cache_key,))
-            row = cur.fetchone()
-            if not row:
-                return None
-
             browser_ver = row["browser_version"] if "browser_version" in row.keys() else ""
             cfg_hash = row["config_hash"] if "config_hash" in row.keys() else ""
-            if not browser_ver or not cfg_hash:
+            raster_sha = row["raster_sha256"] if "raster_sha256" in row.keys() else ""
+            cache_key = row["cache_key"] if "cache_key" in row.keys() else ""
+
+            if not browser_ver or not cfg_hash or not raster_sha or not cache_key:
                 return None
 
+            # Fast validation of 64-char hex strings before object instantiation
+            for val in (cfg_hash, raster_sha, cache_key):
+                if not isinstance(val, str) or len(val) != 64 or not all(c in "0123456789abcdefABCDEF" for c in val):
+                    return None
+
             metrics = DirectMetrics(
-                code_point=row["code_point"],
-                character=chr(row["code_point"]),
+                code_point=int(row["code_point"]),
+                character=chr(int(row["code_point"])),
                 font_size_px=200.0,
-                raw_advance_width=row["advance_width_px"],
-                raw_actual_left=row["lsb_px"],
-                raw_actual_right=row["advance_width_px"] - row["rsb_px"],
-                raw_actual_ascent=row["ascent_px"],
-                raw_actual_descent=-row["descent_px"],
-                raw_font_ascent=row["ascent_px"],
-                raw_font_descent=-row["descent_px"],
-                advance_width_upem=row["advance_width_upem"],
-                lsb_upem=row["lsb_upem"],
-                rsb_upem=row["rsb_upem"],
-                ascent_upem=row["ascent_upem"],
-                descent_upem=row["descent_upem"],
-                bbox_width_upem=row["bbox_width_upem"],
-                bbox_height_upem=row["bbox_height_upem"],
-                sample_count=row["sample_count"],
-                confidence=row["confidence"],
+                raw_advance_width=float(row["advance_width_px"]),
+                raw_actual_left=float(row["lsb_px"]),
+                raw_actual_right=float(row["advance_width_px"]) - float(row["rsb_px"]),
+                raw_actual_ascent=float(row["ascent_px"]),
+                raw_actual_descent=-float(row["descent_px"]),
+                raw_font_ascent=float(row["ascent_px"]),
+                raw_font_descent=-float(row["descent_px"]),
+                advance_width_upem=float(row["advance_width_upem"]),
+                lsb_upem=float(row["lsb_upem"]),
+                rsb_upem=float(row["rsb_upem"]),
+                ascent_upem=float(row["ascent_upem"]),
+                descent_upem=float(row["descent_upem"]),
+                bbox_width_upem=float(row["bbox_width_upem"]),
+                bbox_height_upem=float(row["bbox_height_upem"]),
+                sample_count=int(row["sample_count"]),
+                confidence=float(row["confidence"]),
             )
 
             rec = ObservationRecord(
-                cache_key=row["cache_key"],
-                reference_id=row["reference_id"],
-                style_id=row["style_id"],
-                code_point=row["code_point"],
-                resolution=row["resolution"],
-                subpixel_x=row["subpixel_x"],
-                subpixel_y=row["subpixel_y"],
-                raster_relative_path=row["raster_relative_path"],
-                raster_sha256=row["raster_sha256"],
-                raster_size_bytes=row["raster_size_bytes"],
+                cache_key=cache_key,
+                reference_id=str(row["reference_id"]),
+                style_id=str(row["style_id"]),
+                code_point=int(row["code_point"]),
+                resolution=int(row["resolution"]),
+                subpixel_x=float(row["subpixel_x"]),
+                subpixel_y=float(row["subpixel_y"]),
+                raster_relative_path=str(row["raster_relative_path"]),
+                raster_sha256=raster_sha,
+                raster_size_bytes=int(row["raster_size_bytes"]),
                 metrics=metrics,
-                created_at=row["created_at"],
+                created_at=str(row["created_at"]),
                 browser_version=browser_ver,
                 config_hash=cfg_hash,
             )
             if not rec.validate_cache_key():
                 return None
             return rec
+        except Exception:
+            return None
+
+    def has_observation(self, cache_key: str) -> bool:
+        """Check if a fully verified observation with the specified cache key exists on disk and in database."""
+        try:
+            rec = self.get_observation(cache_key)
+            if rec is None:
+                return False
+            png_path = self.base_dir / rec.raster_relative_path
+            if not png_path.exists():
+                return False
+            png_bytes = png_path.read_bytes()
+            if len(png_bytes) != rec.raster_size_bytes:
+                return False
+            if hashlib.sha256(png_bytes).hexdigest() != rec.raster_sha256:
+                return False
+            return True
+        except Exception:
+            return False
+
+    def get_observation(self, cache_key: str) -> ObservationRecord | None:
+        """Fetch an observation record by cache key."""
+        try:
+            with self._get_connection() as conn:
+                cur = conn.execute("SELECT * FROM observations WHERE cache_key = ?", (cache_key,))
+                row = cur.fetchone()
+                return self._row_to_record(row)
+        except Exception:
+            return None
 
     def get_glyph_observations(
         self, reference_id: str, style_id: str, code_point: int
     ) -> list[tuple[ObservationRecord, bytes]]:
         """Retrieve all observation records and raw PNG bytes for a specific glyph."""
-        with self._get_connection() as conn:
-            cur = conn.execute(
-                """
-                SELECT * FROM observations
-                WHERE reference_id = ? AND style_id = ? AND code_point = ?
-                ORDER BY resolution ASC, subpixel_x ASC, subpixel_y ASC
-                """,
-                (reference_id, style_id, code_point),
-            )
-            rows = cur.fetchall()
-            results = []
-            for row in rows:
-                browser_ver = row["browser_version"] if "browser_version" in row.keys() else ""
-                cfg_hash = row["config_hash"] if "config_hash" in row.keys() else ""
-                if not browser_ver or not cfg_hash:
-                    continue
-                metrics = DirectMetrics(
-                    code_point=row["code_point"],
-                    character=chr(row["code_point"]),
-                    font_size_px=200.0,
-                    raw_advance_width=row["advance_width_px"],
-                    raw_actual_left=row["lsb_px"],
-                    raw_actual_right=row["advance_width_px"] - row["rsb_px"],
-                    raw_actual_ascent=row["ascent_px"],
-                    raw_actual_descent=-row["descent_px"],
-                    raw_font_ascent=row["ascent_px"],
-                    raw_font_descent=-row["descent_px"],
-                    advance_width_upem=row["advance_width_upem"],
-                    lsb_upem=row["lsb_upem"],
-                    rsb_upem=row["rsb_upem"],
-                    ascent_upem=row["ascent_upem"],
-                    descent_upem=row["descent_upem"],
-                    bbox_width_upem=row["bbox_width_upem"],
-                    bbox_height_upem=row["bbox_height_upem"],
-                    sample_count=row["sample_count"],
-                    confidence=row["confidence"],
+        try:
+            with self._get_connection() as conn:
+                cur = conn.execute(
+                    """
+                    SELECT * FROM observations
+                    WHERE reference_id = ? AND style_id = ? AND code_point = ?
+                    ORDER BY resolution ASC, subpixel_x ASC, subpixel_y ASC
+                    """,
+                    (reference_id, style_id, code_point),
                 )
-                rec = ObservationRecord(
-                    cache_key=row["cache_key"],
-                    reference_id=row["reference_id"],
-                    style_id=row["style_id"],
-                    code_point=row["code_point"],
-                    resolution=row["resolution"],
-                    subpixel_x=row["subpixel_x"],
-                    subpixel_y=row["subpixel_y"],
-                    raster_relative_path=row["raster_relative_path"],
-                    raster_sha256=row["raster_sha256"],
-                    raster_size_bytes=row["raster_size_bytes"],
-                    metrics=metrics,
-                    created_at=row["created_at"],
-                    browser_version=browser_ver,
-                    config_hash=cfg_hash,
-                )
-                if not rec.validate_cache_key():
-                    continue
-                png_path = self.base_dir / rec.raster_relative_path
-                if not png_path.exists():
-                    continue
-                png_bytes = png_path.read_bytes()
-                if len(png_bytes) != rec.raster_size_bytes or hashlib.sha256(png_bytes).hexdigest() != rec.raster_sha256:
-                    continue
-                results.append((rec, png_bytes))
-            return results
+                rows = cur.fetchall()
+                results = []
+                for row in rows:
+                    rec = self._row_to_record(row)
+                    if rec is None:
+                        continue
+                    png_path = self.base_dir / rec.raster_relative_path
+                    if not png_path.exists():
+                        continue
+                    try:
+                        png_bytes = png_path.read_bytes()
+                        if len(png_bytes) != rec.raster_size_bytes or hashlib.sha256(png_bytes).hexdigest() != rec.raster_sha256:
+                            continue
+                        results.append((rec, png_bytes))
+                    except Exception:
+                        continue
+                return results
+        except Exception:
+            return []
 
     def save_observation(self, record: ObservationRecord, png_bytes: bytes) -> None:
         """Save raster PNG to filesystem and write metadata record to SQLite index with strict validation."""

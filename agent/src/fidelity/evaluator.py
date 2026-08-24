@@ -522,28 +522,34 @@ class FidelityEvaluator:
                     failure_reasons.append(f"CONSUMER_GATE_FAIL: {err}")
             else:
                 bundle_hash = consumer_bundle.compute_bundle_hash()
-                ft = consumer_bundle.fonttools_result
+                ft = consumer_bundle.fonttools.result
                 ft_pass = bool(
                     ft.is_direct_loadable_fonttools
                     and ft.has_valid_cmap
                     and ft.has_valid_metrics
                     and ft.decompression_round_trip
+                    and ft.glyph_count > 0
+                    and ft.units_per_em > 0
                     and getattr(ft, "validation_error", None) is None
                 )
 
-                fr = consumer_bundle.freetype_result
+                fr = consumer_bundle.freetype.result
                 freetype_pass = bool(
                     fr.render_error is None
+                    and fr.render_size_px > 0
+                    and math.isfinite(fr.raster_iou)
                     and fr.raster_iou >= thresholds.min_raster_iou
                 )
 
-                hb = consumer_bundle.harfbuzz_result
+                hb = consumer_bundle.harfbuzz.result
                 hb_pass = bool(
                     hb.in_candidate_cmap
                     and hb.glyph_sequence_match
+                    and hb.candidate_glyph_count > 0
+                    and math.isfinite(hb.candidate_total_advance_upem)
                 )
 
-                cr = consumer_bundle.chromium_result
+                cr = consumer_bundle.chromium.result
                 chromium_pass = bool(
                     cr.is_available
                     and cr.is_direct_loadable_chromium
