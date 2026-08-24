@@ -5,13 +5,14 @@ import datetime
 import hashlib
 import io
 import math
-from typing import Any, Callable, Sequence
+from typing import Callable, Sequence
 
 import numpy as np
 from PIL import Image, ImageDraw
 import scipy.ndimage
 
 from fidelity.models import (
+    ConsumerEvidenceBundle,
     ConsumerGateResult,
     CoverageGateResult,
     FidelityReport,
@@ -21,14 +22,8 @@ from fidelity.models import (
     TopologyGateResult,
     TypographyGateResult,
 )
-from measurement.calibration import CalibrationTransform
+from measurement.calibration import CalibrationTransform, ObservationCalibrator
 from measurement.models import ObservationConfig, ObservationRecord
-from reconstruction.candidate_validator import (
-    ChromiumValidationResult,
-    FormatValidationResult,
-    RasterComparisonResult,
-    ShapingTestResult,
-)
 from reconstruction.font_model import CanonicalFontModel
 from typography.models import PairKerningObservation
 
@@ -53,7 +48,6 @@ class FidelityEvaluator:
         img = Image.new("L", (resolution, resolution), 0)
         draw = ImageDraw.Draw(img)
 
-        # Sort contours so outer contours are drawn first (value 255), then holes (value 0)
         outer_contours = [c for c in glyph.contours if not c.is_hole]
         hole_contours = [c for c in glyph.contours if c.is_hole]
 
@@ -84,11 +78,10 @@ class FidelityEvaluator:
     ) -> float:
         """Compute Euclidean chamfer distance in font design space (UPEM units) between model contour and raster."""
         if not np.any(ref_mask):
-            return 1000.0  # Blank reference mask penalty
+            return 1000.0
 
         dt_ref = scipy.ndimage.distance_transform_edt(1 - ref_mask)
         sample_distances_upem: list[float] = []
-
         scale = max(transform.scale, 1e-6)
 
         for c in glyph.contours:
@@ -114,7 +107,7 @@ class FidelityEvaluator:
         held_out_records: Sequence[ObservationRecord],
         fit_pairs: Sequence[PairKerningObservation] = (),
         held_out_pairs: Sequence[PairKerningObservation] = (),
-        consumer_results: Sequence[Any] = (),
+        consumer_bundle: ConsumerEvidenceBundle | None = None,
         thresholds: FidelityThresholds | None = None,
         raster_provider: Callable[[ObservationRecord], bytes] | None = None,
     ) -> FidelityReport:
@@ -138,11 +131,16 @@ class FidelityEvaluator:
         held_out_fp = cls._compute_records_fingerprint(held_out_records)
 
         # ==========================================
-        # GATE 0: FIT / HELD-OUT SEPARATION & LEAKAGE CHECK
+        # GATE 0: FIT / HELD-OUT PROVENANCE, LEAKAGE & MODEL BINDING
         # ==========================================
         if model.config_hash != config_hash:
             failure_reasons.append(
                 f"CONFIG_HASH_MISMATCH: Model config hash ({model.config_hash}) does not match active config hash ({config_hash})"
+            )
+
+        if model.fit_observations_count != len(fit_records):
+            failure_reasons.append(
+                f"FIT_OBSERVATIONS_COUNT_MISMATCH: Model declared {model.fit_observations_count} != actual fit records {len(fit_records)}"
             )
 
         fit_keys = {r.cache_key for r in fit_records}
@@ -177,8 +175,45 @@ class FidelityEvaluator:
                 failure_reasons.append(f"STYLE_ID_DRIFT: Record style_id '{r.style_id}' != model '{model.style_id}'")
             if r.browser_version != model.browser_version:
                 failure_reasons.append(f"BROWSER_VERSION_DRIFT: Record browser '{r.browser_version}' != model '{model.browser_version}'")
+            if r.config_hash != config_hash:
+                failure_reasons.append(f"CONFIG_HASH_DRIFT: Record config_hash '{r.config_hash}' != '{config_hash}'")
             if not r.validate_cache_key():
                 failure_reasons.append(f"INVALID_CACHE_KEY: Cache key mismatch for record: {r.cache_key}")
+
+        # Strict Model-to-Fit Evidence Binding
+        for cp, glyph in model.glyphs.items():
+            glyph_fit_records = [r for r in fit_records if r.code_point == cp]
+            if not glyph_fit_records:
+                failure_reasons.append(f"MISSING_FIT_EVIDENCE: Glyph {cp} in model has no corresponding fit observation records")
+                continue
+            expected_glyph_fps = tuple(sorted(r.raster_sha256 for r in glyph_fit_records))
+            if glyph.observation_fingerprints != expected_glyph_fps:
+                failure_reasons.append(
+                    f"GLYPH_FINGERPRINT_MISMATCH: Glyph {cp} fingerprints ({glyph.observation_fingerprints}) != expected fit rasters ({expected_glyph_fps})"
+                )
+
+        if fit_records:
+            try:
+                expected_calib_fp = ObservationCalibrator.compute_calibration_fingerprint(
+                    fit_records, config=config, units_per_em=model.metrics.units_per_em, min_confidence=thresholds.min_confidence
+                )
+                if model.calibration_fingerprint != expected_calib_fp:
+                    failure_reasons.append(
+                        f"CALIBRATION_FINGERPRINT_MISMATCH: Model calibration fingerprint ({model.calibration_fingerprint}) != recomputed ({expected_calib_fp})"
+                    )
+            except Exception as e:
+                failure_reasons.append(f"CALIBRATION_RECOMPUTATION_ERROR: {e}")
+
+        # Typography pair validation
+        for p in list(fit_pairs) + list(held_out_pairs):
+            if p.provenance == "untrusted" or not p.provenance:
+                failure_reasons.append(f"UNTRUSTED_TYPOGRAPHY: Pair ({p.left_cp}, {p.right_cp}) has untrusted provenance '{p.provenance}'")
+            if p.left_char != chr(p.left_cp) or p.right_char != chr(p.right_cp):
+                failure_reasons.append(f"INVALID_TYPOGRAPHY_PAIR: Character/codepoint mismatch ({p.left_cp}:{p.left_char}, {p.right_cp}:{p.right_char})")
+            if not (math.isfinite(p.left_advance_upem) and math.isfinite(p.right_advance_upem) and math.isfinite(p.measured_pair_advance_upem) and math.isfinite(p.inferred_kerning_upem)):
+                failure_reasons.append(f"NON_FINITE_TYPOGRAPHY_METRIC in pair ({p.left_cp}, {p.right_cp})")
+            if p.confidence < thresholds.min_confidence:
+                failure_reasons.append(f"LOW_CONFIDENCE_TYPOGRAPHY in pair ({p.left_cp}, {p.right_cp}): {p.confidence} < {thresholds.min_confidence}")
 
         # ==========================================
         # GATE 1: COVERAGE GATE
@@ -226,7 +261,7 @@ class FidelityEvaluator:
         for cp, glyph in model.glyphs.items():
             total_contours += len(glyph.contours)
             for c in glyph.contours:
-                if not c.is_closed and not thresholds.allow_unclosed_contours:
+                if not c.is_closed:
                     unclosed_count += 1
                 for s in c.segments:
                     if s.approximate_length() < 1e-4:
@@ -234,7 +269,7 @@ class FidelityEvaluator:
 
         top_pass_rate = 1.0 if total_contours == 0 else max(0.0, 1.0 - (unclosed_count + degenerate_seg_count) / max(total_contours, 1))
         top_status = "PASS"
-        if unclosed_count > 0 and not thresholds.allow_unclosed_contours:
+        if unclosed_count > 0:
             top_status = "FAIL"
             failure_reasons.append(f"TOPOLOGY_GATE_FAIL: {unclosed_count} unclosed contours detected")
         if degenerate_seg_count > 0:
@@ -265,19 +300,16 @@ class FidelityEvaluator:
         else:
             for r in held_out_records:
                 if r.code_point not in model.glyphs:
-                    geom_status = "FAIL"
                     failure_reasons.append(f"GEOMETRY_RASTER_GATE_FAIL: Missing glyph {r.code_point} in model")
                     continue
 
                 glyph = model.glyphs[r.code_point]
                 raw_bytes = raster_provider(r)
                 if not isinstance(raw_bytes, bytes) or len(raw_bytes) == 0:
-                    geom_status = "FAIL"
                     failure_reasons.append(f"GEOMETRY_RASTER_GATE_FAIL: Empty raster bytes supplied for held-out record {r.cache_key}")
                     continue
 
                 if len(raw_bytes) != r.raster_size_bytes:
-                    geom_status = "FAIL"
                     failure_reasons.append(
                         f"GEOMETRY_RASTER_GATE_FAIL: Raster byte size mismatch for {r.cache_key}: {len(raw_bytes)} != {r.raster_size_bytes}"
                     )
@@ -285,7 +317,6 @@ class FidelityEvaluator:
 
                 actual_sha = hashlib.sha256(raw_bytes).hexdigest()
                 if actual_sha != r.raster_sha256:
-                    geom_status = "FAIL"
                     failure_reasons.append(
                         f"GEOMETRY_RASTER_GATE_FAIL: CORRUPT_RASTER_EVIDENCE: SHA256 mismatch for held-out record {r.cache_key}: {actual_sha} != {r.raster_sha256}"
                     )
@@ -294,7 +325,6 @@ class FidelityEvaluator:
                 try:
                     img = Image.open(io.BytesIO(raw_bytes)).convert("L")
                     if img.size != (r.resolution, r.resolution):
-                        geom_status = "FAIL"
                         failure_reasons.append(
                             f"GEOMETRY_RASTER_GATE_FAIL: Raster image size mismatch: {img.size} != ({r.resolution}, {r.resolution})"
                         )
@@ -302,7 +332,6 @@ class FidelityEvaluator:
                     arr = np.array(img, dtype=np.float32) / 255.0
                     ref_mask = ((1.0 - arr) >= 0.5).astype(np.uint8)
                 except Exception as e:
-                    geom_status = "FAIL"
                     failure_reasons.append(f"GEOMETRY_RASTER_GATE_FAIL: Raster decode error: {e}")
                     continue
 
@@ -337,10 +366,10 @@ class FidelityEvaluator:
                 failure_reasons.append(
                     f"GEOMETRY_RASTER_GATE_FAIL: Mean IoU ({mean_iou:.4f}) below threshold ({thresholds.min_raster_iou})"
                 )
-            elif mean_chamfer > thresholds.max_chamfer_distance_upem:
+            elif max_chamfer > thresholds.max_chamfer_distance_upem:
                 geom_status = "FAIL"
                 failure_reasons.append(
-                    f"GEOMETRY_RASTER_GATE_FAIL: Mean chamfer distance ({mean_chamfer:.2f} UPEM) exceeds threshold ({thresholds.max_chamfer_distance_upem})"
+                    f"GEOMETRY_RASTER_GATE_FAIL: Max chamfer distance ({max_chamfer:.2f} UPEM) exceeds threshold ({thresholds.max_chamfer_distance_upem})"
                 )
 
         geometry_raster_gate = GeometryRasterGateResult(
@@ -357,6 +386,11 @@ class FidelityEvaluator:
         # GATE 4: METRICS & CONFIDENCE GATE (FAIL-CLOSED)
         # ==========================================
         adv_deltas: list[float] = []
+        lsb_deltas: list[float] = []
+        rsb_deltas: list[float] = []
+        ascent_deltas: list[float] = []
+        descent_deltas: list[float] = []
+        all_metric_deltas: list[float] = []
         low_confidence_count = 0
 
         for cp, glyph in model.glyphs.items():
@@ -374,16 +408,26 @@ class FidelityEvaluator:
         else:
             for r in held_out_records:
                 if r.code_point not in model.glyphs:
-                    metrics_status = "FAIL"
                     failure_reasons.append(f"METRICS_GATE_FAIL: Held-out metric for missing glyph {r.code_point}")
                     continue
                 glyph = model.glyphs[r.code_point]
-                delta = abs(glyph.advance_width_upem - r.metrics.advance_width_upem)
-                adv_deltas.append(delta)
+                d_adv = abs(glyph.advance_width_upem - r.metrics.advance_width_upem)
+                d_lsb = abs(glyph.lsb_upem - r.metrics.lsb_upem)
+                d_rsb = abs(glyph.rsb_upem - r.metrics.rsb_upem)
+                d_asc = abs(glyph.ascent_upem - r.metrics.ascent_upem)
+                d_desc = abs(glyph.descent_upem - r.metrics.descent_upem)
+
+                adv_deltas.append(d_adv)
+                lsb_deltas.append(d_lsb)
+                rsb_deltas.append(d_rsb)
+                ascent_deltas.append(d_asc)
+                descent_deltas.append(d_desc)
+                all_metric_deltas.extend([d_adv, d_lsb, d_rsb, d_asc, d_desc])
 
             mean_adv_delta = float(np.mean(adv_deltas)) if adv_deltas else 0.0
             max_adv_delta = float(np.max(adv_deltas)) if adv_deltas else 0.0
             rms_adv_delta = float(np.sqrt(np.mean(np.square(adv_deltas)))) if adv_deltas else 0.0
+            overall_rms = float(np.sqrt(np.mean(np.square(all_metric_deltas)))) if all_metric_deltas else 0.0
 
             metrics_status = "PASS"
             if len(adv_deltas) == 0:
@@ -394,10 +438,10 @@ class FidelityEvaluator:
                 failure_reasons.append(
                     f"METRICS_GATE_FAIL: Max advance delta ({max_adv_delta:.2f} UPEM) exceeds threshold ({thresholds.max_advance_width_delta_upem})"
                 )
-            elif rms_adv_delta > thresholds.max_metric_rms_upem:
+            elif overall_rms > thresholds.max_metric_rms_upem:
                 metrics_status = "FAIL"
                 failure_reasons.append(
-                    f"METRICS_GATE_FAIL: RMS advance delta ({rms_adv_delta:.2f} UPEM) exceeds threshold ({thresholds.max_metric_rms_upem})"
+                    f"METRICS_GATE_FAIL: Overall metrics RMS delta ({overall_rms:.2f} UPEM) exceeds threshold ({thresholds.max_metric_rms_upem})"
                 )
 
         if low_confidence_count > 0:
@@ -408,6 +452,11 @@ class FidelityEvaluator:
             advance_width_mean_delta_upem=round(float(np.mean(adv_deltas)), 2) if adv_deltas else 0.0,
             advance_width_max_delta_upem=round(float(np.max(adv_deltas)), 2) if adv_deltas else 0.0,
             advance_width_rms_delta_upem=round(float(np.sqrt(np.mean(np.square(adv_deltas)))), 2) if adv_deltas else 0.0,
+            lsb_max_delta_upem=round(float(np.max(lsb_deltas)), 2) if lsb_deltas else 0.0,
+            rsb_max_delta_upem=round(float(np.max(rsb_deltas)), 2) if rsb_deltas else 0.0,
+            ascent_max_delta_upem=round(float(np.max(ascent_deltas)), 2) if ascent_deltas else 0.0,
+            descent_max_delta_upem=round(float(np.max(descent_deltas)), 2) if descent_deltas else 0.0,
+            overall_metrics_rms_upem=round(overall_rms, 2) if all_metric_deltas else 0.0,
             evaluated_metrics_count=len(adv_deltas),
             details={"total_held_out_metrics": len(adv_deltas), "low_confidence_count": low_confidence_count},
         )
@@ -448,50 +497,56 @@ class FidelityEvaluator:
         )
 
         # ==========================================
-        # GATE 6: INDEPENDENT CONSUMERS GATE
+        # GATE 6: INDEPENDENT CONSUMERS GATE (MANDATORY & TYPED)
         # ==========================================
-        ft_pass = True
-        freetype_pass = True
-        hb_pass = True
-        chromium_pass = True
-        consumer_status = "PASS"
+        ft_pass = False
+        freetype_pass = False
+        hb_pass = False
+        chromium_pass = False
+        consumer_status = "FAIL"
+        bundle_hash = ""
 
-        if thresholds.require_consumers and not consumer_results:
-            consumer_status = "FAIL"
-            failure_reasons.append("CONSUMER_GATE_FAIL: ZERO_HELD_OUT_CONSUMERS: Configured consumers required but none provided")
-        elif consumer_results:
-            for cr in consumer_results:
-                if isinstance(cr, FormatValidationResult):
-                    if not (cr.is_direct_loadable_fonttools and cr.has_valid_cmap and cr.has_valid_metrics):
-                        ft_pass = False
-                    if not (cr.is_direct_loadable_freetype and cr.is_roundtrip_loadable_freetype):
-                        freetype_pass = False
-                    if not cr.is_direct_loadable_harfbuzz:
-                        hb_pass = False
-                    if not cr.is_direct_loadable_chromium:
-                        chromium_pass = False
-                elif isinstance(cr, ShapingTestResult):
-                    if not cr.glyph_sequence_match:
-                        hb_pass = False
-                elif isinstance(cr, RasterComparisonResult):
-                    if cr.render_error is not None or cr.raster_iou < thresholds.min_raster_iou:
-                        freetype_pass = False
-                elif isinstance(cr, ChromiumValidationResult):
-                    if not (cr.is_direct_loadable_chromium and cr.fallback_rejection_verified):
-                        chromium_pass = False
+        if consumer_bundle is None or not isinstance(consumer_bundle, ConsumerEvidenceBundle):
+            failure_reasons.append("CONSUMER_GATE_FAIL: MISSING_CONSUMER_BUNDLE: Production evaluation requires a valid bound ConsumerEvidenceBundle")
+        else:
+            binding_errors = consumer_bundle.validate_bindings(
+                expected_model_hash=model_hash,
+                expected_config_hash=config_hash,
+                expected_held_out_fingerprint=held_out_fp,
+            )
+            if binding_errors:
+                for err in binding_errors:
+                    failure_reasons.append(f"CONSUMER_GATE_FAIL: {err}")
+            else:
+                bundle_hash = consumer_bundle.compute_bundle_hash()
+                ft = consumer_bundle.fonttools_result
+                ft_pass = bool(ft.is_direct_loadable_fonttools and ft.has_valid_cmap and ft.has_valid_metrics)
 
-            if not (ft_pass and freetype_pass and hb_pass and chromium_pass):
-                consumer_status = "FAIL"
-                failure_reasons.append("CONSUMER_GATE_FAIL: One or more independent consumers failed validation")
+                fr = consumer_bundle.freetype_result
+                freetype_pass = bool(fr.render_error is None and fr.raster_iou >= thresholds.min_raster_iou)
+
+                hb = consumer_bundle.harfbuzz_result
+                hb_pass = bool(hb.glyph_sequence_match)
+
+                cr = consumer_bundle.chromium_result
+                chromium_pass = bool(cr.is_direct_loadable_chromium and cr.fallback_rejection_verified)
+
+                if ft_pass and freetype_pass and hb_pass and chromium_pass:
+                    consumer_status = "PASS"
+                else:
+                    failure_reasons.append(
+                        f"CONSUMER_GATE_FAIL: Consumers failed: fonttools={ft_pass}, freetype={freetype_pass}, harfbuzz={hb_pass}, chromium={chromium_pass}"
+                    )
 
         consumer_gate = ConsumerGateResult(
             status=consumer_status,
-            total_consumers_evaluated=len(consumer_results),
+            total_consumers_evaluated=4 if consumer_bundle else 0,
             fonttools_passed=ft_pass,
             freetype_passed=freetype_pass,
             harfbuzz_passed=hb_pass,
             chromium_passed=chromium_pass,
-            details={"consumer_results_count": len(consumer_results)},
+            consumer_bundle_hash=bundle_hash,
+            details={"bound_artifact_sha": consumer_bundle.candidate_artifact_sha if consumer_bundle else ""},
         )
 
         # ==========================================
@@ -508,8 +563,9 @@ class FidelityEvaluator:
         )
         overall_status = "PASS" if all_passed else "FAIL"
 
+        policy_hash = thresholds.compute_policy_hash()
         report_id = hashlib.sha256(
-            f"{model_hash}:{config_hash}:{fit_fp}:{held_out_fp}".encode("utf-8")
+            f"{model_hash}:{config_hash}:{fit_fp}:{held_out_fp}:{policy_hash}:{bundle_hash}".encode("utf-8")
         ).hexdigest()[:16]
 
         now_utc = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -521,6 +577,8 @@ class FidelityEvaluator:
             config_hash=config_hash,
             fit_set_fingerprint=fit_fp,
             held_out_set_fingerprint=held_out_fp,
+            policy_hash=policy_hash,
+            policy=thresholds.to_dict(),
             overall_status=overall_status,
             coverage_gate=coverage_gate,
             topology_gate=topology_gate,

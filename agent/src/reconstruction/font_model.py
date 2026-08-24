@@ -230,17 +230,25 @@ class GlobalFontMetrics:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> GlobalFontMetrics:
+        required = [
+            "units_per_em", "ascent_upem", "descent_upem", "line_gap_upem",
+            "cap_height_upem", "x_height_upem", "max_advance_width_upem",
+            "avg_char_width_upem", "underline_position_upem", "underline_thickness_upem",
+        ]
+        for k in required:
+            if k not in d:
+                raise ValueError(f"Missing required field in GlobalFontMetrics: {k}")
         metrics = cls(
-            units_per_em=int(d.get("units_per_em", 1000)),
-            ascent_upem=float(d.get("ascent_upem", 800.0)),
-            descent_upem=float(d.get("descent_upem", -200.0)),
-            line_gap_upem=float(d.get("line_gap_upem", 0.0)),
-            cap_height_upem=float(d.get("cap_height_upem", 700.0)),
-            x_height_upem=float(d.get("x_height_upem", 500.0)),
-            max_advance_width_upem=float(d.get("max_advance_width_upem", 1000.0)),
-            avg_char_width_upem=float(d.get("avg_char_width_upem", 500.0)),
-            underline_position_upem=float(d.get("underline_position_upem", -100.0)),
-            underline_thickness_upem=float(d.get("underline_thickness_upem", 50.0)),
+            units_per_em=int(d["units_per_em"]),
+            ascent_upem=float(d["ascent_upem"]),
+            descent_upem=float(d["descent_upem"]),
+            line_gap_upem=float(d["line_gap_upem"]),
+            cap_height_upem=float(d["cap_height_upem"]),
+            x_height_upem=float(d["x_height_upem"]),
+            max_advance_width_upem=float(d["max_advance_width_upem"]),
+            avg_char_width_upem=float(d["avg_char_width_upem"]),
+            underline_position_upem=float(d["underline_position_upem"]),
+            underline_thickness_upem=float(d["underline_thickness_upem"]),
         )
         metrics.validate()
         return metrics
@@ -279,10 +287,9 @@ class CanonicalFontModel:
             raise ValueError("FontModel style_id cannot be empty")
         if not self.browser_version or not isinstance(self.browser_version, str):
             raise ValueError("FontModel browser_version cannot be empty")
-        if not self.config_hash or len(self.config_hash) != 64:
-            raise ValueError(f"FontModel config_hash must be a 64-char SHA256 digest, got: '{self.config_hash}'")
-        if not self.calibration_fingerprint or len(self.calibration_fingerprint) != 64:
-            raise ValueError(f"FontModel calibration_fingerprint must be a 64-char SHA256 digest, got: '{self.calibration_fingerprint}'")
+        for name, val in [("config_hash", self.config_hash), ("calibration_fingerprint", self.calibration_fingerprint)]:
+            if not isinstance(val, str) or len(val) != 64 or not all(c in "0123456789abcdefABCDEF" for c in val):
+                raise ValueError(f"FontModel {name} must be a 64-char hex digest, got: '{val}'")
         if self.fit_observations_count <= 0:
             raise ValueError(f"FontModel fit_observations_count must be positive, got: {self.fit_observations_count}")
         if not self.glyphs:
@@ -300,33 +307,33 @@ class CanonicalFontModel:
                 raise ValueError(f"Non-finite kerning value for ({l_cp}, {r_cp}): {kern}")
 
     def compute_canonical_hash(self) -> str:
-        """Compute authoritative deterministic SHA-256 hash digest of the production font model."""
+        """Compute authoritative SHA-256 hash over the canonical JSON representation."""
         self.validate()
-        canon_json = self.to_canonical_json()
-        return hashlib.sha256(canon_json.encode("utf-8")).hexdigest()
+        canonical_json = self.to_canonical_json()
+        return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
 
     def to_canonical_dict(self) -> dict[str, Any]:
-        """Serialize model into sorted, canonical dictionary strictly excluding timestamps and paths."""
+        """Export deterministic dictionary representation with sorted keys and lists."""
         return {
             "schema_version": self.schema_version,
             "family_name": self.family_name,
             "style_name": self.style_name,
             "reference_id": self.reference_id,
             "style_id": self.style_id,
-            "metrics": self.metrics.to_canonical_dict(),
             "config_hash": self.config_hash,
             "browser_version": self.browser_version,
             "fit_observations_count": self.fit_observations_count,
             "calibration_fingerprint": self.calibration_fingerprint,
             "fit_provenance": self.fit_provenance,
+            "metrics": self.metrics.to_canonical_dict(),
             "feature_tags": sorted(list(self.feature_tags)),
             "kerning_pairs": [
                 {
-                    "left_cp": left_cp,
-                    "right_cp": right_cp,
-                    "kerning_upem": int(val),
+                    "left_cp": l_cp,
+                    "right_cp": r_cp,
+                    "kerning_upem": self.kerning_pairs[(l_cp, r_cp)],
                 }
-                for (left_cp, right_cp), val in sorted(self.kerning_pairs.items())
+                for (l_cp, r_cp) in sorted(self.kerning_pairs.keys())
             ],
             "glyphs": [
                 self.glyphs[cp].to_canonical_dict()
@@ -353,13 +360,21 @@ class CanonicalFontModel:
 
         metrics = GlobalFontMetrics.from_dict(d["metrics"])
         glyphs: dict[int, CalibratedGlyph] = {}
+        seen_cps: set[int] = set()
         for g_data in d.get("glyphs", []):
             g = CalibratedGlyph.from_dict(g_data)
+            if g.code_point in seen_cps:
+                raise ValueError(f"Duplicate glyph entry for code point {g.code_point}")
+            seen_cps.add(g.code_point)
             glyphs[g.code_point] = g
 
         kerning_pairs: dict[tuple[int, int], int] = {}
+        seen_pairs: set[tuple[int, int]] = set()
         for k_data in d.get("kerning_pairs", []):
             pair_key = (int(k_data["left_cp"]), int(k_data["right_cp"]))
+            if pair_key in seen_pairs:
+                raise ValueError(f"Duplicate kerning pair entry for {pair_key}")
+            seen_pairs.add(pair_key)
             kerning_pairs[pair_key] = int(k_data["kerning_upem"])
 
         model = cls(

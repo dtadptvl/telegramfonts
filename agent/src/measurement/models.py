@@ -200,8 +200,18 @@ class ObservationRecord:
     raster_size_bytes: int
     metrics: DirectMetrics
     created_at: str
-    browser_version: str = "chromium"
-    config_hash: str = ""
+    browser_version: str
+    config_hash: str
+
+    def __post_init__(self) -> None:
+        if not self.browser_version:
+            raise ValueError("ObservationRecord browser_version cannot be empty")
+        if not self.config_hash or len(self.config_hash) != 64:
+            raise ValueError(f"ObservationRecord config_hash must be a 64-char SHA256 digest, got: '{self.config_hash}'")
+        if not self.raster_sha256 or len(self.raster_sha256) != 64:
+            raise ValueError(f"ObservationRecord raster_sha256 must be a 64-char SHA256 digest, got: '{self.raster_sha256}'")
+        if self.raster_size_bytes <= 0:
+            raise ValueError(f"ObservationRecord raster_size_bytes must be positive, got: {self.raster_size_bytes}")
 
     @staticmethod
     def build_cache_key(
@@ -220,8 +230,8 @@ class ObservationRecord:
 
     def validate_cache_key(self) -> bool:
         """Verify that cache_key matches recomputed key from record fields."""
-        if not self.config_hash:
-            return True
+        if not self.config_hash or not self.browser_version:
+            return False
         expected = self.build_cache_key(
             reference_id=self.reference_id,
             style_id=self.style_id,

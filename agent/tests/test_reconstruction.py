@@ -1,6 +1,7 @@
 """Authoritative test suite for MAX Pipeline B Outline Reconstruction."""
 from __future__ import annotations
 
+import hashlib
 import io
 import math
 from pathlib import Path
@@ -85,10 +86,12 @@ def sample_observation_data() -> list[tuple[ObservationRecord, bytes]]:
             subpixel_x=0.0,
             subpixel_y=0.0,
             raster_relative_path=f"test/{res}.png",
-            raster_sha256="abc123",
+            raster_sha256=hashlib.sha256(png_bytes).hexdigest(),
             raster_size_bytes=len(png_bytes),
             metrics=metrics,
             created_at="2026-08-21T00:00:00Z",
+            browser_version="chromium",
+            config_hash="a" * 64,
         )
         records.append((rec, png_bytes))
     return records

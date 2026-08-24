@@ -347,3 +347,23 @@ class ObservationCalibrator:
             )
 
         return calibrated
+
+    @classmethod
+    def compute_calibration_fingerprint(
+        cls,
+        records: Sequence[ObservationRecord],
+        config: ObservationConfig | None = None,
+        units_per_em: int = 1000,
+        min_confidence: float = 0.5,
+    ) -> str:
+        """Compute authoritative deterministic calibration fingerprint over all glyph calibrations."""
+        if not records:
+            return ""
+        calibrated_map = cls.calibrate_all(
+            records, config=config, units_per_em=units_per_em, min_confidence=min_confidence
+        )
+        combined_payload = ":".join(
+            f"{cp}:{calibrated_map[cp].calibration_fingerprint}"
+            for cp in sorted(calibrated_map.keys())
+        )
+        return hashlib.sha256(combined_payload.encode("utf-8")).hexdigest()

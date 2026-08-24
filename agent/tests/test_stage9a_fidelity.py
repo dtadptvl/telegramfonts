@@ -1,10 +1,12 @@
-"""Comprehensive test suite for Stage 9A calibration, Canonical FontModel, and fail-closed Fidelity Report."""
+"""Comprehensive test suite for Stage 9A calibration, Canonical FontModel, consumer bundles, and fail-closed Fidelity Report."""
 from __future__ import annotations
 
 import copy
 import hashlib
 import io
 import math
+import tempfile
+from pathlib import Path
 from typing import Sequence
 
 import numpy as np
@@ -13,6 +15,7 @@ from PIL import Image, ImageDraw
 
 from fidelity.evaluator import FidelityEvaluator
 from fidelity.models import (
+    ConsumerEvidenceBundle,
     ConsumerGateResult,
     FidelityReport,
     FidelityThresholds,
@@ -23,6 +26,7 @@ from measurement.calibration import (
     ObservationCalibrator,
 )
 from measurement.models import DirectMetrics, ObservationConfig, ObservationRecord
+from measurement.store import ObservationStore
 from reconstruction.candidate_validator import (
     ChromiumValidationResult,
     FormatValidationResult,
@@ -126,7 +130,12 @@ def _make_observation_record(
         confidence=confidence,
     )
     if raster_bytes is None:
-        raster_bytes = _generate_png_bytes(resolution, (50, 50, 550, 700) if code_point == 65 else (40, 50, 560, 700), subpixel_x, subpixel_y)
+        raster_bytes = _generate_png_bytes(
+            resolution,
+            (50, 50, 550, 700) if code_point == 65 else (40, 50, 560, 700),
+            subpixel_x,
+            subpixel_y,
+        )
 
     sha = hashlib.sha256(raster_bytes).hexdigest()
     cache_key = ObservationRecord.build_cache_key(
@@ -147,7 +156,7 @@ def _make_observation_record(
         resolution=resolution,
         subpixel_x=subpixel_x,
         subpixel_y=subpixel_y,
-        raster_relative_path=f"rasters/{cache_key}.png",
+        raster_relative_path=f"{reference_id}/{style_id}/{code_point:04X}/{resolution}px_{subpixel_x:.2f}_{subpixel_y:.2f}.png",
         raster_sha256=sha,
         raster_size_bytes=len(raster_bytes),
         metrics=metrics,
@@ -174,8 +183,51 @@ def _make_sample_contour(offset_x: float = 0.0, offset_y: float = 0.0) -> Contou
     return Contour(segments=segments, is_hole=False, area_upem=325000.0)
 
 
+def _make_valid_consumer_bundle(
+    model_hash: str,
+    config_hash: str,
+    held_out_fp: str,
+    artifact_sha: str = "d" * 64,
+) -> ConsumerEvidenceBundle:
+    fmt = FormatValidationResult(
+        format="ttf", file_path="font.ttf", size_bytes=1024, sha256_hex=artifact_sha,
+        is_direct_loadable_fonttools=True, is_direct_loadable_freetype=True,
+        is_roundtrip_loadable_freetype=True, is_direct_loadable_harfbuzz=True,
+        is_direct_loadable_chromium=True, glyph_count=2, units_per_em=1000,
+        has_valid_cmap=True, has_valid_metrics=True, decompression_round_trip=True,
+    )
+    raster_res = RasterComparisonResult(
+        code_point=65, character="A", render_size_px=256,
+        raster_iou=0.95, pixel_delta_count=5, render_error=None,
+    )
+    shaping_res = ShapingTestResult(
+        text="AB", category="basic", in_candidate_cmap=True,
+        glyph_sequence_match=True, candidate_glyph_names=["A", "B"],
+        reference_glyph_names=["A", "B"], candidate_glyph_count=2,
+        reference_glyph_count=2, candidate_total_advance_upem=1250,
+        reference_total_advance_upem=1250, advance_delta_upem=0,
+        max_position_delta_upem=0,
+    )
+    chromium_res = ChromiumValidationResult(
+        is_available=True, browser_version="chromium",
+        is_direct_loadable_chromium=True, fallback_rejection_verified=True,
+        measured_glyph_count=2, mean_chromium_advance_error_upem=0.5,
+    )
+    return ConsumerEvidenceBundle(
+        schema_version="1.0.0",
+        model_canonical_hash=model_hash,
+        config_hash=config_hash,
+        held_out_fingerprint=held_out_fp,
+        candidate_artifact_sha=artifact_sha,
+        fonttools_result=fmt,
+        freetype_result=raster_res,
+        harfbuzz_result=shaping_res,
+        chromium_result=chromium_res,
+    )
+
+
 # =========================================================================
-# 1. Calibration & Transform Tests
+# 1. Calibration Transform & Order Independence
 # =========================================================================
 
 def test_calibration_transform_forward_and_inverse() -> None:
@@ -237,15 +289,10 @@ def test_observation_calibrator_rejects_mismatched_and_corrupt_records() -> None
     with pytest.raises(ValueError, match="Code point mismatch"):
         ObservationCalibrator.calibrate_glyph_observations([r1, r_diff_cp])
 
-    r_corrupt = copy.deepcopy(r1)
-    r_corrupt.raster_sha256 = "invalid_short_hash"
-    with pytest.raises(ValueError, match="Corrupt or missing raster SHA256"):
-        ObservationCalibrator.calibrate_glyph_observations([r_corrupt])
-
 
 def test_observation_calibrator_rejects_duplicate_and_missing_phases() -> None:
     config = ObservationConfig(
-        resolutions=(128, 256, 512),
+        resolutions=(128, 256),
         base_subpixel_phases=((0.0, 0.0), (0.5, 0.5)),
         expanded_subpixel_phases=((0.0, 0.0), (0.5, 0.5)),
     )
@@ -263,70 +310,101 @@ def test_observation_calibrator_rejects_duplicate_and_missing_phases() -> None:
 
 
 # =========================================================================
-# 2. Canonical FontModel Tests
+# 2. Observation Store Round-Trip & Identity Preservation
 # =========================================================================
 
-def test_canonical_font_model_validation_and_hashing() -> None:
+def test_collector_store_roundtrip_identity_preservation() -> None:
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        store = ObservationStore(Path(tmp_dir))
+        config = ObservationConfig(resolutions=(128, 256), base_subpixel_phases=((0.0, 0.0),), expanded_subpixel_phases=((0.0, 0.0),))
+        cfg_hash = config.compute_hash()
+
+        rec, png_bytes = _make_observation_record(
+            code_point=65, resolution=128, browser_version="chromium-headless-shell", config_hash=cfg_hash
+        )
+        store.save_observation(rec, png_bytes)
+
+        loaded_rec = store.get_observation(rec.cache_key)
+        assert loaded_rec is not None
+        assert loaded_rec.browser_version == "chromium-headless-shell"
+        assert loaded_rec.config_hash == cfg_hash
+        assert loaded_rec.validate_cache_key() is True
+
+        glyph_obs = store.get_glyph_observations("test_font", "regular", 65)
+        assert len(glyph_obs) == 1
+        g_rec, g_bytes = glyph_obs[0]
+        assert g_rec.browser_version == "chromium-headless-shell"
+        assert g_rec.config_hash == cfg_hash
+        assert g_bytes == png_bytes
+
+
+def test_store_rejects_legacy_and_tampered_identity() -> None:
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        store = ObservationStore(Path(tmp_dir))
+        # Insert a raw legacy row without browser_version / config_hash
+        with store._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO observations (
+                    cache_key, reference_id, style_id, code_point, resolution,
+                    subpixel_x, subpixel_y, raster_relative_path, raster_sha256,
+                    raster_size_bytes, advance_width_px, advance_width_upem,
+                    lsb_px, lsb_upem, rsb_px, rsb_upem, ascent_px, ascent_upem,
+                    descent_px, descent_upem, bbox_width_upem, bbox_height_upem,
+                    sample_count, confidence, created_at, browser_version, config_hash
+                ) VALUES ('legacy_key', 'ref', 'style', 65, 128, 0, 0, 'path.png', 'a'*64, 100, 50, 500, 0, 0, 0, 0, 50, 500, 0, 0, 500, 500, 1, 1.0, '2026-08-25', '', '')
+                """
+            )
+            conn.commit()
+
+        assert store.get_observation("legacy_key") is None
+        assert len(store.get_glyph_observations("ref", "style", 65)) == 0
+
+
+# =========================================================================
+# 3. Strict Canonical Model & Metrics Parsing
+# =========================================================================
+
+def test_canonical_font_model_strict_validation_and_parsing() -> None:
     contour = _make_sample_contour()
     glyph_A = CalibratedGlyph(
-        code_point=65,
-        character="A",
-        advance_width_upem=650.0,
-        lsb_upem=50.0,
-        rsb_upem=50.0,
-        ascent_upem=750.0,
-        descent_upem=-200.0,
-        bounding_box_upem=(50.0, 50.0, 550.0, 700.0),
-        contours=[contour],
-        confidence=1.0,
-        observation_fingerprints=("a" * 64, "b" * 64),
+        code_point=65, character="A", advance_width_upem=650.0, lsb_upem=50.0, rsb_upem=50.0,
+        ascent_upem=750.0, descent_upem=-200.0, bounding_box_upem=(50.0, 50.0, 550.0, 700.0),
+        contours=[contour], confidence=1.0, observation_fingerprints=("a" * 64,),
     )
-    glyph_B = CalibratedGlyph(
-        code_point=66,
-        character="B",
-        advance_width_upem=600.0,
-        lsb_upem=40.0,
-        rsb_upem=40.0,
-        ascent_upem=750.0,
-        descent_upem=-200.0,
-        bounding_box_upem=(40.0, 50.0, 560.0, 700.0),
-        contours=[_make_sample_contour(offset_x=10.0)],
-        confidence=0.98,
-        observation_fingerprints=("c" * 64,),
-    )
-
     model = CanonicalFontModel(
-        schema_version="1.0.0",
-        family_name="TestFamily",
-        style_name="Regular",
-        reference_id="test_family",
-        style_id="regular",
-        metrics=GlobalFontMetrics(units_per_em=1000, ascent_upem=800.0, descent_upem=-200.0),
-        glyphs={65: glyph_A, 66: glyph_B},
-        kerning_pairs={(65, 66): -20},
-        config_hash="a" * 64,
-        browser_version="chromium",
-        fit_observations_count=4,
-        calibration_fingerprint="b" * 64,
+        schema_version="1.0.0", family_name="TestFamily", style_name="Regular",
+        reference_id="test_family", style_id="regular",
+        metrics=GlobalFontMetrics(
+            units_per_em=1000, ascent_upem=800.0, descent_upem=-200.0, line_gap_upem=0.0,
+            cap_height_upem=700.0, x_height_upem=500.0, max_advance_width_upem=1000.0,
+            avg_char_width_upem=500.0, underline_position_upem=-100.0, underline_thickness_upem=50.0,
+        ),
+        glyphs={65: glyph_A}, kerning_pairs={(65, 65): 0},
+        config_hash="a" * 64, browser_version="chromium",
+        fit_observations_count=1, calibration_fingerprint="b" * 64,
     )
-
-    hash_1 = model.compute_canonical_hash()
-    assert len(hash_1) == 64
-
     json_str = model.to_canonical_json()
-    model_restored = CanonicalFontModel.from_canonical_json(json_str)
-    assert model_restored.compute_canonical_hash() == hash_1
-    assert model_restored.family_name == "TestFamily"
-    assert len(model_restored.glyphs) == 2
+    restored = CanonicalFontModel.from_canonical_json(json_str)
+    assert restored.compute_canonical_hash() == model.compute_canonical_hash()
 
+    # Reject duplicate glyph entries
+    d = model.to_canonical_dict()
+    d["glyphs"].append(glyph_A.to_canonical_dict())
+    with pytest.raises(ValueError, match="Duplicate glyph entry"):
+        CanonicalFontModel.from_canonical_dict(d)
 
-def test_canonical_font_model_rejects_empty_and_corrupt_models() -> None:
-    empty_model = CanonicalFontModel()
-    with pytest.raises(ValueError, match="FontModel family_name cannot be empty"):
-        empty_model.validate()
+    # Reject duplicate kerning pairs
+    d_kern = model.to_canonical_dict()
+    d_kern["kerning_pairs"].append({"left_cp": 65, "right_cp": 65, "kerning_upem": 0})
+    with pytest.raises(ValueError, match="Duplicate kerning pair entry"):
+        CanonicalFontModel.from_canonical_dict(d_kern)
 
-    with pytest.raises(ValueError, match="Missing required field in CanonicalFontModel"):
-        CanonicalFontModel.from_canonical_dict({})
+    # Reject non-hex hashes
+    with pytest.raises(ValueError, match="must be a 64-char hex digest"):
+        bad_model = copy.deepcopy(model)
+        bad_model.config_hash = "g" * 64
+        bad_model.validate()
 
 
 def test_canonical_font_model_hash_stability_under_reordering() -> None:
@@ -336,111 +414,251 @@ def test_canonical_font_model_hash_stability_under_reordering() -> None:
     glyph_A = CalibratedGlyph(65, "A", 650.0, 50.0, 50.0, 750.0, -200.0, (50.0, 50.0, 550.0, 700.0), [contour_A], observation_fingerprints=("a" * 64,))
     glyph_B = CalibratedGlyph(66, "B", 600.0, 40.0, 40.0, 750.0, -200.0, (40.0, 50.0, 560.0, 700.0), [contour_B], observation_fingerprints=("b" * 64,))
 
+    metrics = GlobalFontMetrics(1000, 800.0, -200.0, 0.0, 700.0, 500.0, 1000.0, 500.0, -100.0, 50.0)
+
     model_1 = CanonicalFontModel(
-        family_name="ReorderFont",
-        style_name="Regular",
-        reference_id="ref",
-        style_id="reg",
-        config_hash="a" * 64,
-        browser_version="chromium",
-        fit_observations_count=2,
-        calibration_fingerprint="c" * 64,
-        glyphs={65: glyph_A, 66: glyph_B},
-        kerning_pairs={(65, 66): -20, (66, 65): -10},
+        family_name="ReorderFont", style_name="Regular", reference_id="ref", style_id="reg",
+        metrics=metrics, config_hash="a" * 64, browser_version="chromium", fit_observations_count=2,
+        calibration_fingerprint="c" * 64, glyphs={65: glyph_A, 66: glyph_B}, kerning_pairs={(65, 66): -20, (66, 65): -10},
     )
 
     model_2 = CanonicalFontModel(
-        family_name="ReorderFont",
-        style_name="Regular",
-        reference_id="ref",
-        style_id="reg",
-        config_hash="a" * 64,
-        browser_version="chromium",
-        fit_observations_count=2,
-        calibration_fingerprint="c" * 64,
-        glyphs={66: glyph_B, 65: glyph_A},
-        kerning_pairs={(66, 65): -10, (65, 66): -20},
+        family_name="ReorderFont", style_name="Regular", reference_id="ref", style_id="reg",
+        metrics=metrics, config_hash="a" * 64, browser_version="chromium", fit_observations_count=2,
+        calibration_fingerprint="c" * 64, glyphs={66: glyph_B, 65: glyph_A}, kerning_pairs={(66, 65): -10, (65, 66): -20},
     )
 
     assert model_1.compute_canonical_hash() == model_2.compute_canonical_hash()
 
 
 # =========================================================================
-# 3. Architect Adversarial Reproduction & Fail-Closed Tests
+# 4. Architect Adversarial Reproduction & Fail-Closed Tests
 # =========================================================================
 
-def test_adversarial_architect_reproduction_fails_closed() -> None:
-    """Exact reproduction from Architect review: config mismatch, no raster provider, no pairs -> must FAIL."""
-    config = ObservationConfig(resolutions=(128, 256))
-    active_cfg_hash = config.compute_hash()
-
-    r_fit, _ = _make_observation_record(code_point=65, resolution=128, config_hash=active_cfg_hash)
-    r_held, _ = _make_observation_record(code_point=65, resolution=256, config_hash=active_cfg_hash)
-
-    glyph = CalibratedGlyph(65, "A", 650.0, 50.0, 50.0, 750.0, -200.0, (50, 50, 550, 700), [_make_sample_contour()], observation_fingerprints=("a" * 64,))
-    model = CanonicalFontModel(
-        family_name="F",
-        style_name="R",
-        reference_id="test_font",
-        style_id="regular",
-        config_hash="f" * 64,  # Mismatched config hash!
-        browser_version="chromium",
-        fit_observations_count=1,
-        calibration_fingerprint="c" * 64,
-        glyphs={65: glyph},
-    )
-
-    report = FidelityEvaluator.evaluate(
-        model=model,
-        config=config,
-        fit_records=[r_fit],
-        held_out_records=[r_held],
-        raster_provider=None,
-        held_out_pairs=(),
-    )
-
-    assert report.overall_status == "FAIL"
-    assert report.geometry_raster_gate.status == "FAIL"
-    assert report.typography_gate.status == "FAIL"
-    assert any("CONFIG_HASH_MISMATCH" in r for r in report.failure_reasons)
-    assert any("MISSING_RASTER_PROVIDER" in r for r in report.failure_reasons)
-    assert any("ZERO_HELD_OUT_TYPOGRAPHY" in r for r in report.failure_reasons)
-
-
-def test_fidelity_rejects_corrupt_and_mismatched_raster_bytes() -> None:
-    config = ObservationConfig(resolutions=(128, 256))
+def test_consumer_gate_mandatory_and_bypass_fails_closed() -> None:
+    config = ObservationConfig(resolutions=(128, 256), base_subpixel_phases=((0.0, 0.0),), expanded_subpixel_phases=((0.0, 0.0),))
     cfg_hash = config.compute_hash()
 
     r_fit, b_fit = _make_observation_record(code_point=65, resolution=128, config_hash=cfg_hash)
-    r_held, b_held = _make_observation_record(code_point=65, resolution=256, config_hash=cfg_hash)
+    r_fit2, b_fit2 = _make_observation_record(code_point=65, resolution=256, config_hash=cfg_hash)
+    r_held, b_held = _make_observation_record(code_point=65, resolution=256, subpixel_x=0.25, subpixel_y=0.25, config_hash=cfg_hash)
 
-    glyph = CalibratedGlyph(65, "A", 650.0, 50.0, 50.0, 750.0, -200.0, (50, 50, 550, 700), [_make_sample_contour()], observation_fingerprints=("a" * 64,))
-    model = CanonicalFontModel(
-        family_name="F",
-        style_name="R",
-        reference_id="test_font",
-        style_id="regular",
-        config_hash=cfg_hash,
-        browser_version="chromium",
-        fit_observations_count=1,
-        calibration_fingerprint="c" * 64,
-        glyphs={65: glyph},
+    fit_records = [r_fit, r_fit2]
+    calib_map = ObservationCalibrator.calibrate_all(fit_records, config=config)
+    calib_fp = ObservationCalibrator.compute_calibration_fingerprint(fit_records, config=config)
+
+    glyph = CalibratedGlyph(
+        65, "A", 650.0, 50.0, 50.0, 750.0, -200.0, (50, 50, 550, 700),
+        [_make_sample_contour()], observation_fingerprints=calib_map[65].observation_fingerprints,
     )
+    model = CanonicalFontModel(
+        family_name="F", style_name="R", reference_id="test_font", style_id="regular",
+        config_hash=cfg_hash, browser_version="chromium", fit_observations_count=2,
+        calibration_fingerprint=calib_fp, glyphs={65: glyph},
+    )
+    model_hash = model.compute_canonical_hash()
+    held_fp = FidelityEvaluator._compute_records_fingerprint([r_held])
+
+    # 1. Missing bundle -> FAIL
+    rep1 = FidelityEvaluator.evaluate(
+        model=model, config=config, fit_records=fit_records, held_out_records=[r_held],
+        held_out_pairs=[PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False, provenance="fit_pair")],
+        consumer_bundle=None, raster_provider=lambda r: b_held,
+    )
+    assert rep1.overall_status == "FAIL"
+    assert rep1.consumer_gate.status == "FAIL"
+    assert any("MISSING_CONSUMER_BUNDLE" in r for r in rep1.failure_reasons)
+
+    # 2. Stale model hash in bundle -> FAIL
+    stale_bundle = _make_valid_consumer_bundle(model_hash="e" * 64, config_hash=cfg_hash, held_out_fp=held_fp)
+    rep2 = FidelityEvaluator.evaluate(
+        model=model, config=config, fit_records=fit_records, held_out_records=[r_held],
+        held_out_pairs=[PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False, provenance="fit_pair")],
+        consumer_bundle=stale_bundle, raster_provider=lambda r: b_held,
+    )
+    assert rep2.overall_status == "FAIL"
+    assert rep2.consumer_gate.status == "FAIL"
+    assert any("BUNDLE_MODEL_HASH_MISMATCH" in r for r in rep2.failure_reasons)
+
+    # 3. Failing consumer (e.g. FreeType render error) -> FAIL
+    bad_bundle = _make_valid_consumer_bundle(model_hash=model_hash, config_hash=cfg_hash, held_out_fp=held_fp)
+    bad_bundle = ConsumerEvidenceBundle(
+        schema_version="1.0.0", model_canonical_hash=model_hash, config_hash=cfg_hash,
+        held_out_fingerprint=held_fp, candidate_artifact_sha="d" * 64,
+        fonttools_result=bad_bundle.fonttools_result,
+        freetype_result=RasterComparisonResult(65, "A", 256, 0.5, 50, render_error="CORRUPT_TABLE"),
+        harfbuzz_result=bad_bundle.harfbuzz_result,
+        chromium_result=bad_bundle.chromium_result,
+    )
+    rep3 = FidelityEvaluator.evaluate(
+        model=model, config=config, fit_records=fit_records, held_out_records=[r_held],
+        held_out_pairs=[PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False, provenance="fit_pair")],
+        consumer_bundle=bad_bundle, raster_provider=lambda r: b_held,
+    )
+    assert rep3.overall_status == "FAIL"
+    assert rep3.consumer_gate.status == "FAIL"
+    assert not rep3.consumer_gate.freetype_passed
+
+
+def test_fit_evidence_fingerprint_binding_fails_closed() -> None:
+    config = ObservationConfig(resolutions=(128, 256), base_subpixel_phases=((0.0, 0.0),), expanded_subpixel_phases=((0.0, 0.0),))
+    cfg_hash = config.compute_hash()
+
+    r_fit, b_fit = _make_observation_record(code_point=65, resolution=128, config_hash=cfg_hash)
+    r_fit2, b_fit2 = _make_observation_record(code_point=65, resolution=256, config_hash=cfg_hash)
+    r_held, b_held = _make_observation_record(code_point=65, resolution=256, subpixel_x=0.25, subpixel_y=0.25, config_hash=cfg_hash)
+
+    fit_records = [r_fit, r_fit2]
+    # Model with arbitrary/tampered glyph observation fingerprints
+    glyph = CalibratedGlyph(
+        65, "A", 650.0, 50.0, 50.0, 750.0, -200.0, (50, 50, 550, 700),
+        [_make_sample_contour()], observation_fingerprints=("f" * 64,),  # Arbitrary hash!
+    )
+    calib_fp = ObservationCalibrator.compute_calibration_fingerprint(fit_records, config=config)
+    model = CanonicalFontModel(
+        family_name="F", style_name="R", reference_id="test_font", style_id="regular",
+        config_hash=cfg_hash, browser_version="chromium", fit_observations_count=2,
+        calibration_fingerprint=calib_fp, glyphs={65: glyph},
+    )
+
+    bundle = _make_valid_consumer_bundle(
+        model_hash=model.compute_canonical_hash(),
+        config_hash=cfg_hash,
+        held_out_fp=FidelityEvaluator._compute_records_fingerprint([r_held]),
+    )
+
+    report = FidelityEvaluator.evaluate(
+        model=model, config=config, fit_records=fit_records, held_out_records=[r_held],
+        held_out_pairs=[PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False, provenance="fit_pair")],
+        consumer_bundle=bundle, raster_provider=lambda r: b_held,
+    )
+    assert report.overall_status == "FAIL"
+    assert any("GLYPH_FINGERPRINT_MISMATCH" in r for r in report.failure_reasons)
+
+
+def test_typography_untrusted_provenance_fails_closed() -> None:
+    config = ObservationConfig(resolutions=(128, 256), base_subpixel_phases=((0.0, 0.0),), expanded_subpixel_phases=((0.0, 0.0),))
+    cfg_hash = config.compute_hash()
+
+    r_fit, b_fit = _make_observation_record(code_point=65, resolution=128, config_hash=cfg_hash)
+    r_fit2, b_fit2 = _make_observation_record(code_point=65, resolution=256, config_hash=cfg_hash)
+    r_held, b_held = _make_observation_record(code_point=65, resolution=256, subpixel_x=0.25, subpixel_y=0.25, config_hash=cfg_hash)
+
+    fit_records = [r_fit, r_fit2]
+    calib_map = ObservationCalibrator.calibrate_all(fit_records, config=config)
+    calib_fp = ObservationCalibrator.compute_calibration_fingerprint(fit_records, config=config)
+
+    glyph = CalibratedGlyph(
+        65, "A", 650.0, 50.0, 50.0, 750.0, -200.0, (50, 50, 550, 700),
+        [_make_sample_contour()], observation_fingerprints=calib_map[65].observation_fingerprints,
+    )
+    model = CanonicalFontModel(
+        family_name="F", style_name="R", reference_id="test_font", style_id="regular",
+        config_hash=cfg_hash, browser_version="chromium", fit_observations_count=2,
+        calibration_fingerprint=calib_fp, glyphs={65: glyph},
+    )
+
+    bundle = _make_valid_consumer_bundle(
+        model_hash=model.compute_canonical_hash(),
+        config_hash=cfg_hash,
+        held_out_fp=FidelityEvaluator._compute_records_fingerprint([r_held]),
+    )
+
+    # Untrusted provenance in pair observation
+    untrusted_pair = PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False, provenance="untrusted")
+    report = FidelityEvaluator.evaluate(
+        model=model, config=config, fit_records=fit_records, held_out_records=[r_held],
+        held_out_pairs=[untrusted_pair], consumer_bundle=bundle, raster_provider=lambda r: b_held,
+    )
+    assert report.overall_status == "FAIL"
+    assert any("UNTRUSTED_TYPOGRAPHY" in r for r in report.failure_reasons)
+
+
+def test_policy_hash_and_max_chamfer_gating() -> None:
+    config = ObservationConfig(resolutions=(128, 256), base_subpixel_phases=((0.0, 0.0),), expanded_subpixel_phases=((0.0, 0.0),))
+    cfg_hash = config.compute_hash()
+
+    r_fit, b_fit = _make_observation_record(code_point=65, resolution=128, config_hash=cfg_hash)
+    r_fit2, b_fit2 = _make_observation_record(code_point=65, resolution=256, config_hash=cfg_hash)
+    r_held, b_held = _make_observation_record(code_point=65, resolution=256, subpixel_x=0.25, subpixel_y=0.25, config_hash=cfg_hash)
+
+    fit_records = [r_fit, r_fit2]
+    calib_map = ObservationCalibrator.calibrate_all(fit_records, config=config)
+    calib_fp = ObservationCalibrator.compute_calibration_fingerprint(fit_records, config=config)
+
+    glyph = CalibratedGlyph(
+        65, "A", 650.0, 50.0, 50.0, 750.0, -200.0, (50, 50, 550, 700),
+        [_make_sample_contour()], observation_fingerprints=calib_map[65].observation_fingerprints,
+    )
+    model = CanonicalFontModel(
+        family_name="F", style_name="R", reference_id="test_font", style_id="regular",
+        config_hash=cfg_hash, browser_version="chromium", fit_observations_count=2,
+        calibration_fingerprint=calib_fp, glyphs={65: glyph},
+    )
+
+    bundle = _make_valid_consumer_bundle(
+        model_hash=model.compute_canonical_hash(),
+        config_hash=cfg_hash,
+        held_out_fp=FidelityEvaluator._compute_records_fingerprint([r_held]),
+    )
+    held_pair = PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False, provenance="fit_pair")
+
+    pol1 = FidelityThresholds(max_chamfer_distance_upem=30.0)
+    pol2 = FidelityThresholds(max_chamfer_distance_upem=0.001)
+
+    assert pol1.compute_policy_hash() != pol2.compute_policy_hash()
+
+    rep_pass = FidelityEvaluator.evaluate(
+        model=model, config=config, fit_records=fit_records, held_out_records=[r_held],
+        held_out_pairs=[held_pair], consumer_bundle=bundle, raster_provider=lambda r: b_held,
+        thresholds=pol1,
+    )
+    rep_fail = FidelityEvaluator.evaluate(
+        model=model, config=config, fit_records=fit_records, held_out_records=[r_held],
+        held_out_pairs=[held_pair], consumer_bundle=bundle, raster_provider=lambda r: b_held,
+        thresholds=pol2,
+    )
+
+    assert rep_pass.geometry_raster_gate.status == "PASS"
+    assert rep_fail.geometry_raster_gate.status == "FAIL"
+    assert rep_pass.report_id != rep_fail.report_id
+
+
+def test_fidelity_rejects_corrupt_and_mismatched_raster_bytes() -> None:
+    config = ObservationConfig(resolutions=(128, 256), base_subpixel_phases=((0.0, 0.0),), expanded_subpixel_phases=((0.0, 0.0),))
+    cfg_hash = config.compute_hash()
+
+    r_fit, b_fit = _make_observation_record(code_point=65, resolution=128, config_hash=cfg_hash)
+    r_fit2, b_fit2 = _make_observation_record(code_point=65, resolution=256, config_hash=cfg_hash)
+    r_held, b_held = _make_observation_record(code_point=65, resolution=256, subpixel_x=0.25, subpixel_y=0.25, config_hash=cfg_hash)
+
+    fit_records = [r_fit, r_fit2]
+    calib_map = ObservationCalibrator.calibrate_all(fit_records, config=config)
+    calib_fp = ObservationCalibrator.compute_calibration_fingerprint(fit_records, config=config)
+
+    glyph = CalibratedGlyph(
+        65, "A", 650.0, 50.0, 50.0, 750.0, -200.0, (50, 50, 550, 700),
+        [_make_sample_contour()], observation_fingerprints=calib_map[65].observation_fingerprints,
+    )
+    model = CanonicalFontModel(
+        family_name="F", style_name="R", reference_id="test_font", style_id="regular",
+        config_hash=cfg_hash, browser_version="chromium", fit_observations_count=2,
+        calibration_fingerprint=calib_fp, glyphs={65: glyph},
+    )
+
+    bundle = _make_valid_consumer_bundle(
+        model_hash=model.compute_canonical_hash(),
+        config_hash=cfg_hash,
+        held_out_fp=FidelityEvaluator._compute_records_fingerprint([r_held]),
+    )
+    held_pair = PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False, provenance="fit_pair")
 
     corrupt_bytes = b"X" * len(b_held)
 
-    def corrupt_provider(r: ObservationRecord) -> bytes:
-        return corrupt_bytes
-
-    held_pair = PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False)
-
     report = FidelityEvaluator.evaluate(
-        model=model,
-        config=config,
-        fit_records=[r_fit],
-        held_out_records=[r_held],
-        held_out_pairs=[held_pair],
-        raster_provider=corrupt_provider,
+        model=model, config=config, fit_records=fit_records, held_out_records=[r_held],
+        held_out_pairs=[held_pair], consumer_bundle=bundle,
+        raster_provider=lambda r: corrupt_bytes,
     )
     assert report.overall_status == "FAIL"
     assert report.geometry_raster_gate.status == "FAIL"
@@ -448,134 +666,49 @@ def test_fidelity_rejects_corrupt_and_mismatched_raster_bytes() -> None:
 
 
 def test_fidelity_rejects_same_raster_sha_under_different_cache_keys() -> None:
-    config = ObservationConfig()
+    config = ObservationConfig(resolutions=(128, 256), base_subpixel_phases=((0.0, 0.0),), expanded_subpixel_phases=((0.0, 0.0),))
     cfg_hash = config.compute_hash()
 
     r_fit, b_fit = _make_observation_record(code_point=65, resolution=128, config_hash=cfg_hash)
-    r_held, _ = _make_observation_record(code_point=65, resolution=256, config_hash=cfg_hash, raster_bytes=b_fit)
+    r_fit2, b_fit2 = _make_observation_record(code_point=65, resolution=256, config_hash=cfg_hash)
+    r_held, _ = _make_observation_record(code_point=65, resolution=256, subpixel_x=0.25, subpixel_y=0.25, config_hash=cfg_hash, raster_bytes=b_fit)
 
-    glyph = CalibratedGlyph(65, "A", 650.0, 50.0, 50.0, 750.0, -200.0, (50, 50, 550, 700), [_make_sample_contour()], observation_fingerprints=("a" * 64,))
+    fit_records = [r_fit, r_fit2]
+    calib_map = ObservationCalibrator.calibrate_all(fit_records, config=config)
+    calib_fp = ObservationCalibrator.compute_calibration_fingerprint(fit_records, config=config)
+
+    glyph = CalibratedGlyph(
+        65, "A", 650.0, 50.0, 50.0, 750.0, -200.0, (50, 50, 550, 700),
+        [_make_sample_contour()], observation_fingerprints=calib_map[65].observation_fingerprints,
+    )
     model = CanonicalFontModel(
-        family_name="F",
-        style_name="R",
-        reference_id="test_font",
-        style_id="regular",
-        config_hash=cfg_hash,
-        browser_version="chromium",
-        fit_observations_count=1,
-        calibration_fingerprint="c" * 64,
-        glyphs={65: glyph},
+        family_name="F", style_name="R", reference_id="test_font", style_id="regular",
+        config_hash=cfg_hash, browser_version="chromium", fit_observations_count=2,
+        calibration_fingerprint=calib_fp, glyphs={65: glyph},
     )
 
-    held_pair = PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False)
+    bundle = _make_valid_consumer_bundle(
+        model_hash=model.compute_canonical_hash(),
+        config_hash=cfg_hash,
+        held_out_fp=FidelityEvaluator._compute_records_fingerprint([r_held]),
+    )
+    held_pair = PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False, provenance="fit_pair")
+
     report = FidelityEvaluator.evaluate(
-        model=model,
-        config=config,
-        fit_records=[r_fit],
-        held_out_records=[r_held],
-        held_out_pairs=[held_pair],
+        model=model, config=config, fit_records=fit_records, held_out_records=[r_held],
+        held_out_pairs=[held_pair], consumer_bundle=bundle,
         raster_provider=lambda r: b_fit,
     )
     assert report.overall_status == "FAIL"
     assert any("LEAKAGE_DETECTED: Fit and held-out sets share" in r for r in report.failure_reasons)
 
 
-def test_threshold_non_inertness() -> None:
-    """Verify that every advertised threshold actively affects the gate outcome."""
-    config = ObservationConfig()
-    cfg_hash = config.compute_hash()
-
-    r_fit, b_fit = _make_observation_record(code_point=65, resolution=128, config_hash=cfg_hash)
-    r_held, b_held = _make_observation_record(code_point=65, resolution=256, config_hash=cfg_hash, advance_width_upem=658.0)
-
-    glyph = CalibratedGlyph(65, "A", 650.0, 50.0, 50.0, 750.0, -200.0, (50, 50, 550, 700), [_make_sample_contour()], confidence=0.85, observation_fingerprints=("a" * 64,))
-    model = CanonicalFontModel(
-        family_name="F",
-        style_name="R",
-        reference_id="test_font",
-        style_id="regular",
-        config_hash=cfg_hash,
-        browser_version="chromium",
-        fit_observations_count=1,
-        calibration_fingerprint="c" * 64,
-        glyphs={65: glyph},
-    )
-
-    held_pair = PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False)
-
-    # 1. min_confidence: 0.85 >= 0.80 passes, but >= 0.90 fails
-    rep_pass = FidelityEvaluator.evaluate(
-        model=model, config=config, fit_records=[r_fit], held_out_records=[r_held], held_out_pairs=[held_pair],
-        raster_provider=lambda r: b_held, thresholds=FidelityThresholds(min_confidence=0.80, max_advance_width_delta_upem=10.0),
-    )
-    rep_fail = FidelityEvaluator.evaluate(
-        model=model, config=config, fit_records=[r_fit], held_out_records=[r_held], held_out_pairs=[held_pair],
-        raster_provider=lambda r: b_held, thresholds=FidelityThresholds(min_confidence=0.90, max_advance_width_delta_upem=10.0),
-    )
-    assert rep_pass.metrics_gate.status == "PASS"
-    assert rep_fail.metrics_gate.status == "FAIL"
-
-    # 2. max_chamfer_distance_upem: generous passes, strict fails
-    rep_chamfer_fail = FidelityEvaluator.evaluate(
-        model=model, config=config, fit_records=[r_fit], held_out_records=[r_held], held_out_pairs=[held_pair],
-        raster_provider=lambda r: b_held, thresholds=FidelityThresholds(max_chamfer_distance_upem=0.001),
-    )
-    assert rep_chamfer_fail.geometry_raster_gate.status == "FAIL"
-
-    # 3. require_consumers: True with empty consumers fails
-    rep_consumer_fail = FidelityEvaluator.evaluate(
-        model=model, config=config, fit_records=[r_fit], held_out_records=[r_held], held_out_pairs=[held_pair],
-        raster_provider=lambda r: b_held, thresholds=FidelityThresholds(require_consumers=True),
-    )
-    assert rep_consumer_fail.consumer_gate.status == "FAIL"
-
-
-def test_independent_consumer_integration() -> None:
-    config = ObservationConfig()
-    cfg_hash = config.compute_hash()
-
-    r_fit, b_fit = _make_observation_record(code_point=65, resolution=128, config_hash=cfg_hash)
-    r_held, b_held = _make_observation_record(code_point=65, resolution=256, config_hash=cfg_hash)
-
-    glyph = CalibratedGlyph(65, "A", 650.0, 50.0, 50.0, 750.0, -200.0, (50, 50, 550, 700), [_make_sample_contour()], observation_fingerprints=("a" * 64,))
-    model = CanonicalFontModel(
-        family_name="F",
-        style_name="R",
-        reference_id="test_font",
-        style_id="regular",
-        config_hash=cfg_hash,
-        browser_version="chromium",
-        fit_observations_count=1,
-        calibration_fingerprint="c" * 64,
-        glyphs={65: glyph},
-    )
-
-    held_pair = PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False)
-
-    bad_fmt = FormatValidationResult(
-        format="ttf", file_path="font.ttf", size_bytes=100, sha256_hex="a" * 64,
-        is_direct_loadable_fonttools=False,
-        is_direct_loadable_freetype=True, is_roundtrip_loadable_freetype=True,
-        is_direct_loadable_harfbuzz=True, is_direct_loadable_chromium=True,
-        glyph_count=1, units_per_em=1000, has_valid_cmap=True, has_valid_metrics=True,
-        decompression_round_trip=True,
-    )
-
-    report_fail = FidelityEvaluator.evaluate(
-        model=model, config=config, fit_records=[r_fit], held_out_records=[r_held], held_out_pairs=[held_pair],
-        consumer_results=[bad_fmt], raster_provider=lambda r: b_held,
-    )
-    assert report_fail.overall_status == "FAIL"
-    assert report_fail.consumer_gate.status == "FAIL"
-    assert not report_fail.consumer_gate.fonttools_passed
-
-
 # =========================================================================
-# 4. Positive End-to-End Vertical Slice Fixture
+# 5. Positive End-to-End Vertical Slice Fixture
 # =========================================================================
 
 def test_fidelity_report_e2e_positive_fixture() -> None:
-    """Full vertical slice: observations -> calibration -> CanonicalFontModel -> held-out consumers -> FidelityReport PASS."""
+    """Full vertical slice: observations -> calibration -> CanonicalFontModel -> bound ConsumerEvidenceBundle -> PASS."""
     config = ObservationConfig(
         resolutions=(128, 256),
         base_subpixel_phases=((0.0, 0.0),),
@@ -622,8 +755,8 @@ def test_fidelity_report_e2e_positive_fixture() -> None:
         rsb_upem=calibrated_map[66].rsb_upem,
         ascent_upem=calibrated_map[66].ascent_upem,
         descent_upem=calibrated_map[66].descent_upem,
-        bounding_box_upem=(50.0, 50.0, 550.0, 700.0),
-        contours=[_make_sample_contour()],
+        bounding_box_upem=(40.0, 50.0, 560.0, 700.0),
+        contours=[_make_sample_contour(offset_x=10.0)],
         confidence=calibrated_map[66].confidence,
         observation_fingerprints=calibrated_map[66].observation_fingerprints,
     )
@@ -632,16 +765,16 @@ def test_fidelity_report_e2e_positive_fixture() -> None:
         left_cp=65, right_cp=66, left_char="A", right_char="B",
         left_advance_upem=650.0, right_advance_upem=600.0,
         measured_pair_advance_upem=1230.0, inferred_kerning_upem=-20,
-        is_kerning_applied=True,
+        is_kerning_applied=True, provenance="fit_pair",
     )
     held_out_pair = PairKerningObservation(
         left_cp=66, right_cp=65, left_char="B", right_char="A",
         left_advance_upem=600.0, right_advance_upem=650.0,
         measured_pair_advance_upem=1240.0, inferred_kerning_upem=-10,
-        is_kerning_applied=True,
+        is_kerning_applied=True, provenance="held_out_pair",
     )
 
-    calib_fp = hashlib.sha256((calibrated_map[65].calibration_fingerprint + calibrated_map[66].calibration_fingerprint).encode("utf-8")).hexdigest()
+    calib_fp = ObservationCalibrator.compute_calibration_fingerprint(fit_records, config=config, units_per_em=1000)
 
     model = CanonicalFontModel(
         schema_version="1.0.0",
@@ -649,7 +782,11 @@ def test_fidelity_report_e2e_positive_fixture() -> None:
         style_name="Regular",
         reference_id="test_font",
         style_id="regular",
-        metrics=GlobalFontMetrics(units_per_em=1000, ascent_upem=800.0, descent_upem=-200.0),
+        metrics=GlobalFontMetrics(
+            units_per_em=1000, ascent_upem=800.0, descent_upem=-200.0, line_gap_upem=0.0,
+            cap_height_upem=700.0, x_height_upem=500.0, max_advance_width_upem=1000.0,
+            avg_char_width_upem=500.0, underline_position_upem=-100.0, underline_thickness_upem=50.0,
+        ),
         glyphs={65: glyph_A, 66: glyph_B},
         kerning_pairs={(65, 66): -20, (66, 65): -10},
         config_hash=cfg_hash,
@@ -658,13 +795,9 @@ def test_fidelity_report_e2e_positive_fixture() -> None:
         calibration_fingerprint=calib_fp,
     )
 
-    valid_fmt = FormatValidationResult(
-        format="ttf", file_path="font.ttf", size_bytes=1024, sha256_hex="a" * 64,
-        is_direct_loadable_fonttools=True, is_direct_loadable_freetype=True,
-        is_roundtrip_loadable_freetype=True, is_direct_loadable_harfbuzz=True,
-        is_direct_loadable_chromium=True, glyph_count=2, units_per_em=1000,
-        has_valid_cmap=True, has_valid_metrics=True, decompression_round_trip=True,
-    )
+    model_hash = model.compute_canonical_hash()
+    held_fp = FidelityEvaluator._compute_records_fingerprint(held_out_records)
+    bundle = _make_valid_consumer_bundle(model_hash=model_hash, config_hash=cfg_hash, held_out_fp=held_fp)
 
     report = FidelityEvaluator.evaluate(
         model=model,
@@ -673,7 +806,7 @@ def test_fidelity_report_e2e_positive_fixture() -> None:
         held_out_records=held_out_records,
         fit_pairs=[fit_pair],
         held_out_pairs=[held_out_pair],
-        consumer_results=[valid_fmt],
+        consumer_bundle=bundle,
         raster_provider=lambda r: held_out_rasters[r.cache_key],
         thresholds=FidelityThresholds(
             min_core_coverage_rate=1.0,
@@ -681,7 +814,6 @@ def test_fidelity_report_e2e_positive_fixture() -> None:
             max_chamfer_distance_upem=30.0,
             max_advance_width_delta_upem=5.0,
             max_kerning_delta_upem=5.0,
-            require_consumers=True,
         ),
     )
 

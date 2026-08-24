@@ -1,12 +1,14 @@
 """Immutable observation persistence, lossless raster storage, and SQLite-backed minimal indexing."""
 from __future__ import annotations
 
+import contextlib
 import datetime
 import hashlib
 import json
 import logging
 import os
 import sqlite3
+from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 
@@ -30,10 +32,14 @@ class ObservationStore:
         self.db_path = self.base_dir / "index.sqlite3"
         self._init_db()
 
-    def _get_connection(self) -> sqlite3.Connection:
+    @contextlib.contextmanager
+    def _get_connection(self) -> Generator[sqlite3.Connection, None, None]:
         conn = sqlite3.connect(str(self.db_path), timeout=30.0)
         conn.row_factory = sqlite3.Row
-        return conn
+        try:
+            yield conn
+        finally:
+            conn.close()
 
     def _init_db(self) -> None:
         """Create required tables with indexes for fast resume checks."""
@@ -65,7 +71,9 @@ class ObservationStore:
                     bbox_height_upem REAL NOT NULL,
                     sample_count INTEGER NOT NULL,
                     confidence REAL NOT NULL,
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    browser_version TEXT NOT NULL,
+                    config_hash TEXT NOT NULL
                 )
                 """
             )
@@ -185,6 +193,18 @@ class ObservationStore:
             try:
                 conn.execute(
                     "ALTER TABLE pair_observations ADD COLUMN provenance TEXT NOT NULL DEFAULT 'untrusted'"
+                )
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute(
+                    "ALTER TABLE observations ADD COLUMN browser_version TEXT NOT NULL DEFAULT ''"
+                )
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute(
+                    "ALTER TABLE observations ADD COLUMN config_hash TEXT NOT NULL DEFAULT ''"
                 )
             except sqlite3.OperationalError:
                 pass
@@ -358,6 +378,11 @@ class ObservationStore:
                 confidence=row["confidence"],
             )
 
+            browser_ver = row["browser_version"] if "browser_version" in row.keys() else ""
+            cfg_hash = row["config_hash"] if "config_hash" in row.keys() else ""
+            if not browser_ver or not cfg_hash:
+                return None
+
             return ObservationRecord(
                 cache_key=row["cache_key"],
                 reference_id=row["reference_id"],
@@ -371,6 +396,8 @@ class ObservationStore:
                 raster_size_bytes=row["raster_size_bytes"],
                 metrics=metrics,
                 created_at=row["created_at"],
+                browser_version=browser_ver,
+                config_hash=cfg_hash,
             )
 
     def get_glyph_observations(
@@ -389,6 +416,10 @@ class ObservationStore:
             rows = cur.fetchall()
             results = []
             for row in rows:
+                browser_ver = row["browser_version"] if "browser_version" in row.keys() else ""
+                cfg_hash = row["config_hash"] if "config_hash" in row.keys() else ""
+                if not browser_ver or not cfg_hash:
+                    continue
                 metrics = DirectMetrics(
                     code_point=row["code_point"],
                     character=chr(row["code_point"]),
@@ -423,6 +454,8 @@ class ObservationStore:
                     raster_size_bytes=row["raster_size_bytes"],
                     metrics=metrics,
                     created_at=row["created_at"],
+                    browser_version=browser_ver,
+                    config_hash=cfg_hash,
                 )
                 png_path = self.base_dir / rec.raster_relative_path
                 png_bytes = png_path.read_bytes() if png_path.exists() else b""
@@ -444,8 +477,8 @@ class ObservationStore:
                     raster_size_bytes, advance_width_px, advance_width_upem,
                     lsb_px, lsb_upem, rsb_px, rsb_upem, ascent_px, ascent_upem,
                     descent_px, descent_upem, bbox_width_upem, bbox_height_upem,
-                    sample_count, confidence, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    sample_count, confidence, created_at, browser_version, config_hash
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.cache_key,
@@ -473,6 +506,8 @@ class ObservationStore:
                     record.metrics.sample_count,
                     record.metrics.confidence,
                     record.created_at,
+                    record.browser_version,
+                    record.config_hash,
                 ),
             )
             conn.commit()
