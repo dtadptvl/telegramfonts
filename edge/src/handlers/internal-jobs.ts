@@ -2,6 +2,21 @@ import type { Env } from '../env';
 import { JobService, buildArtifactStorageKey } from '../services/job-service';
 import { emitStructuredLog } from '../utils/logger';
 
+const INTERNAL_AUTH_COMPARE_BYTES = 1024;
+const INTERNAL_AUTH_LENGTH_BYTES = 4;
+const INTERNAL_AUTH_PAYLOAD_BYTES = INTERNAL_AUTH_COMPARE_BYTES - INTERNAL_AUTH_LENGTH_BYTES;
+
+function fixedAuthValue(value: string, encoder: TextEncoder): { bytes: Uint8Array; withinLimit: boolean } {
+  const encoded = encoder.encode(value);
+  const bytes = new Uint8Array(INTERNAL_AUTH_COMPARE_BYTES);
+  new DataView(bytes.buffer).setUint32(0, encoded.byteLength, false);
+  bytes.set(encoded.subarray(0, INTERNAL_AUTH_PAYLOAD_BYTES), INTERNAL_AUTH_LENGTH_BYTES);
+  return {
+    bytes,
+    withinLimit: encoded.byteLength <= INTERNAL_AUTH_PAYLOAD_BYTES,
+  };
+}
+
 export function verifyInternalAuth(request: Request, secret: string | undefined): boolean {
   if (!secret || !secret.trim()) return false;
   const authHeader = request.headers.get('Authorization');
@@ -11,15 +26,10 @@ export function verifyInternalAuth(request: Request, secret: string | undefined)
   if (!token) return false;
 
   const enc = new TextEncoder();
-  const tokenBytes = enc.encode(token);
-  const secretBytes = enc.encode(secret.trim());
-
-  if (tokenBytes.byteLength !== secretBytes.byteLength) return false;
-  let diff = 0;
-  for (let i = 0; i < tokenBytes.byteLength; i++) {
-    diff |= tokenBytes[i] ^ secretBytes[i];
-  }
-  return diff === 0;
+  const tokenValue = fixedAuthValue(token, enc);
+  const secretValue = fixedAuthValue(secret.trim(), enc);
+  const equal = crypto.subtle.timingSafeEqual(tokenValue.bytes, secretValue.bytes);
+  return tokenValue.withinLimit && secretValue.withinLimit && equal;
 }
 
 export function hexToArrayBuffer(hex: string): ArrayBuffer {
@@ -71,7 +81,7 @@ export async function handleInternalJobs(
   const path = url.pathname;
 
   // Match /internal/jobs/:job_id/:action
-  const match = path.match(/^\/internal\/jobs\/([a-zA-Z0-9_-]+)\/(claim|heartbeat|fail|artifact|complete|rearm)$/);
+  const match = path.match(/^\/internal\/jobs\/([a-zA-Z0-9_-]+)\/(claim|heartbeat|fail|artifact|complete|rearm|rescue)$/);
   if (!match) {
     return new Response(JSON.stringify({ error: 'Not Found' }), {
       status: 404,
@@ -598,6 +608,118 @@ export async function handleInternalJobs(
       });
     } catch {
       return new Response(JSON.stringify({ error: 'Rearm failed' }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+  }
+
+  // Route: POST /internal/jobs/:job_id/rescue (exact exhausted-job recovery CAS)
+  if (action === 'rescue') {
+    if (!/^[a-zA-Z0-9_-]{1,64}$/.test(jobId)) {
+      return new Response(JSON.stringify({ error: 'Valid job_id is required' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    const expectedKeys = [
+      'order_id',
+      'outbox_id',
+      'payment_id',
+      'payment_transaction_id',
+      'payment_code',
+      'lease_owner',
+      'lease_expires_at',
+      'attempt_count',
+      'max_attempts',
+      'last_error',
+      'dispatch_attempts',
+    ];
+    const bodyKeys = Object.keys(body);
+    if (
+      bodyKeys.length !== expectedKeys.length ||
+      expectedKeys.some((key) => !Object.prototype.hasOwnProperty.call(body, key))
+    ) {
+      return new Response(JSON.stringify({ error: 'Exact rescue request fields required' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    const orderId = typeof body.order_id === 'string' ? body.order_id.trim() : '';
+    const outboxId = typeof body.outbox_id === 'string' ? body.outbox_id.trim() : '';
+    const paymentId = typeof body.payment_id === 'string' ? body.payment_id.trim() : '';
+    const paymentTransactionId = typeof body.payment_transaction_id === 'string'
+      ? body.payment_transaction_id.trim()
+      : '';
+    const paymentCode = typeof body.payment_code === 'string' ? body.payment_code.trim() : '';
+    const leaseOwner = typeof body.lease_owner === 'string' ? body.lease_owner.trim() : '';
+    const leaseExpiresAt = body.lease_expires_at;
+    const attemptCount = body.attempt_count;
+    const maxAttempts = body.max_attempts;
+    const lastError = typeof body.last_error === 'string' ? body.last_error.trim() : '';
+    const dispatchAttempts = body.dispatch_attempts;
+
+    if (
+      !/^[a-zA-Z0-9_-]{1,64}$/.test(orderId) ||
+      !/^[a-zA-Z0-9_-]{1,64}$/.test(outboxId) ||
+      !/^[a-zA-Z0-9_-]{1,64}$/.test(paymentId) ||
+      !/^[a-zA-Z0-9_.:-]{1,128}$/.test(paymentTransactionId) ||
+      !/^[a-zA-Z0-9_-]{1,64}$/.test(paymentCode) ||
+      !/^[a-zA-Z0-9_-]{1,64}$/.test(leaseOwner) ||
+      typeof leaseExpiresAt !== 'number' ||
+      !Number.isSafeInteger(leaseExpiresAt) ||
+      leaseExpiresAt < 0 ||
+      typeof attemptCount !== 'number' ||
+      !Number.isInteger(attemptCount) ||
+      attemptCount < 0 ||
+      attemptCount > 1000 ||
+      typeof maxAttempts !== 'number' ||
+      !Number.isInteger(maxAttempts) ||
+      maxAttempts < 1 ||
+      maxAttempts >= 1000 ||
+      !/^[a-zA-Z0-9_]{1,64}$/.test(lastError) ||
+      typeof dispatchAttempts !== 'number' ||
+      !Number.isInteger(dispatchAttempts) ||
+      dispatchAttempts < 0 ||
+      dispatchAttempts > 1_000_000
+    ) {
+      return new Response(JSON.stringify({ error: 'Invalid rescue request bounds' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    try {
+      const result = await jobService.rescueExactExhaustedJob({
+        jobId,
+        orderId,
+        outboxId,
+        paymentId,
+        paymentTransactionId,
+        paymentCode,
+        leaseOwner,
+        leaseExpiresAt,
+        attemptCount,
+        maxAttempts,
+        lastError,
+        dispatchAttempts,
+      });
+
+      if (result.status === 'RESCUED') {
+        return new Response(JSON.stringify({ success: true, status: result.status }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      return new Response(JSON.stringify({ error: 'Rescue preconditions not met', status: 'CONFLICT' }), {
+        status: 409,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    } catch {
+      return new Response(JSON.stringify({ error: 'Rescue failed' }), {
         status: 500,
         headers: { 'Content-Type': 'application/json' },
       });

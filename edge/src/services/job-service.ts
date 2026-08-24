@@ -87,6 +87,32 @@ export interface QueueRearmResult {
   status: QueueRearmStatus;
 }
 
+export type ExactJobRescueStatus = 'RESCUED' | 'CONFLICT';
+
+export interface ExactJobRescueResult {
+  status: ExactJobRescueStatus;
+}
+
+export interface ExactJobRescueParams {
+  jobId: string;
+  orderId: string;
+  outboxId: string;
+  paymentId: string;
+  paymentTransactionId: string;
+  paymentCode: string;
+  leaseOwner: string;
+  leaseExpiresAt: number;
+  attemptCount: number;
+  maxAttempts: number;
+  lastError: string;
+  dispatchAttempts: number;
+}
+
+export interface FinalizeExpiredJobsResult {
+  finalizedJobs: number;
+  transitionedOrders: number;
+}
+
 export interface QueueRearmParams {
   jobId: string;
   orderId: string;
@@ -98,8 +124,11 @@ export interface QueueRearmParams {
 }
 
 export const QUEUE_REARM_AUDIT_REASON = 'QUEUE_RETENTION_EXPIRED_RECOVERY';
+export const MAX_ATTEMPTS_EXHAUSTED_REASON = 'max_attempts_exhausted';
+export const MAX_ATTEMPTS_EXHAUSTED_RESCUE_REASON = 'MAX_ATTEMPTS_EXHAUSTED_RESCUE';
 
 const SAFE_INTERNAL_ID = /^[a-zA-Z0-9_-]{1,64}$/;
+const SAFE_LINEAGE_ID = /^[a-zA-Z0-9_.:-]{1,128}$/;
 const MAX_REARM_ATTEMPT_COUNT = 1000;
 const MAX_REARM_DISPATCH_ATTEMPTS = 1_000_000;
 
@@ -114,6 +143,31 @@ function validQueueRearmParams(params: QueueRearmParams): boolean {
     Number.isInteger(params.attemptCount) &&
     params.attemptCount >= 0 &&
     params.attemptCount <= MAX_REARM_ATTEMPT_COUNT &&
+    Number.isInteger(params.dispatchAttempts) &&
+    params.dispatchAttempts >= 0 &&
+    params.dispatchAttempts <= MAX_REARM_DISPATCH_ATTEMPTS
+  );
+}
+
+function validExactJobRescueParams(params: ExactJobRescueParams): boolean {
+  return (
+    SAFE_INTERNAL_ID.test(params.jobId) &&
+    SAFE_INTERNAL_ID.test(params.orderId) &&
+    SAFE_INTERNAL_ID.test(params.outboxId) &&
+    SAFE_INTERNAL_ID.test(params.paymentId) &&
+    SAFE_LINEAGE_ID.test(params.paymentTransactionId) &&
+    SAFE_INTERNAL_ID.test(params.paymentCode) &&
+    SAFE_INTERNAL_ID.test(params.leaseOwner) &&
+    Number.isSafeInteger(params.leaseExpiresAt) &&
+    params.leaseExpiresAt >= 0 &&
+    Number.isInteger(params.attemptCount) &&
+    params.attemptCount >= 0 &&
+    params.attemptCount <= MAX_REARM_ATTEMPT_COUNT &&
+    Number.isInteger(params.maxAttempts) &&
+    params.maxAttempts > 0 &&
+    params.maxAttempts < MAX_REARM_ATTEMPT_COUNT &&
+    params.attemptCount === params.maxAttempts &&
+    params.lastError === MAX_ATTEMPTS_EXHAUSTED_REASON &&
     Number.isInteger(params.dispatchAttempts) &&
     params.dispatchAttempts >= 0 &&
     params.dispatchAttempts <= MAX_REARM_DISPATCH_ATTEMPTS
@@ -229,6 +283,110 @@ export class JobService {
       .first<FulfillmentReceiptRecord>();
   }
 
+  async finalizeExpiredExhaustedJobs(
+    now = Date.now(),
+    batchSize = 25
+  ): Promise<FinalizeExpiredJobsResult> {
+    const boundedBatchSize = Math.max(1, Math.min(batchSize, 25));
+    const candidates = await this.db
+      .prepare(
+        `SELECT id, order_id, lease_expires_at, attempt_count, max_attempts
+         FROM fulfillment_jobs
+         WHERE status = 'PROCESSING'
+           AND lease_expires_at IS NOT NULL
+           AND lease_expires_at <= ?
+           AND attempt_count >= max_attempts
+         ORDER BY lease_expires_at ASC
+         LIMIT ?`
+      )
+      .bind(now, boundedBatchSize)
+      .all<{
+        id: string;
+        order_id: string;
+        lease_expires_at: number;
+        attempt_count: number;
+        max_attempts: number;
+      }>();
+
+    if (candidates.results.length === 0) {
+      return { finalizedJobs: 0, transitionedOrders: 0 };
+    }
+
+    const statements: D1PreparedStatement[] = [];
+    for (const candidate of candidates.results) {
+      statements.push(
+        this.db
+          .prepare(
+            `UPDATE fulfillment_jobs
+             SET status = 'FAILED',
+                 lease_token = NULL,
+                 next_retry_at = NULL,
+                 last_error = ?,
+                 updated_at = ?
+             WHERE id = ?
+               AND order_id = ?
+               AND status = 'PROCESSING'
+               AND lease_expires_at = ?
+               AND lease_expires_at <= ?
+               AND attempt_count = ?
+               AND max_attempts = ?
+               AND attempt_count >= max_attempts`
+          )
+          .bind(
+            MAX_ATTEMPTS_EXHAUSTED_REASON,
+            now,
+            candidate.id,
+            candidate.order_id,
+            candidate.lease_expires_at,
+            now,
+            candidate.attempt_count,
+            candidate.max_attempts
+          )
+      );
+      statements.push(
+        this.db
+          .prepare(
+            `UPDATE orders
+             SET status = 'FAILED', updated_at = ?
+             WHERE id = ?
+               AND status = 'PROCESSING'
+               AND EXISTS (
+                 SELECT 1
+                 FROM fulfillment_jobs
+                 WHERE id = ?
+                   AND order_id = ?
+                   AND status = 'FAILED'
+                   AND last_error = ?
+                   AND updated_at = ?
+                   AND attempt_count = ?
+                   AND max_attempts = ?
+                   AND lease_expires_at = ?
+               )`
+          )
+          .bind(
+            now,
+            candidate.order_id,
+            candidate.id,
+            candidate.order_id,
+            MAX_ATTEMPTS_EXHAUSTED_REASON,
+            now,
+            candidate.attempt_count,
+            candidate.max_attempts,
+            candidate.lease_expires_at
+          )
+      );
+    }
+
+    const results = await this.db.batch(statements);
+    let finalizedJobs = 0;
+    let transitionedOrders = 0;
+    for (let i = 0; i < candidates.results.length; i++) {
+      if (results[i * 2].meta.changes === 1) finalizedJobs++;
+      if (results[i * 2 + 1].meta.changes === 1) transitionedOrders++;
+    }
+    return { finalizedJobs, transitionedOrders };
+  }
+
   async rearmExpiredQueueEvent(params: QueueRearmParams): Promise<QueueRearmResult> {
     const cleanParams: QueueRearmParams = {
       jobId: params.jobId.trim(),
@@ -284,6 +442,237 @@ export class JobService {
       .first<{ matched: number }>();
 
     return alreadyRearmed ? { status: 'ALREADY_REARMED' } : { status: 'CONFLICT' };
+  }
+
+  async rescueExactExhaustedJob(params: ExactJobRescueParams): Promise<ExactJobRescueResult> {
+    const cleanParams: ExactJobRescueParams = {
+      jobId: params.jobId.trim(),
+      orderId: params.orderId.trim(),
+      outboxId: params.outboxId.trim(),
+      paymentId: params.paymentId.trim(),
+      paymentTransactionId: params.paymentTransactionId.trim(),
+      paymentCode: params.paymentCode.trim(),
+      leaseOwner: params.leaseOwner.trim(),
+      leaseExpiresAt: params.leaseExpiresAt,
+      attemptCount: params.attemptCount,
+      maxAttempts: params.maxAttempts,
+      lastError: params.lastError.trim(),
+      dispatchAttempts: params.dispatchAttempts,
+    };
+
+    if (!validExactJobRescueParams(cleanParams)) {
+      return { status: 'CONFLICT' };
+    }
+
+    const now = Date.now();
+    const nextMaxAttempts = cleanParams.maxAttempts + 1;
+    const statements: D1PreparedStatement[] = [
+      this.db
+        .prepare(
+          `UPDATE fulfillment_jobs AS j
+           SET status = 'RETRY',
+               max_attempts = max_attempts + 1,
+               next_retry_at = NULL,
+               last_error = ?,
+               lease_owner = NULL,
+               lease_token = NULL,
+               leased_at = NULL,
+               lease_expires_at = NULL,
+               updated_at = ?
+           WHERE j.id = ?
+             AND j.order_id = ?
+             AND j.status = 'FAILED'
+             AND j.attempt_count = ?
+             AND j.max_attempts = ?
+             AND j.lease_owner = ?
+             AND j.lease_expires_at = ?
+             AND j.lease_expires_at <= ?
+             AND j.last_error = ?
+             AND j.artifact_key IS NULL
+             AND j.artifact_sha256 IS NULL
+             AND j.artifact_size_bytes IS NULL
+             AND j.artifact_parts IS NULL
+             AND j.completed_at IS NULL
+             AND NOT EXISTS (
+               SELECT 1 FROM fulfillment_receipts AS r
+               WHERE r.job_id = j.id OR r.order_id = j.order_id
+             )
+             AND NOT EXISTS (
+               SELECT 1 FROM artifacts AS a
+               WHERE a.job_id = j.id OR a.order_id = j.order_id
+             )
+             AND EXISTS (
+               SELECT 1 FROM orders AS o
+               WHERE o.id = ?
+                 AND o.status = 'FAILED'
+                 AND o.payment_code = ?
+             )
+              AND EXISTS (
+                SELECT 1
+                FROM payments AS p
+                JOIN orders AS payment_order ON payment_order.id = p.order_id
+                WHERE p.id = ?
+                  AND p.order_id = ?
+                  AND payment_order.id = ?
+                  AND p.provider = 'SEPAY'
+                  AND p.status = 'VERIFIED'
+                  AND p.transaction_id = ?
+                  AND p.amount = payment_order.total_amount
+                  AND p.currency = payment_order.currency
+              )
+             AND (
+               SELECT COUNT(*) FROM payments
+               WHERE order_id = ? AND provider = 'SEPAY' AND status = 'VERIFIED'
+             ) = 1
+             AND EXISTS (
+               SELECT 1 FROM outbox_events AS e
+               WHERE e.id = ?
+                 AND e.event_type = 'JOB_READY'
+                 AND e.aggregate_type = 'ORDER'
+                 AND e.aggregate_id = ?
+                 AND e.status = 'SENT'
+                 AND e.dispatch_attempts = ?
+                 AND e.dispatched_at IS NOT NULL
+                 AND e.dispatch_lease_token IS NULL
+                 AND e.dispatch_leased_at IS NULL
+                 AND e.dispatch_lease_expires_at IS NULL
+                 AND e.next_dispatch_at IS NULL
+                 AND json_valid(e.payload) = 1
+                 AND json_extract(e.payload, '$.job_id') = ?
+             )
+             AND (
+               SELECT COUNT(*) FROM outbox_events
+               WHERE event_type = 'JOB_READY'
+                 AND aggregate_id = ?
+             ) = 1`
+        )
+        .bind(
+          MAX_ATTEMPTS_EXHAUSTED_RESCUE_REASON,
+          now,
+          cleanParams.jobId,
+          cleanParams.orderId,
+          cleanParams.attemptCount,
+          cleanParams.maxAttempts,
+          cleanParams.leaseOwner,
+          cleanParams.leaseExpiresAt,
+          now,
+          cleanParams.lastError,
+          cleanParams.orderId,
+           cleanParams.paymentCode,
+           cleanParams.paymentId,
+           cleanParams.orderId,
+           cleanParams.orderId,
+           cleanParams.paymentTransactionId,
+          cleanParams.orderId,
+          cleanParams.outboxId,
+          cleanParams.orderId,
+          cleanParams.dispatchAttempts,
+          cleanParams.jobId,
+          cleanParams.orderId
+        ),
+      this.db
+        .prepare(
+          `UPDATE orders AS o
+           SET status = 'PROCESSING', updated_at = ?
+           WHERE o.id = ?
+             AND o.status = 'FAILED'
+             AND o.payment_code = ?
+             AND EXISTS (
+               SELECT 1 FROM fulfillment_jobs AS j
+               WHERE j.id = ?
+                 AND j.order_id = ?
+                 AND j.status = 'RETRY'
+                 AND j.attempt_count = ?
+                 AND j.max_attempts = ?
+                 AND j.last_error = ?
+                 AND j.updated_at = ?
+             )
+           AND EXISTS (
+              SELECT 1 FROM payments AS p
+              WHERE p.id = ?
+                AND p.order_id = o.id
+                AND p.provider = 'SEPAY'
+                AND p.status = 'VERIFIED'
+                AND p.transaction_id = ?
+                AND p.amount = o.total_amount
+                AND p.currency = o.currency
+              )
+             AND (
+               SELECT COUNT(*) FROM payments
+               WHERE order_id = o.id AND provider = 'SEPAY' AND status = 'VERIFIED'
+             ) = 1`
+        )
+        .bind(
+          now,
+          cleanParams.orderId,
+          cleanParams.paymentCode,
+          cleanParams.jobId,
+          cleanParams.orderId,
+          cleanParams.attemptCount,
+          nextMaxAttempts,
+          MAX_ATTEMPTS_EXHAUSTED_RESCUE_REASON,
+          now,
+          cleanParams.paymentId,
+          cleanParams.paymentTransactionId
+        ),
+      this.db
+        .prepare(
+          `UPDATE outbox_events AS e
+           SET status = 'PENDING',
+               dispatched_at = NULL,
+               dispatch_lease_token = NULL,
+               dispatch_leased_at = NULL,
+               dispatch_lease_expires_at = NULL,
+               next_dispatch_at = NULL,
+               last_dispatch_error = ?
+           WHERE e.id = ?
+             AND e.event_type = 'JOB_READY'
+             AND e.aggregate_type = 'ORDER'
+             AND e.aggregate_id = ?
+             AND e.status = 'SENT'
+             AND e.dispatch_attempts = ?
+             AND e.dispatched_at IS NOT NULL
+             AND e.dispatch_lease_token IS NULL
+             AND e.dispatch_leased_at IS NULL
+             AND e.dispatch_lease_expires_at IS NULL
+             AND e.next_dispatch_at IS NULL
+             AND json_valid(e.payload) = 1
+             AND json_extract(e.payload, '$.job_id') = ?
+             AND EXISTS (
+               SELECT 1 FROM fulfillment_jobs AS j
+               WHERE j.id = ?
+                 AND j.order_id = ?
+                 AND j.status = 'RETRY'
+                 AND j.attempt_count = ?
+                 AND j.max_attempts = ?
+                 AND j.last_error = ?
+                 AND j.updated_at = ?
+             )
+             AND EXISTS (
+               SELECT 1 FROM orders AS o
+               WHERE o.id = ? AND o.status = 'PROCESSING'
+             )`
+        )
+        .bind(
+          MAX_ATTEMPTS_EXHAUSTED_RESCUE_REASON,
+          cleanParams.outboxId,
+          cleanParams.orderId,
+          cleanParams.dispatchAttempts,
+          cleanParams.jobId,
+          cleanParams.jobId,
+          cleanParams.orderId,
+          cleanParams.attemptCount,
+          nextMaxAttempts,
+          MAX_ATTEMPTS_EXHAUSTED_RESCUE_REASON,
+          now,
+          cleanParams.orderId
+        ),
+    ];
+
+    const results = await this.db.batch(statements);
+    return results.every((result) => result.meta.changes === 1)
+      ? { status: 'RESCUED' }
+      : { status: 'CONFLICT' };
   }
 
   async validateLeaseForArtifactUpload(
@@ -379,32 +768,32 @@ export class JobService {
                    lease_token = NULL,
                    leased_at = NULL,
                    lease_expires_at = NULL,
-                   last_error = 'max_attempts_exhausted',
+                   last_error = ?,
                    updated_at = ?
                WHERE id = ?
                  AND status = 'PROCESSING'
                  AND (lease_expires_at IS NULL OR lease_expires_at <= ?)
                  AND attempt_count >= max_attempts`
             )
-            .bind(now, jobId, now),
+             .bind(MAX_ATTEMPTS_EXHAUSTED_REASON, now, jobId, now),
           this.db
             .prepare(
               `UPDATE orders
                SET status = 'FAILED', updated_at = ?
                WHERE id = (
                  SELECT order_id FROM fulfillment_jobs
-                 WHERE id = ? AND status = 'FAILED' AND last_error = 'max_attempts_exhausted' AND updated_at = ?
+                 WHERE id = ? AND status = 'FAILED' AND last_error = ? AND updated_at = ?
                )
                AND status = 'PROCESSING'`
             )
-            .bind(now, jobId, now),
+             .bind(now, jobId, MAX_ATTEMPTS_EXHAUSTED_REASON, now),
         ]);
       }
 
       return {
         status: 'TERMINAL',
         queue_action: 'ack',
-        reason: 'max_attempts_exhausted',
+        reason: MAX_ATTEMPTS_EXHAUSTED_REASON,
       };
     }
 
@@ -994,7 +1383,7 @@ export class JobService {
     }
 
     const terminalReason =
-      job.attempt_count >= job.max_attempts ? 'max_attempts_exhausted' : cleanReason;
+      job.attempt_count >= job.max_attempts ? MAX_ATTEMPTS_EXHAUSTED_REASON : cleanReason;
 
     const statements: D1PreparedStatement[] = [
       this.db

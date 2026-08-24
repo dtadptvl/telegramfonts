@@ -27,6 +27,62 @@ logger = logging.getLogger("telegramfonts.agent.runner")
 
 LEASE_SAFETY_MARGIN_MS = 15000  # 15s deadline safety margin
 
+FENCED_ERROR_CODE = "LEASE_FENCED_OR_EXPIRED"
+UNEXPECTED_ERROR_CODE = "UNEXPECTED_RUNTIME_ERROR"
+
+TERMINAL_ERROR_CODES = frozenset({
+    "INVALID_SOURCE_URL",
+    "NO_PUBLIC_PREVIEW_FOUND",
+    "SOURCE_ACQUISITION_BLOCKED_403",
+    "SOURCE_ACQUISITION_BLOCKED_429",
+    "SOURCE_PREVIEW_PARSE_FAILED",
+    "MALFORMED_SOURCE_INPUT",
+    "CORRUPT_SOURCE_IMAGE",
+    "UNSUPPORTED_FORMAT",
+    "NO_FILES_GENERATED",
+})
+
+KNOWN_ERROR_CODES = frozenset(
+    TERMINAL_ERROR_CODES
+    | {
+        FENCED_ERROR_CODE,
+        "MISSING_SOURCE_PAYLOAD",
+        "FINAL_FONT_ARCHIVE_WRITE_FAILED",
+        "NO_OBSERVABLE_BROWSER_FONT_FACES",
+    }
+)
+
+KNOWN_ERROR_PREFIXES = (
+    ("STYLE_MISSING_IN_SOURCE_", "STYLE_MISSING_IN_SOURCE"),
+    ("GENERATED_FONT_INVALID_", "GENERATED_FONT_INVALID"),
+    ("SOURCE_HTTP_ERROR_", "SOURCE_HTTP_ERROR"),
+    ("MALFORMED_SOURCE_INPUT_", "MALFORMED_SOURCE_INPUT"),
+    ("MALFORMED_GLYPH_DATA:", "MALFORMED_GLYPH_DATA"),
+    ("NO_OBSERVABLE_GLYPHS_FOR_", "NO_OBSERVABLE_GLYPHS"),
+    ("NO_MAX_RECONSTRUCTION_FOR_", "NO_MAX_RECONSTRUCTION"),
+    ("NO_MAX_STYLES_COMPILED_FOR_", "NO_MAX_STYLES_COMPILED"),
+    ("NO_MAX_OBSERVATIONS_FOUND_FOR_", "NO_MAX_OBSERVATIONS_FOUND"),
+    ("NO_MAX_RECONSTRUCTED_GLYPHS_AVAILABLE_FOR_", "NO_MAX_RECONSTRUCTED_GLYPHS_AVAILABLE"),
+    ("COMPLETED_MAX_COLLECTION_HAS_NO_COVERAGE_", "COMPLETED_MAX_COLLECTION_HAS_NO_COVERAGE"),
+    ("FAILED_BUILDING_FORMAT_", "FAILED_BUILDING_FORMAT"),
+    ("UNSUPPORTED_ARCHIVE_FORMAT:", "UNSUPPORTED_ARCHIVE_FORMAT"),
+    ("UNSUPPORTED_ARCHIVE_MODE:", "UNSUPPORTED_ARCHIVE_MODE"),
+    ("UNSUPPORTED_FORMAT:", "UNSUPPORTED_FORMAT"),
+    ("EMPTY_ARCHIVE_IDENTITY_", "EMPTY_ARCHIVE_IDENTITY"),
+    ("ARTIFACT_PART_EXCEEDS_CAP:", "ARTIFACT_PART_EXCEEDS_CAP"),
+)
+
+
+def _safe_error_code(exc: Exception) -> str:
+    """Map only known internal errors to bounded codes; never expose exception text."""
+    raw = str(exc)
+    if raw in KNOWN_ERROR_CODES:
+        return raw
+    for prefix, canonical in KNOWN_ERROR_PREFIXES:
+        if raw.startswith(prefix):
+            return canonical
+    return UNEXPECTED_ERROR_CODE
+
 
 class RunnerAction(str, Enum):
     ACKED = "acked"
@@ -90,7 +146,17 @@ class JobRunner:
             if stop_event.is_set():
                 break
 
-            hb_res = await self.worker_client.heartbeat(job_id, lease_token)
+            try:
+                hb_res = await self.worker_client.heartbeat(job_id, lease_token)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "Heartbeat exception for %s; class=%s",
+                    job_id,
+                    type(exc).__name__,
+                )
+                continue
             if hb_res.success and hb_res.lease_expires_at:
                 expiry_holder[0] = hb_res.lease_expires_at
                 logger.debug(f"Heartbeat renewed for job {job_id}, new expiry={hb_res.lease_expires_at}")
@@ -407,32 +473,28 @@ class JobRunner:
                 await self.queue_client.retry_messages([(msg.lease_id, 30)])
                 return ProcessResult(action=RunnerAction.RETRIED, job_id=job.job_id, reason=complete_res.reason)
 
-        except (ValueError, RuntimeError) as exc:
-            err_code = str(exc)
-            logger.warning(f"Error during compute execution for {job.job_id}: {err_code}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            err_code = _safe_error_code(exc)
+            logger.warning(
+                "Error during compute execution for %s: class=%s code=%s",
+                job.job_id,
+                type(exc).__name__,
+                err_code,
+            )
 
-            if "LEASE_FENCED" in err_code:
+            if err_code == FENCED_ERROR_CODE:
                 self.scratch_manager.cleanup_job_dir(job_dir)
                 return ProcessResult(action=RunnerAction.FENCED_ABORT, job_id=job.job_id, reason="fenced")
 
-            terminal_codes = {
-                "INVALID_SOURCE_URL",
-                "NO_PUBLIC_PREVIEW_FOUND",
-                "SOURCE_ACQUISITION_BLOCKED_403",
-                "SOURCE_ACQUISITION_BLOCKED_429",
-                "SOURCE_PREVIEW_PARSE_FAILED",
-                "MALFORMED_SOURCE_INPUT",
-                "CORRUPT_SOURCE_IMAGE",
-                "UNSUPPORTED_FORMAT",
-                "NO_FILES_GENERATED",
-            }
-            is_terminal = any(tc in err_code for tc in terminal_codes)
+            is_terminal = err_code in TERMINAL_ERROR_CODES
 
             fail_res = await self.worker_client.fail(
                 job_id=job.job_id,
                 lease_token=job.lease_token,
                 retryable=not is_terminal,
-                reason_code=err_code[:64],
+                reason_code=err_code,
             )
 
             self.scratch_manager.cleanup_job_dir(job_dir)
@@ -454,7 +516,12 @@ class JobRunner:
         try:
             reqs = await self.worker_client.get_pending_catalog_requests()
         except Exception as exc:
-            logger.warning(f"Error checking pending catalog requests: {exc}")
+            safe_code = _safe_error_code(exc)
+            logger.warning(
+                "Error checking pending catalog requests: class=%s code=%s",
+                type(exc).__name__,
+                safe_code,
+            )
             return 0
 
         if not reqs:
@@ -476,11 +543,23 @@ class JobRunner:
                     logger.warning(f"Transient error completing catalog request {req.id}; leaving retryable")
             except ValueError as exc:
                 # Terminal source/parser/validation failure: fail request out of PENDING and notify user
-                logger.warning(f"Terminal failure processing catalog request {req.id}: {exc}")
-                await self.worker_client.fail_catalog_request(req.id, str(exc))
+                safe_code = _safe_error_code(exc)
+                logger.warning(
+                    "Terminal failure processing catalog request %s: class=%s code=%s",
+                    req.id,
+                    type(exc).__name__,
+                    safe_code,
+                )
+                await self.worker_client.fail_catalog_request(req.id, safe_code)
             except Exception as exc:
                 # Transient network, 5xx, or transport error: leave retryable in D1
-                logger.warning(f"Transient error processing catalog request {req.id}: {exc}")
+                safe_code = _safe_error_code(exc)
+                logger.warning(
+                    "Transient error processing catalog request %s: class=%s code=%s",
+                    req.id,
+                    type(exc).__name__,
+                    safe_code,
+                )
         return processed
 
     async def close(self) -> None:
@@ -535,7 +614,13 @@ class JobRunner:
             except asyncio.CancelledError:
                 break
             except Exception as exc:
-                logger.error(f"Error in runner loop iteration {iterations}: {exc}")
+                safe_code = _safe_error_code(exc)
+                logger.error(
+                    "Error in runner loop iteration %s: class=%s code=%s",
+                    iterations,
+                    type(exc).__name__,
+                    safe_code,
+                )
                 if stop_event is not None:
                     try:
                         await asyncio.wait_for(

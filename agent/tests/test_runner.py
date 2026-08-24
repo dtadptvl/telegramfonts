@@ -13,7 +13,7 @@ from compute.packager import PackagerService
 from compute.source import SourceAcquirer
 from config import Settings
 from queue_client import CloudflareQueueClient, QueueMessage
-from runner import A23Runner, RunnerAction
+from runner import A23Runner, RunnerAction, _safe_error_code
 from worker_client import WorkerJobClient
 
 
@@ -40,6 +40,14 @@ class FixtureSourceAcquirer(SourceAcquirer):
             preview_input=self.preview_bytes,
             allow_web_fallback=allow_web_fallback,
         )
+
+
+def test_safe_error_code_allows_only_known_canonical_values():
+    assert _safe_error_code(RuntimeError("LEASE_FENCED_OR_EXPIRED")) == "LEASE_FENCED_OR_EXPIRED"
+    assert _safe_error_code(RuntimeError("LEASE_FENCED_OR_EXPIRED_SUPERSET")) == "UNEXPECTED_RUNTIME_ERROR"
+    assert _safe_error_code(RuntimeError("UNSUPPORTED_FORMAT_SUPERSET")) == "UNEXPECTED_RUNTIME_ERROR"
+    assert _safe_error_code(RuntimeError("STYLE_MISSING_IN_SOURCE_private-style")) == "STYLE_MISSING_IN_SOURCE"
+    assert _safe_error_code(RuntimeError("source URL https://private.invalid/style")) == "UNEXPECTED_RUNTIME_ERROR"
 
 
 @pytest.mark.asyncio
@@ -343,6 +351,73 @@ async def test_missing_or_blocked_live_preview_fails_without_synthetic_success(t
 
 
 @pytest.mark.asyncio
+async def test_runner_known_terminal_format_error_fails_and_acks(test_settings: Settings):
+    failed_payloads = []
+    acked_leases = []
+
+    def queue_handler(request: httpx.Request) -> httpx.Response:
+        data = json.loads(request.content)
+        if "acks" in data:
+            acked_leases.extend([item["lease_id"] for item in data["acks"]])
+        return httpx.Response(200, json={"success": True})
+
+    def worker_handler(request: httpx.Request) -> httpx.Response:
+        if "claim" in request.url.path:
+            return httpx.Response(
+                200,
+                json={
+                    "job_id": "job_terminal_format",
+                    "order_id": "ord_terminal_format",
+                    "lease_token": "12345678-1234-1234-1234-123456789abc",
+                    "lease_expires_at": int(time.time() * 1000) + 300000,
+                    "source_url": "https://www.myfonts.com/collections/be-vietnam-pro",
+                    "styles": [{"id": "regular", "display_name": "Regular"}],
+                    "formats": ["TTF"],
+                },
+            )
+        if "fail" in request.url.path:
+            failed_payloads.append(json.loads(request.content))
+            return httpx.Response(200, json={"success": True, "status": "FAILED", "queue_action": "ack"})
+        return httpx.Response(404)
+
+    class UnsupportedFormatSourceAcquirer(SourceAcquirer):
+        async def acquire_source(self, source_url, styles, preview_input=None, allow_web_fallback=False):
+            raise ValueError("UNSUPPORTED_FORMAT: WOFF2")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(queue_handler)) as q_http, \
+               httpx.AsyncClient(transport=httpx.MockTransport(worker_handler)) as w_http:
+        q_client = CloudflareQueueClient(test_settings, client=q_http)
+        w_client = WorkerJobClient(test_settings, client=w_http)
+        runner = A23Runner(
+            test_settings,
+            q_client,
+            w_client,
+            source_acquirer=UnsupportedFormatSourceAcquirer(),
+        )
+
+        msg = QueueMessage(
+            id="m_terminal_format",
+            lease_id="l_terminal_format",
+            body_raw='{"job_id":"job_terminal_format"}',
+            attempts=1,
+            job_id="job_terminal_format",
+        )
+        result = await runner.process_message(msg)
+
+        assert result.action == RunnerAction.FAILED_TERMINAL
+        assert result.reason == "UNSUPPORTED_FORMAT"
+        assert failed_payloads == [
+            {
+                "worker_id": test_settings.A23_WORKER_ID,
+                "lease_token": "12345678-1234-1234-1234-123456789abc",
+                "retryable": False,
+                "reason_code": "UNSUPPORTED_FORMAT",
+            }
+        ]
+        assert acked_leases == ["l_terminal_format"]
+
+
+@pytest.mark.asyncio
 async def test_runner_invalid_message_body(test_settings: Settings):
     acked_leases = []
 
@@ -402,6 +477,81 @@ async def test_runner_claim_ack_and_retry_paths(test_settings: Settings):
         res2 = await runner.process_message(msg_conf)
         assert res2.action == RunnerAction.RETRIED
         assert "l_conf" in retried_leases
+
+
+@pytest.mark.asyncio
+async def test_runner_unexpected_exception_after_claim_fails_and_retries(test_settings: Settings):
+    failed_payloads = []
+    retried_leases = []
+
+    def queue_handler(request: httpx.Request) -> httpx.Response:
+        data = json.loads(request.content)
+        if "retries" in data:
+            retried_leases.extend([item["lease_id"] for item in data["retries"]])
+        return httpx.Response(200, json={"success": True})
+
+    def worker_handler(request: httpx.Request) -> httpx.Response:
+        if "claim" in request.url.path:
+            return httpx.Response(
+                200,
+                json={
+                    "job_id": "job_unexpected_exception",
+                    "order_id": "ord_unexpected_exception",
+                    "lease_token": "12345678-1234-1234-1234-123456789abc",
+                    "lease_expires_at": int(time.time() * 1000) + 300000,
+                    "source_url": "https://www.myfonts.com/collections/be-vietnam-pro",
+                    "styles": [{"id": "regular", "display_name": "Regular"}],
+                    "formats": ["TTF"],
+                },
+            )
+        if "heartbeat" in request.url.path:
+            return httpx.Response(
+                200,
+                json={"success": True, "lease_expires_at": int(time.time() * 1000) + 300000},
+            )
+        if "fail" in request.url.path:
+            failed_payloads.append(json.loads(request.content))
+            return httpx.Response(
+                200,
+                json={"success": True, "status": "RETRY", "queue_action": "retry", "delay_seconds": 17},
+            )
+        return httpx.Response(404)
+
+    class UnexpectedSourceAcquirer(SourceAcquirer):
+        async def acquire_source(self, source_url, styles, preview_input=None, allow_web_fallback=False):
+            raise TypeError("unexpected source payload containing untrusted details")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(queue_handler)) as q_http, \
+               httpx.AsyncClient(transport=httpx.MockTransport(worker_handler)) as w_http:
+        q_client = CloudflareQueueClient(test_settings, client=q_http)
+        w_client = WorkerJobClient(test_settings, client=w_http)
+        runner = A23Runner(
+            test_settings,
+            q_client,
+            w_client,
+            source_acquirer=UnexpectedSourceAcquirer(),
+        )
+
+        msg = QueueMessage(
+            id="m_unexpected",
+            lease_id="l_unexpected",
+            body_raw='{"job_id":"job_unexpected_exception"}',
+            attempts=1,
+            job_id="job_unexpected_exception",
+        )
+        result = await runner.process_message(msg)
+
+        assert result.action == RunnerAction.RETRIED
+        assert result.reason == "UNEXPECTED_RUNTIME_ERROR"
+        assert failed_payloads == [
+            {
+                "worker_id": test_settings.A23_WORKER_ID,
+                "lease_token": "12345678-1234-1234-1234-123456789abc",
+                "retryable": True,
+                "reason_code": "UNEXPECTED_RUNTIME_ERROR",
+            }
+        ]
+        assert retried_leases == ["l_unexpected"]
 
 
 @pytest.mark.asyncio
