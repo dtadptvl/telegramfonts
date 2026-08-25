@@ -20,7 +20,7 @@ from acquisition.providers import (
     PersistentSessionBinaryProvider,
     parse_discovery_from_dump,
 )
-from acquisition.adapters import MonotypeRasterHttpClient
+from acquisition.adapters import MonotypeRenderClient
 from compute.binary_cache import AuthorizedBinaryCache, BinaryCacheIdentity
 from compute.openrouter_client import MODEL_ARBITER, MODEL_PRIMARY, OpenRouterAIClient
 from compute.vietnamese import VietnameseAIIntegrityError
@@ -198,54 +198,121 @@ def test_MONOTYPE_TARGET_exact_family_style_md5_on_every_request():
     asyncio.run(run())
 
 
-def test_MONOTYPE_TARGET_production_client_cross_style_echo_fails_closed():
-    page_payload = {"browser_version": "bv", "glyphs": [{"code_point": 65}]}
+def test_MONOTYPE_REAL_PROTOCOL_get_md5_path_render_contract():
+    """Captured request is HTTPS GET to the MD5 path with the approved render
+    query/header contract; no generic POST/Bearer JSON."""
+    captured: list[httpx.Request] = []
+    sprite_b64 = base64.b64encode(b"\x89PNG-fake-sprite").decode()
 
-    def handler_factory(response_overrides: dict):
-        captured: list[dict] = []
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            body = json.loads(request.content)
-            captured.append(body)
-            data = {
-                "family": body.get("family"),
-                "style": body.get("style"),
-                "md5": body.get("md5"),
-                "final": True,
-                "payload": page_payload,
-            }
-            data.update(response_overrides)
-            return httpx.Response(200, json=data)
-
-        return handler, captured
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(
+            200,
+            json={"layout": {"0": {"codePoint": 65}}, "image": sprite_b64},
+        )
 
     async def run():
-        # Correct echo: page accepted with the exact target on the request.
-        handler, captured = handler_factory({})
-        client = MonotypeRasterHttpClient("https://provider.example/raster", "token", timeout_seconds=5)
-        page = await _fetch_with_transport(client, httpx.MockTransport(handler), {"family": "Target Fam", "style": "Regular", "md5": ENVELOPE_MD5})
+        client = MonotypeRenderClient()
+        page = await _fetch_with_transport(
+            client, httpx.MockTransport(handler),
+            {"family": "Real Fam", "style": "Regular", "md5": ENVELOPE_MD5},
+        )
         assert page is not None
-        assert captured[0]["family"] == "Target Fam"
-        assert captured[0]["style"] == "Regular"
-        assert captured[0]["md5"] == ENVELOPE_MD5
-
-        # Cross-style echo (wrong md5) fails closed.
-        handler2, captured2 = handler_factory({"md5": "f" * 32})
-        page2 = await _fetch_with_transport(client, httpx.MockTransport(handler2), {"family": "Target Fam", "style": "Regular", "md5": ENVELOPE_MD5})
-        assert page2 is None
-
-        # Empty target never issues a request.
-        handler3, captured3 = handler_factory({})
-        page3 = await _fetch_with_transport(client, httpx.MockTransport(handler3), {"family": "", "style": "", "md5": ""})
-        assert page3 is None
-        assert captured3 == []
+        req = captured[0]
+        assert req.method == "GET"
+        assert req.url.scheme == "https"
+        assert req.url.host == "sig.monotype.com"
+        assert req.url.path == f"/render/105/font/{ENVELOPE_MD5}"
+        q = dict(req.url.params)
+        assert q["rbe"] == "gmap"
+        assert q["acs_pt"] == "120"
+        assert q["acs_w"] == "1500"
+        assert q["acs_l"] == "1"
+        assert q["acs_ar"] == "0"
+        assert q["acs_p"] == "1"
+        assert q["acs_gpp"] == "100"
+        assert "Authorization" not in req.headers
+        assert req.headers["Referer"] == "https://www.myfonts.com/"
+        assert req.headers["Origin"] == "https://www.myfonts.com"
+        assert "Mozilla" in req.headers["User-Agent"]
 
     import asyncio
 
     asyncio.run(run())
 
 
-async def _fetch_with_transport(client: MonotypeRasterHttpClient, transport, request: dict):
+def _real_shape_response(cps: list[int], page_has_more: bool = False) -> dict:
+    """Sanitized real-shape render response: layout map + base64 sprite."""
+    sprite_b64 = base64.b64encode(b"\x89PNG-real-shape-sprite").decode()
+    layout = {}
+    for i, cp in enumerate(cps):
+        layout[str(i)] = {
+            "codePoint": cp,
+            "metrics": {
+                "advanceWidthPx": 46.8,
+                "lsbPx": 3.6,
+                "rsbPx": 3.6,
+                "ascentPx": 50.4,
+                "descentPx": -14.4,
+                "advanceWidthUpem": 600.0,
+                "lsbUpem": 50.0,
+                "rsbUpem": 50.0,
+                "ascentUpem": 700.0,
+                "descentUpem": -200.0,
+                "bboxWidthUpem": 500.0,
+                "bboxHeightUpem": 650.0,
+            },
+            "box": {"x": 0, "y": 0, "w": 100, "h": 100},
+        }
+    return {"layout": layout, "image": sprite_b64}
+
+
+def test_MONOTYPE_REAL_RESPONSE_real_shape_fixture_yields_pages_and_completion():
+    requests_seen: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        page = int(dict(request.url.params)["acs_p"])
+        requests_seen.append({"page": page, "path": request.url.path})
+        if page == 1:
+            return httpx.Response(200, json=_real_shape_response([65, 66]))
+        # Empty layout marks bounded completion.
+        return httpx.Response(200, json={"layout": {}, "image": base64.b64encode(b"x").decode()})
+
+    async def run():
+        client = MonotypeRenderClient()
+        provider = MonotypeRasterProvider(_TransportBoundClient(client, httpx.MockTransport(handler)))
+        target = {"family": "Real Fam", "style": "Regular", "md5": ENVELOPE_MD5}
+        pages = await provider.fetch_sprite_pages(target, BinaryAcquisitionPolicy(max_sprite_pages=8))
+        assert len(pages) == 1  # bounded completion at empty second page
+        page = pages[0]
+        assert page.glyph_count == 2
+        glyphs = page.payload["glyphs"]
+        assert [g["code_point"] for g in glyphs] == [65, 66]
+        assert all(g["metrics"]["advance_width_upem"] == 600.0 for g in glyphs)
+        assert page.payload["browser_version"] == MonotypeRenderClient.BROWSER_VERSION
+        assert page.raster_bytes == b"\x89PNG-real-shape-sprite"
+        assert [r["path"] for r in requests_seen] == [
+            f"/render/105/font/{ENVELOPE_MD5}",
+            f"/render/105/font/{ENVELOPE_MD5}",
+        ]
+
+    import asyncio
+
+    asyncio.run(run())
+
+
+class _TransportBoundClient:
+    """Bind a mock transport to the production render client for tests."""
+
+    def __init__(self, client: MonotypeRenderClient, transport):
+        self._client = client
+        self._transport = transport
+
+    async def fetch_sprite_page(self, request, cursor):
+        return await _fetch_with_transport(self._client, self._transport, request, cursor=cursor)
+
+
+async def _fetch_with_transport(client, transport, request: dict, cursor: str = ""):
     """Bind a mock transport to the production client for one call."""
     import acquisition.adapters as adapters_mod
 
@@ -258,9 +325,75 @@ async def _fetch_with_transport(client: MonotypeRasterHttpClient, transport, req
 
     adapters_mod.httpx.AsyncClient = patched
     try:
-        return await client.fetch_sprite_page(request, "")
+        return await client.fetch_sprite_page(request, cursor)
     finally:
         adapters_mod.httpx.AsyncClient = original
+
+
+def test_MONOTYPE_BAD_TARGET_fail_closed_matrix():
+    sprite_b64 = base64.b64encode(b"\x89PNG-sprite").decode()
+
+    async def run():
+        client = MonotypeRenderClient()
+
+        # Empty/invalid target: no request, fail closed.
+        def counting_handler(request):
+            raise AssertionError("no request may be issued for an invalid target")
+
+        assert await _fetch_with_transport(client, httpx.MockTransport(counting_handler), {"family": "", "style": "", "md5": ""}) is None
+        assert await _fetch_with_transport(client, httpx.MockTransport(counting_handler), {"family": "F", "style": "R", "md5": "short"}) is None
+
+        # Malformed layout fails closed.
+        bad_layout = httpx.MockTransport(lambda r: httpx.Response(200, json={"layout": "nope", "image": sprite_b64}))
+        assert await _fetch_with_transport(client, bad_layout, {"family": "F", "style": "R", "md5": ENVELOPE_MD5}) is None
+
+        # Missing raster fails closed.
+        no_image = httpx.MockTransport(lambda r: httpx.Response(200, json={"layout": {"0": {"codePoint": 65}}}))
+        assert await _fetch_with_transport(client, no_image, {"family": "F", "style": "R", "md5": ENVELOPE_MD5}) is None
+
+        # Cross-style / invalid code point fails closed.
+        bad_cp = httpx.MockTransport(lambda r: httpx.Response(200, json={"layout": {"0": {"codePoint": -3}}, "image": sprite_b64}))
+        assert await _fetch_with_transport(client, bad_cp, {"family": "F", "style": "R", "md5": ENVELOPE_MD5}) is None
+
+        # Incomplete coverage (pairs/features absent) publishes nothing:
+        # ingestion fails closed before completion is recorded.
+        from acquisition.raster_ingest import ingest_raster_pages
+        from measurement.store import ObservationStore
+        from compute.vietnamese import VietnameseAIIntegrityError  # noqa: F401  (import guard only)
+
+        page = MonotypeRenderClient._parse_page(_real_shape_response([65]), 1)
+        assert page is not None
+        store_dir = Path(tempfile.mkdtemp())
+        store = ObservationStore(store_dir)
+        with pytest.raises(ValueError):
+            ingest_raster_pages(
+                store, ISSUE71_CONFIG, "bad_target_fam", "regular",
+                MonotypeRenderClient.BROWSER_VERSION, [page],
+            )
+        assert store.is_source_collection_completed(
+            "bad_target_fam", "regular",
+            config_hash=ISSUE71_CONFIG.compute_hash(),
+            browser_version=MonotypeRenderClient.BROWSER_VERSION,
+        ) is False
+
+        # Extra pages stay bounded (budget smaller than available pages).
+        page_counter = {"n": 0}
+
+        def endless_handler(request):
+            page_counter["n"] += 1
+            return httpx.Response(200, json=_real_shape_response([65]))
+
+        provider = MonotypeRasterProvider(_TransportBoundClient(client, httpx.MockTransport(endless_handler)))
+        pages = await provider.fetch_sprite_pages(
+            {"family": "F", "style": "R", "md5": ENVELOPE_MD5},
+            BinaryAcquisitionPolicy(max_sprite_pages=2),
+        )
+        assert len(pages) == 2 and page_counter["n"] == 2  # bounded, deterministic
+
+    import asyncio
+    import tempfile
+
+    asyncio.run(run())
 
 
 # =========================================================================

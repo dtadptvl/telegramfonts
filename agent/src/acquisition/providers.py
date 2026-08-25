@@ -303,6 +303,10 @@ class MonotypeRasterProvider:
             page = await self.client.fetch_sprite_page(request, cursor)
             if page is None:
                 break
+            if page.glyph_count == 0:
+                # Empty layout marks bounded completion; the empty page itself
+                # carries no evidence and is never ingested.
+                break
             pages.append(page)
             if page.final or not page.next_cursor:
                 return tuple(pages)

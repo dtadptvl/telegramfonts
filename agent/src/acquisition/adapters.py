@@ -14,6 +14,9 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+import base64
+import hashlib
+
 import httpx
 
 from acquisition.models import BinaryAcquisitionPolicy, DiscoveryEnvelope, SpriteRasterPage
@@ -177,19 +180,127 @@ class AuthorizedSessionHttpTransport:
             return None
 
 
-class MonotypeRasterHttpClient:
-    """Authorized Monotype raster endpoint client (MD5/style-bound closed schema).
+class MonotypeRenderClient:
+    """Authorized Monotype CDN raster client (real MD5-bound render protocol).
 
-    Every page request carries the exact family/style/MD5 target; responses
-    must echo the same target identity or they are rejected fail-closed.
+    Request family: HTTPS GET https://sig.monotype.com/render/105/font/{md5}
+    with the approved render query contract (rbe=gmap, acs_pt/acs_w/acs_l/
+    acs_ar/acs_p/acs_gpp) and browser render headers (User-Agent plus
+    myfonts Referer/Origin). No generic POST/Bearer JSON. Session material is
+    runtime-only (opaque cookies) and never logged or embedded in artifacts.
+
+    Response shape (sanitized real shape): JSON with a `layout` map keyed by
+    glyph entries carrying `codePoint` (plus optional metrics/box fields) and
+    an `image` base64 sprite. Pages are addressed by `acs_p`; an empty layout
+    marks bounded completion. Malformed, mismatched, empty, or incomplete
+    results fail closed (None).
     """
 
-    def __init__(self, endpoint_url: str, token: str, timeout_seconds: float = 60.0) -> None:
-        if not endpoint_url or not token:
-            raise ValueError("MONOTYPE_RASTER_CONFIG_REQUIRED")
-        self.endpoint_url = endpoint_url
-        self._token = token
+    RENDER_PATH = "/render/105/font/"
+    RENDER_QUERY = (
+        ("rbe", "gmap"),
+        ("acs_pt", "120"),
+        ("acs_w", "1500"),
+        ("acs_l", "1"),
+        ("acs_ar", "0"),
+        ("acs_gpp", "100"),
+    )
+    RENDER_USER_AGENT = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    )
+    RENDER_REFERER = "https://www.myfonts.com/"
+    RENDER_ORIGIN = "https://www.myfonts.com"
+    BROWSER_VERSION = "monotype_render_105"
+
+    def __init__(
+        self,
+        session_cookies: dict[str, str] | None = None,
+        base_url: str = "https://sig.monotype.com",
+        timeout_seconds: float = 60.0,
+    ) -> None:
+        self._session_cookies = dict(session_cookies or {})
+        self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
+
+    def _headers(self) -> dict[str, str]:
+        return {
+            "User-Agent": self.RENDER_USER_AGENT,
+            "Referer": self.RENDER_REFERER,
+            "Origin": self.RENDER_ORIGIN,
+        }
+
+    @classmethod
+    def _parse_page(cls, data: Any, page_index: int) -> SpriteRasterPage | None:
+        """Parse one bounded real-shape render response; fail closed on any gap."""
+        if not isinstance(data, dict):
+            return None
+        layout = data.get("layout")
+        if not isinstance(layout, dict):
+            return None
+        image_b64 = data.get("image")
+        if not isinstance(image_b64, str) or not image_b64:
+            return None
+        try:
+            sprite_bytes = base64.b64decode(image_b64, validate=True)
+        except (ValueError, TypeError):
+            return None
+        if not sprite_bytes:
+            return None
+
+        glyphs: list[dict] = []
+        for entry in layout.values():
+            if not isinstance(entry, dict):
+                return None
+            cp_raw = entry.get("codePoint")
+            if not isinstance(cp_raw, int) or cp_raw <= 0:
+                return None
+            metrics_raw = entry.get("metrics") if isinstance(entry.get("metrics"), dict) else entry
+            try:
+                metrics = {
+                    "advance_width_px": float(metrics_raw.get("advanceWidthPx", metrics_raw.get("aw", 0.0))),
+                    "lsb_px": float(metrics_raw.get("lsbPx", metrics_raw.get("lsb", 0.0))),
+                    "rsb_px": float(metrics_raw.get("rsbPx", metrics_raw.get("rsb", 0.0))),
+                    "ascent_px": float(metrics_raw.get("ascentPx", metrics_raw.get("asc", 0.0))),
+                    "descent_px": float(metrics_raw.get("descentPx", metrics_raw.get("desc", 0.0))),
+                    "advance_width_upem": float(metrics_raw.get("advanceWidthUpem", metrics_raw.get("awu", 0.0))),
+                    "lsb_upem": float(metrics_raw.get("lsbUpem", metrics_raw.get("lsbu", 0.0))),
+                    "rsb_upem": float(metrics_raw.get("rsbUpem", metrics_raw.get("rsbu", 0.0))),
+                    "ascent_upem": float(metrics_raw.get("ascentUpem", metrics_raw.get("ascu", 0.0))),
+                    "descent_upem": float(metrics_raw.get("descentUpem", metrics_raw.get("descu", 0.0))),
+                    "bbox_width_upem": float(metrics_raw.get("bboxWidthUpem", metrics_raw.get("bw", 0.0))),
+                    "bbox_height_upem": float(metrics_raw.get("bboxHeightUpem", metrics_raw.get("bh", 0.0))),
+                }
+            except (TypeError, ValueError):
+                return None
+            glyph_entry: dict = {
+                "code_point": cp_raw,
+                "resolution": 120,
+                "subpixel_x": 0.0,
+                "subpixel_y": 0.0,
+                "png_base64": image_b64,
+                "metrics": metrics,
+            }
+            box = entry.get("box") if isinstance(entry.get("box"), dict) else None
+            if box is not None:
+                glyph_entry["sprite_box"] = box
+            glyphs.append(glyph_entry)
+
+        payload = {
+            "browser_version": cls.BROWSER_VERSION,
+            "glyphs": glyphs,
+            "pairs": [],
+            "features": [],
+            "sprite_sha256": hashlib.sha256(sprite_bytes).hexdigest(),
+        }
+        return SpriteRasterPage(
+            page_index=page_index,
+            glyph_count=len(glyphs),
+            raster_bytes=sprite_bytes,
+            next_cursor=str(page_index + 1) if glyphs else "",
+            final=not glyphs,
+            payload=payload,
+        )
 
     async def fetch_sprite_page(self, request: dict[str, Any], cursor: str) -> SpriteRasterPage | None:
         family = str(request.get("family", "")).strip()
@@ -198,45 +309,47 @@ class MonotypeRasterHttpClient:
         if not family or not style or not md5 or len(md5) != 32:
             return None
         try:
-            async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-                resp = await client.post(
-                    self.endpoint_url,
-                    headers={"Authorization": f"Bearer {self._token}"},
-                    json={
-                        "family": family,
-                        "style": style,
-                        "md5": md5,
-                        "cursor": cursor,
-                    },
-                )
+            page_index = int(cursor) if cursor else 1
+        except ValueError:
+            return None
+        if page_index < 1:
+            return None
+        url = f"{self.base_url}{self.RENDER_PATH}{md5}"
+        params = list(self.RENDER_QUERY) + [("acs_p", str(page_index))]
+        try:
+            async with httpx.AsyncClient(
+                timeout=self.timeout_seconds,
+                cookies=self._session_cookies or None,
+                follow_redirects=True,
+            ) as client:
+                resp = await client.get(url, params=params, headers=self._headers())
                 if resp.status_code != 200:
                     return None
                 data = resp.json()
-                if not isinstance(data, dict):
-                    return None
-                # Cross-style/wrong-target responses fail closed.
-                if str(data.get("family", family)).strip() != family:
-                    return None
-                if str(data.get("style", style)).strip() != style:
-                    return None
-                if str(data.get("md5", md5)).strip().lower() != md5:
-                    return None
-                payload = data.get("payload")
-                if not isinstance(payload, dict):
-                    return None
-                glyphs = payload.get("glyphs")
-                if not isinstance(glyphs, list):
-                    return None
-                return SpriteRasterPage(
-                    page_index=int(data.get("page_index", 0)),
-                    glyph_count=len(glyphs),
-                    raster_bytes=b"",
-                    next_cursor=str(data.get("next_cursor", "")),
-                    final=bool(data.get("final", True)),
-                    payload=payload,
-                )
         except Exception:
             return None
+        return self._parse_page(data, page_index)
+
+
+# Backward-compatible alias for composition wiring.
+MonotypeRasterHttpClient = MonotypeRenderClient
+
+
+def _load_session_cookies(material_path: Any) -> dict[str, str]:
+    """Opaque runtime-only session cookies; never logged or embedded."""
+    if material_path is None:
+        return {}
+    try:
+        resolved = Path(material_path).expanduser()
+        if not resolved.is_file():
+            return {}
+        payload = json.loads(resolved.read_text(encoding="utf-8"))
+        cookies = payload.get("cookies") if isinstance(payload, dict) else None
+        if isinstance(cookies, dict):
+            return {str(k): str(v) for k, v in cookies.items()}
+        return {}
+    except Exception:
+        return {}
 
 
 def build_production_acquisition_pipeline(
@@ -266,10 +379,11 @@ def build_production_acquisition_pipeline(
 
     raster_provider = None
     raster_url = str(getattr(settings, "MONOTYPE_RASTER_ENDPOINT_URL", "") or "")
-    raster_token = getattr(settings, "MONOTYPE_RASTER_TOKEN", None)
-    token_value = raster_token.get_secret_value() if raster_token is not None else ""
-    if raster_url and token_value:
-        raster_provider = MonotypeRasterProvider(MonotypeRasterHttpClient(raster_url, token_value))
+    if raster_url:
+        session_cookies = _load_session_cookies(getattr(settings, "AUTHORIZED_SESSION_MATERIAL_FILE", None))
+        raster_provider = MonotypeRasterProvider(
+            MonotypeRenderClient(session_cookies=session_cookies, base_url=raster_url)
+        )
 
     return AcquisitionPipeline(
         dump_dom_transport=dump_dom,
