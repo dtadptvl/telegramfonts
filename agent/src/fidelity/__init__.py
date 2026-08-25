@@ -1,5 +1,5 @@
 """Fidelity evaluation, quality gates, and canonical verification models (Stage 9A / 9B)."""
-from fidelity.evaluator import FidelityEvaluator
+from fidelity.evaluator import FidelityEvaluator, validate_consumer_gate
 from fidelity.models import (
     BoundChromiumEvidence,
     BoundFontToolsEvidence,
@@ -59,4 +59,5 @@ __all__ = [
     "ProductionProducerError",
     "TopologyGateResult",
     "TypographyGateResult",
+    "validate_consumer_gate",
 ]

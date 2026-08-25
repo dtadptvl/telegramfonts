@@ -31,6 +31,7 @@ from fidelity.models import (
     ChromiumGlyphSampleEvidence,
     ChromiumPairSampleEvidence,
     ConsumerEvidenceBundle,
+    FidelityThresholds,
     FreeTypeSampleEvidence,
     HarfBuzzPositionVector,
     HarfBuzzSampleEvidence,
@@ -69,7 +70,11 @@ class CandidateArtifactDescriptor:
             raise ValueError(f"UNSUPPORTED_EXPECTED_FORMAT: '{self.expected_format}'")
         if self.expected_size_bytes <= 0:
             raise ValueError(f"INVALID_EXPECTED_SIZE: {self.expected_size_bytes}")
-        if not self.expected_sha256_hex or len(self.expected_sha256_hex) != 64:
+        if (
+            not self.expected_sha256_hex
+            or len(self.expected_sha256_hex) != 64
+            or any(c not in "0123456789abcdef" for c in self.expected_sha256_hex)
+        ):
             raise ValueError(f"INVALID_EXPECTED_SHA256: '{self.expected_sha256_hex}'")
 
 
@@ -89,19 +94,16 @@ class CandidateArtifact:
         descriptor.validate()
         p = Path(descriptor.file_path)
 
-        if p.exists():
-            disk_bytes = p.read_bytes()
-            if descriptor.raw_bytes is not None and descriptor.raw_bytes != disk_bytes:
-                raise ValueError(
-                    "ARTIFACT_PATH_BYTES_DRIFT: Descriptor raw_bytes do not match file_path content on disk"
-                )
-            raw_bytes = disk_bytes
-            file_path_str = str(p.resolve())
-        elif descriptor.raw_bytes is not None:
-            raw_bytes = descriptor.raw_bytes
-            file_path_str = str(descriptor.file_path)
-        else:
-            raise FileNotFoundError(f"Candidate font file not found: {p}")
+        if not p.is_file():
+            raise FileNotFoundError(f"ARTIFACT_FILE_NOT_FOUND: Candidate font file not found: {p}")
+
+        disk_bytes = p.read_bytes()
+        if descriptor.raw_bytes is not None and descriptor.raw_bytes != disk_bytes:
+            raise ValueError(
+                "ARTIFACT_PATH_BYTES_DRIFT: Descriptor raw_bytes do not match file_path content on disk"
+            )
+        raw_bytes = disk_bytes
+        file_path_str = str(p.resolve())
 
         actual_size = len(raw_bytes)
         if actual_size != descriptor.expected_size_bytes:
@@ -979,6 +981,7 @@ class ProductionConsumerEvidenceProducer:
         held_out_records: Sequence[ObservationRecord],
         held_out_pairs: Sequence[PairKerningObservation],
         raster_provider: Callable[[ObservationRecord], bytes],
+        thresholds: FidelityThresholds | None = None,
     ) -> ConsumerEvidenceBundle:
         """Execute FontTools, FreeType, HarfBuzz, and Chromium against the attested candidate artifact.
 
@@ -1015,7 +1018,7 @@ class ProductionConsumerEvidenceProducer:
         model_hash = model.compute_canonical_hash()
         config_hash = config.compute_hash()
 
-        from fidelity.evaluator import FidelityEvaluator
+        from fidelity.evaluator import FidelityEvaluator, validate_consumer_gate
 
         held_out_raster_fp = FidelityEvaluator._compute_records_fingerprint(held_out_records)
         held_out_typo_fp = FidelityEvaluator._compute_typography_fingerprint(held_out_pairs)
@@ -1034,63 +1037,7 @@ class ProductionConsumerEvidenceProducer:
         hb_evidence = HarfBuzzEvidenceProducer.produce(artifact, model, sorted_pairs)
         cr_evidence = await ChromiumEvidenceProducer.produce(artifact, model, sorted_records, sorted_pairs)
 
-        # 4. Fail-closed production outcome check: if ANY consumer failed quality/policy, do not return a usable PASS bundle
-        ft = ft_evidence.result
-        if (
-            not ft.is_direct_loadable_fonttools
-            or not ft.has_valid_cmap
-            or not ft.has_valid_metrics
-            or not ft.decompression_round_trip
-            or ft.glyph_count <= 0
-            or ft.units_per_em <= 0
-            or ft.validation_error is not None
-        ):
-            raise ProductionProducerError("CONSUMER_PRODUCER_FAILED: FontTools structural validation failed")
-
-        fr = fr_evidence.result
-        if (
-            fr.render_error is not None
-            or not fr.samples
-            or len(fr.samples) != len(held_out_records)
-            or any(s.render_error is not None or s.raster_iou < 0.85 for s in fr.samples)
-            or fr.min_raster_iou < 0.85
-        ):
-            raise ProductionProducerError("CONSUMER_PRODUCER_FAILED: FreeType raster rendering verification failed")
-
-        hb = hb_evidence.result
-        if (
-            hb.error_message is not None
-            or not hb.all_in_cmap
-            or not hb.all_sequence_match
-            or not hb.samples
-            or len(hb.samples) != len(held_out_pairs)
-            or any(
-                s.error_message is not None
-                or not s.in_candidate_cmap
-                or not s.glyph_sequence_match
-                or s.advance_delta_upem > 5.0
-                or s.max_position_delta_upem > 5.0
-                for s in hb.samples
-            )
-        ):
-            raise ProductionProducerError("CONSUMER_PRODUCER_FAILED: HarfBuzz shaping verification failed")
-
-        cr = cr_evidence.result
-        expected_unique_cps = sorted(list({r.code_point for r in held_out_records if r.code_point in model.glyphs}))
-        if (
-            not cr.is_available
-            or not cr.is_direct_loadable_chromium
-            or not cr.fallback_rejection_verified
-            or not cr.rendered_canvas_valid
-            or cr.error_message is not None
-            or not cr.held_out_pairs_non_regression
-            or len(cr.glyph_samples) != len(expected_unique_cps)
-            or len(cr.pair_samples) != len(held_out_pairs)
-            or any(not s.non_regression for s in cr.pair_samples)
-        ):
-            raise ProductionProducerError("CONSUMER_PRODUCER_FAILED: Chromium browser verification failed")
-
-        # 5. Construct and validate bundle
+        # 4. Construct candidate bundle
         bundle = ConsumerEvidenceBundle(
             schema_version="1.0.0",
             model_canonical_hash=model_hash,
@@ -1105,15 +1052,18 @@ class ProductionConsumerEvidenceProducer:
             held_out_typography_fingerprint=held_out_typo_fp,
         )
 
-        binding_errors = bundle.validate_bindings(
-            expected_model_hash=model_hash,
-            expected_config_hash=config_hash,
-            expected_held_out_fingerprint=composite_held_out_fp,
-            expected_raster_fingerprint=held_out_raster_fp,
-            expected_typography_fingerprint=held_out_typo_fp,
+        # 5. Shared single Gate 6 validator check: fail closed if Gate 6 would reject
+        gate_result, gate_failures = validate_consumer_gate(
+            bundle=bundle,
+            model=model,
+            config=config,
+            held_out_records=held_out_records,
+            held_out_pairs=held_out_pairs,
+            thresholds=thresholds or FidelityThresholds(),
         )
-        if binding_errors:
-            raise ValueError(f"CONSUMER_BUNDLE_BINDING_FAILED: {binding_errors}")
+        if gate_result.status != "PASS":
+            reason_summary = "; ".join(gate_failures) if gate_failures else "Consumer gate validation failed"
+            raise ProductionProducerError(f"CONSUMER_PRODUCER_FAILED: {reason_summary}")
 
         return bundle
 
@@ -1126,6 +1076,7 @@ class ProductionConsumerEvidenceProducer:
         held_out_records: Sequence[ObservationRecord],
         held_out_pairs: Sequence[PairKerningObservation],
         raster_provider: Callable[[ObservationRecord], bytes],
+        thresholds: FidelityThresholds | None = None,
     ) -> ConsumerEvidenceBundle:
         """Synchronous wrapper for produce_bundle."""
         return asyncio.run(
@@ -1136,5 +1087,6 @@ class ProductionConsumerEvidenceProducer:
                 held_out_records=held_out_records,
                 held_out_pairs=held_out_pairs,
                 raster_provider=raster_provider,
+                thresholds=thresholds,
             )
         )

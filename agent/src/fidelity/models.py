@@ -297,22 +297,24 @@ class ConsumerEvidenceBundle:
             errors.append(f"BUNDLE_CONFIG_HASH_MISMATCH: {self.config_hash} != {expected_config_hash}")
         if self.held_out_fingerprint != expected_held_out_fingerprint:
             errors.append(f"BUNDLE_HELD_OUT_FP_MISMATCH: {self.held_out_fingerprint} != {expected_held_out_fingerprint}")
-        if (
-            expected_raster_fingerprint
-            and self.held_out_raster_fingerprint
-            and self.held_out_raster_fingerprint != expected_raster_fingerprint
-        ):
-            errors.append(
-                f"BUNDLE_RASTER_FP_MISMATCH: {self.held_out_raster_fingerprint} != {expected_raster_fingerprint}"
-            )
-        if (
-            expected_typography_fingerprint
-            and self.held_out_typography_fingerprint
-            and self.held_out_typography_fingerprint != expected_typography_fingerprint
-        ):
-            errors.append(
-                f"BUNDLE_TYPOGRAPHY_FP_MISMATCH: {self.held_out_typography_fingerprint} != {expected_typography_fingerprint}"
-            )
+        if expected_raster_fingerprint:
+            if not self.held_out_raster_fingerprint:
+                errors.append(
+                    "MISSING_RASTER_FINGERPRINT: held_out_raster_fingerprint is required when raster evidence is evaluated"
+                )
+            elif self.held_out_raster_fingerprint != expected_raster_fingerprint:
+                errors.append(
+                    f"BUNDLE_RASTER_FP_MISMATCH: {self.held_out_raster_fingerprint} != {expected_raster_fingerprint}"
+                )
+        if expected_typography_fingerprint:
+            if not self.held_out_typography_fingerprint:
+                errors.append(
+                    "MISSING_TYPOGRAPHY_FINGERPRINT: held_out_typography_fingerprint is required when typography evidence is evaluated"
+                )
+            elif self.held_out_typography_fingerprint != expected_typography_fingerprint:
+                errors.append(
+                    f"BUNDLE_TYPOGRAPHY_FP_MISMATCH: {self.held_out_typography_fingerprint} != {expected_typography_fingerprint}"
+                )
         if (
             not self.candidate_artifact_sha
             or len(self.candidate_artifact_sha) != 64
