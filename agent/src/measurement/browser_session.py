@@ -98,7 +98,6 @@ class ChromiumSession:
             "--disable-gpu",
             "--no-sandbox",
             "--disable-dev-shm-usage",
-            "--disable-software-rasterizer",
             "--disable-background-networking",
             "--disable-sync",
             "--disable-extensions",

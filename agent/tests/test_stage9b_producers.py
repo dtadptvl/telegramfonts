@@ -661,8 +661,16 @@ async def test_production_consumer_bundle_assembler_positive_fixture() -> None:
         glyph_A = CalibratedGlyph(65, "A", 650.0, 50.0, 50.0, 750.0, -200.0, (50, 50, 550, 700), [contour_A], observation_fingerprints=calibrated_map[65].observation_fingerprints)
         glyph_B = CalibratedGlyph(66, "B", 600.0, 40.0, 40.0, 750.0, -200.0, (40, 50, 560, 700), [contour_B], observation_fingerprints=calibrated_map[66].observation_fingerprints)
 
-        fit_pair = PairKerningObservation(65, 66, "A", "B", 650.0, 600.0, 1230.0, -20, True, provenance="chromium:chromium:canvas_text_metrics")
-        held_out_pair = PairKerningObservation(66, 65, "B", "A", 600.0, 650.0, 1240.0, -10, True, provenance="chromium:chromium:canvas_text_metrics")
+        fit_pair = PairKerningObservation(
+            65, 66, "A", "B", 650.0, 600.0, 1230.0, -20, True,
+            provenance="chromium:chromium:canvas_text_metrics",
+            reference_id="test_font", style_id="regular", browser_version="chromium", config_hash=cfg_hash,
+        )
+        held_out_pair = PairKerningObservation(
+            66, 65, "B", "A", 600.0, 650.0, 1240.0, -10, True,
+            provenance="chromium:chromium:canvas_text_metrics",
+            reference_id="test_font", style_id="regular", browser_version="chromium", config_hash=cfg_hash,
+        )
 
         model = CanonicalFontModel(
             schema_version="1.0.0",
