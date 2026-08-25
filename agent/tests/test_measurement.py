@@ -312,7 +312,7 @@ async def test_browser_session_font_restoration_and_fallback_rejection():
         assert "BeVietnamTestFont" in session._loaded_font_blobs
         assert await session.is_glyph_supported_in_font("BeVietnamTestFont", ord("A")) is True
     finally:
-        session.close()
+        await session.aclose()
 
 
 def test_ground_truth_coverage_set_comparison_rejects_equal_count_mismatch(tmp_path):

@@ -193,17 +193,22 @@ def _sanitize_text(value: str) -> str:
     text = re.sub(r"(?i)(target[ _-]?id\s*[:=]\s*)[^\s,;]+", r"\1<redacted>", text)
     text = re.sub(r"(?i)(/devtools/page/)[^/\s\"']+", r"\1<target>", text)
     text = re.sub(
+        r"(?i)\b(authorization\s*[:=]\s*(?:(?:bearer|basic)\s+)?)\S+",
+        r"\1<redacted>",
+        text,
+    )
+    text = re.sub(
         r"(?i)\b(?:[a-z0-9]+[_-])*(?:token|secret|password|api[_-]?key)"
         r"\s*[:=]\s*[^\s,;]+",
         "<credential>=<redacted>",
         text,
     )
     text = re.sub(
-        r"(?i)\b(authorization|token|secret|password)(\s*[:=]\s*)[^\s,;]+",
+        r"(?i)\b(token|secret|password)(\s*[:=]\s*)[^\s,;]+",
         r"\1\2<redacted>",
         text,
     )
-    text = re.sub(r"(?:[A-Za-z]:[\\/]|/)(?:[^\s\"'<>|]+)", "<path>", text)
+    text = re.sub(r"(?:[A-Za-z]:[\\/]|/)[^\r\n\"'<>|,;]+", "<path>", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text[:_DIAGNOSTIC_MESSAGE_CHARS]
 
@@ -288,6 +293,18 @@ def find_chromium_executable() -> str:
             return cand
 
     raise RuntimeError("CHROMIUM_EXECUTABLE_NOT_FOUND: no Chromium / Chrome binary found on host")
+
+
+async def close_browser_session(session: Any) -> Any:
+    """Await owned browser cleanup while retaining compatibility with test doubles."""
+    closer = getattr(session, "aclose", None)
+    if closer is not None:
+        result = closer()
+    else:
+        result = session.close()
+    if inspect.isawaitable(result):
+        return await result
+    return result
 
 
 class ChromiumSession:
@@ -393,7 +410,8 @@ class ChromiumSession:
             http_url = f"http://127.0.0.1:{target_port}"
             page_ws_url: str | None = None
 
-            for _ in range(50):
+            discovery_attempts = max(50, int(self.timeout_seconds * 10))
+            for _ in range(discovery_attempts):
                 if self.process.poll() is not None:
                     raise RuntimeError("CHROMIUM_PROCESS_EXITED_DURING_CDP_DISCOVERY")
                 try:

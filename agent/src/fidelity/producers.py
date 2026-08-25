@@ -37,7 +37,7 @@ from fidelity.models import (
     HarfBuzzSampleEvidence,
     ProductionProducerError,
 )
-from measurement.browser_session import ChromiumSession, find_chromium_executable
+from measurement.browser_session import ChromiumSession, close_browser_session, find_chromium_executable
 from measurement.calibration import CalibrationTransform
 from measurement.models import ObservationConfig, ObservationRecord
 from reconstruction.candidate_validator import (
@@ -966,7 +966,7 @@ class ChromiumEvidenceProducer:
             )
         finally:
             if owns_session:
-                sess.close()
+                await close_browser_session(sess)
 
 
 class ProductionConsumerEvidenceProducer:

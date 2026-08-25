@@ -9,7 +9,7 @@ import pytest
 from websockets.exceptions import InvalidMessage
 
 import measurement.browser_session as browser_session
-from measurement.browser_session import ChromiumSession, ChromiumSessionError
+from measurement.browser_session import ChromiumSession, ChromiumSessionError, _sanitize_text
 
 
 class FakeProcess:
@@ -75,6 +75,17 @@ def test_endpoint_drift_is_rejected_before_websocket_connect(url: str, reason: s
         session._validate_endpoint(url, 9222)
 
 
+def test_diagnostic_redaction_covers_bearer_values_and_spaced_paths():
+    safe = _sanitize_text(
+        "Authorization: Bearer super-secret-value at C:\\Users\\runner temp\\profile data"
+    )
+    assert "super-secret-value" not in safe
+    assert "runner temp" not in safe
+    assert "profile data" not in safe
+    assert "<redacted>" in safe
+    assert "<path>" in safe
+
+
 @pytest.mark.asyncio
 async def test_discovered_endpoint_is_rejected_before_connect(monkeypatch):
     session = ChromiumSession(executable_path="unused", port=9222)
@@ -108,22 +119,49 @@ async def test_discovered_endpoint_is_rejected_before_connect(monkeypatch):
 @pytest.mark.asyncio
 async def test_loopback_websocket_ignores_ambient_proxy(monkeypatch):
     session = ChromiumSession(executable_path="unused")
-    calls: dict[str, object] = {}
+    direct_attempts = 0
+    proxy_attempts = 0
 
-    async def fake_connect(url: str, *, proxy: object = True, max_size: int) -> object:
-        calls.update(url=url, proxy=proxy, max_size=max_size)
-        return object()
+    async def direct_handler(reader, writer):
+        nonlocal direct_attempts
+        direct_attempts += 1
+        writer.close()
+        await writer.wait_closed()
 
-    monkeypatch.setattr(browser_session.websockets, "connect", fake_connect)
+    async def proxy_handler(reader, writer):
+        nonlocal proxy_attempts
+        proxy_attempts += 1
+        writer.close()
+        await writer.wait_closed()
+
+    direct_server = await asyncio.start_server(direct_handler, "127.0.0.1", 0)
+    proxy_server = await asyncio.start_server(proxy_handler, "127.0.0.1", 0)
+    direct_port = direct_server.sockets[0].getsockname()[1]
+    proxy_port = proxy_server.sockets[0].getsockname()[1]
     monkeypatch.setenv("HTTP_PROXY", "http://proxy.invalid:8080")
-    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.invalid:8080")
-    monkeypatch.setenv("ALL_PROXY", "http://proxy.invalid:8080")
+    monkeypatch.setenv("HTTPS_PROXY", f"http://127.0.0.1:{proxy_port}")
+    monkeypatch.setenv("ALL_PROXY", f"http://127.0.0.1:{proxy_port}")
+    monkeypatch.setenv("http_proxy", f"http://127.0.0.1:{proxy_port}")
+    monkeypatch.setenv("https_proxy", f"http://127.0.0.1:{proxy_port}")
+    monkeypatch.setenv("all_proxy", f"http://127.0.0.1:{proxy_port}")
+    monkeypatch.setenv("NO_PROXY", "")
+    monkeypatch.setenv("no_proxy", "")
 
-    await session._connect_websocket("ws://127.0.0.1:9222/devtools/page/opaque")
+    try:
+        with pytest.raises(Exception):
+            await session._connect_websocket(
+                f"ws://127.0.0.1:{direct_port}/devtools/page/opaque"
+            )
+        await asyncio.sleep(0)
+    finally:
+        direct_server.close()
+        proxy_server.close()
+        await direct_server.wait_closed()
+        await proxy_server.wait_closed()
 
-    assert calls["proxy"] is None
-    assert calls["max_size"] == 20 * 1024 * 1024
-    assert browser_session.os.environ["HTTP_PROXY"] == "http://proxy.invalid:8080"
+    assert direct_attempts == 1
+    assert proxy_attempts == 0
+    assert browser_session.os.environ["HTTP_PROXY"] == f"http://127.0.0.1:{proxy_port}"
 
 
 @pytest.mark.asyncio
