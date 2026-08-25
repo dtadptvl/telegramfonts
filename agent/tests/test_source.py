@@ -203,19 +203,31 @@ async def test_production_acquire_source_known_store_hit_zero_http_calls(tmp_pat
         fixture_store = tmp_path / "benchmark_fixture"
         fixture_store.mkdir()
         shutil.copy2("observations/benchmark/index.sqlite3", fixture_store / "index.sqlite3")
-        shutil.copy2(
-            "observations/benchmark/reconstructed_be_vietnam_pro_regular.pkl",
-            fixture_store / "reconstructed_be_vietnam_pro_regular.pkl",
-        )
         acquirer = SourceAcquirer(
             client=http_client,
             observation_store_dir=fixture_store,
         )
+        cfg_h = acquirer.observation_config.compute_hash()
+        bv = "chromium"
+        shutil.copy2(
+            "observations/benchmark/reconstructed_be_vietnam_pro_regular.pkl",
+            fixture_store / f"reconstructed_be_vietnam_pro_regular_{bv}_{cfg_h}.pkl",
+        )
+        with acquirer.store._get_connection() as conn:
+            conn.execute(
+                """
+                UPDATE unicode_coverage SET browser_version = ?, config_hash = ?
+                WHERE reference_id = 'be_vietnam_pro' AND style_id = 'regular'
+                """,
+                (bv, cfg_h),
+            )
+            conn.commit()
+
         acquirer.store.record_source_collection_completed(
             reference_id="be_vietnam_pro",
             style_id="regular",
-            config_hash=acquirer.observation_config.compute_hash(),
-            browser_version="chromium",
+            config_hash=cfg_h,
+            browser_version=bv,
         )
         styles = [ClaimStyle(id="regular", display_name="Regular")]
         payload = await acquirer.acquire_source(

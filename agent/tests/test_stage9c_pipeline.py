@@ -479,7 +479,7 @@ def test_store_partial_coverage_fails_closed_in_loader() -> None:
         cfg_hash = config.compute_hash()
 
         # Declare coverage for [65, 66, 67]
-        store.save_coverage("partial_font", "regular", [65, 66, 67])
+        store.save_coverage("partial_font", "regular", [65, 66, 67], browser_version="chromium", config_hash=cfg_hash)
 
         # Record only glyph 65 observations
         rec, png = _make_observation_record("partial_font", "regular", 65, 128, 0.0, 0.0, 650.0, "chromium", cfg_hash)
@@ -509,7 +509,7 @@ def test_store_incomplete_source_collection_fails_closed_in_loader() -> None:
         cfg_hash = config.compute_hash()
 
         # Save coverage and observations but DO NOT mark collection as complete
-        store.save_coverage("uncompleted_font", "regular", [65])
+        store.save_coverage("uncompleted_font", "regular", [65], browser_version="chromium", config_hash=cfg_hash)
         rec, png = _make_observation_record("uncompleted_font", "regular", 65, 128, 0.0, 0.0, 650.0, "chromium", cfg_hash)
         store.save_observation(rec, png)
 
@@ -859,7 +859,7 @@ def test_production_loader_rejects_empty_legacy_pair_identity() -> None:
         ref_id, style_id = "test_font", "regular"
 
         # Record coverage and completion marker
-        store.save_coverage(ref_id, style_id, [65, 66])
+        store.save_coverage(ref_id, style_id, [65, 66], browser_version="chromium", config_hash=cfg_hash)
         store.record_source_collection_completed(ref_id, style_id, cfg_hash, "chromium")
 
         # Save valid observation records for 65 and 66

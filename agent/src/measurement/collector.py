@@ -66,7 +66,13 @@ class ObservationCollector:
                 measure_fn=lambda cp: self.session.is_glyph_supported_in_font(font_family, cp),
             )
 
-        self.store.save_coverage(reference_id, style_id, code_points)
+        self.store.save_coverage(
+            reference_id=reference_id,
+            style_id=style_id,
+            code_points=code_points,
+            browser_version=self.session.browser_version,
+            config_hash=config_hash,
+        )
 
         total_rasters = 0
         total_glyphs = len(code_points)
@@ -334,10 +340,10 @@ class ObservationCollector:
         expected_pair_prov = f"chromium:{bv}:canvas_text_metrics"
         expected_feat_prov = f"chromium:{bv}:canvas_feature_probe"
 
-        # 1. Coverage verification
-        coverage = self.store.get_coverage(reference_id, style_id)
+        # 1. Coverage verification (exact identity)
+        coverage = self.store.get_coverage(reference_id, style_id, browser_version=bv, config_hash=cfg_h)
         if not coverage:
-            raise ValueError(f"FINALIZATION_FAILED: no glyph coverage found for {reference_id}:{style_id}")
+            raise ValueError(f"FINALIZATION_FAILED: no glyph coverage found for {reference_id}:{style_id} under exact identity ({bv}, {cfg_h})")
 
         # 2. Scoped Glyph observation verification (exact identity)
         for cp in coverage:
@@ -378,19 +384,19 @@ class ObservationCollector:
                     f"FINALIZATION_FAILED: untrusted or mismatched pair provenance '{p.get('provenance')}' != '{expected_pair_prov}' for {reference_id}:{style_id}"
                 )
 
-        # 4. Scoped OpenType feature probe observation verification (exact identity)
+        # 4. Scoped OpenType feature probe observation verification (exact (tag, sample_text) tuple identity)
         features = self.store.get_feature_observations(
             reference_id=reference_id,
             style_id=style_id,
             browser_version=bv,
             config_hash=cfg_h,
         )
-        expected_feature_tags = {tag for tag, _ in self.config.feature_probes}
-        stored_feature_tags = {f["feature_tag"] for f in features}
-        missing_features = expected_feature_tags - stored_feature_tags
+        expected_feature_probes = set(self.config.feature_probes)
+        stored_feature_probes = {(f["feature_tag"], f["sample_text"]) for f in features}
+        missing_features = expected_feature_probes - stored_feature_probes
         if missing_features:
             raise ValueError(
-                f"FINALIZATION_FAILED: missing feature observations for {reference_id}:{style_id}: {missing_features}"
+                f"FINALIZATION_FAILED: missing feature probe observations for {reference_id}:{style_id}: {missing_features}"
             )
         for f in features:
             if f.get("provenance") != expected_feat_prov:

@@ -102,16 +102,68 @@ class ObservationStore:
                 )
                 """
             )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS unicode_coverage (
-                    reference_id TEXT NOT NULL,
-                    style_id TEXT NOT NULL,
-                    code_point INTEGER NOT NULL,
-                    PRIMARY KEY (reference_id, style_id, code_point)
+            # Create or migrate unicode_coverage table to 5-column composite primary key
+            cur = conn.execute("PRAGMA table_info(unicode_coverage)")
+            cov_columns = {row[1]: row for row in cur.fetchall()}
+            if not cov_columns:
+                conn.execute(
+                    """
+                    CREATE TABLE unicode_coverage (
+                        reference_id TEXT NOT NULL,
+                        style_id TEXT NOT NULL,
+                        browser_version TEXT NOT NULL,
+                        config_hash TEXT NOT NULL,
+                        code_point INTEGER NOT NULL,
+                        PRIMARY KEY (reference_id, style_id, browser_version, config_hash, code_point)
+                    )
+                    """
                 )
-                """
-            )
+            else:
+                bv_info = cov_columns.get("browser_version")
+                cfg_info = cov_columns.get("config_hash")
+                needs_cov_pk_migration = not (
+                    bv_info is not None and bv_info[5] > 0 and
+                    cfg_info is not None and cfg_info[5] > 0
+                )
+                if needs_cov_pk_migration:
+                    if not bv_info:
+                        try:
+                            conn.execute("ALTER TABLE unicode_coverage ADD COLUMN browser_version TEXT NOT NULL DEFAULT ''")
+                        except sqlite3.OperationalError:
+                            pass
+                    if not cfg_info:
+                        try:
+                            conn.execute("ALTER TABLE unicode_coverage ADD COLUMN config_hash TEXT NOT NULL DEFAULT ''")
+                        except sqlite3.OperationalError:
+                            pass
+
+                    conn.execute(
+                        """
+                        CREATE TABLE unicode_coverage_new (
+                            reference_id TEXT NOT NULL,
+                            style_id TEXT NOT NULL,
+                            browser_version TEXT NOT NULL,
+                            config_hash TEXT NOT NULL,
+                            code_point INTEGER NOT NULL,
+                            PRIMARY KEY (reference_id, style_id, browser_version, config_hash, code_point)
+                        )
+                        """
+                    )
+                    conn.execute(
+                        """
+                        INSERT OR IGNORE INTO unicode_coverage_new (
+                            reference_id, style_id, browser_version, config_hash, code_point
+                        )
+                        SELECT
+                            reference_id, style_id,
+                            COALESCE(browser_version, ''),
+                            COALESCE(config_hash, ''),
+                            code_point
+                        FROM unicode_coverage
+                        """
+                    )
+                    conn.execute("DROP TABLE unicode_coverage")
+                    conn.execute("ALTER TABLE unicode_coverage_new RENAME TO unicode_coverage")
             # Create or migrate pair_observations table to 6-column composite primary key
             cur = conn.execute("PRAGMA table_info(pair_observations)")
             columns = {row[1]: row for row in cur.fetchall()}
@@ -359,6 +411,11 @@ class ObservationStore:
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_feature_env ON feature_observations (reference_id, style_id, browser_version, config_hash)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_coverage_env ON unicode_coverage (reference_id, style_id, browser_version, config_hash)
                 """
             )
 
@@ -729,29 +786,52 @@ class ObservationStore:
             )
             conn.commit()
 
-    def save_coverage(self, reference_id: str, style_id: str, code_points: list[int]) -> None:
-        """Save canonical Unicode coverage for a style."""
+    def save_coverage(
+        self,
+        reference_id: str,
+        style_id: str,
+        code_points: list[int],
+        browser_version: str,
+        config_hash: str,
+    ) -> None:
+        """Save canonical Unicode coverage for a style strictly bound to exact identity."""
+        if not browser_version or not config_hash:
+            raise ValueError(
+                "COVERAGE_IDENTITY_REQUIRED: browser_version and config_hash must be non-empty strings"
+            )
         with self._get_connection() as conn:
             for cp in code_points:
                 conn.execute(
                     """
-                    INSERT OR IGNORE INTO unicode_coverage (reference_id, style_id, code_point)
-                    VALUES (?, ?, ?)
+                    INSERT OR IGNORE INTO unicode_coverage (
+                        reference_id, style_id, browser_version, config_hash, code_point
+                    )
+                    VALUES (?, ?, ?, ?, ?)
                     """,
-                    (reference_id, style_id, cp),
+                    (reference_id, style_id, browser_version, config_hash, cp),
                 )
             conn.commit()
 
-    def get_coverage(self, reference_id: str, style_id: str) -> list[int]:
-        """Retrieve canonical sorted Unicode coverage for a style."""
+    def get_coverage(
+        self,
+        reference_id: str,
+        style_id: str,
+        browser_version: str,
+        config_hash: str,
+    ) -> list[int]:
+        """Retrieve canonical sorted Unicode coverage for a style strictly filtered by exact identity."""
+        if not browser_version or not config_hash:
+            raise ValueError(
+                "COVERAGE_IDENTITY_REQUIRED: browser_version and config_hash must be non-empty strings"
+            )
         with self._get_connection() as conn:
             cur = conn.execute(
                 """
                 SELECT code_point FROM unicode_coverage
-                WHERE reference_id = ? AND style_id = ?
+                WHERE reference_id = ? AND style_id = ? AND browser_version = ? AND config_hash = ?
                 ORDER BY code_point ASC
                 """,
-                (reference_id, style_id),
+                (reference_id, style_id, browser_version, config_hash),
             )
             return [row["code_point"] for row in cur.fetchall()]
 

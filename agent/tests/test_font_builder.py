@@ -527,7 +527,7 @@ async def test_observation_collector_and_source_acquirer_exact_lifecycle_and_cac
 
     # 2. Glyph + pair without feature: finalize rejects and store is NOT completed!
     assert not store.is_source_collection_completed("test_family", "regular", cfg_h, real_browser_ver)
-    with pytest.raises(ValueError, match="missing feature observations"):
+    with pytest.raises(ValueError, match="missing feature probe observations"):
         collector.finalize_source_collection("test_family", "regular")
 
     # Step 3: Collect features
@@ -739,11 +739,11 @@ async def test_multi_environment_exact_tuple_isolation_and_hostile_mixed_rejecti
         coll1.finalize_source_collection("mixed_font", "regular")
 
     # Attempting to finalize under coll2 (has pairs, but missing glyphs for (bv2, h2))
-    with pytest.raises(ValueError, match="missing glyph observations"):
+    with pytest.raises(ValueError, match="no glyph coverage found"):
         coll2.finalize_source_collection("mixed_font", "regular")
 
     # Attempting to finalize under coll3 (has features, but missing glyphs for (bv3, h1))
-    with pytest.raises(ValueError, match="missing glyph observations"):
+    with pytest.raises(ValueError, match="no glyph coverage found"):
         coll3.finalize_source_collection("mixed_font", "regular")
 
     # None of the tuples are completed
@@ -775,3 +775,314 @@ async def test_multi_environment_exact_tuple_isolation_and_hostile_mixed_rejecti
     await coll1.collect_pair_observations("legacy_font", "regular", "LegacyFont")
     with pytest.raises(ValueError, match="untrusted or mismatched feature provenance"):
         coll1.finalize_source_collection("legacy_font", "regular")
+
+
+@pytest.mark.asyncio
+async def test_reproduction_a_different_coverage_independent_finalization_and_no_cross_reconstruction(tmp_path: Path):
+    """Reproduction A:
+    Env A coverage {A,B}, Env B coverage {A,C}; both finalize/load independently
+    and neither candidate/source reconstruction can observe the other environment.
+    """
+    from measurement.store import ObservationStore
+    from measurement.models import ObservationConfig, DirectMetrics
+    from measurement.collector import ObservationCollector
+    from fidelity.pipeline import ObservationStoreSnapshot
+    from compute.source import SourceAcquirer
+    from compute.models import ClaimStyle
+
+    store_dir = tmp_path / "repro_a_store"
+    store = ObservationStore(store_dir)
+
+    cfg1 = ObservationConfig(resolutions=(128,), font_size_px=128.0)
+    cfg2 = ObservationConfig(resolutions=(256,), font_size_px=256.0)
+    h1 = cfg1.compute_hash()
+    h2 = cfg2.compute_hash()
+    bv1 = "chromium_128_win"
+    bv2 = "chromium_129_linux"
+
+    class MockSession:
+        def __init__(self, bv):
+            self.browser_version = bv
+        async def start(self):
+            pass
+        async def stop(self):
+            pass
+        async def capture_lossless_raster(self, font_family, code_point, resolution_px, subpixel_offset=(0.0, 0.0)):
+            from PIL import Image
+            import io
+            img = Image.new("RGBA", (resolution_px, resolution_px), (255, 255, 255, 255))
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            return buf.getvalue()
+        async def measure_glyph_direct(self, font_family, code_point, font_size_px, upem):
+            scale = font_size_px / upem
+            return DirectMetrics.from_browser_measurements(
+                code_point=code_point,
+                char=chr(code_point),
+                font_size_px=font_size_px,
+                m={
+                    "width": 600.0 * scale,
+                    "actualBoundingBoxLeft": 50.0 * scale,
+                    "actualBoundingBoxRight": 550.0 * scale,
+                    "actualBoundingBoxAscent": 700.0 * scale,
+                    "actualBoundingBoxDescent": 0.0,
+                    "fontBoundingBoxAscent": 800.0 * scale,
+                    "fontBoundingBoxDescent": -200.0 * scale,
+                },
+                upem=upem,
+            )
+        async def measure_text_advance(self, font_family, text, font_size_px, upem):
+            return 1200.0
+        async def probe_opentype_feature(self, font_family, feature_tag, sample_text, font_size_px, upem):
+            return {
+                "enabled_advance_upem": 1200.0,
+                "disabled_advance_upem": 1200.0,
+                "enabled_raster_signature": "sig_a",
+                "disabled_raster_signature": "sig_a",
+            }
+
+    sess1 = MockSession(bv1)
+    sess2 = MockSession(bv2)
+    coll1 = ObservationCollector(sess1, store, cfg1)
+    coll2 = ObservationCollector(sess2, store, cfg2)
+
+    # Env A: collects coverage for {65, 66} (A, B)
+    await coll1.collect_font_observations("cov_font", "regular", "CovFont", code_points=[65, 66])
+    await coll1.collect_pair_observations("cov_font", "regular", "CovFont")
+    await coll1.collect_feature_observations("cov_font", "regular", "CovFont")
+    coll1.finalize_source_collection("cov_font", "regular")
+
+    # Env B: collects coverage for {65, 67} (A, C)
+    await coll2.collect_font_observations("cov_font", "regular", "CovFont", code_points=[65, 67])
+    await coll2.collect_pair_observations("cov_font", "regular", "CovFont")
+    await coll2.collect_feature_observations("cov_font", "regular", "CovFont")
+    coll2.finalize_source_collection("cov_font", "regular")
+
+    # 1. Snapshots load independently and hold exact separate coverage
+    snap_a = ObservationStoreSnapshot.load_from_store(
+        store=store,
+        reference_id="cov_font",
+        style_id="regular",
+        family_name="CovFont",
+        style_name="Regular",
+        config=cfg1,
+        browser_version=bv1,
+    )
+    snap_b = ObservationStoreSnapshot.load_from_store(
+        store=store,
+        reference_id="cov_font",
+        style_id="regular",
+        family_name="CovFont",
+        style_name="Regular",
+        config=cfg2,
+        browser_version=bv2,
+    )
+    assert {r.code_point for r in snap_a.records} == {65, 66}
+    assert {r.code_point for r in snap_b.records} == {65, 67}
+
+    # 2. SourceAcquirer with config cfg1 and session sess1 reconstructs only {65, 66}
+    acq_a = SourceAcquirer(
+        browser_session_factory=lambda: sess1,
+        observation_store_dir=store_dir,
+        observation_config=cfg1,
+    )
+    payload_a = await acq_a.acquire_source(
+        source_url="https://www.myfonts.com/collections/cov-font",
+        styles=[ClaimStyle(id="regular", display_name="Regular")],
+    )
+    reconstructed_a = payload_a.styles["regular"].reconstructed_glyphs
+    assert set(reconstructed_a.keys()) == {65, 66}
+    assert 67 not in reconstructed_a
+
+    # 3. SourceAcquirer with config cfg2 and session sess2 reconstructs only {65, 67}
+    acq_b = SourceAcquirer(
+        browser_session_factory=lambda: sess2,
+        observation_store_dir=store_dir,
+        observation_config=cfg2,
+    )
+    payload_b = await acq_b.acquire_source(
+        source_url="https://www.myfonts.com/collections/cov-font",
+        styles=[ClaimStyle(id="regular", display_name="Regular")],
+    )
+    reconstructed_b = payload_b.styles["regular"].reconstructed_glyphs
+    assert set(reconstructed_b.keys()) == {65, 67}
+    assert 66 not in reconstructed_b
+
+
+@pytest.mark.asyncio
+async def test_reproduction_b_correct_feature_tag_with_wrong_sample_text_is_rejected(tmp_path: Path):
+    """Reproduction B:
+    Correct feature tag with wrong sample text is rejected during finalization.
+    """
+    from measurement.store import ObservationStore
+    from measurement.models import ObservationConfig, DirectMetrics
+    from measurement.collector import ObservationCollector
+
+    store_dir = tmp_path / "repro_b_store"
+    store = ObservationStore(store_dir)
+    cfg = ObservationConfig(resolutions=(128,), font_size_px=128.0)
+    cfg_h = cfg.compute_hash()
+    bv = "chromium_128_win"
+
+    class MockSession:
+        def __init__(self, bv):
+            self.browser_version = bv
+        async def start(self):
+            pass
+        async def stop(self):
+            pass
+        async def capture_lossless_raster(self, font_family, code_point, resolution_px, subpixel_offset=(0.0, 0.0)):
+            from PIL import Image
+            import io
+            img = Image.new("RGBA", (resolution_px, resolution_px), (255, 255, 255, 255))
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            return buf.getvalue()
+        async def measure_glyph_direct(self, font_family, code_point, font_size_px, upem):
+            scale = font_size_px / upem
+            return DirectMetrics.from_browser_measurements(
+                code_point=code_point,
+                char=chr(code_point),
+                font_size_px=font_size_px,
+                m={
+                    "width": 600.0 * scale,
+                    "actualBoundingBoxLeft": 50.0 * scale,
+                    "actualBoundingBoxRight": 550.0 * scale,
+                    "actualBoundingBoxAscent": 700.0 * scale,
+                    "actualBoundingBoxDescent": 0.0,
+                    "fontBoundingBoxAscent": 800.0 * scale,
+                    "fontBoundingBoxDescent": -200.0 * scale,
+                },
+                upem=upem,
+            )
+        async def measure_text_advance(self, font_family, text, font_size_px, upem):
+            return 1200.0
+        async def probe_opentype_feature(self, font_family, feature_tag, sample_text, font_size_px, upem):
+            return {
+                "enabled_advance_upem": 1200.0,
+                "disabled_advance_upem": 1200.0,
+                "enabled_raster_signature": "sig_a",
+                "disabled_raster_signature": "sig_a",
+            }
+
+    sess = MockSession(bv)
+    coll = ObservationCollector(sess, store, cfg)
+
+    await coll.collect_font_observations("tag_font", "regular", "TagFont", code_points=[65, 66])
+    await coll.collect_pair_observations("tag_font", "regular", "TagFont")
+
+    # Ingest feature probes with correct tags ('liga', 'kern', 'calt') but WRONG sample text
+    with store._get_connection() as conn:
+        for tag, _ in cfg.feature_probes:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO feature_observations (
+                    reference_id, style_id, browser_version, config_hash,
+                    feature_tag, sample_text, enabled_advance_upem,
+                    disabled_advance_upem, enabled_raster_signature,
+                    disabled_raster_signature, effect_observed,
+                    provenance, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "tag_font", "regular", bv, cfg_h, tag, "wrong_sample_text",
+                    1200.0, 1200.0, "a", "a", 0, f"chromium:{bv}:canvas_feature_probe", "2026-01-01T00:00:00Z"
+                ),
+            )
+        conn.commit()
+
+    # Finalization must reject because sample_text does not match configured probe tuples
+    with pytest.raises(ValueError, match="missing feature probe observations"):
+        coll.finalize_source_collection("tag_font", "regular")
+
+
+@pytest.mark.asyncio
+async def test_reproduction_c_legacy_unbound_coverage_cannot_satisfy_exact_completion(tmp_path: Path):
+    """Reproduction C:
+    Legacy unbound coverage/evidence cannot satisfy an exact completion.
+    """
+    from measurement.store import ObservationStore
+    from measurement.models import ObservationConfig, DirectMetrics
+    from measurement.collector import ObservationCollector
+    from fidelity.pipeline import ObservationStoreSnapshot
+
+    store_dir = tmp_path / "repro_c_store"
+    store = ObservationStore(store_dir)
+    cfg = ObservationConfig(resolutions=(128,), font_size_px=128.0)
+    cfg_h = cfg.compute_hash()
+    bv = "chromium_128_win"
+
+    class MockSession:
+        def __init__(self, bv):
+            self.browser_version = bv
+        async def start(self):
+            pass
+        async def stop(self):
+            pass
+        async def capture_lossless_raster(self, font_family, code_point, resolution_px, subpixel_offset=(0.0, 0.0)):
+            from PIL import Image
+            import io
+            img = Image.new("RGBA", (resolution_px, resolution_px), (255, 255, 255, 255))
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            return buf.getvalue()
+        async def measure_glyph_direct(self, font_family, code_point, font_size_px, upem):
+            scale = font_size_px / upem
+            return DirectMetrics.from_browser_measurements(
+                code_point=code_point,
+                char=chr(code_point),
+                font_size_px=font_size_px,
+                m={
+                    "width": 600.0 * scale,
+                    "actualBoundingBoxLeft": 50.0 * scale,
+                    "actualBoundingBoxRight": 550.0 * scale,
+                    "actualBoundingBoxAscent": 700.0 * scale,
+                    "actualBoundingBoxDescent": 0.0,
+                    "fontBoundingBoxAscent": 800.0 * scale,
+                    "fontBoundingBoxDescent": -200.0 * scale,
+                },
+                upem=upem,
+            )
+        async def measure_text_advance(self, font_family, text, font_size_px, upem):
+            return 1200.0
+        async def probe_opentype_feature(self, font_family, feature_tag, sample_text, font_size_px, upem):
+            return {
+                "enabled_advance_upem": 1200.0,
+                "disabled_advance_upem": 1200.0,
+                "enabled_raster_signature": "sig_a",
+                "disabled_raster_signature": "sig_a",
+            }
+
+    sess = MockSession(bv)
+    coll = ObservationCollector(sess, store, cfg)
+
+    # Ingest legacy unbound coverage directly into DB with empty browser_version / config_hash
+    with store._get_connection() as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO unicode_coverage (reference_id, style_id, browser_version, config_hash, code_point)
+            VALUES (?, ?, '', '', 65), (?, ?, '', '', 66)
+            """,
+            ("unbound_font", "regular", "unbound_font", "regular"),
+        )
+        conn.commit()
+
+    # Collect pairs and features under active identity
+    await coll.collect_pair_observations("unbound_font", "regular", "UnboundFont")
+    await coll.collect_feature_observations("unbound_font", "regular", "UnboundFont")
+
+    # Finalization must reject because no coverage exists under exact identity (bv, cfg_h)
+    with pytest.raises(ValueError, match="no glyph coverage found"):
+        coll.finalize_source_collection("unbound_font", "regular")
+
+    # Snapshot loader must also reject legacy unbound coverage
+    with pytest.raises(ValueError, match="STORE_LOAD_ERROR"):
+        ObservationStoreSnapshot.load_from_store(
+            store=store,
+            reference_id="unbound_font",
+            style_id="regular",
+            family_name="UnboundFont",
+            style_name="Regular",
+            config=cfg,
+            browser_version=bv,
+        )

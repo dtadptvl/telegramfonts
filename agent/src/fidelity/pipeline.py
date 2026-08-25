@@ -245,19 +245,19 @@ class ObservationStoreSnapshot:
                     f"matching browser '{browser_version}' and config '{cfg_hash}'"
                 )
 
-            # 3. Query Unicode coverage on same transaction
+            # 3. Query Unicode coverage on same transaction (exact identity)
             cov_rows = conn.execute(
                 """
                 SELECT code_point FROM unicode_coverage
-                WHERE reference_id = ? AND style_id = ?
+                WHERE reference_id = ? AND style_id = ? AND browser_version = ? AND config_hash = ?
                 ORDER BY code_point ASC
                 """,
-                (reference_id, style_id),
+                (reference_id, style_id, browser_version, cfg_hash),
             ).fetchall()
             coverage_cps = [int(r["code_point"]) for r in cov_rows]
             if not coverage_cps:
                 raise ValueError(
-                    f"STORE_LOAD_ERROR: No Unicode coverage found for {reference_id}/{style_id}"
+                    f"STORE_LOAD_ERROR: No Unicode coverage found for {reference_id}/{style_id} under exact identity ({browser_version}, {cfg_hash})"
                 )
 
             # 4. Query all matching observation records on same transaction

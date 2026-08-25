@@ -81,7 +81,9 @@ def run_candidate_pipeline(
     logger.info("Reconstructing cubic master glyphs from cached observations...")
     reconstructed_glyphs = []
     for cp in REPRESENTATIVE_CODE_POINTS:
-        obs = store.get_glyph_observations(reference_id, style_id, cp)
+        obs = store.get_glyph_observations(
+            reference_id, style_id, cp, browser_version=browser_version, config_hash=config_hash
+        )
         if obs:
             glyph = solver.reconstruct_glyph(obs)
             reconstructed_glyphs.append(glyph)

@@ -169,9 +169,11 @@ def test_archive_context_is_per_style_and_order_independent(tmp_path: Path):
     regular = ClaimStyle("regular", "Regular")
     bold = ClaimStyle("bold", "Bold")
 
+    cfg_h = source.observation_config.compute_hash()
+    bv = "unspecified_browser"
     try:
-        source.store.save_coverage("demo", "regular", [65])
-        source.store.save_coverage("demo", "bold", [65, 66])
+        source.store.save_coverage("demo", "regular", [65], browser_version=bv, config_hash=cfg_h)
+        source.store.save_coverage("demo", "bold", [65, 66], browser_version=bv, config_hash=cfg_h)
 
         full = source.get_archive_context(source_url, [regular, bold])
         subset = source.get_archive_context(source_url, [regular])
