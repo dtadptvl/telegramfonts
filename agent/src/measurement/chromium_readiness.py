@@ -25,6 +25,9 @@ _SAFE_TYPE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,80}$")
 _SAFE_STAGE = re.compile(r"^[a-z][a-z0-9_]{0,64}$")
 _SAFE_PROCESS_STATE = re.compile(r"^(?:not_started|running|unknown|exited:-?[0-9]+)$")
 _SAFE_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_SAFE_BROWSER_VERSION = re.compile(
+    r"^(?:Chromium|Chrome)/[0-9]{1,9}(?:\.[0-9]{1,9}){1,3}$"
+)
 _LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 
@@ -79,20 +82,29 @@ def _safe_process_state(value: object) -> str:
     return text if _SAFE_PROCESS_STATE.fullmatch(text) else "<redacted>"
 
 
+def _safe_browser_version(value: object) -> str | None:
+    text = str(value).strip()
+    return text if _SAFE_BROWSER_VERSION.fullmatch(text) else None
+
+
 def _endpoint_payload(endpoint: ChromiumEndpoint | None) -> dict[str, Any] | None:
     if endpoint is None:
         return None
     host = str(endpoint.host).lower()
-    if host not in _LOOPBACK_HOSTS:
+    if (
+        endpoint.scheme != "ws"
+        or endpoint.path_prefix != "/devtools/page/"
+        or host not in _LOOPBACK_HOSTS
+    ):
         return None
     port = int(endpoint.port) if isinstance(endpoint.port, int) else None
     if port is None or not 1 <= port <= 65535:
         return None
     return {
-        "scheme": "ws" if endpoint.scheme == "ws" else None,
+        "scheme": "ws",
         "host": host,
         "port": port,
-        "path_prefix": "/devtools/page/" if endpoint.path_prefix == "/devtools/page/" else None,
+        "path_prefix": "/devtools/page/",
     }
 
 
@@ -286,17 +298,17 @@ async def run_readiness(
         report["start_returned"] = True
         endpoint = getattr(session, "endpoint", None)
         report["endpoint"] = _endpoint_payload(endpoint)
-        browser_version = _safe_text(getattr(session, "browser_version", ""))
+        browser_version = _safe_browser_version(getattr(session, "browser_version", ""))
         report["browser_version"] = browser_version
 
         if _endpoint_payload(endpoint) is None:
             raise RuntimeError("CHROMIUM_LOOPBACK_CDP_NOT_VALIDATED")
-        if not browser_version or browser_version == "unknown":
-            raise RuntimeError("CHROMIUM_BROWSER_VERSION_NOT_AVAILABLE")
+        if browser_version is None:
+            raise RuntimeError("CHROMIUM_BROWSER_VERSION_INVALID")
 
         report["evaluation_count"] = 1
         evaluation = await session.evaluate_script("1 + 1")
-        if isinstance(evaluation, bool) or evaluation != 2:
+        if type(evaluation) is not int or evaluation != 2:
             raise RuntimeError("CHROMIUM_INERT_EVALUATION_NOT_TWO")
         report["evaluation_value"] = 2
         report["stage"] = "ready_check"
@@ -311,6 +323,9 @@ async def run_readiness(
             getattr(typed_diagnostics, "process_created", False)
         )
     except Exception as exc:
+        if start_returned:
+            report["process_state"] = _session_process_state(session)
+            report["process_creation_proven"] = _session_process_created(session, True)
         runner_failure = ("evaluation" if start_returned else "startup", exc)
     finally:
         if session is not None:
@@ -364,7 +379,7 @@ async def run_readiness(
 
     cleanup_ok = bool(cleanup is not None and cleanup.ok)
     endpoint_ok = _endpoint_payload(endpoint) is not None
-    browser_version_ok = bool(report["browser_version"]) and report["browser_version"] != "unknown"
+    browser_version_ok = _safe_browser_version(report["browser_version"]) is not None
     report["ready"] = bool(
         identity["verified"]
         and start_returned

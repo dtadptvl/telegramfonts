@@ -137,7 +137,7 @@ class _CleanupFailureSession:
         self.executable_path = executable_path
         self.timeout_seconds = timeout_seconds
         self.endpoint = ChromiumEndpoint("ws", "127.0.0.1", 9222, "/devtools/page/")
-        self.browser_version = "Chromium/test"
+        self.browser_version = "Chromium/123.0.0.0"
         self.process = SimpleNamespace(poll=lambda: None)
         self.ws = None
         self.user_data_dir = object()
@@ -177,14 +177,37 @@ async def test_cleanup_failure_cannot_emit_readiness(monkeypatch, tmp_path: Path
     assert "do-not-print" not in json.dumps(report)
 
 
+class _EvaluationFailureSession(_CleanupFailureSession):
+    async def evaluate_script(self, expression: str) -> int:
+        self.eval_calls.append(expression)
+        raise RuntimeError("evaluation failed after process start")
+
+
+@pytest.mark.asyncio
+async def test_post_start_failure_retains_process_state_before_cleanup(monkeypatch, tmp_path: Path):
+    executable = _executable(tmp_path)
+    monkeypatch.setattr(readiness, "ChromiumSession", _EvaluationFailureSession)
+
+    report, exit_code = await readiness.run_readiness(executable)
+
+    assert exit_code == 1
+    assert report["diagnostics"]["stage"] == "evaluation"
+    assert report["diagnostics"]["process_state"] == "running"
+    assert report["diagnostics"]["process_created"] is True
+    assert report["cleanup"]["available"] is True
+
+
 class _SuccessSession:
     instances: list["_SuccessSession"] = []
+    endpoint_value = ChromiumEndpoint("ws", "127.0.0.1", 9222, "/devtools/page/")
+    browser_version_value = "Chromium/123.0.0.0"
+    evaluation_value: object = 2
 
     def __init__(self, executable_path: str, timeout_seconds: float) -> None:
         self.executable_path = executable_path
         self.timeout_seconds = timeout_seconds
-        self.endpoint = ChromiumEndpoint("ws", "127.0.0.1", 9222, "/devtools/page/")
-        self.browser_version = "Chromium/123.0.0.0"
+        self.endpoint = self.endpoint_value
+        self.browser_version = self.browser_version_value
         self.process = SimpleNamespace(poll=lambda: None)
         self.ws = None
         self.user_data_dir = object()
@@ -198,7 +221,7 @@ class _SuccessSession:
 
     async def evaluate_script(self, expression: str) -> int:
         self.eval_calls.append(expression)
-        return 2
+        return self.evaluation_value  # type: ignore[return-value]
 
     async def aclose(self) -> ChromiumCleanup:
         self.close_calls += 1
@@ -226,3 +249,64 @@ async def test_success_requires_exact_input_single_inert_eval_and_clean_close(mo
     assert report["evaluation_value"] == 2
     assert report["cleanup"]["ok"] is True
     assert report["owned_residue_clear"] is True
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        ChromiumEndpoint("http", "127.0.0.1", 9222, "/devtools/page/"),
+        ChromiumEndpoint("ws", "127.0.0.1", 9222, "/json/version"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_invalid_endpoint_identity_cannot_emit_readiness(
+    monkeypatch,
+    tmp_path: Path,
+    endpoint: ChromiumEndpoint,
+):
+    executable = _executable(tmp_path)
+    monkeypatch.setattr(_SuccessSession, "endpoint_value", endpoint)
+    monkeypatch.setattr(readiness, "ChromiumSession", _SuccessSession)
+
+    report, exit_code = await readiness.run_readiness(executable)
+
+    assert exit_code == 1
+    assert report["ready"] is False
+    assert report["endpoint"] is None
+
+
+@pytest.mark.parametrize("evaluation", [2.0, True, "2"])
+@pytest.mark.asyncio
+async def test_inert_evaluation_requires_exact_integer_two(
+    monkeypatch,
+    tmp_path: Path,
+    evaluation: object,
+):
+    executable = _executable(tmp_path)
+    monkeypatch.setattr(_SuccessSession, "evaluation_value", evaluation)
+    monkeypatch.setattr(readiness, "ChromiumSession", _SuccessSession)
+
+    report, exit_code = await readiness.run_readiness(executable)
+
+    assert exit_code == 1
+    assert report["ready"] is False
+    assert report["evaluation_count"] == 1
+    assert report["evaluation_value"] is None
+
+
+@pytest.mark.parametrize("browser_version", ["unknown", "Chromium/test", "<redacted>"])
+@pytest.mark.asyncio
+async def test_invalid_browser_identity_cannot_emit_readiness(
+    monkeypatch,
+    tmp_path: Path,
+    browser_version: str,
+):
+    executable = _executable(tmp_path)
+    monkeypatch.setattr(_SuccessSession, "browser_version_value", browser_version)
+    monkeypatch.setattr(readiness, "ChromiumSession", _SuccessSession)
+
+    report, exit_code = await readiness.run_readiness(executable)
+
+    assert exit_code == 1
+    assert report["ready"] is False
+    assert report["browser_version"] is None
