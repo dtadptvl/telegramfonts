@@ -23,10 +23,31 @@ from reconstruction_benchmark import REPRESENTATIVE_CODE_POINTS
 from typography.kerning_inferencer import EvidenceKerningInferencer
 
 
+PHYSICAL_PROOF_AUTH_ENV = "A23_PHYSICAL_PROOF_AUTH_TOKEN"
+EXPECTED_AUTH_PREFIX = "ARCHITECT_EXECUTING_AUTHORIZED_"
+
+
+def verify_physical_proof_authorization(token: str | None) -> bool:
+    """Verify authorization token binding for physical proof execution."""
+    if not token or not isinstance(token, str):
+        return False
+    if not token.startswith(EXPECTED_AUTH_PREFIX):
+        return False
+    suffix = token[len(EXPECTED_AUTH_PREFIX):]
+    return len(suffix) >= 16 and all(c in "0123456789abcdefABCDEF_-" for c in suffix)
+
+
 def run_a23_full_style_proof(
     browser_version: str,
     config_hash: str,
+    auth_token: str | None = None,
 ) -> dict:
+    effective_token = auth_token or os.environ.get(PHYSICAL_PROOF_AUTH_ENV)
+    if not verify_physical_proof_authorization(effective_token):
+        raise PermissionError(
+            "UNAUTHORIZED_PHYSICAL_PROOF_INVOCATION: explicit Architect execution authorization token "
+            f"(e.g. {EXPECTED_AUTH_PREFIX}<hex>) required via --auth-token or {PHYSICAL_PROOF_AUTH_ENV}."
+        )
     if not browser_version or not config_hash:
         raise ValueError("INCOMPLETE_EXACT_IDENTITY: browser_version and config_hash are required")
 
@@ -198,10 +219,27 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run Physical A23 Full-Style Proof")
     parser.add_argument("--browser-version", required=True, help="Exact observed browser version")
     parser.add_argument("--config-hash", required=True, help="Exact observation config hash")
+    parser.add_argument(
+        "--auth-token",
+        default=None,
+        help=f"Architect execution authorization token (or set {PHYSICAL_PROOF_AUTH_ENV})",
+    )
     args = parser.parse_args()
 
+    effective_token = args.auth_token or os.environ.get(PHYSICAL_PROOF_AUTH_ENV)
+    if not verify_physical_proof_authorization(effective_token):
+        print(
+            "BLOCKED: UNAUTHORIZED_PHYSICAL_PROOF_INVOCATION: explicit Architect execution authorization required. "
+            "Zero network requests and zero mutations performed."
+        )
+        sys.exit(1)
+
     print("=== Running MAX Physical A23 Full-Style Proof ===")
-    rep = run_a23_full_style_proof(browser_version=args.browser_version, config_hash=args.config_hash)
+    rep = run_a23_full_style_proof(
+        browser_version=args.browser_version,
+        config_hash=args.config_hash,
+        auth_token=effective_token,
+    )
     out_file = Path("ops/max_physical_a23_proof_report.json")
     out_file.parent.mkdir(parents=True, exist_ok=True)
     with open(out_file, "w", encoding="utf-8") as f:
