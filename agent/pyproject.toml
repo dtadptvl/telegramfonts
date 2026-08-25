@@ -22,6 +22,9 @@ dependencies = [
     "freetype-py>=2.3.0",
 ]
 
+[project.scripts]
+chromium-readiness = "measurement.chromium_readiness:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0.0",
