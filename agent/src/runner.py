@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import sqlite3
 import time
@@ -18,6 +19,7 @@ from compute.packager import PackagerService
 from compute.source import SourceAcquirer
 from compute.validator import validate_font_file
 from config import Settings
+from fidelity.release_gate import Stage9DReleaseGate
 from queue_client import CloudflareQueueClient, QueueMessage
 from scratch import ScratchManager
 from worker_client import ClaimedJob, WorkerJobClient
@@ -40,6 +42,7 @@ TERMINAL_ERROR_CODES = frozenset({
     "CORRUPT_SOURCE_IMAGE",
     "UNSUPPORTED_FORMAT",
     "NO_FILES_GENERATED",
+    "STAGE9D_GATE_FAILED",
 })
 
 KNOWN_ERROR_CODES = frozenset(
@@ -70,6 +73,7 @@ KNOWN_ERROR_PREFIXES = (
     ("UNSUPPORTED_FORMAT:", "UNSUPPORTED_FORMAT"),
     ("EMPTY_ARCHIVE_IDENTITY_", "EMPTY_ARCHIVE_IDENTITY"),
     ("ARTIFACT_PART_EXCEEDS_CAP:", "ARTIFACT_PART_EXCEEDS_CAP"),
+    ("STAGE9D_GATE_FAILED_", "STAGE9D_GATE_FAILED"),
 )
 
 
@@ -205,7 +209,8 @@ class JobRunner:
         family_name: str,
         context: ArchiveSourceContext | None,
     ) -> list[GeneratedFontFile] | None:
-        """Return all requested files only when every requested format is a verified hit."""
+        """Return all requested files only when every requested format is a verified
+        attested hit. Legacy/unattested/tampered entries are cache misses."""
         if self.archive is None or context is None:
             return None
         if not job.formats or any(fmt not in ARCHIVEABLE_FORMATS for fmt in job.formats):
@@ -222,11 +227,56 @@ class JobRunner:
                     fmt,
                     context,
                 )
-                entry = self.archive.get(identity)
+                entry = self.archive.get_attested(identity)
                 if entry is None:
                     return None
                 cached_files.append(entry.to_generated_font_file())
         return cached_files or None
+
+    def _stage9d_gate_artifact(
+        self,
+        style_data: Any,
+        family_name: str,
+        style_id: str,
+        style_name: str,
+        fmt: str,
+        build_dir: Path,
+    ) -> tuple[GeneratedFontFile, Any]:
+        """Run the Stage 9D release gate for one style+format; fail-closed.
+
+        Returns the exact PASS-gated artifact as a GeneratedFontFile plus the
+        attestation payload. Raises a sanitized error on any non-publishable outcome.
+        """
+        gate_store = getattr(self.source_acquirer, "store", None)
+        gate_config = getattr(self.source_acquirer, "observation_config", None)
+        if gate_store is None or gate_config is None:
+            raise ValueError(f"STAGE9D_GATE_FAILED_{fmt}")
+
+        result = Stage9DReleaseGate.execute_sync(
+            store=gate_store,
+            config=gate_config,
+            reference_id=style_data.observation_reference_id,
+            style_id=style_data.observation_style_id or style_id,
+            family_name=family_name,
+            style_name=style_name,
+            browser_version=style_data.observation_browser_version,
+            format_type=fmt,
+            output_dir=build_dir / "stage9d" / fmt.lower(),
+        )
+        if not result.is_publishable or result.attestation is None:
+            raise ValueError(f"STAGE9D_GATE_FAILED_{fmt}")
+
+        artifact_path = Path(result.candidate_file_path)
+        font_file = GeneratedFontFile(
+            style_id=style_id,
+            style_name=style_name,
+            format=fmt,
+            filename=artifact_path.name,
+            file_path=artifact_path,
+            size_bytes=result.candidate_size_bytes,
+            sha256_hex=result.candidate_artifact_sha,
+        )
+        return font_file, result.attestation
 
     def _sync_build_validate_and_package(
         self,
@@ -251,15 +301,55 @@ class JobRunner:
             if source_payload is None:
                 raise RuntimeError("MISSING_SOURCE_PAYLOAD")
             generated_files = []
+            # Stage 9D: archive writes are deferred until every requested
+            # style+format gate has PASSed, so partial PASS archives nothing.
+            pending_attested: list[tuple[ArchiveIdentity, GeneratedFontFile, Any]] = []
             for style in job.styles:
                 style_data = source_payload.styles.get(style.id)
                 if not style_data:
                     raise ValueError(f"STYLE_MISSING_IN_SOURCE_{style.id}")
 
+                # Production MAX observation path carries a complete exact 4-tuple;
+                # such artifacts may only publish through the Stage 9D release gate.
+                stage9d_required = bool(
+                    getattr(style_data, "observation_reference_id", None)
+                    and getattr(style_data, "observation_browser_version", None)
+                    and getattr(style_data, "observation_config_hash", None)
+                )
+
                 for fmt in job.formats:
                     now_ms = int(time.time() * 1000)
                     if fenced_event.is_set() or (now_ms + LEASE_SAFETY_MARGIN_MS >= expiry_holder[0]):
                         raise RuntimeError("LEASE_FENCED_OR_EXPIRED")
+
+                    if stage9d_required:
+                        font_file, attestation = self._stage9d_gate_artifact(
+                            style_data,
+                            family_name,
+                            style.id,
+                            style.display_name,
+                            fmt,
+                            build_dir,
+                        )
+                        if not validate_font_file(font_file.file_path, fmt):
+                            raise ValueError(f"GENERATED_FONT_INVALID_{fmt}")
+                        if self.archive is not None and archive_context is not None and fmt in ARCHIVEABLE_FORMATS:
+                            pending_attested.append(
+                                (
+                                    self._make_archive_identity(
+                                        job,
+                                        family_name,
+                                        style.id,
+                                        style.display_name,
+                                        fmt,
+                                        archive_context,
+                                    ),
+                                    font_file,
+                                    attestation,
+                                )
+                            )
+                        generated_files.append(font_file)
+                        continue
 
                     font_file = self.font_builder.build_font(
                         style_data,
@@ -286,6 +376,19 @@ class JobRunner:
                             raise RuntimeError("FINAL_FONT_ARCHIVE_WRITE_FAILED") from exc
 
                     generated_files.append(font_file)
+
+            for identity, font_file, attestation in pending_attested:
+                try:
+                    self.archive.put_attested(
+                        identity,
+                        font_file,
+                        attestation_json=json.dumps(
+                            attestation.to_dict(), sort_keys=True, separators=(",", ":")
+                        ),
+                        attestation_hash=attestation.compute_hash(),
+                    )
+                except (OSError, sqlite3.Error) as exc:
+                    raise RuntimeError("FINAL_FONT_ARCHIVE_WRITE_FAILED") from exc
 
         if not generated_files:
             raise ValueError("NO_FILES_GENERATED")
