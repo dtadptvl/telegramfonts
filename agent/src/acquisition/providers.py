@@ -310,6 +310,12 @@ class MonotypeRasterProvider:
             pages.append(page)
             if page.final or not page.next_cursor:
                 return tuple(pages)
+            observed = (page.payload or {}).get("observed_headers") or {}
+            max_gpp = observed.get("max_glyphs_per_page")
+            if isinstance(max_gpp, int) and max_gpp > 0 and page.glyph_count < max_gpp:
+                # Observable page signal: a partial fill below the declared
+                # per-page maximum marks the final evidence page.
+                return tuple(pages)
             cursor = page.next_cursor
         # Bounded termination: hitting the page budget without a final marker
         # is an insufficient raster outcome, never an infinite crawl.

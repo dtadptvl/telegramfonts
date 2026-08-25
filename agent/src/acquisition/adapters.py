@@ -189,11 +189,18 @@ class MonotypeRenderClient:
     myfonts Referer/Origin). No generic POST/Bearer JSON. Session material is
     runtime-only (opaque cookies) and never logged or embedded in artifacts.
 
-    Response shape (sanitized real shape): JSON with a `layout` map keyed by
-    glyph entries carrying `codePoint` (plus optional metrics/box fields) and
-    an `image` base64 sprite. Pages are addressed by `acs_p`; an empty layout
-    marks bounded completion. Malformed, mismatched, empty, or incomplete
-    results fail closed (None).
+    Response shape (captured live read-only diagnostics, Issue #71 comment
+    5412717546): HTTP 200 with Content-Type ``application/json``; body
+    ``{"status": 200, "layout": {key: {"glyph", "x", "y", "width", "height",
+    "codePoint"}}, "image": "<base64 PNG sprite>"}``. Layout entries carry
+    sprite-cell coordinates only — no glyph metrics exist in the real
+    response and none are inferred; metrics/pairs/features are never consumed
+    from this endpoint (raster-only source). Pages are addressed by ``acs_p``;
+    an empty ``layout`` marks bounded completion (captured at an out-of-range
+    page). Response headers may expose ``max-glyphs-per-page`` /
+    ``X-Missing-Unicodes`` / ``X-Tofus-Found``; present values are preserved
+    as observed evidence. Malformed, mismatched, empty, or incomplete results
+    fail closed (None).
     """
 
     RENDER_PATH = "/render/105/font/"
@@ -212,6 +219,8 @@ class MonotypeRenderClient:
     RENDER_REFERER = "https://www.myfonts.com/"
     RENDER_ORIGIN = "https://www.myfonts.com"
     BROWSER_VERSION = "monotype_render_105"
+    PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+    MAX_SPRITE_BYTES = 8 * 1024 * 1024
 
     def __init__(
         self,
@@ -231,9 +240,48 @@ class MonotypeRenderClient:
         }
 
     @classmethod
-    def _parse_page(cls, data: Any, page_index: int) -> SpriteRasterPage | None:
-        """Parse one bounded real-shape render response; fail closed on any gap."""
+    def _observed_headers(cls, headers: Any) -> dict[str, Any]:
+        """Preserve only the real observed response evidence (never secrets)."""
+        observed: dict[str, Any] = {}
+        try:
+            content_type = headers.get("content-type", "")
+        except Exception:
+            return observed
+        if content_type:
+            observed["content_type"] = str(content_type)
+        for header, key in (
+            ("max-glyphs-per-page", "max_glyphs_per_page"),
+            ("x-missing-unicodes", "x_missing_unicodes"),
+            ("x-tofus-found", "x_tofus_found"),
+        ):
+            try:
+                value = headers.get(header)
+            except Exception:
+                value = None
+            if value is None or str(value).strip() == "":
+                continue
+            if key == "max_glyphs_per_page":
+                try:
+                    observed[key] = int(str(value).strip())
+                except ValueError:
+                    continue
+            else:
+                observed[key] = str(value)
+        return observed
+
+    @classmethod
+    def _parse_page(
+        cls, data: Any, headers: Any, page_index: int
+    ) -> SpriteRasterPage | None:
+        """Parse one bounded captured-shape render response; fail closed on any gap.
+
+        Only observable provider fields are consumed: body ``status``, layout
+        entries (glyph/x/y/width/height/codePoint), and the base64 PNG sprite.
+        No glyph metrics exist in the real response and none are inferred.
+        """
         if not isinstance(data, dict):
+            return None
+        if data.get("status") != 200:
             return None
         layout = data.get("layout")
         if not isinstance(layout, dict):
@@ -245,46 +293,67 @@ class MonotypeRenderClient:
             sprite_bytes = base64.b64decode(image_b64, validate=True)
         except (ValueError, TypeError):
             return None
-        if not sprite_bytes:
+        if (
+            not sprite_bytes
+            or len(sprite_bytes) > cls.MAX_SPRITE_BYTES
+            or not sprite_bytes.startswith(cls.PNG_MAGIC)
+        ):
             return None
+        observed = cls._observed_headers(headers)
+
+        if not layout:
+            # Captured bounded-completion signal: empty layout at an
+            # out-of-range page; the placeholder sprite carries no evidence.
+            return SpriteRasterPage(
+                page_index=page_index,
+                glyph_count=0,
+                raster_bytes=sprite_bytes,
+                next_cursor="",
+                final=True,
+                payload={
+                    "browser_version": cls.BROWSER_VERSION,
+                    "glyphs": [],
+                    "pairs": [],
+                    "features": [],
+                    "sprite_sha256": hashlib.sha256(sprite_bytes).hexdigest(),
+                    "observed_headers": observed,
+                },
+            )
 
         glyphs: list[dict] = []
+        unmapped_slots = 0
         for entry in layout.values():
             if not isinstance(entry, dict):
                 return None
-            cp_raw = entry.get("codePoint")
-            if not isinstance(cp_raw, int) or cp_raw <= 0:
-                return None
-            metrics_raw = entry.get("metrics") if isinstance(entry.get("metrics"), dict) else entry
             try:
-                metrics = {
-                    "advance_width_px": float(metrics_raw.get("advanceWidthPx", metrics_raw.get("aw", 0.0))),
-                    "lsb_px": float(metrics_raw.get("lsbPx", metrics_raw.get("lsb", 0.0))),
-                    "rsb_px": float(metrics_raw.get("rsbPx", metrics_raw.get("rsb", 0.0))),
-                    "ascent_px": float(metrics_raw.get("ascentPx", metrics_raw.get("asc", 0.0))),
-                    "descent_px": float(metrics_raw.get("descentPx", metrics_raw.get("desc", 0.0))),
-                    "advance_width_upem": float(metrics_raw.get("advanceWidthUpem", metrics_raw.get("awu", 0.0))),
-                    "lsb_upem": float(metrics_raw.get("lsbUpem", metrics_raw.get("lsbu", 0.0))),
-                    "rsb_upem": float(metrics_raw.get("rsbUpem", metrics_raw.get("rsbu", 0.0))),
-                    "ascent_upem": float(metrics_raw.get("ascentUpem", metrics_raw.get("ascu", 0.0))),
-                    "descent_upem": float(metrics_raw.get("descentUpem", metrics_raw.get("descu", 0.0))),
-                    "bbox_width_upem": float(metrics_raw.get("bboxWidthUpem", metrics_raw.get("bw", 0.0))),
-                    "bbox_height_upem": float(metrics_raw.get("bboxHeightUpem", metrics_raw.get("bh", 0.0))),
+                box = {
+                    "x": int(entry["x"]),
+                    "y": int(entry["y"]),
+                    "width": int(entry["width"]),
+                    "height": int(entry["height"]),
                 }
-            except (TypeError, ValueError):
+                glyph_index = int(entry.get("glyph", -1))
+                cp_raw = entry["codePoint"]
+            except (KeyError, TypeError, ValueError):
                 return None
-            glyph_entry: dict = {
-                "code_point": cp_raw,
-                "resolution": 120,
-                "subpixel_x": 0.0,
-                "subpixel_y": 0.0,
-                "png_base64": image_b64,
-                "metrics": metrics,
-            }
-            box = entry.get("box") if isinstance(entry.get("box"), dict) else None
-            if box is not None:
-                glyph_entry["sprite_box"] = box
-            glyphs.append(glyph_entry)
+            if box["width"] < 1 or box["height"] < 1 or box["x"] < 0 or box["y"] < 0:
+                return None
+            if not isinstance(cp_raw, int) or cp_raw <= 0:
+                # Observable unmapped glyph slot (e.g. .notdef): never bound
+                # to a code point and never invented.
+                unmapped_slots += 1
+                continue
+            glyphs.append(
+                {
+                    "code_point": cp_raw,
+                    "glyph_index": glyph_index,
+                    "sprite_box": box,
+                }
+            )
+        if not glyphs:
+            # Non-empty layout with zero observable code-point bindings fails
+            # closed; nothing may be ingested or inferred.
+            return None
 
         payload = {
             "browser_version": cls.BROWSER_VERSION,
@@ -292,13 +361,15 @@ class MonotypeRenderClient:
             "pairs": [],
             "features": [],
             "sprite_sha256": hashlib.sha256(sprite_bytes).hexdigest(),
+            "observed_headers": observed,
+            "unmapped_glyph_slots": unmapped_slots,
         }
         return SpriteRasterPage(
             page_index=page_index,
             glyph_count=len(glyphs),
             raster_bytes=sprite_bytes,
-            next_cursor=str(page_index + 1) if glyphs else "",
-            final=not glyphs,
+            next_cursor=str(page_index + 1),
+            final=False,
             payload=payload,
         )
 
@@ -325,10 +396,13 @@ class MonotypeRenderClient:
                 resp = await client.get(url, params=params, headers=self._headers())
                 if resp.status_code != 200:
                     return None
+                content_type = str(resp.headers.get("content-type", ""))
+                if not content_type.lower().startswith("application/json"):
+                    return None
                 data = resp.json()
         except Exception:
             return None
-        return self._parse_page(data, page_index)
+        return self._parse_page(data, resp.headers, page_index)
 
 
 # Backward-compatible alias for composition wiring.

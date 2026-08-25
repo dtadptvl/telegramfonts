@@ -198,18 +198,67 @@ def test_MONOTYPE_TARGET_exact_family_style_md5_on_every_request():
     asyncio.run(run())
 
 
-def test_MONOTYPE_REAL_PROTOCOL_get_md5_path_render_contract():
-    """Captured request is HTTPS GET to the MD5 path with the approved render
-    query/header contract; no generic POST/Bearer JSON."""
+def _captured_shape_response(
+    cps: list[int],
+    status: int = 200,
+    include_image: bool = True,
+    sprite_bytes: bytes | None = None,
+) -> dict:
+    """Captured real render response shape: status + layout boxes + binary PNG.
+
+    Layout entries carry only the observable provider fields
+    (glyph/x/y/width/height/codePoint). The sprite is a real binary PNG.
+    """
+    import io
+
+    from PIL import Image, ImageDraw
+
+    if sprite_bytes is None:
+        img = Image.new("RGB", (60 * max(len(cps), 1) + 10, 100), "white")
+        draw = ImageDraw.Draw(img)
+        for i, _cp in enumerate(cps):
+            draw.rectangle([60 * i + 6, 10, 60 * i + 54, 90], fill="black")
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        sprite_bytes = buf.getvalue()
+    layout = {
+        str(i): {
+            "glyph": i,
+            "x": 60 * i,
+            "y": 0,
+            "width": 59,
+            "height": 100,
+            "codePoint": cp,
+        }
+        for i, cp in enumerate(cps)
+    }
+    body: dict = {"status": status, "layout": layout}
+    if include_image:
+        body["image"] = base64.b64encode(sprite_bytes).decode()
+    return body
+
+
+CAPTURED_HEADERS = {
+    "content-type": "application/json; charset=utf-8",
+    "max-glyphs-per-page": "100",
+    "x-missing-unicodes": "U+00FF",
+    "x-tofus-found": "0",
+}
+
+
+def test_MONOTYPE_CAPTURED_HEADERS_binary_png_contract():
+    """Captured request contract + consumed binary PNG response evidence.
+
+    GET to the MD5 path with the approved render query/header contract; the
+    response is consumed as status/Content-Type/JSON-body with a base64
+    binary PNG sprite validated by magic + size, bound to the exact target.
+    No invented JSON metrics anywhere.
+    """
     captured: list[httpx.Request] = []
-    sprite_b64 = base64.b64encode(b"\x89PNG-fake-sprite").decode()
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured.append(request)
-        return httpx.Response(
-            200,
-            json={"layout": {"0": {"codePoint": 65}}, "image": sprite_b64},
-        )
+        return httpx.Response(200, json=_captured_shape_response([65, 66]), headers=CAPTURED_HEADERS)
 
     async def run():
         client = MonotypeRenderClient()
@@ -236,65 +285,148 @@ def test_MONOTYPE_REAL_PROTOCOL_get_md5_path_render_contract():
         assert req.headers["Origin"] == "https://www.myfonts.com"
         assert "Mozilla" in req.headers["User-Agent"]
 
+        # Consumed binary PNG response evidence.
+        assert page.glyph_count == 2
+        assert page.raster_bytes.startswith(b"\x89PNG\r\n\x1a\n")
+        assert page.payload["sprite_sha256"] == hashlib.sha256(page.raster_bytes).hexdigest()
+        observed = page.payload["observed_headers"]
+        assert observed["content_type"] == "application/json; charset=utf-8"
+        assert observed["max_glyphs_per_page"] == 100
+        assert observed["x_missing_unicodes"] == "U+00FF"
+        assert observed["x_tofus_found"] == "0"
+        # Glyph binding is the observable codePoint + sprite-cell box only.
+        for g in page.payload["glyphs"]:
+            assert set(g.keys()) == {"code_point", "glyph_index", "sprite_box"}
+            assert set(g["sprite_box"].keys()) == {"x", "y", "width", "height"}
+        assert [g["code_point"] for g in page.payload["glyphs"]] == [65, 66]
+        # Raster-only source: never metrics/pairs/features.
+        assert page.payload["pairs"] == [] and page.payload["features"] == []
+        assert "metrics" not in json.dumps(page.payload)
+
+        # Fail-closed binary/response contract matrix.
+        not_json_ct = httpx.MockTransport(lambda r: httpx.Response(
+            200, content=json.dumps(_captured_shape_response([65])).encode(),
+            headers={"content-type": "image/png"},
+        ))
+        assert await _fetch_with_transport(client, not_json_ct, {"family": "F", "style": "R", "md5": ENVELOPE_MD5}) is None
+
+        bad_status = httpx.MockTransport(lambda r: httpx.Response(
+            200, json=_captured_shape_response([65], status=500), headers=CAPTURED_HEADERS))
+        assert await _fetch_with_transport(client, bad_status, {"family": "F", "style": "R", "md5": ENVELOPE_MD5}) is None
+
+        not_png = httpx.MockTransport(lambda r: httpx.Response(
+            200,
+            json={"status": 200, "layout": {"0": {"glyph": 0, "x": 0, "y": 0, "width": 10, "height": 10, "codePoint": 65}},
+                  "image": base64.b64encode(b"not-a-png-sprite").decode()},
+            headers=CAPTURED_HEADERS))
+        assert await _fetch_with_transport(client, not_png, {"family": "F", "style": "R", "md5": ENVELOPE_MD5}) is None
+
+        no_image = httpx.MockTransport(lambda r: httpx.Response(
+            200, json={"status": 200, "layout": {"0": {"codePoint": 65}}}, headers=CAPTURED_HEADERS))
+        assert await _fetch_with_transport(client, no_image, {"family": "F", "style": "R", "md5": ENVELOPE_MD5}) is None
+
+        malformed_layout = httpx.MockTransport(lambda r: httpx.Response(
+            200, json={"status": 200, "layout": "nope", "image": base64.b64encode(b"\x89PNG").decode()},
+            headers=CAPTURED_HEADERS))
+        assert await _fetch_with_transport(client, malformed_layout, {"family": "F", "style": "R", "md5": ENVELOPE_MD5}) is None
+
+        bad_box = httpx.MockTransport(lambda r: httpx.Response(
+            200, json={"status": 200, "layout": {"0": {"glyph": 0, "x": "wide", "y": 0, "width": 5, "height": 5, "codePoint": 65}},
+                       "image": base64.b64encode(b"\x89PNG\r\n\x1a\nrest").decode()},
+            headers=CAPTURED_HEADERS))
+        assert await _fetch_with_transport(client, bad_box, {"family": "F", "style": "R", "md5": ENVELOPE_MD5}) is None
+
     import asyncio
 
     asyncio.run(run())
 
 
-def _real_shape_response(cps: list[int], page_has_more: bool = False) -> dict:
-    """Sanitized real-shape render response: layout map + base64 sprite."""
-    sprite_b64 = base64.b64encode(b"\x89PNG-real-shape-sprite").decode()
-    layout = {}
-    for i, cp in enumerate(cps):
-        layout[str(i)] = {
-            "codePoint": cp,
-            "metrics": {
-                "advanceWidthPx": 46.8,
-                "lsbPx": 3.6,
-                "rsbPx": 3.6,
-                "ascentPx": 50.4,
-                "descentPx": -14.4,
-                "advanceWidthUpem": 600.0,
-                "lsbUpem": 50.0,
-                "rsbUpem": 50.0,
-                "ascentUpem": 700.0,
-                "descentUpem": -200.0,
-                "bboxWidthUpem": 500.0,
-                "bboxHeightUpem": 650.0,
-            },
-            "box": {"x": 0, "y": 0, "w": 100, "h": 100},
-        }
-    return {"layout": layout, "image": sprite_b64}
+def test_MONOTYPE_PAGINATION_bounded_coverage_and_termination():
+    """Bounded pagination/coverage over the observable provider signals.
 
-
-def test_MONOTYPE_REAL_RESPONSE_real_shape_fixture_yields_pages_and_completion():
+    Termination signals are the captured empty layout and the
+    max-glyphs-per-page partial-fill header; coverage is exactly the
+    observable code points; unmapped glyph slots are skipped, never bound.
+    """
     requests_seen: list[dict] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         page = int(dict(request.url.params)["acs_p"])
         requests_seen.append({"page": page, "path": request.url.path})
         if page == 1:
-            return httpx.Response(200, json=_real_shape_response([65, 66]))
-        # Empty layout marks bounded completion.
-        return httpx.Response(200, json={"layout": {}, "image": base64.b64encode(b"x").decode()})
+            # Full page under the declared per-page maximum.
+            return httpx.Response(
+                200, json=_captured_shape_response([65, 66]),
+                headers={**CAPTURED_HEADERS, "max-glyphs-per-page": "2"},
+            )
+        if page == 2:
+            # Partial fill below the maximum: observable final page signal.
+            return httpx.Response(
+                200, json=_captured_shape_response([67]),
+                headers={**CAPTURED_HEADERS, "max-glyphs-per-page": "2"},
+            )
+        # Captured bounded-completion shape: empty layout + placeholder PNG.
+        return httpx.Response(
+            200, json=_captured_shape_response([]), headers=CAPTURED_HEADERS
+        )
 
     async def run():
         client = MonotypeRenderClient()
         provider = MonotypeRasterProvider(_TransportBoundClient(client, httpx.MockTransport(handler)))
         target = {"family": "Real Fam", "style": "Regular", "md5": ENVELOPE_MD5}
         pages = await provider.fetch_sprite_pages(target, BinaryAcquisitionPolicy(max_sprite_pages=8))
-        assert len(pages) == 1  # bounded completion at empty second page
-        page = pages[0]
-        assert page.glyph_count == 2
-        glyphs = page.payload["glyphs"]
-        assert [g["code_point"] for g in glyphs] == [65, 66]
-        assert all(g["metrics"]["advance_width_upem"] == 600.0 for g in glyphs)
-        assert page.payload["browser_version"] == MonotypeRenderClient.BROWSER_VERSION
-        assert page.raster_bytes == b"\x89PNG-real-shape-sprite"
+        assert [p.glyph_count for p in pages] == [2, 1]  # stopped at partial fill
         assert [r["path"] for r in requests_seen] == [
             f"/render/105/font/{ENVELOPE_MD5}",
             f"/render/105/font/{ENVELOPE_MD5}",
         ]
+        coverage = sorted(g["code_point"] for p in pages for g in p.payload["glyphs"])
+        assert coverage == [65, 66, 67]
+
+        # Empty-layout termination (no max-glyphs-per-page header present).
+        requests_seen.clear()
+
+        def empty_after_one(request: httpx.Request) -> httpx.Response:
+            page = int(dict(request.url.params)["acs_p"])
+            requests_seen.append({"page": page})
+            if page == 1:
+                return httpx.Response(200, json=_captured_shape_response([65]), headers={"content-type": "application/json"})
+            return httpx.Response(200, json=_captured_shape_response([]), headers={"content-type": "application/json"})
+
+        provider2 = MonotypeRasterProvider(_TransportBoundClient(client, httpx.MockTransport(empty_after_one)))
+        pages2 = await provider2.fetch_sprite_pages(target, BinaryAcquisitionPolicy(max_sprite_pages=8))
+        assert [p.glyph_count for p in pages2] == [1]
+        assert [r["page"] for r in requests_seen] == [1, 2]  # bounded completion at empty layout
+
+        # Page budget stays bounded (RASTER_MAX semantics): full-fill pages
+        # declare no completion signal, so only the budget terminates.
+        page_counter = {"n": 0}
+
+        def endless_handler(request):
+            page_counter["n"] += 1
+            return httpx.Response(
+                200, json=_captured_shape_response([65]),
+                headers={**CAPTURED_HEADERS, "max-glyphs-per-page": "1"},
+            )
+
+        provider3 = MonotypeRasterProvider(_TransportBoundClient(client, httpx.MockTransport(endless_handler)))
+        pages3 = await provider3.fetch_sprite_pages(target, BinaryAcquisitionPolicy(max_sprite_pages=2))
+        assert len(pages3) == 2 and page_counter["n"] == 2  # bounded, deterministic
+
+        # Unmapped glyph slots (codePoint <= 0) are skipped, never bound;
+        # a page with zero observable bindings fails closed.
+        mixed = _captured_shape_response([65])
+        mixed["layout"]["slot0"] = {"glyph": 99, "x": 0, "y": 0, "width": 5, "height": 5, "codePoint": 0}
+        mixed_handler = httpx.MockTransport(lambda r: httpx.Response(200, json=mixed, headers=CAPTURED_HEADERS))
+        mixed_page = await _fetch_with_transport(client, mixed_handler, target)
+        assert mixed_page is not None
+        assert [g["code_point"] for g in mixed_page.payload["glyphs"]] == [65]
+        assert mixed_page.payload["unmapped_glyph_slots"] == 1
+
+        only_unmapped = _captured_shape_response([])
+        only_unmapped["layout"] = {"0": {"glyph": 0, "x": 0, "y": 0, "width": 5, "height": 5, "codePoint": 0}}
+        unmapped_handler = httpx.MockTransport(lambda r: httpx.Response(200, json=only_unmapped, headers=CAPTURED_HEADERS))
+        assert await _fetch_with_transport(client, unmapped_handler, target) is None
 
     import asyncio
 
@@ -330,70 +462,144 @@ async def _fetch_with_transport(client, transport, request: dict, cursor: str = 
         adapters_mod.httpx.AsyncClient = original
 
 
-def test_MONOTYPE_BAD_TARGET_fail_closed_matrix():
-    sprite_b64 = base64.b64encode(b"\x89PNG-sprite").decode()
+def test_RASTER_FALLBACK_E2E_observations_from_browser_measurement(tmp_path: Path):
+    """End-to-end fallback-to-observation under the captured contract.
+
+    The production client consumes the real captured response shape; the
+    raster-only pages bind coverage/code points; metrics/pairs/features and
+    the raster schedule come from approved browser-measurement evidence.
+    Raster-only evidence alone can never complete the snapshot.
+    """
+    from acquisition.raster_ingest import BrowserMeasurementEvidence, ingest_raster_pages
+    from measurement.store import ObservationStore
+    from tests.test_issue72_review_repros import _browser_measurement_for_seed
+
+    target = {"family": "E2E Fam", "style": "Regular", "md5": ENVELOPE_MD5}
+    evidence = _browser_measurement_for_seed("chromium_e2e_v1")
 
     async def run():
         client = MonotypeRenderClient()
+        page = await _fetch_with_transport(
+            client,
+            httpx.MockTransport(lambda r: httpx.Response(
+                200, json=_captured_shape_response([65, 66]), headers=CAPTURED_HEADERS)),
+            target,
+        )
+        assert page is not None
 
-        # Empty/invalid target: no request, fail closed.
+        store = ObservationStore(tmp_path / "obs_e2e")
+        ingested = ingest_raster_pages(
+            store, ISSUE71_CONFIG, "e2e_fam", "regular",
+            evidence, [page], source_url="https://www.myfonts.com/collections/e2e-fam",
+        )
+        assert ingested == 2
+        cfg_h = ISSUE71_CONFIG.compute_hash()
+        assert store.get_coverage("e2e_fam", "regular", browser_version="chromium_e2e_v1", config_hash=cfg_h) == [65, 66]
+        assert store.is_source_collection_completed(
+            "e2e_fam", "regular", config_hash=cfg_h, browser_version="chromium_e2e_v1",
+        )
+        # Stored rasters/metrics are exactly the browser-measured evidence.
+        obs = store.get_glyph_observations("e2e_fam", "regular", 66, browser_version="chromium_e2e_v1", config_hash=cfg_h)
+        assert obs and obs[0][0].metrics.advance_width_upem == 600.0
+        stored = (store.base_dir / obs[0][0].raster_relative_path).read_bytes()
+        assert stored == evidence.rasters[66][obs[0][0].resolution, obs[0][0].subpixel_x, obs[0][0].subpixel_y]
+        # Pair/feature provenance is the approved chromium canvas path.
+        pairs = store.get_pair_observations("e2e_fam", "regular", browser_version="chromium_e2e_v1", config_hash=cfg_h)
+        assert pairs and all(p["provenance"] == "chromium:chromium_e2e_v1:canvas_text_metrics" for p in pairs)
+        feats = store.get_feature_observations("e2e_fam", "regular", browser_version="chromium_e2e_v1", config_hash=cfg_h)
+        assert feats and all(f["provenance"] == "chromium:chromium_e2e_v1:canvas_feature_probe" for f in feats)
+
+    import asyncio
+
+    asyncio.run(run())
+
+
+def test_RASTER_FALLBACK_fail_closed_matrix(tmp_path: Path):
+    """Raster-only pages never satisfy the snapshot without browser evidence."""
+    from acquisition.raster_ingest import (
+        BrowserMeasurementEvidence,
+        ingest_raster_pages,
+        page_slice_attestation,
+    )
+    from measurement.models import DirectMetrics
+    from measurement.store import ObservationStore
+    from tests.test_issue72_review_repros import (
+        _browser_measurement_for_seed,
+        _raster_pages_for_seed,
+    )
+
+    pages = _raster_pages_for_seed(MonotypeRenderClient.BROWSER_VERSION)
+    evidence = _browser_measurement_for_seed("chromium_matrix_v1")
+    cfg_h = ISSUE71_CONFIG.compute_hash()
+
+    # Empty/invalid target: no request, fail closed (client level).
+    async def run_client_matrix():
+        client = MonotypeRenderClient()
+
         def counting_handler(request):
             raise AssertionError("no request may be issued for an invalid target")
 
         assert await _fetch_with_transport(client, httpx.MockTransport(counting_handler), {"family": "", "style": "", "md5": ""}) is None
         assert await _fetch_with_transport(client, httpx.MockTransport(counting_handler), {"family": "F", "style": "R", "md5": "short"}) is None
 
-        # Malformed layout fails closed.
-        bad_layout = httpx.MockTransport(lambda r: httpx.Response(200, json={"layout": "nope", "image": sprite_b64}))
-        assert await _fetch_with_transport(client, bad_layout, {"family": "F", "style": "R", "md5": ENVELOPE_MD5}) is None
-
-        # Missing raster fails closed.
-        no_image = httpx.MockTransport(lambda r: httpx.Response(200, json={"layout": {"0": {"codePoint": 65}}}))
-        assert await _fetch_with_transport(client, no_image, {"family": "F", "style": "R", "md5": ENVELOPE_MD5}) is None
-
-        # Cross-style / invalid code point fails closed.
-        bad_cp = httpx.MockTransport(lambda r: httpx.Response(200, json={"layout": {"0": {"codePoint": -3}}, "image": sprite_b64}))
-        assert await _fetch_with_transport(client, bad_cp, {"family": "F", "style": "R", "md5": ENVELOPE_MD5}) is None
-
-        # Incomplete coverage (pairs/features absent) publishes nothing:
-        # ingestion fails closed before completion is recorded.
-        from acquisition.raster_ingest import ingest_raster_pages
-        from measurement.store import ObservationStore
-        from compute.vietnamese import VietnameseAIIntegrityError  # noqa: F401  (import guard only)
-
-        page = MonotypeRenderClient._parse_page(_real_shape_response([65]), 1)
-        assert page is not None
-        store_dir = Path(tempfile.mkdtemp())
-        store = ObservationStore(store_dir)
-        with pytest.raises(ValueError):
-            ingest_raster_pages(
-                store, ISSUE71_CONFIG, "bad_target_fam", "regular",
-                MonotypeRenderClient.BROWSER_VERSION, [page],
-            )
-        assert store.is_source_collection_completed(
-            "bad_target_fam", "regular",
-            config_hash=ISSUE71_CONFIG.compute_hash(),
-            browser_version=MonotypeRenderClient.BROWSER_VERSION,
-        ) is False
-
-        # Extra pages stay bounded (budget smaller than available pages).
-        page_counter = {"n": 0}
-
-        def endless_handler(request):
-            page_counter["n"] += 1
-            return httpx.Response(200, json=_real_shape_response([65]))
-
-        provider = MonotypeRasterProvider(_TransportBoundClient(client, httpx.MockTransport(endless_handler)))
-        pages = await provider.fetch_sprite_pages(
-            {"family": "F", "style": "R", "md5": ENVELOPE_MD5},
-            BinaryAcquisitionPolicy(max_sprite_pages=2),
-        )
-        assert len(pages) == 2 and page_counter["n"] == 2  # bounded, deterministic
-
     import asyncio
-    import tempfile
 
-    asyncio.run(run())
+    asyncio.run(run_client_matrix())
+
+    # Raster pages without browser measurement can never complete.
+    store = ObservationStore(tmp_path / "obs_matrix_a")
+    with pytest.raises(ValueError, match="RASTER_INGEST_BROWSER_MEASUREMENT_REQUIRED"):
+        ingest_raster_pages(store, ISSUE71_CONFIG, "m_fam", "regular", None, pages)
+    assert store.is_source_collection_completed(
+        "m_fam", "regular", config_hash=cfg_h, browser_version="chromium_matrix_v1"
+    ) is False
+
+    # Coverage drift between CDN binding and browser measurement fails closed.
+    drifted = BrowserMeasurementEvidence(
+        browser_version="chromium_matrix_v1",
+        metrics={65: evidence.metrics[65]},
+        rasters={65: evidence.rasters[65]},
+        pairs=evidence.pairs,
+        features=evidence.features,
+    )
+    store_b = ObservationStore(tmp_path / "obs_matrix_b")
+    with pytest.raises(ValueError, match="RASTER_INGEST_COVERAGE_DRIFT"):
+        ingest_raster_pages(store_b, ISSUE71_CONFIG, "m_fam", "regular", drifted, pages)
+
+    # Corrupt sprite evidence fails closed at slice validation.
+    broken = _raster_pages_for_seed(MonotypeRenderClient.BROWSER_VERSION)
+    bad_payload = dict(broken[0].payload)
+    bad_payload["glyphs"] = [
+        {"code_point": 65, "glyph_index": 0, "sprite_box": {"x": 500, "y": 0, "width": 59, "height": 80}},
+        {"code_point": 66, "glyph_index": 1, "sprite_box": {"x": 59, "y": 0, "width": 55, "height": 80}},
+    ]
+    from acquisition.models import SpriteRasterPage
+
+    broken_page = SpriteRasterPage(
+        page_index=1, glyph_count=2, raster_bytes=broken[0].raster_bytes,
+        next_cursor="2", final=False, payload=bad_payload,
+    )
+    with pytest.raises(ValueError, match="RASTER_INGEST_BOX_OUT_OF_BOUNDS"):
+        page_slice_attestation([broken_page])
+    store_c = ObservationStore(tmp_path / "obs_matrix_c")
+    with pytest.raises(ValueError, match="RASTER_INGEST_BOX_OUT_OF_BOUNDS"):
+        ingest_raster_pages(store_c, ISSUE71_CONFIG, "m_fam", "regular", evidence, [broken_page])
+
+    # Non-PNG browser raster evidence fails closed.
+    bad_rasters = {
+        cp: {key: b"not-a-png" for key in tup}
+        for cp, tup in evidence.rasters.items()
+    }
+    poisoned = BrowserMeasurementEvidence(
+        browser_version="chromium_matrix_v1",
+        metrics=evidence.metrics,
+        rasters=bad_rasters,
+        pairs=evidence.pairs,
+        features=evidence.features,
+    )
+    store_d = ObservationStore(tmp_path / "obs_matrix_d")
+    with pytest.raises(ValueError, match="RASTER_INGEST_BROWSER_RASTER_NOT_PNG"):
+        ingest_raster_pages(store_d, ISSUE71_CONFIG, "m_fam", "regular", poisoned, pages)
 
 
 # =========================================================================

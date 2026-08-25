@@ -88,66 +88,106 @@ def test_PROD_COMPOSITION_real_factory_concrete_dependencies(tmp_path: Path, tes
 # =========================================================================
 
 def _raster_pages_for_seed(browser_version: str) -> list[SpriteRasterPage]:
-    """Complete authorized raster page set matching ISSUE71_CONFIG schedules."""
-    glyphs = []
-    for cp, adv, bbox in ((65, 650.0, (50, 50, 550, 700)), (66, 600.0, (40, 50, 560, 700))):
-        for res in ISSUE71_CONFIG.resolutions:
-            for sx, sy in ((0.0, 0.0),):
-                glyphs.append(_glyph_entry(cp, adv, bbox, res, sx, sy))
-        eval_res = max(ISSUE71_CONFIG.resolutions)
-        for sx, sy in ISSUE71_CONFIG.held_out_subpixel_phases:
-            glyphs.append(_glyph_entry(cp, adv, bbox, eval_res, sx, sy))
+    """Captured-shape raster page: real binary PNG sprite + observable boxes.
+
+    Raster-only provider evidence: code-point mapping and sprite-cell boxes
+    only. Never metrics, pairs, or features.
+    """
+    import io
+
+    from PIL import Image, ImageDraw
+
+    boxes = {65: (0, 0, 59, 80), 66: (59, 0, 55, 80)}
+    img = Image.new("RGB", (200, 100), "white")
+    draw = ImageDraw.Draw(img)
+    for x, y, bw, bh in boxes.values():
+        draw.rectangle([x + 5, y + 10, x + bw - 5, y + bh - 5], fill="black")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    sprite = buf.getvalue()
     payload = {
         "browser_version": browser_version,
-        "glyphs": glyphs,
-        "pairs": [
-            {"left_cp": 65, "right_cp": 66, "left_advance_upem": 650.0, "right_advance_upem": 600.0, "pair_advance_upem": 1230.0},
-            {"left_cp": 66, "right_cp": 65, "left_advance_upem": 600.0, "right_advance_upem": 650.0, "pair_advance_upem": 1240.0},
-        ],
-        "features": [
+        "glyphs": [
             {
-                "feature_tag": tag,
-                "sample_text": text,
-                "enabled_advance_upem": 1200.0,
-                "disabled_advance_upem": 1200.0,
-                "enabled_raster_signature": "a",
-                "disabled_raster_signature": "a",
+                "code_point": cp,
+                "glyph_index": i,
+                "sprite_box": {"x": x, "y": y, "width": bw, "height": bh},
             }
-            for tag, text in ISSUE71_CONFIG.feature_probes
+            for i, (cp, (x, y, bw, bh)) in enumerate(boxes.items())
         ],
+        "pairs": [],
+        "features": [],
+        "sprite_sha256": hashlib.sha256(sprite).hexdigest(),
+        "observed_headers": {"content_type": "application/json; charset=utf-8"},
     }
-    return [SpriteRasterPage(page_index=0, glyph_count=len(glyphs), raster_bytes=b"", final=True, payload=payload)]
+    return [SpriteRasterPage(page_index=1, glyph_count=len(boxes), raster_bytes=sprite, next_cursor="2", final=False, payload=payload)]
 
 
-def _glyph_entry(cp: int, adv: float, bbox, res: int, sx: float, sy: float) -> dict:
-    import math
+def _browser_measurement_for_seed(browser_version: str):
+    """Deterministic approved-path-shaped browser measurement evidence.
 
-    font_size = math.floor(res * 0.72)
-    scale = font_size / 1000.0
-    png = _generate_png_bytes(res, bbox, adv, sx, sy)
-    return {
-        "code_point": cp,
-        "resolution": res,
-        "subpixel_x": sx,
-        "subpixel_y": sy,
-        "png_base64": base64.b64encode(png).decode(),
-        "metrics": {
-            "advance_width_px": round(adv * scale, 2),
-            "lsb_px": round(bbox[0] * scale, 2),
-            "rsb_px": round((adv - bbox[2]) * scale, 2),
-            "ascent_px": round(bbox[3] * scale, 2),
-            "descent_px": round(-bbox[1] * scale, 2),
-            "advance_width_upem": adv,
-            "lsb_upem": float(bbox[0]),
-            "rsb_upem": adv - float(bbox[2]),
-            "ascent_upem": float(bbox[3]),
-            "descent_upem": -200.0,
-            "bbox_width_upem": float(bbox[2] - bbox[0]),
-            "bbox_height_upem": float(bbox[3] - bbox[1]),
-            "sample_count": 1,
-            "confidence": 1.0,
-        },
-    }
+    Carries exactly what the production ChromiumSession canvas path
+    produces: per-glyph DirectMetrics, the full config raster schedule,
+    bounded-fit pairs within coverage, and feature probes.
+    """
+    from acquisition.raster_ingest import BrowserMeasurementEvidence
+    from measurement.models import DirectMetrics
+
+    config = ISSUE71_CONFIG
+    advs = {65: 650.0, 66: 600.0}
+    bboxes = {65: (50, 50, 550, 700), 66: (40, 50, 560, 700)}
+    scale = float(config.font_size_px) / float(config.upem)
+    metrics: dict[int, DirectMetrics] = {}
+    rasters: dict[int, dict[tuple[int, float, float], bytes]] = {}
+    eval_res = max(config.resolutions)
+    for cp, adv in advs.items():
+        bbox = bboxes[cp]
+        metrics[cp] = DirectMetrics(
+            code_point=cp,
+            character=chr(cp),
+            font_size_px=float(config.font_size_px),
+            raw_advance_width=adv * scale,
+            raw_actual_left=float(bbox[0]) * scale,
+            raw_actual_right=float(bbox[2]) * scale,
+            raw_actual_ascent=float(bbox[3]) * scale,
+            raw_actual_descent=200.0 * scale,
+            raw_font_ascent=float(bbox[3]) * scale,
+            raw_font_descent=200.0 * scale,
+            advance_width_upem=adv,
+            lsb_upem=float(bbox[0]),
+            rsb_upem=adv - float(bbox[2]),
+            ascent_upem=float(bbox[3]),
+            descent_upem=-200.0,
+            bbox_width_upem=float(bbox[2] - bbox[0]),
+            bbox_height_upem=float(bbox[3] - bbox[1]),
+        )
+        schedule = [(res, sx, sy) for res in config.resolutions for sx, sy in config.base_subpixel_phases]
+        schedule.extend((eval_res, sx, sy) for sx, sy in config.held_out_subpixel_phases)
+        rasters[cp] = {
+            (res, sx, sy): _generate_png_bytes(res, bbox, adv, sx, sy)
+            for res, sx, sy in schedule
+        }
+    pairs = [
+        {"left_cp": 65, "right_cp": 66, "left_advance_upem": 650.0,
+         "right_advance_upem": 600.0, "pair_advance_upem": 1230.0},
+        {"left_cp": 66, "right_cp": 65, "left_advance_upem": 600.0,
+         "right_advance_upem": 650.0, "pair_advance_upem": 1240.0},
+    ]
+    features = [
+        {
+            "feature_tag": tag,
+            "sample_text": text,
+            "enabled_advance_upem": 1200.0,
+            "disabled_advance_upem": 1200.0,
+            "enabled_raster_signature": "a",
+            "disabled_raster_signature": "a",
+        }
+        for tag, text in config.feature_probes
+    ]
+    return BrowserMeasurementEvidence(
+        browser_version=browser_version, metrics=metrics, rasters=rasters,
+        pairs=pairs, features=features,
+    )
 
 
 class _RasterOnlyClient:
@@ -194,14 +234,31 @@ class _MetadataDumpDom:
 
 @pytest.mark.asyncio
 async def test_RASTER_HANDOFF_provider_pages_reach_stage9d_not_legacy_acquirer(
-    test_settings: Settings, tmp_path: Path
+    test_settings: Settings, tmp_path: Path, monkeypatch
 ):
     store_dir = tmp_path / "obs"
     store_dir.mkdir()
-    browser_version = "monotype_authorized_v1"
-    pages = _raster_pages_for_seed(browser_version)
-    # The page payload must carry the exact raster target identity.
-    pages[0].payload["browser_version"] = browser_version
+    measurement_bv = "chromium_measurement_v1"
+    pages = _raster_pages_for_seed("monotype_render_105")
+    evidence = _browser_measurement_for_seed(measurement_bv)
+
+    # The runner must source metrics/pairs/features through the approved
+    # browser-measurement path, bound to the exact raster target.
+    import runner as runner_mod
+
+    measurement_calls: list[dict] = []
+
+    async def _stub_collect_browser_measurement(source_url, family_name, style_name, code_points, config):
+        measurement_calls.append({
+            "source_url": source_url,
+            "family_name": family_name,
+            "style_name": style_name,
+            "code_points": list(code_points),
+            "config_hash": config.compute_hash(),
+        })
+        return evidence
+
+    monkeypatch.setattr(runner_mod, "collect_browser_measurement", _stub_collect_browser_measurement)
 
     class _SabotagedAcquirer(CountingAcquirer):
         async def acquire_source(self, *args, **kwargs):
@@ -244,14 +301,37 @@ async def test_RASTER_HANDOFF_provider_pages_reach_stage9d_not_legacy_acquirer(
     assert res.action == RunnerAction.ACKED
     assert acquirer.acquire_calls == 0  # legacy acquirer never invoked
     assert len(state["uploads"]) == 1
+
+    # Browser measurement was requested for the exact observable target.
+    assert measurement_calls == [{
+        "source_url": "https://www.myfonts.com/collections/raster-handoff-fam",
+        "family_name": "Raster Handoff Fam",
+        "style_name": "Regular",
+        "code_points": [65, 66],
+        "config_hash": ISSUE71_CONFIG.compute_hash(),
+    }]
+
     events = [e for e in runner.last_reuse_trace["events"] if e["event"] == "RASTER_HANDOFF"]
     assert events and events[0]["glyphs"] == 2
-    # Observations + completed collection now exist under the exact tuple.
+    # Consumed CDN sprite evidence is attested in the trace.
+    assert events[0]["sprite_sha256"] == [pages[0].payload["sprite_sha256"]]
+
+    # Observations + completed collection exist under the exact tuple, with
+    # browser-measured metrics/rasters (never provider-supplied).
+    cfg_h = ISSUE71_CONFIG.compute_hash()
     cov = acquirer.store.get_coverage(
-        "raster_handoff_fam", "regular", browser_version=browser_version,
-        config_hash=ISSUE71_CONFIG.compute_hash(),
+        "raster_handoff_fam", "regular", browser_version=measurement_bv, config_hash=cfg_h,
     )
     assert cov == [65, 66]
+    obs = acquirer.store.get_glyph_observations(
+        "raster_handoff_fam", "regular", 65, browser_version=measurement_bv, config_hash=cfg_h,
+    )
+    assert obs and obs[0][0].metrics.advance_width_upem == 650.0
+    stored_raster = (acquirer.store.base_dir / obs[0][0].raster_relative_path).read_bytes()
+    assert stored_raster == evidence.rasters[65][(128, 0.0, 0.0)]
+    assert acquirer.store.is_source_collection_completed(
+        "raster_handoff_fam", "regular", config_hash=cfg_h, browser_version=measurement_bv,
+    )
 
 
 # =========================================================================

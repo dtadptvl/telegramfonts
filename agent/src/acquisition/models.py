@@ -82,16 +82,16 @@ class AcquiredBinary:
 class SpriteRasterPage:
     """One bounded page of authorized raster sprite evidence.
 
-    `payload` carries the closed provider schema:
+    `payload` carries the closed provider schema (captured real render
+    response; raster-only source — never metrics/pairs/features):
       browser_version: str
-      glyphs: [{code_point, resolution, subpixel_x, subpixel_y, png_base64,
-                metrics{advance_width_px, lsb_px, rsb_px, ascent_px, descent_px,
-                        *_upem fields, sample_count, confidence}}]
-      pairs:  [{left_cp, right_cp, left_advance_upem, right_advance_upem,
-                pair_advance_upem}]
-      features: [{feature_tag, sample_text, enabled_advance_upem,
-                  disabled_advance_upem, enabled_raster_signature,
-                  disabled_raster_signature}]
+      glyphs: [{code_point, glyph_index, sprite_box{x, y, width, height}}]
+      pairs:  []  (never supplied by the raster endpoint)
+      features: []  (never supplied by the raster endpoint)
+      sprite_sha256: str
+      observed_headers: {content_type, max_glyphs_per_page?,
+                         x_missing_unicodes?, x_tofus_found?}
+      unmapped_glyph_slots: int
     """
 
     page_index: int

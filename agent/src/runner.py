@@ -21,7 +21,11 @@ from acquisition.models import (
     BINARY_STAGE_DUMP_DOM,
 )
 from acquisition.pipeline import AcquisitionPipeline
-from acquisition.raster_ingest import ingest_raster_pages
+from acquisition.raster_ingest import (
+    collect_browser_measurement,
+    ingest_raster_pages,
+    page_slice_attestation,
+)
 from compute.archive import (
     ARCHIVEABLE_FORMATS,
     PROVENANCE_BINARY_DUMP_DOM,
@@ -921,26 +925,36 @@ class JobRunner:
                                 )
                                 continue
                             if outcome.kind == "raster_authorized" and outcome.raster_pages:
-                                # Raster evidence is never discarded: convert to
-                                # complete exact-tuple observations, then the normal
-                                # Stage 9D raster gate consumes them.
-                                raster_bv = ""
-                                for page in outcome.raster_pages:
-                                    page_bv = str((page.payload or {}).get("browser_version", ""))
-                                    if page_bv:
-                                        raster_bv = page_bv
-                                        break
-                                if not raster_bv:
+                                # Raster evidence is never discarded: the CDN
+                                # supplies raster/coverage only; metrics, pairs,
+                                # and features are measured through the approved
+                                # browser path before the immutable snapshot may
+                                # complete, then the normal Stage 9D raster gate
+                                # consumes the observations.
+                                raster_cps = sorted({
+                                    int(g["code_point"])
+                                    for page in outcome.raster_pages
+                                    for g in (page.payload or {}).get("glyphs", [])
+                                })
+                                if not raster_cps:
                                     raise ValueError("ACQUISITION_RASTER_IDENTITY_MISSING")
                                 family_key, style_key = self._observation_keys(
                                     job.source_url, style.id
                                 )
+                                measurement = await collect_browser_measurement(
+                                    job.source_url,
+                                    family_name,
+                                    style.display_name,
+                                    raster_cps,
+                                    gate_config,
+                                )
+                                attestation = page_slice_attestation(outcome.raster_pages)
                                 ingested = ingest_raster_pages(
                                     gate_store,
                                     gate_config,
                                     family_key,
                                     style_key,
-                                    raster_bv,
+                                    measurement,
                                     outcome.raster_pages,
                                     source_url=job.source_url,
                                 )
@@ -948,7 +962,8 @@ class JobRunner:
                                     f"PREACQ_{style.id}",
                                     "RASTER_HANDOFF",
                                     glyphs=ingested,
-                                    browser_version=raster_bv,
+                                    browser_version=measurement.browser_version,
+                                    sprite_sha256=attestation["sprite_sha256"],
                                 )
                                 continue
                             if outcome.kind == "insufficient" and outcome.terminal_reason_code.startswith(
