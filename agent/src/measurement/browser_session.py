@@ -49,6 +49,7 @@ class ChromiumExceptionInfo:
 
     type_name: str
     message: str
+    code: str | None = None
 
 
 @dataclass(frozen=True)
@@ -99,6 +100,7 @@ class ChromiumSessionDiagnostics:
     error: ChromiumExceptionInfo
     cause_chain: tuple[ChromiumExceptionInfo, ...]
     process_state: str
+    process_created: bool
     endpoint: ChromiumEndpoint | None
     stdout: ChromiumStreamEvidence | None
     stderr: ChromiumStreamEvidence | None
@@ -214,9 +216,17 @@ def _sanitize_text(value: str) -> str:
 
 
 def _exception_info(exc: BaseException) -> ChromiumExceptionInfo:
+    message = _sanitize_text(str(exc)) or "<no message>"
+    code_candidate = message.split(":", 1)[0].strip()
+    code = (
+        code_candidate
+        if re.fullmatch(r"[A-Z][A-Z0-9_]{2,79}", code_candidate)
+        else None
+    )
     return ChromiumExceptionInfo(
         type_name=type(exc).__name__,
-        message=_sanitize_text(str(exc)) or "<no message>",
+        message=message,
+        code=code,
     )
 
 
@@ -334,6 +344,7 @@ class ChromiumSession:
         self._stderr_capture: _BoundedPipeCapture | None = None
         self.last_cleanup: ChromiumCleanup | None = None
         self.last_diagnostic: ChromiumSessionDiagnostics | None = None
+        self._process_created = False
         self.browser_version: str = "unknown"
         self._loaded_fonts: set[str] = set()
         self._loaded_font_blobs: dict[str, bytes] = {}
@@ -362,6 +373,7 @@ class ChromiumSession:
             self._stderr_capture = None
             self.last_cleanup = None
             self.last_diagnostic = None
+            self._process_created = False
             self.ws_url = None
             self.endpoint = None
             self.cdp_port = None
@@ -400,6 +412,7 @@ class ChromiumSession:
                 text=False,
                 bufsize=0,
             )
+            self._process_created = self.process is not None
             self._stdout_capture = _BoundedPipeCapture(self.process.stdout)
             self._stderr_capture = _BoundedPipeCapture(self.process.stderr)
             self._stdout_capture.start()
@@ -556,6 +569,7 @@ class ChromiumSession:
             error=_exception_info(exc),
             cause_chain=_cause_chain(exc),
             process_state=process_state,
+            process_created=self._process_created,
             endpoint=self.endpoint,
             stdout=self._stdout_capture.evidence() if self._stdout_capture else None,
             stderr=self._stderr_capture.evidence() if self._stderr_capture else None,
