@@ -12,7 +12,7 @@ from typing import Any
 
 from fontTools.ttLib import TTFont
 
-from measurement.browser_session import ChromiumSession
+from measurement.browser_session import ChromiumSession, close_browser_session
 from measurement.collector import ObservationCollector
 from measurement.manifest import create_reproducibility_manifest
 from measurement.models import BenchmarkResult, ObservationConfig
@@ -221,4 +221,4 @@ class GroundTruthBenchmarkRunner:
                 reproducibility_manifest=manifest.to_dict(),
             )
         finally:
-            session.close()
+            await close_browser_session(session)

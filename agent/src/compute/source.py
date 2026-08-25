@@ -16,7 +16,7 @@ from PIL import Image, ImageDraw
 
 from compute.archive import canonical_source_identity
 from compute.models import ArchiveSourceContext, ClaimStyle, GlyphVector, SourcePayload, StyleSourceData
-from measurement.browser_session import ChromiumSession
+from measurement.browser_session import ChromiumSession, close_browser_session
 from measurement.collector import ObservationCollector
 from measurement.models import ObservationConfig
 from measurement.store import ObservationStore
@@ -576,7 +576,7 @@ class SourceAcquirer:
                     )
             finally:
                 if browser_session is not None:
-                    browser_session.close()
+                    await close_browser_session(browser_session)
 
             if not style_data_map:
                 raise ValueError(f"NO_MAX_STYLES_COMPILED_FOR_{family_name}")

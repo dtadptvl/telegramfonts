@@ -517,7 +517,7 @@ class MaxCandidateHeldOutValidator:
         tested_codepoints: list[int] | None = None,
     ) -> ChromiumValidationResult:
         """Exercise candidate OTF and TTF binaries in headless Chromium via CDP."""
-        from measurement.browser_session import ChromiumSession, find_chromium_executable
+        from measurement.browser_session import ChromiumSession, close_browser_session, find_chromium_executable
 
         try:
             find_chromium_executable()
@@ -700,7 +700,7 @@ class MaxCandidateHeldOutValidator:
                     error_message=str(e),
                 )
             finally:
-                session.close()
+                await close_browser_session(session)
 
         try:
             return asyncio.run(_run_browser())
