@@ -77,8 +77,16 @@ def run_candidate_pipeline(
         style_name="Regular",
         units_per_em=1000,
     )
+    cfg_hash = ObservationConfig().compute_hash()
     if store.has_pair_observations(reference_id, style_id):
-        typography_dataset = inferencer.infer_from_store(store, reference_id, style_id)
+        typography_dataset = inferencer.infer_from_store(
+            store,
+            reference_id=reference_id,
+            style_id=style_id,
+            browser_version="chromium",
+            config_hash=cfg_hash,
+            require_provenance=False,
+        )
         logger.info(
             "Loaded %d active kerning pairs (from %d probed pairs) from store",
             typography_dataset.active_kerning_pairs_count,

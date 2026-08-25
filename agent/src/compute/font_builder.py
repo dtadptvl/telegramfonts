@@ -57,13 +57,23 @@ class FontBuilderService:
         if self.store:
             family_key = style_source.observation_reference_id or sanitized_family.lower().replace(" ", "_").replace("-", "_")
             style_key = style_source.observation_style_id or sanitized_style.lower().replace(" ", "_").replace("-", "_")
+            browser_ver = getattr(style_source, "observation_browser_version", None) or "chromium"
+            from measurement.models import ObservationConfig
+            cfg_h = getattr(style_source, "observation_config_hash", None) or ObservationConfig().compute_hash()
             try:
                 inferencer = EvidenceKerningInferencer(
                     family_name=sanitized_family,
                     style_name=sanitized_style,
                     units_per_em=1000,
                 )
-                typography = inferencer.infer_from_store(self.store, family_key, style_key)
+                typography = inferencer.infer_from_store(
+                    self.store,
+                    reference_id=family_key,
+                    style_id=style_key,
+                    browser_version=browser_ver,
+                    config_hash=cfg_h,
+                    require_provenance=False,
+                )
             except Exception:
                 typography = None
 
