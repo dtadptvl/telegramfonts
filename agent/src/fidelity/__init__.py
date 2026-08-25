@@ -1,4 +1,4 @@
-"""Fidelity evaluation, quality gates, and canonical verification models (Stage 9A)."""
+"""Fidelity evaluation, quality gates, and canonical verification models (Stage 9A / 9B)."""
 from fidelity.evaluator import FidelityEvaluator
 from fidelity.models import (
     BoundChromiumEvidence,
@@ -15,20 +15,34 @@ from fidelity.models import (
     TopologyGateResult,
     TypographyGateResult,
 )
+from fidelity.producers import (
+    CandidateArtifact,
+    ChromiumEvidenceProducer,
+    FontToolsEvidenceProducer,
+    FreeTypeEvidenceProducer,
+    HarfBuzzEvidenceProducer,
+    ProductionConsumerEvidenceProducer,
+)
 
 __all__ = [
     "BoundChromiumEvidence",
     "BoundFontToolsEvidence",
     "BoundFreeTypeEvidence",
     "BoundHarfBuzzEvidence",
+    "CandidateArtifact",
+    "ChromiumEvidenceProducer",
     "ConsumerEvidenceBundle",
     "ConsumerGateResult",
     "CoverageGateResult",
     "FidelityEvaluator",
     "FidelityReport",
     "FidelityThresholds",
+    "FontToolsEvidenceProducer",
+    "FreeTypeEvidenceProducer",
     "GeometryRasterGateResult",
+    "HarfBuzzEvidenceProducer",
     "MetricsGateResult",
+    "ProductionConsumerEvidenceProducer",
     "TopologyGateResult",
     "TypographyGateResult",
 ]
