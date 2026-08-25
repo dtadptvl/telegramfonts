@@ -13,7 +13,7 @@ import io
 import json
 import logging
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
@@ -32,7 +32,9 @@ from fidelity.models import (
     ChromiumPairSampleEvidence,
     ConsumerEvidenceBundle,
     FreeTypeSampleEvidence,
+    HarfBuzzPositionVector,
     HarfBuzzSampleEvidence,
+    ProductionProducerError,
 )
 from measurement.browser_session import ChromiumSession, find_chromium_executable
 from measurement.calibration import CalibrationTransform
@@ -86,10 +88,21 @@ class CandidateArtifact:
         """Construct verified artifact from an explicit descriptor, enforcing byte/size/SHA anti-drift."""
         descriptor.validate()
         p = Path(descriptor.file_path)
-        if not p.exists() and descriptor.raw_bytes is None:
+
+        if p.exists():
+            disk_bytes = p.read_bytes()
+            if descriptor.raw_bytes is not None and descriptor.raw_bytes != disk_bytes:
+                raise ValueError(
+                    "ARTIFACT_PATH_BYTES_DRIFT: Descriptor raw_bytes do not match file_path content on disk"
+                )
+            raw_bytes = disk_bytes
+            file_path_str = str(p.resolve())
+        elif descriptor.raw_bytes is not None:
+            raw_bytes = descriptor.raw_bytes
+            file_path_str = str(descriptor.file_path)
+        else:
             raise FileNotFoundError(f"Candidate font file not found: {p}")
 
-        raw_bytes = descriptor.raw_bytes if descriptor.raw_bytes is not None else p.read_bytes()
         actual_size = len(raw_bytes)
         if actual_size != descriptor.expected_size_bytes:
             raise ValueError(
@@ -117,7 +130,7 @@ class CandidateArtifact:
 
         return cls(
             format=fmt,
-            file_path=str(p.resolve()) if p.exists() else "descriptor_memory",
+            file_path=file_path_str,
             size_bytes=actual_size,
             sha256_hex=actual_sha,
             raw_bytes=raw_bytes,
@@ -126,16 +139,11 @@ class CandidateArtifact:
     @classmethod
     def from_source(
         cls,
-        source: Path | str | bytes | CandidateArtifactDescriptor | CandidateArtifact,
+        source: Path | str | bytes,
         format_hint: str | None = None,
         file_path_hint: str | None = None,
     ) -> CandidateArtifact:
-        """Validate and construct CandidateArtifact with strict byte, size, format, and SHA-256 checks."""
-        if isinstance(source, CandidateArtifact):
-            return source
-        if isinstance(source, CandidateArtifactDescriptor):
-            return cls.from_descriptor(source)
-
+        """Convenience constructor for test fixtures."""
         raw_bytes: bytes
         file_path_str: str
 
@@ -437,13 +445,11 @@ class FreeTypeEvidenceProducer:
                         units_per_em=model.metrics.units_per_em,
                     )
 
-                    # Top-left of the glyph bitmap on the pixel canvas
                     dst_x0 = int(round(transform.x_origin_px + bmp_left))
                     dst_y0 = int(round(transform.y_origin_px - bmp_top))
                     dst_x1 = dst_x0 + bmp_w
                     dst_y1 = dst_y0 + bmp_h
 
-                    # Clip to canvas bounds
                     src_x0 = max(0, -dst_x0)
                     src_y0 = max(0, -dst_y0)
                     src_x1 = bmp_w - max(0, dst_x1 - res)
@@ -596,10 +602,14 @@ class HarfBuzzEvidenceProducer:
                 first_error = first_error or sample_err
                 samples.append(
                     HarfBuzzSampleEvidence(
+                        left_cp=pair.left_cp,
+                        right_cp=pair.right_cp,
                         text=text,
                         in_candidate_cmap=False,
                         glyph_sequence_match=False,
                         glyph_ids=(),
+                        clusters=(),
+                        positions=(),
                         candidate_total_advance_upem=0.0,
                         expected_total_advance_upem=pair.measured_pair_advance_upem,
                         advance_delta_upem=abs(pair.measured_pair_advance_upem),
@@ -618,17 +628,48 @@ class HarfBuzzEvidenceProducer:
                 infos = buf.glyph_infos
                 positions = buf.glyph_positions
                 glyph_ids = tuple(info.codepoint for info in infos)
+                clusters = tuple(info.cluster for info in infos)
+
+                pos_vectors = tuple(
+                    HarfBuzzPositionVector(
+                        x_advance=float(pos.x_advance),
+                        y_advance=float(pos.y_advance),
+                        x_offset=float(pos.x_offset),
+                        y_offset=float(pos.y_offset),
+                    )
+                    for pos in positions
+                )
 
                 # OpenType .notdef is glyph ID 0; in-cmap requires all non-zero glyph IDs
                 in_cmap = bool(len(infos) == 2 and all(gid != 0 for gid in glyph_ids))
 
-                cand_total_adv = float(sum(pos.x_advance for pos in positions))
+                cand_total_adv = float(sum(p.x_advance for p in pos_vectors))
                 expected_adv = pair.measured_pair_advance_upem
                 adv_delta = abs(cand_total_adv - expected_adv)
 
-                # Cluster alignment: first glyph cluster=0, second glyph cluster=1
-                clusters_ok = len(infos) == 2 and infos[0].cluster == 0 and infos[1].cluster == 1
-                seq_match = bool(in_cmap and clusters_ok and adv_delta <= 15.0)
+                # Real position vector validation against canonical model expectation
+                exp1_adv = model.glyphs[pair.left_cp].advance_width_upem + float(model.kerning_pairs.get((pair.left_cp, pair.right_cp), 0))
+                exp2_adv = model.glyphs[pair.right_cp].advance_width_upem
+
+                if len(pos_vectors) >= 2:
+                    d1 = max(
+                        abs(pos_vectors[0].x_advance - exp1_adv),
+                        abs(pos_vectors[0].y_advance),
+                        abs(pos_vectors[0].x_offset),
+                        abs(pos_vectors[0].y_offset),
+                    )
+                    d2 = max(
+                        abs(pos_vectors[1].x_advance - exp2_adv),
+                        abs(pos_vectors[1].y_advance),
+                        abs(pos_vectors[1].x_offset),
+                        abs(pos_vectors[1].y_offset),
+                    )
+                    max_pos_delta = max(d1, d2)
+                else:
+                    max_pos_delta = 1000.0
+
+                clusters_ok = len(infos) == 2 and clusters == (0, 1)
+                seq_match = bool(in_cmap and clusters_ok and adv_delta <= 15.0 and max_pos_delta <= 15.0)
 
                 sample_err = None if (in_cmap and seq_match) else "SHAPING_MISMATCH"
                 if sample_err:
@@ -636,14 +677,18 @@ class HarfBuzzEvidenceProducer:
 
                 samples.append(
                     HarfBuzzSampleEvidence(
+                        left_cp=pair.left_cp,
+                        right_cp=pair.right_cp,
                         text=text,
                         in_candidate_cmap=in_cmap,
                         glyph_sequence_match=seq_match,
                         glyph_ids=glyph_ids,
+                        clusters=clusters,
+                        positions=pos_vectors,
                         candidate_total_advance_upem=cand_total_adv,
                         expected_total_advance_upem=expected_adv,
                         advance_delta_upem=adv_delta,
-                        max_position_delta_upem=adv_delta,
+                        max_position_delta_upem=max_pos_delta,
                         error_message=sample_err,
                     )
                 )
@@ -652,10 +697,14 @@ class HarfBuzzEvidenceProducer:
                 first_error = first_error or sample_err
                 samples.append(
                     HarfBuzzSampleEvidence(
+                        left_cp=pair.left_cp,
+                        right_cp=pair.right_cp,
                         text=text,
                         in_candidate_cmap=False,
                         glyph_sequence_match=False,
                         glyph_ids=(),
+                        clusters=(),
+                        positions=(),
                         candidate_total_advance_upem=0.0,
                         expected_total_advance_upem=pair.measured_pair_advance_upem,
                         advance_delta_upem=abs(pair.measured_pair_advance_upem),
@@ -667,6 +716,7 @@ class HarfBuzzEvidenceProducer:
         all_in_cmap = all(s.in_candidate_cmap for s in samples) if samples else False
         all_seq_match = all(s.glyph_sequence_match for s in samples) if samples else False
         max_adv_delta = max((s.advance_delta_upem for s in samples), default=0.0)
+        max_pos_delta = max((s.max_position_delta_upem for s in samples), default=0.0)
 
         primary_sample = samples[0] if samples else None
         cand_names = [f"g_{gid}" for gid in (primary_sample.glyph_ids if primary_sample else ())]
@@ -677,13 +727,13 @@ class HarfBuzzEvidenceProducer:
             in_candidate_cmap=all_in_cmap,
             glyph_sequence_match=all_seq_match,
             candidate_glyph_names=cand_names,
-            reference_glyph_names=cand_names,
+            reference_glyph_names=[],
             candidate_glyph_count=len(cand_names),
-            reference_glyph_count=len(cand_names),
+            reference_glyph_count=2,
             candidate_total_advance_upem=int(round(primary_sample.candidate_total_advance_upem if primary_sample else 0)),
             reference_total_advance_upem=int(round(primary_sample.expected_total_advance_upem if primary_sample else 0)),
             advance_delta_upem=int(round(max_adv_delta)),
-            max_position_delta_upem=int(round(max_adv_delta)),
+            max_position_delta_upem=int(round(max_pos_delta)),
             samples=tuple(samples),
             all_in_cmap=all_in_cmap,
             all_sequence_match=all_seq_match,
@@ -706,9 +756,26 @@ class ChromiumEvidenceProducer:
         model: CanonicalFontModel,
         held_out_records: Sequence[ObservationRecord],
         held_out_pairs: Sequence[PairKerningObservation] | None = None,
-        _test_session: ChromiumSession | None = None,
     ) -> BoundChromiumEvidence:
         """Execute headless Chromium session on candidate artifact and return BoundChromiumEvidence."""
+        return await cls._produce_with_session_internal(
+            artifact=artifact,
+            model=model,
+            held_out_records=held_out_records,
+            held_out_pairs=held_out_pairs,
+            custom_session=None,
+        )
+
+    @classmethod
+    async def _produce_with_session_internal(
+        cls,
+        artifact: CandidateArtifact,
+        model: CanonicalFontModel,
+        held_out_records: Sequence[ObservationRecord],
+        held_out_pairs: Sequence[PairKerningObservation] | None = None,
+        custom_session: ChromiumSession | None = None,
+    ) -> BoundChromiumEvidence:
+        """Internal worker executing session actions."""
         # 1. Capability check
         try:
             find_chromium_executable()
@@ -716,7 +783,7 @@ class ChromiumEvidenceProducer:
         except Exception:
             chromium_available = False
 
-        if not chromium_available:
+        if not chromium_available and custom_session is None:
             return BoundChromiumEvidence(
                 candidate_artifact_sha=artifact.sha256_hex,
                 result=ChromiumValidationResult(
@@ -736,8 +803,8 @@ class ChromiumEvidenceProducer:
                 ),
             )
 
-        owns_session = _test_session is None
-        sess = _test_session or ChromiumSession(timeout_seconds=10.0)
+        owns_session = custom_session is None
+        sess = custom_session or ChromiumSession(timeout_seconds=10.0)
 
         try:
             await sess.start()
@@ -750,7 +817,10 @@ class ChromiumEvidenceProducer:
                 measured_cps = list(model.glyphs.keys())[:4]
 
             test_in_cp = measured_cps[0] if measured_cps else 65
-            test_out_cp = next((cp for cp in (ord("Z"), ord("Q"), ord("X"), ord("?"), 0x00D0, 0x1EA0) if cp not in model.glyphs), 0xFFFF)
+            test_out_cp = next(
+                (cp for cp in (ord("Z"), ord("Q"), ord("X"), ord("?"), 0x00D0, 0x1EA0) if cp not in model.glyphs),
+                0xFFFF,
+            )
 
             in_loaded = await sess.is_glyph_supported_in_font(alias, test_in_cp)
             out_rejected = not (await sess.is_glyph_supported_in_font(alias, test_out_cp))
@@ -834,6 +904,8 @@ class ChromiumEvidenceProducer:
                     pair_metrics.append(p_res)
                     pair_samples.append(
                         ChromiumPairSampleEvidence(
+                            left_cp=pair.left_cp,
+                            right_cp=pair.right_cp,
                             pair=pair_text,
                             baseline_single_sum_upem=baseline_sum,
                             candidate_pair_advance_upem=cand_pair_adv,
@@ -846,7 +918,6 @@ class ChromiumEvidenceProducer:
 
                 held_out_non_reg = all(s.non_regression for s in pair_samples)
             else:
-                # No held-out pairs provided -> cannot claim non-regression!
                 held_out_non_reg = False
 
             mean_adv_err = float(np.mean(adv_deltas)) if adv_deltas else 0.0
@@ -896,33 +967,55 @@ class ChromiumEvidenceProducer:
                 sess.close()
 
 
+class TestChromiumEvidenceProducerAdapter:
+    """Test-only adapter for running ChromiumEvidenceProducer with a caller-provided session."""
+
+    @classmethod
+    async def produce_with_session(
+        cls,
+        artifact: CandidateArtifact,
+        model: CanonicalFontModel,
+        held_out_records: Sequence[ObservationRecord],
+        held_out_pairs: Sequence[PairKerningObservation] | None,
+        session: ChromiumSession,
+    ) -> BoundChromiumEvidence:
+        return await ChromiumEvidenceProducer._produce_with_session_internal(
+            artifact=artifact,
+            model=model,
+            held_out_records=held_out_records,
+            held_out_pairs=held_out_pairs,
+            custom_session=session,
+        )
+
+
 class ProductionConsumerEvidenceProducer:
     """Authoritative builder executing all four consumers and producing a strictly bound ConsumerEvidenceBundle."""
 
     @classmethod
     async def produce_bundle(
         cls,
-        candidate_source: Path | str | bytes | CandidateArtifactDescriptor | CandidateArtifact,
+        descriptor: CandidateArtifactDescriptor | CandidateArtifact,
         model: CanonicalFontModel,
         config: ObservationConfig,
         held_out_records: Sequence[ObservationRecord],
         held_out_pairs: Sequence[PairKerningObservation],
         raster_provider: Callable[[ObservationRecord], bytes],
-        format_hint: str | None = None,
-        expected_descriptor: CandidateArtifactDescriptor | None = None,
-        _test_chromium_session: ChromiumSession | None = None,
     ) -> ConsumerEvidenceBundle:
-        """Execute FontTools, FreeType, HarfBuzz, and Chromium against the verified candidate artifact.
+        """Execute FontTools, FreeType, HarfBuzz, and Chromium against the attested candidate artifact.
 
-        Derives all cryptographic fingerprints and returns a strictly bound ConsumerEvidenceBundle.
+        Returns a complete four-consumer passing ConsumerEvidenceBundle or raises ProductionProducerError.
         """
-        # 1. Single artifact verification
-        if expected_descriptor is not None:
-            artifact = CandidateArtifact.from_descriptor(expected_descriptor)
+        # 1. Enforce descriptor attestation
+        if isinstance(descriptor, CandidateArtifactDescriptor):
+            artifact = CandidateArtifact.from_descriptor(descriptor)
+        elif isinstance(descriptor, CandidateArtifact):
+            artifact = descriptor
         else:
-            artifact = CandidateArtifact.from_source(candidate_source, format_hint=format_hint)
+            raise TypeError(
+                f"ProductionConsumerEvidenceProducer requires a CandidateArtifactDescriptor, got {type(descriptor)}"
+            )
 
-        # 2. Strict pre-validation of inputs (no zero or unknown samples permitted)
+        # 2. Strict pre-validation of inputs (no zero, unknown, or mismatched samples permitted)
         if not held_out_records:
             raise ValueError("ZERO_HELD_OUT_RASTER_SAMPLES: held_out_records cannot be empty")
         if not held_out_pairs:
@@ -936,6 +1029,10 @@ class ProductionConsumerEvidenceProducer:
             if p.left_cp not in model.glyphs or p.right_cp not in model.glyphs:
                 raise ValueError(
                     f"UNKNOWN_HELD_OUT_PAIR_GLYPHS: Pair ({p.left_cp}, {p.right_cp}) not in canonical model"
+                )
+            if p.left_char != chr(p.left_cp) or p.right_char != chr(p.right_cp):
+                raise ValueError(
+                    f"TYPOGRAPHY_CHAR_CODEPOINT_MISMATCH: Pair ({p.left_cp}, {p.right_cp}) character text drift"
                 )
 
         model_hash = model.compute_canonical_hash()
@@ -958,11 +1055,25 @@ class ProductionConsumerEvidenceProducer:
         ft_evidence = FontToolsEvidenceProducer.produce(artifact)
         fr_evidence = FreeTypeEvidenceProducer.produce(artifact, model, sorted_records, raster_provider)
         hb_evidence = HarfBuzzEvidenceProducer.produce(artifact, model, sorted_pairs)
-        cr_evidence = await ChromiumEvidenceProducer.produce(
-            artifact, model, sorted_records, sorted_pairs, _test_session=_test_chromium_session
-        )
+        cr_evidence = await ChromiumEvidenceProducer.produce(artifact, model, sorted_records, sorted_pairs)
 
-        # 4. Construct and validate bundle
+        # 4. Fail-closed production outcome check: if ANY consumer failed, do not return a usable PASS bundle
+        producer_failures: list[str] = []
+        if not ft_evidence.result.is_direct_loadable_fonttools or ft_evidence.result.validation_error:
+            producer_failures.append(f"FontTools failed: {ft_evidence.result.validation_error}")
+        if fr_evidence.result.render_error:
+            producer_failures.append(f"FreeType failed: {fr_evidence.result.render_error}")
+        if hb_evidence.result.error_message:
+            producer_failures.append(f"HarfBuzz failed: {hb_evidence.result.error_message}")
+        if not cr_evidence.result.is_available:
+            producer_failures.append(f"Chromium unavailable: {cr_evidence.result.error_message}")
+        elif cr_evidence.result.error_message or not cr_evidence.result.is_direct_loadable_chromium or not cr_evidence.result.held_out_pairs_non_regression:
+            producer_failures.append(f"Chromium failed: {cr_evidence.result.error_message or 'non-regression/load failed'}")
+
+        if producer_failures:
+            raise ProductionProducerError(f"CONSUMER_PRODUCER_FAILED: {'; '.join(producer_failures)}")
+
+        # 5. Construct and validate bundle
         bundle = ConsumerEvidenceBundle(
             schema_version="1.0.0",
             model_canonical_hash=model_hash,
@@ -992,25 +1103,21 @@ class ProductionConsumerEvidenceProducer:
     @classmethod
     def produce_bundle_sync(
         cls,
-        candidate_source: Path | str | bytes | CandidateArtifactDescriptor | CandidateArtifact,
+        descriptor: CandidateArtifactDescriptor | CandidateArtifact,
         model: CanonicalFontModel,
         config: ObservationConfig,
         held_out_records: Sequence[ObservationRecord],
         held_out_pairs: Sequence[PairKerningObservation],
         raster_provider: Callable[[ObservationRecord], bytes],
-        format_hint: str | None = None,
-        expected_descriptor: CandidateArtifactDescriptor | None = None,
     ) -> ConsumerEvidenceBundle:
         """Synchronous wrapper for produce_bundle."""
         return asyncio.run(
             cls.produce_bundle(
-                candidate_source=candidate_source,
+                descriptor=descriptor,
                 model=model,
                 config=config,
                 held_out_records=held_out_records,
                 held_out_pairs=held_out_pairs,
                 raster_provider=raster_provider,
-                format_hint=format_hint,
-                expected_descriptor=expected_descriptor,
             )
         )

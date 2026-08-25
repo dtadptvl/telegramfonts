@@ -42,9 +42,14 @@ class FidelityEvaluator:
     def _compute_typography_fingerprint(pairs: Sequence[PairKerningObservation]) -> str:
         if not pairs:
             return "empty"
-        sorted_pairs = sorted(pairs, key=lambda p: (p.left_cp, p.right_cp, p.provenance))
+        for p in pairs:
+            if p.left_char != chr(p.left_cp) or p.right_char != chr(p.right_cp):
+                raise ValueError(
+                    f"TYPOGRAPHY_CHAR_CODEPOINT_MISMATCH: left '{p.left_char}' != chr({p.left_cp}) or right '{p.right_char}' != chr({p.right_cp})"
+                )
+        sorted_pairs = sorted(pairs, key=lambda p: (p.left_cp, p.right_cp, p.left_char, p.right_char, p.provenance))
         payload_items = [
-            f"{p.left_cp}:{p.right_cp}:{p.left_advance_upem:.2f}:{p.right_advance_upem:.2f}:{p.measured_pair_advance_upem:.2f}:{p.inferred_kerning_upem}:{p.provenance}"
+            f"{p.left_cp}:{p.left_char}:{p.right_cp}:{p.right_char}:{p.left_advance_upem:.2f}:{p.right_advance_upem:.2f}:{p.measured_pair_advance_upem:.2f}:{p.inferred_kerning_upem}:{p.provenance}"
             for p in sorted_pairs
         ]
         return hashlib.sha256(";".join(payload_items).encode("utf-8")).hexdigest()
@@ -568,43 +573,73 @@ class FidelityEvaluator:
                 fr = consumer_bundle.freetype.result
                 fr_samples = getattr(fr, "samples", ())
                 fr_samples_ok = True
-                if fr_samples:
-                    # Verify every held-out record is represented and valid
-                    sample_keys = {s.cache_key for s in fr_samples}
-                    expected_keys = {r.cache_key for r in held_out_records}
-                    if expected_keys - sample_keys:
-                        fr_samples_ok = False
-                        failure_reasons.append("CONSUMER_GATE_FAIL: FreeType missing evaluated held-out samples")
-                    for s in fr_samples:
-                        if s.render_error is not None or not math.isfinite(s.raster_iou) or s.raster_iou < thresholds.min_raster_iou:
+                if not fr_samples or len(fr_samples) != len(held_out_records):
+                    fr_samples_ok = False
+                    failure_reasons.append(
+                        f"CONSUMER_GATE_FAIL: FreeType sample count {len(fr_samples)} != expected {len(held_out_records)}"
+                    )
+                else:
+                    sorted_samples = sorted(fr_samples, key=lambda s: s.cache_key)
+                    sorted_records = sorted(held_out_records, key=lambda r: r.cache_key)
+                    for s, r in zip(sorted_samples, sorted_records):
+                        if (
+                            s.cache_key != r.cache_key
+                            or s.code_point != r.code_point
+                            or s.resolution != r.resolution
+                            or s.raster_sha256 != r.raster_sha256
+                            or s.render_error is not None
+                            or not math.isfinite(s.raster_iou)
+                            or s.raster_iou < thresholds.min_raster_iou
+                        ):
                             fr_samples_ok = False
-                            failure_reasons.append(f"CONSUMER_GATE_FAIL: FreeType sample {s.cache_key} failed (iou={s.raster_iou:.4f}, err={s.render_error})")
+                            failure_reasons.append(
+                                f"CONSUMER_GATE_FAIL: FreeType sample {s.cache_key} failed (iou={s.raster_iou:.4f}, err={s.render_error})"
+                            )
+
                 freetype_pass = bool(
-                    fr.render_error is None
-                    and fr.render_size_px > 0
-                    and math.isfinite(fr.raster_iou)
-                    and fr.raster_iou >= thresholds.min_raster_iou
+                    getattr(fr, "render_error", None) is None
+                    and getattr(fr, "render_size_px", 0) > 0
+                    and math.isfinite(getattr(fr, "raster_iou", 0.0))
+                    and getattr(fr, "raster_iou", 0.0) >= thresholds.min_raster_iou
                     and fr_samples_ok
                 )
 
                 hb = consumer_bundle.harfbuzz.result
                 hb_samples = getattr(hb, "samples", ())
                 hb_samples_ok = True
-                if hb_samples:
-                    sample_texts = {s.text for s in hb_samples}
-                    expected_texts = {f"{p.left_char}{p.right_char}" for p in held_out_pairs}
-                    if expected_texts - sample_texts:
-                        hb_samples_ok = False
-                        failure_reasons.append("CONSUMER_GATE_FAIL: HarfBuzz missing evaluated held-out pair samples")
-                    for s in hb_samples:
-                        if not s.in_candidate_cmap or not s.glyph_sequence_match or s.error_message is not None or s.advance_delta_upem > thresholds.max_kerning_delta_upem:
+                if not hb_samples or len(hb_samples) != len(held_out_pairs):
+                    hb_samples_ok = False
+                    failure_reasons.append(
+                        f"CONSUMER_GATE_FAIL: HarfBuzz sample count {len(hb_samples)} != expected {len(held_out_pairs)}"
+                    )
+                else:
+                    sorted_hb_samples = sorted(hb_samples, key=lambda s: (s.left_cp, s.right_cp, s.text))
+                    sorted_pairs = sorted(held_out_pairs, key=lambda p: (p.left_cp, p.right_cp, f"{p.left_char}{p.right_char}"))
+                    for s, p in zip(sorted_hb_samples, sorted_pairs):
+                        expected_text = f"{p.left_char}{p.right_char}"
+                        if (
+                            s.left_cp != p.left_cp
+                            or s.right_cp != p.right_cp
+                            or s.text != expected_text
+                            or not s.in_candidate_cmap
+                            or not s.glyph_sequence_match
+                            or s.error_message is not None
+                            or not math.isfinite(s.candidate_total_advance_upem)
+                            or s.advance_delta_upem > thresholds.max_kerning_delta_upem
+                            or s.max_position_delta_upem > thresholds.max_kerning_delta_upem
+                            or len(s.positions) < 2
+                            or len(s.clusters) < 2
+                        ):
                             hb_samples_ok = False
-                            failure_reasons.append(f"CONSUMER_GATE_FAIL: HarfBuzz sample '{s.text}' failed (cmap={s.in_candidate_cmap}, seq={s.glyph_sequence_match}, delta={s.advance_delta_upem:.2f})")
+                            failure_reasons.append(
+                                f"CONSUMER_GATE_FAIL: HarfBuzz sample '{s.text}' failed (cmap={s.in_candidate_cmap}, seq={s.glyph_sequence_match}, delta={s.advance_delta_upem:.2f}, pos_delta={s.max_position_delta_upem:.2f})"
+                            )
+
                 hb_pass = bool(
-                    hb.in_candidate_cmap
-                    and hb.glyph_sequence_match
-                    and hb.candidate_glyph_count > 0
-                    and math.isfinite(hb.candidate_total_advance_upem)
+                    getattr(hb, "in_candidate_cmap", False)
+                    and getattr(hb, "glyph_sequence_match", False)
+                    and getattr(hb, "candidate_glyph_count", 0) > 0
+                    and math.isfinite(getattr(hb, "candidate_total_advance_upem", 0.0))
                     and hb_samples_ok
                     and getattr(hb, "error_message", None) is None
                 )
@@ -612,19 +647,34 @@ class FidelityEvaluator:
                 cr = consumer_bundle.chromium.result
                 cr_pair_samples = getattr(cr, "pair_samples", ())
                 cr_pair_samples_ok = True
-                if cr_pair_samples:
-                    for s in cr_pair_samples:
-                        if not s.non_regression:
+                if not cr_pair_samples or len(cr_pair_samples) != len(held_out_pairs):
+                    cr_pair_samples_ok = False
+                    failure_reasons.append(
+                        f"CONSUMER_GATE_FAIL: Chromium pair sample count {len(cr_pair_samples)} != expected {len(held_out_pairs)}"
+                    )
+                else:
+                    sorted_cr_samples = sorted(cr_pair_samples, key=lambda s: (s.left_cp, s.right_cp, s.pair))
+                    sorted_pairs = sorted(held_out_pairs, key=lambda p: (p.left_cp, p.right_cp, f"{p.left_char}{p.right_char}"))
+                    for s, p in zip(sorted_cr_samples, sorted_pairs):
+                        expected_pair = f"{p.left_char}{p.right_char}"
+                        if (
+                            s.left_cp != p.left_cp
+                            or s.right_cp != p.right_cp
+                            or s.pair != expected_pair
+                            or not s.non_regression
+                            or not math.isfinite(s.candidate_pair_advance_upem)
+                        ):
                             cr_pair_samples_ok = False
-                            failure_reasons.append(f"CONSUMER_GATE_FAIL: Chromium pair sample '{s.pair}' regressed")
+                            failure_reasons.append(f"CONSUMER_GATE_FAIL: Chromium pair sample '{s.pair}' regressed or mismatched")
+
                 chromium_pass = bool(
-                    cr.is_available
-                    and cr.is_direct_loadable_chromium
-                    and cr.fallback_rejection_verified
-                    and cr.rendered_canvas_valid
-                    and cr.error_message is None
-                    and cr.measured_glyph_count > 0
-                    and cr.held_out_pairs_non_regression
+                    getattr(cr, "is_available", False)
+                    and getattr(cr, "is_direct_loadable_chromium", False)
+                    and getattr(cr, "fallback_rejection_verified", False)
+                    and getattr(cr, "rendered_canvas_valid", False)
+                    and getattr(cr, "error_message", None) is None
+                    and getattr(cr, "measured_glyph_count", 0) > 0
+                    and getattr(cr, "held_out_pairs_non_regression", False)
                     and cr_pair_samples_ok
                 )
 

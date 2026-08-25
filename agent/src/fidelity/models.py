@@ -58,6 +58,11 @@ class FidelityThresholds:
         return asdict(self)
 
 
+class ProductionProducerError(Exception):
+    """Raised when one or more consumer evidence producers fail during candidate production."""
+    pass
+
+
 @dataclass(frozen=True)
 class FreeTypeSampleEvidence:
     """Per-sample FreeType raster rendering verification."""
@@ -73,13 +78,27 @@ class FreeTypeSampleEvidence:
 
 
 @dataclass(frozen=True)
+class HarfBuzzPositionVector:
+    """Explicit 2D shaping position and advance vector for a glyph."""
+
+    x_advance: float
+    y_advance: float
+    x_offset: float
+    y_offset: float
+
+
+@dataclass(frozen=True)
 class HarfBuzzSampleEvidence:
     """Per-sample HarfBuzz text shaping verification."""
 
+    left_cp: int
+    right_cp: int
     text: str
     in_candidate_cmap: bool
     glyph_sequence_match: bool
     glyph_ids: tuple[int, ...]
+    clusters: tuple[int, ...]
+    positions: tuple[HarfBuzzPositionVector, ...]
     candidate_total_advance_upem: float
     expected_total_advance_upem: float
     advance_delta_upem: float
@@ -102,6 +121,8 @@ class ChromiumGlyphSampleEvidence:
 class ChromiumPairSampleEvidence:
     """Per-pair Chromium Canvas 2D measurement and GPOS delta evaluation."""
 
+    left_cp: int
+    right_cp: int
     pair: str
     baseline_single_sum_upem: float
     candidate_pair_advance_upem: float

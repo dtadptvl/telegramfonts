@@ -14,8 +14,10 @@ from fidelity.models import (
     FidelityThresholds,
     FreeTypeSampleEvidence,
     GeometryRasterGateResult,
+    HarfBuzzPositionVector,
     HarfBuzzSampleEvidence,
     MetricsGateResult,
+    ProductionProducerError,
     TopologyGateResult,
     TypographyGateResult,
 )
@@ -27,6 +29,7 @@ from fidelity.producers import (
     FreeTypeEvidenceProducer,
     HarfBuzzEvidenceProducer,
     ProductionConsumerEvidenceProducer,
+    TestChromiumEvidenceProducerAdapter,
 )
 
 __all__ = [
@@ -50,9 +53,12 @@ __all__ = [
     "FreeTypeSampleEvidence",
     "GeometryRasterGateResult",
     "HarfBuzzEvidenceProducer",
+    "HarfBuzzPositionVector",
     "HarfBuzzSampleEvidence",
     "MetricsGateResult",
     "ProductionConsumerEvidenceProducer",
+    "ProductionProducerError",
+    "TestChromiumEvidenceProducerAdapter",
     "TopologyGateResult",
     "TypographyGateResult",
 ]
