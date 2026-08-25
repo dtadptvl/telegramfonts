@@ -198,6 +198,34 @@ def test_MONOTYPE_TARGET_exact_family_style_md5_on_every_request():
     asyncio.run(run())
 
 
+def _captured_sprite_bytes(cps: list[int]) -> bytes:
+    """Real binary PNG sprite for the captured response shape."""
+    import io
+
+    from PIL import Image, ImageDraw
+
+    img = Image.new("RGB", (60 * max(len(cps), 1) + 10, 100), "white")
+    draw = ImageDraw.Draw(img)
+    for i, _cp in enumerate(cps):
+        draw.rectangle([60 * i + 6, 10, 60 * i + 54, 90], fill="black")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _captured_expected_slice(cps: list[int], cp: int) -> bytes:
+    """Deterministic re-slice of the captured sprite at the layout box."""
+    import io
+
+    from PIL import Image
+
+    i = cps.index(cp)
+    cell = Image.open(io.BytesIO(_captured_sprite_bytes(cps))).crop((60 * i, 0, 60 * i + 59, 100))
+    buf = io.BytesIO()
+    cell.save(buf, format="PNG")
+    return buf.getvalue()
+
+
 def _captured_shape_response(
     cps: list[int],
     status: int = 200,
@@ -209,18 +237,8 @@ def _captured_shape_response(
     Layout entries carry only the observable provider fields
     (glyph/x/y/width/height/codePoint). The sprite is a real binary PNG.
     """
-    import io
-
-    from PIL import Image, ImageDraw
-
     if sprite_bytes is None:
-        img = Image.new("RGB", (60 * max(len(cps), 1) + 10, 100), "white")
-        draw = ImageDraw.Draw(img)
-        for i, _cp in enumerate(cps):
-            draw.rectangle([60 * i + 6, 10, 60 * i + 54, 90], fill="black")
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        sprite_bytes = buf.getvalue()
+        sprite_bytes = _captured_sprite_bytes(cps)
     layout = {
         str(i): {
             "glyph": i,
@@ -299,6 +317,12 @@ def test_MONOTYPE_CAPTURED_HEADERS_binary_png_contract():
             assert set(g.keys()) == {"code_point", "glyph_index", "sprite_box"}
             assert set(g["sprite_box"].keys()) == {"x", "y", "width", "height"}
         assert [g["code_point"] for g in page.payload["glyphs"]] == [65, 66]
+        # Every page binds the exact MD5/render-size/request parameters.
+        assert page.payload["md5"] == ENVELOPE_MD5
+        assert page.payload["acs_pt"] == 120
+        assert page.payload["request_params"]["acs_pt"] == "120"
+        assert page.payload["request_params"]["acs_p"] == "1"
+        assert page.payload["request_params"]["rbe"] == "gmap"
         # Raster-only source: never metrics/pairs/features.
         assert page.payload["pairs"] == [] and page.payload["features"] == []
         assert "metrics" not in json.dumps(page.payload)
@@ -462,47 +486,68 @@ async def _fetch_with_transport(client, transport, request: dict, cursor: str = 
         adapters_mod.httpx.AsyncClient = original
 
 
-def test_RASTER_FALLBACK_E2E_observations_from_browser_measurement(tmp_path: Path):
+def test_RASTER_FALLBACK_E2E_cdn_pixels_as_reconstruction_observations(tmp_path: Path):
     """End-to-end fallback-to-observation under the captured contract.
 
     The production client consumes the real captured response shape; the
-    raster-only pages bind coverage/code points; metrics/pairs/features and
-    the raster schedule come from approved browser-measurement evidence.
-    Raster-only evidence alone can never complete the snapshot.
+    bounds-checked CDN sprite slices are persisted as the reconstruction
+    raster observations (one per render size, phase (0.0, 0.0)), bound to
+    the exact MD5/page/request parameters; browser evidence supplements
+    metrics/pairs/features only.
     """
-    from acquisition.raster_ingest import BrowserMeasurementEvidence, ingest_raster_pages
+    from acquisition.raster_ingest import ingest_raster_pages
     from measurement.store import ObservationStore
-    from tests.test_issue72_review_repros import _browser_measurement_for_seed
+    from tests.test_issue72_review_repros import (
+        RASTER_ONLY_CONFIG,
+        _browser_supplement_for_seed,
+    )
 
     target = {"family": "E2E Fam", "style": "Regular", "md5": ENVELOPE_MD5}
-    evidence = _browser_measurement_for_seed("chromium_e2e_v1")
+    supplement = _browser_supplement_for_seed("chromium_e2e_v1", config=RASTER_ONLY_CONFIG)
+    pts = list(RASTER_ONLY_CONFIG.resolutions)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        params = dict(request.url.params)
+        page = int(params["acs_p"])
+        if page == 1:
+            return httpx.Response(
+                200, json=_captured_shape_response([65, 66]), headers=CAPTURED_HEADERS
+            )
+        return httpx.Response(
+            200, json=_captured_shape_response([]), headers=CAPTURED_HEADERS
+        )
 
     async def run():
         client = MonotypeRenderClient()
-        page = await _fetch_with_transport(
-            client,
-            httpx.MockTransport(lambda r: httpx.Response(
-                200, json=_captured_shape_response([65, 66]), headers=CAPTURED_HEADERS)),
-            target,
+        provider = MonotypeRasterProvider(_TransportBoundClient(client, httpx.MockTransport(handler)))
+        pages = await provider.fetch_sprite_pages(
+            {**target, "acs_pts": pts}, BinaryAcquisitionPolicy(max_sprite_pages=4)
         )
-        assert page is not None
+        assert sorted(p.payload["acs_pt"] for p in pages) == sorted(pts)
 
         store = ObservationStore(tmp_path / "obs_e2e")
         ingested = ingest_raster_pages(
-            store, ISSUE71_CONFIG, "e2e_fam", "regular",
-            evidence, [page], source_url="https://www.myfonts.com/collections/e2e-fam",
+            store, RASTER_ONLY_CONFIG, "e2e_fam", "regular",
+            supplement, pages, source_url="https://www.myfonts.com/collections/e2e-fam",
         )
         assert ingested == 2
-        cfg_h = ISSUE71_CONFIG.compute_hash()
+        cfg_h = RASTER_ONLY_CONFIG.compute_hash()
         assert store.get_coverage("e2e_fam", "regular", browser_version="chromium_e2e_v1", config_hash=cfg_h) == [65, 66]
         assert store.is_source_collection_completed(
             "e2e_fam", "regular", config_hash=cfg_h, browser_version="chromium_e2e_v1",
         )
-        # Stored rasters/metrics are exactly the browser-measured evidence.
-        obs = store.get_glyph_observations("e2e_fam", "regular", 66, browser_version="chromium_e2e_v1", config_hash=cfg_h)
-        assert obs and obs[0][0].metrics.advance_width_upem == 600.0
-        stored = (store.base_dir / obs[0][0].raster_relative_path).read_bytes()
-        assert stored == evidence.rasters[66][obs[0][0].resolution, obs[0][0].subpixel_x, obs[0][0].subpixel_y]
+        # Stored rasters are exactly the CDN slices (never recaptured).
+        cps = [65, 66]
+        for cp in cps:
+            obs = store.get_glyph_observations(
+                "e2e_fam", "regular", cp, browser_version="chromium_e2e_v1", config_hash=cfg_h,
+            )
+            assert {r.resolution for r, _ in obs} == set(pts)
+            for rec, _ in obs:
+                assert rec.subpixel_x == 0.0 and rec.subpixel_y == 0.0
+                stored = (store.base_dir / rec.raster_relative_path).read_bytes()
+                assert stored == _captured_expected_slice(cps, cp)
+            assert obs[0][0].metrics.advance_width_upem in (650.0, 600.0)
         # Pair/feature provenance is the approved chromium canvas path.
         pairs = store.get_pair_observations("e2e_fam", "regular", browser_version="chromium_e2e_v1", config_hash=cfg_h)
         assert pairs and all(p["provenance"] == "chromium:chromium_e2e_v1:canvas_text_metrics" for p in pairs)
@@ -515,21 +560,22 @@ def test_RASTER_FALLBACK_E2E_observations_from_browser_measurement(tmp_path: Pat
 
 
 def test_RASTER_FALLBACK_fail_closed_matrix(tmp_path: Path):
-    """Raster-only pages never satisfy the snapshot without browser evidence."""
+    """Raster-only pages never complete without supplements; bindings and
+    capability gaps fail closed with the exact cause."""
     from acquisition.raster_ingest import (
-        BrowserMeasurementEvidence,
+        BrowserSupplementalEvidence,
         ingest_raster_pages,
         page_slice_attestation,
     )
-    from measurement.models import DirectMetrics
     from measurement.store import ObservationStore
     from tests.test_issue72_review_repros import (
-        _browser_measurement_for_seed,
+        ISSUE71_CONFIG,
+        _browser_supplement_for_seed,
         _raster_pages_for_seed,
     )
 
     pages = _raster_pages_for_seed(MonotypeRenderClient.BROWSER_VERSION)
-    evidence = _browser_measurement_for_seed("chromium_matrix_v1")
+    supplement = _browser_supplement_for_seed("chromium_matrix_v1")
     cfg_h = ISSUE71_CONFIG.compute_hash()
 
     # Empty/invalid target: no request, fail closed (client level).
@@ -546,25 +592,38 @@ def test_RASTER_FALLBACK_fail_closed_matrix(tmp_path: Path):
 
     asyncio.run(run_client_matrix())
 
-    # Raster pages without browser measurement can never complete.
+    # Raster pages without browser supplement can never complete.
     store = ObservationStore(tmp_path / "obs_matrix_a")
-    with pytest.raises(ValueError, match="RASTER_INGEST_BROWSER_MEASUREMENT_REQUIRED"):
+    with pytest.raises(ValueError, match="RASTER_INGEST_BROWSER_SUPPLEMENT_REQUIRED"):
         ingest_raster_pages(store, ISSUE71_CONFIG, "m_fam", "regular", None, pages)
     assert store.is_source_collection_completed(
         "m_fam", "regular", config_hash=cfg_h, browser_version="chromium_matrix_v1"
     ) is False
 
-    # Coverage drift between CDN binding and browser measurement fails closed.
-    drifted = BrowserMeasurementEvidence(
+    # Coverage drift between CDN binding and browser supplement fails closed.
+    drifted = BrowserSupplementalEvidence(
         browser_version="chromium_matrix_v1",
-        metrics={65: evidence.metrics[65]},
-        rasters={65: evidence.rasters[65]},
-        pairs=evidence.pairs,
-        features=evidence.features,
+        metrics={65: supplement.metrics[65]},
+        pairs=supplement.pairs,
+        features=supplement.features,
     )
     store_b = ObservationStore(tmp_path / "obs_matrix_b")
     with pytest.raises(ValueError, match="RASTER_INGEST_COVERAGE_DRIFT"):
         ingest_raster_pages(store_b, ISSUE71_CONFIG, "m_fam", "regular", drifted, pages)
+
+    # Missing request binding fails closed (no relabeling possible).
+    unbound = _raster_pages_for_seed(MonotypeRenderClient.BROWSER_VERSION)
+    bad_payload = dict(unbound[0].payload)
+    bad_payload.pop("md5")
+    from acquisition.models import SpriteRasterPage
+
+    unbound_page = SpriteRasterPage(
+        page_index=1, glyph_count=2, raster_bytes=unbound[0].raster_bytes,
+        next_cursor="2", final=False, payload=bad_payload,
+    )
+    store_u = ObservationStore(tmp_path / "obs_matrix_u")
+    with pytest.raises(ValueError, match="RASTER_INGEST_REQUEST_BINDING_MISSING"):
+        ingest_raster_pages(store_u, ISSUE71_CONFIG, "m_fam", "regular", supplement, [unbound_page])
 
     # Corrupt sprite evidence fails closed at slice validation.
     broken = _raster_pages_for_seed(MonotypeRenderClient.BROWSER_VERSION)
@@ -573,8 +632,6 @@ def test_RASTER_FALLBACK_fail_closed_matrix(tmp_path: Path):
         {"code_point": 65, "glyph_index": 0, "sprite_box": {"x": 500, "y": 0, "width": 59, "height": 80}},
         {"code_point": 66, "glyph_index": 1, "sprite_box": {"x": 59, "y": 0, "width": 55, "height": 80}},
     ]
-    from acquisition.models import SpriteRasterPage
-
     broken_page = SpriteRasterPage(
         page_index=1, glyph_count=2, raster_bytes=broken[0].raster_bytes,
         next_cursor="2", final=False, payload=bad_payload,
@@ -583,23 +640,15 @@ def test_RASTER_FALLBACK_fail_closed_matrix(tmp_path: Path):
         page_slice_attestation([broken_page])
     store_c = ObservationStore(tmp_path / "obs_matrix_c")
     with pytest.raises(ValueError, match="RASTER_INGEST_BOX_OUT_OF_BOUNDS"):
-        ingest_raster_pages(store_c, ISSUE71_CONFIG, "m_fam", "regular", evidence, [broken_page])
+        ingest_raster_pages(store_c, ISSUE71_CONFIG, "m_fam", "regular", supplement, [broken_page])
 
-    # Non-PNG browser raster evidence fails closed.
-    bad_rasters = {
-        cp: {key: b"not-a-png" for key in tup}
-        for cp, tup in evidence.rasters.items()
-    }
-    poisoned = BrowserMeasurementEvidence(
-        browser_version="chromium_matrix_v1",
-        metrics=evidence.metrics,
-        rasters=bad_rasters,
-        pairs=evidence.pairs,
-        features=evidence.features,
-    )
+    # Held-out subpixel phases are a causal capability gap, never synthesized.
     store_d = ObservationStore(tmp_path / "obs_matrix_d")
-    with pytest.raises(ValueError, match="RASTER_INGEST_BROWSER_RASTER_NOT_PNG"):
-        ingest_raster_pages(store_d, ISSUE71_CONFIG, "m_fam", "regular", poisoned, pages)
+    with pytest.raises(ValueError, match="RASTER_CAPABILITY_GAP"):
+        ingest_raster_pages(store_d, ISSUE71_CONFIG, "m_fam", "regular", supplement, pages)
+    assert store_d.is_source_collection_completed(
+        "m_fam", "regular", config_hash=cfg_h, browser_version="chromium_matrix_v1"
+    ) is False
 
 
 # =========================================================================

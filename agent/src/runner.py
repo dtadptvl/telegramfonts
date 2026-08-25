@@ -22,6 +22,7 @@ from acquisition.models import (
 )
 from acquisition.pipeline import AcquisitionPipeline
 from acquisition.raster_ingest import (
+    RASTER_FALLBACK_PROVENANCE,
     collect_browser_measurement,
     ingest_raster_pages,
     page_slice_attestation,
@@ -901,7 +902,14 @@ class JobRunner:
                             continue
                         if self.acquisition_pipeline is not None:
                             outcome = await self.acquisition_pipeline.acquire(
-                                job.source_url, family_name, style.display_name
+                                job.source_url,
+                                family_name,
+                                style.display_name,
+                                raster_request={
+                                    # Observable render-size passes: one per
+                                    # active schedule resolution (acs_pt).
+                                    "acs_pts": [int(r) for r in gate_config.resolutions]
+                                },
                             )
                             self.last_reuse_trace["acquisition_traces"][style.id] = (
                                 outcome.trace.to_sanitized_dict()
@@ -925,12 +933,13 @@ class JobRunner:
                                 )
                                 continue
                             if outcome.kind == "raster_authorized" and outcome.raster_pages:
-                                # Raster evidence is never discarded: the CDN
-                                # supplies raster/coverage only; metrics, pairs,
-                                # and features are measured through the approved
-                                # browser path before the immutable snapshot may
-                                # complete, then the normal Stage 9D raster gate
-                                # consumes the observations.
+                                # Raster evidence is never discarded: the
+                                # bounds-checked CDN sprite slices ARE the
+                                # reconstruction pixels and are persisted
+                                # directly as observations. The browser path
+                                # supplements observable metrics/pairs/
+                                # features only; it never recaptures rasters
+                                # from the source page.
                                 raster_cps = sorted({
                                     int(g["code_point"])
                                     for page in outcome.raster_pages
@@ -941,7 +950,7 @@ class JobRunner:
                                 family_key, style_key = self._observation_keys(
                                     job.source_url, style.id
                                 )
-                                measurement = await collect_browser_measurement(
+                                supplement = await collect_browser_measurement(
                                     job.source_url,
                                     family_name,
                                     style.display_name,
@@ -954,7 +963,7 @@ class JobRunner:
                                     gate_config,
                                     family_key,
                                     style_key,
-                                    measurement,
+                                    supplement,
                                     outcome.raster_pages,
                                     source_url=job.source_url,
                                 )
@@ -962,8 +971,10 @@ class JobRunner:
                                     f"PREACQ_{style.id}",
                                     "RASTER_HANDOFF",
                                     glyphs=ingested,
-                                    browser_version=measurement.browser_version,
+                                    browser_version=supplement.browser_version,
+                                    raster_provenance=RASTER_FALLBACK_PROVENANCE,
                                     sprite_sha256=attestation["sprite_sha256"],
+                                    slice_bindings=attestation["bindings"],
                                 )
                                 continue
                             if outcome.kind == "insufficient" and outcome.terminal_reason_code.startswith(
@@ -1107,6 +1118,7 @@ class JobRunner:
                 job.job_id,
                 type(exc).__name__,
                 err_code,
+                exc_info=True,
             )
 
             if err_code == FENCED_ERROR_CODE:

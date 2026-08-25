@@ -270,14 +270,27 @@ class MonotypeRenderClient:
         return observed
 
     @classmethod
+    def _request_params(cls, acs_pt: int) -> dict[str, str]:
+        params = {name: value for name, value in cls.RENDER_QUERY}
+        params["acs_p"] = "1"
+        params["acs_pt"] = str(acs_pt)
+        return params
+
+    @classmethod
     def _parse_page(
-        cls, data: Any, headers: Any, page_index: int
+        cls,
+        data: Any,
+        headers: Any,
+        page_index: int,
+        md5: str,
+        acs_pt: int,
     ) -> SpriteRasterPage | None:
         """Parse one bounded captured-shape render response; fail closed on any gap.
 
         Only observable provider fields are consumed: body ``status``, layout
         entries (glyph/x/y/width/height/codePoint), and the base64 PNG sprite.
         No glyph metrics exist in the real response and none are inferred.
+        Every page payload binds the exact MD5/page/request parameters.
         """
         if not isinstance(data, dict):
             return None
@@ -300,6 +313,11 @@ class MonotypeRenderClient:
         ):
             return None
         observed = cls._observed_headers(headers)
+        binding = {
+            "md5": md5,
+            "acs_pt": acs_pt,
+            "request_params": {**cls._request_params(acs_pt), "acs_p": str(page_index)},
+        }
 
         if not layout:
             # Captured bounded-completion signal: empty layout at an
@@ -317,6 +335,7 @@ class MonotypeRenderClient:
                     "features": [],
                     "sprite_sha256": hashlib.sha256(sprite_bytes).hexdigest(),
                     "observed_headers": observed,
+                    **binding,
                 },
             )
 
@@ -363,6 +382,7 @@ class MonotypeRenderClient:
             "sprite_sha256": hashlib.sha256(sprite_bytes).hexdigest(),
             "observed_headers": observed,
             "unmapped_glyph_slots": unmapped_slots,
+            **binding,
         }
         return SpriteRasterPage(
             page_index=page_index,
@@ -385,8 +405,15 @@ class MonotypeRenderClient:
             return None
         if page_index < 1:
             return None
+        try:
+            acs_pt = int(request.get("acs_pt", 120))
+        except (TypeError, ValueError):
+            return None
+        if acs_pt < 1:
+            return None
         url = f"{self.base_url}{self.RENDER_PATH}{md5}"
-        params = list(self.RENDER_QUERY) + [("acs_p", str(page_index))]
+        params = [(name, value) for name, value in self.RENDER_QUERY if name != "acs_pt"]
+        params += [("acs_pt", str(acs_pt)), ("acs_p", str(page_index))]
         try:
             async with httpx.AsyncClient(
                 timeout=self.timeout_seconds,
@@ -402,7 +429,7 @@ class MonotypeRenderClient:
                 data = resp.json()
         except Exception:
             return None
-        return self._parse_page(data, resp.headers, page_index)
+        return self._parse_page(data, resp.headers, page_index, md5, acs_pt)
 
 
 # Backward-compatible alias for composition wiring.

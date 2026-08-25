@@ -297,26 +297,39 @@ class MonotypeRasterProvider:
         md5 = str(request.get("md5", "")).strip().lower()
         if not family or not style or not md5 or len(md5) != 32:
             return ()
+        # Observable render-size passes: each requested acs_pt is one
+        # independent bounded crawl (RASTER_MAX budget applies per pass).
+        acs_pts_raw = request.get("acs_pts")
+        if acs_pts_raw is None:
+            acs_pts_raw = (request.get("acs_pt", 120),)
+        try:
+            acs_pts = tuple(int(p) for p in acs_pts_raw)
+        except (TypeError, ValueError):
+            return ()
+        if not acs_pts or any(p < 1 for p in acs_pts):
+            return ()
         pages: list[SpriteRasterPage] = []
-        cursor = ""
-        for page_index in range(policy.max_sprite_pages):
-            page = await self.client.fetch_sprite_page(request, cursor)
-            if page is None:
-                break
-            if page.glyph_count == 0:
-                # Empty layout marks bounded completion; the empty page itself
-                # carries no evidence and is never ingested.
-                break
-            pages.append(page)
-            if page.final or not page.next_cursor:
-                return tuple(pages)
-            observed = (page.payload or {}).get("observed_headers") or {}
-            max_gpp = observed.get("max_glyphs_per_page")
-            if isinstance(max_gpp, int) and max_gpp > 0 and page.glyph_count < max_gpp:
-                # Observable page signal: a partial fill below the declared
-                # per-page maximum marks the final evidence page.
-                return tuple(pages)
-            cursor = page.next_cursor
-        # Bounded termination: hitting the page budget without a final marker
-        # is an insufficient raster outcome, never an infinite crawl.
+        for pt in acs_pts:
+            pt_request = {**request, "acs_pt": pt}
+            cursor = ""
+            for _page_index in range(policy.max_sprite_pages):
+                page = await self.client.fetch_sprite_page(pt_request, cursor)
+                if page is None:
+                    break
+                if page.glyph_count == 0:
+                    # Empty layout marks bounded completion; the empty page
+                    # itself carries no evidence and is never ingested.
+                    break
+                pages.append(page)
+                if page.final or not page.next_cursor:
+                    break
+                observed = (page.payload or {}).get("observed_headers") or {}
+                max_gpp = observed.get("max_glyphs_per_page")
+                if isinstance(max_gpp, int) and max_gpp > 0 and page.glyph_count < max_gpp:
+                    # Observable page signal: a partial fill below the declared
+                    # per-page maximum marks the final evidence page.
+                    break
+                cursor = page.next_cursor
+        # Bounded termination: hitting any budget without a final marker is an
+        # insufficient raster outcome, never an infinite crawl.
         return tuple(pages)

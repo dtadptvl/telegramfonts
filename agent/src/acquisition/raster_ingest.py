@@ -1,17 +1,25 @@
-"""Convert successful authorized raster-provider results into complete,
-immutable, exact-tuple observation collections.
+"""Convert successful authorized raster-provider results into immutable,
+exact-tuple observation collections.
 
 The authorized raster endpoint is a raster-only source: the captured real
 response supplies the MD5-bound glyph coverage, the code-point mapping, and
 the binary PNG sprite with per-glyph cell boxes. It supplies no glyph
 metrics, pairs, or features, and none are ever inferred from it.
 
-Those measurements must arrive as explicit approved browser-measurement
-evidence (ChromiumSession canvas path) before the immutable snapshot may
-complete. Raster pages are validated under the closed schema (PNG magic,
-bounds-checked sprite-cell slices), cross-bound to the browser-measured
-coverage, persisted through the normal ObservationStore APIs, and finalized
-with the same strict completeness checks as direct browser collection.
+The bounds-checked CDN sprite slices ARE the reconstruction raster evidence:
+they are persisted directly as observation records, bound to the exact
+MD5/style/page/request parameters and slice hashes. They are never
+relabeled as Chromium raster provenance and never recaptured from the
+source page. Browser measurement may supplement observable
+metrics/pairs/features (approved ChromiumSession canvas path) but never
+replaces CDN pixel evidence.
+
+Render-size capability: the approved render query exposes ``acs_pt``
+(point size) as the only observable raster scale control; every render is
+phase (0.0, 0.0). When the active config requires raster evidence the CDN
+cannot observably produce (e.g. held-out subpixel phases), ingestion fails
+closed with the exact capability gap after persisting the observable CDN
+pixel evidence — no synthesis, no recapture.
 """
 from __future__ import annotations
 
@@ -30,6 +38,14 @@ from measurement.store import ObservationStore
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
+# Provenance of raster pixels persisted from the authorized raster fallback.
+# Distinct from chromium canvas provenance by construction.
+RASTER_FALLBACK_PROVENANCE = "monotype_render_105_cdn_sprite"
+
+# The approved render query renders phase (0.0, 0.0) only; no parameter in
+# the captured contract exposes subpixel phase control.
+OBSERVABLE_RENDER_PHASE = (0.0, 0.0)
+
 
 class _IngestSessionIdentity:
     """Browser-identity carrier for finalization (no browser is launched)."""
@@ -39,38 +55,43 @@ class _IngestSessionIdentity:
 
 
 @dataclass(frozen=True)
-class BrowserMeasurementEvidence:
-    """Approved browser-measurement evidence for the raster fallback.
+class BrowserSupplementalEvidence:
+    """Approved browser supplemental evidence for the raster fallback.
 
-    Produced exclusively by the authorized ChromiumSession canvas measurement
-    path (never by the raster endpoint, never synthesized):
-      metrics:  code point -> DirectMetrics measured in the browser
-      rasters:  code point -> {(resolution, subpixel_x, subpixel_y): PNG}
-                covering every fit/held-out tuple of the active config
-      pairs:    browser-measured pair advances
-      features: browser-measured OpenType feature probes
+    Produced exclusively by the authorized ChromiumSession canvas path
+    (never by the raster endpoint, never synthesized). Supplements
+    observable metrics/pairs/features only — it never carries raster
+    pixels; reconstruction pixels come from the CDN sprite slices.
     """
 
     browser_version: str
     metrics: Mapping[int, DirectMetrics]
-    rasters: Mapping[int, Mapping[tuple[int, float, float], bytes]]
     pairs: Sequence[Mapping[str, Any]] = field(default_factory=tuple)
     features: Sequence[Mapping[str, Any]] = field(default_factory=tuple)
 
 
 def _slice_sprite_cells(
     page: SpriteRasterPage,
-) -> dict[int, bytes]:
+) -> tuple[dict[int, bytes], dict[int, dict[str, Any]]]:
     """Validate the page sprite and slice each observable glyph cell.
 
     Consumes the actual binary PNG sprite: every mapped glyph must have a
-    bounds-checked cell that re-encodes as a non-empty PNG. Any gap fails
-    closed with a ValueError.
+    bounds-checked cell that re-encodes as a non-empty PNG. Returns the
+    slices plus their exact request binding (MD5, page index, acs_pt,
+    request parameters, sprite/slice hashes). Any gap fails closed.
     """
     payload = page.payload or {}
     glyphs = payload.get("glyphs") or []
     if not glyphs:
         raise ValueError("RASTER_INGEST_PAGE_NO_GLYPHS")
+    md5 = str(payload.get("md5", ""))
+    acs_pt = payload.get("acs_pt")
+    if not md5 or not isinstance(acs_pt, int) or acs_pt < 1:
+        raise ValueError("RASTER_INGEST_REQUEST_BINDING_MISSING")
+    request_params = payload.get("request_params")
+    if not isinstance(request_params, dict) or not request_params:
+        raise ValueError("RASTER_INGEST_REQUEST_BINDING_MISSING")
+
     try:
         sprite = Image.open(io.BytesIO(page.raster_bytes))
         sprite.load()
@@ -79,6 +100,7 @@ def _slice_sprite_cells(
     sprite_w, sprite_h = sprite.size
 
     slices: dict[int, bytes] = {}
+    bindings: dict[int, dict[str, Any]] = {}
     for g in glyphs:
         cp = int(g["code_point"])
         box = g.get("sprite_box") or {}
@@ -100,7 +122,23 @@ def _slice_sprite_cells(
         if cp in slices:
             raise ValueError(f"RASTER_INGEST_DUPLICATE_CP_{cp}")
         slices[cp] = png_bytes
-    return slices
+        bindings[cp] = {
+            "md5": md5,
+            "acs_pt": acs_pt,
+            "page_index": int(payload.get("request_params", {}).get("acs_p", page.page_index)),
+            "request_params": dict(request_params),
+            "sprite_sha256": str(payload.get("sprite_sha256", ""))
+            or hashlib.sha256(page.raster_bytes).hexdigest(),
+            "slice_sha256": hashlib.sha256(png_bytes).hexdigest(),
+        }
+    return slices, bindings
+
+
+def _config_phase_requirements(config: ObservationConfig) -> tuple[tuple[float, float], ...]:
+    phases = set(config.base_subpixel_phases)
+    phases.update(config.expanded_subpixel_phases)
+    phases.update(config.held_out_subpixel_phases)
+    return tuple(sorted(phases))
 
 
 def ingest_raster_pages(
@@ -108,92 +146,93 @@ def ingest_raster_pages(
     config: ObservationConfig,
     reference_id: str,
     style_id: str,
-    browser_measurement: BrowserMeasurementEvidence | None,
+    supplement: BrowserSupplementalEvidence | None,
     pages: Sequence[SpriteRasterPage],
     source_url: str = "authorized_raster_provider",
 ) -> int:
-    """Persist complete exact-tuple observations from provider raster pages.
+    """Persist immutable exact-tuple observations from provider raster pages.
 
-    The raster pages contribute the MD5-bound coverage and validated sprite
-    cells; metrics/pairs/features and the observation raster schedule come
-    exclusively from ``browser_measurement`` (approved browser path). Raises
-    ValueError (fail-closed) on any identity drift, schema violation,
-    coverage mismatch, schedule gap, or integrity mismatch. Returns the
-    ingested glyph count.
+    The bounds-checked CDN sprite slices are stored as the raster evidence
+    (one observation per code point per observable render size, phase
+    (0.0, 0.0)); ``supplement`` contributes browser-measured metrics, pairs,
+    and features only. Raises ValueError (fail-closed) on any identity
+    drift, schema violation, coverage mismatch, or capability gap. Returns
+    the ingested glyph count.
     """
     if not pages:
         raise ValueError("RASTER_INGEST_EMPTY_PAGES")
-    if browser_measurement is None:
-        raise ValueError("RASTER_INGEST_BROWSER_MEASUREMENT_REQUIRED")
-    browser_version = str(browser_measurement.browser_version or "")
+    if supplement is None:
+        raise ValueError("RASTER_INGEST_BROWSER_SUPPLEMENT_REQUIRED")
+    browser_version = str(supplement.browser_version or "")
     if not browser_version:
         raise ValueError("RASTER_INGEST_IDENTITY_REQUIRED")
     cfg_h = config.compute_hash()
 
-    # 1. Validate the raster-only provider evidence: real sprite PNGs sliced
-    #    at the observable per-glyph boxes. Never ingested as metrics.
-    slices: dict[int, bytes] = {}
+    # 1. Validate and slice the real CDN sprites (raster pixels consumed).
+    slices_by_pt: dict[int, dict[int, bytes]] = {}
+    bindings: dict[int, dict[str, Any]] = {}
     for page in pages:
         payload = page.payload or {}
         if not str(payload.get("browser_version", "")):
             raise ValueError("RASTER_INGEST_IDENTITY_DRIFT")
-        page_slices = _slice_sprite_cells(page)
+        page_slices, page_bindings = _slice_sprite_cells(page)
+        pt = int(payload["acs_pt"])
+        bucket = slices_by_pt.setdefault(pt, {})
         for cp, png in page_slices.items():
-            if cp in slices:
-                raise ValueError(f"RASTER_INGEST_DUPLICATE_CP_{cp}")
-            slices[cp] = png
-    if not slices:
+            if cp in bucket:
+                raise ValueError(f"RASTER_INGEST_DUPLICATE_CP_{cp}_PT_{pt}")
+            bucket[cp] = png
+            bindings.setdefault(cp, page_bindings[cp])
+    if not slices_by_pt:
         raise ValueError("RASTER_INGEST_NO_GLYPHS")
+    coverage_cdn = sorted(set().union(*[set(s.keys()) for s in slices_by_pt.values()]))
 
     # 2. Cross-bind: CDN-observed coverage must equal the browser-measured
-    #    coverage exactly. Drift fails closed; nothing is invented.
-    if set(browser_measurement.metrics.keys()) != set(slices.keys()):
+    #    supplemental coverage exactly. Drift fails closed; nothing invented.
+    if set(supplement.metrics.keys()) != set(coverage_cdn):
         raise ValueError("RASTER_INGEST_COVERAGE_DRIFT")
 
-    # 3. Persist exact-tuple observations: metrics and every raster in the
-    #    active schedule come from the approved browser measurement path.
-    coverage = sorted(slices.keys())
-    for cp in coverage:
-        direct_metrics = browser_measurement.metrics[cp]
+    # 3. Persist the observable CDN pixel evidence under the exact tuple:
+    #    one record per code point per render size, phase (0.0, 0.0). The
+    #    resolution label is the requested acs_pt render parameter itself.
+    for cp in coverage_cdn:
+        direct_metrics = supplement.metrics[cp]
         if not isinstance(direct_metrics, DirectMetrics):
             raise ValueError(f"RASTER_INGEST_BROWSER_METRICS_MISSING_CP_{cp}")
         phases = config.get_phases_for_metrics(direct_metrics)
-        eval_res = max(config.resolutions)
-        schedule: list[tuple[int, float, float]] = [
-            (res, sx, sy) for res in config.resolutions for sx, sy in phases
-        ]
-        schedule.extend((eval_res, sx, sy) for sx, sy in config.held_out_subpixel_phases)
-        cp_rasters = browser_measurement.rasters.get(cp) or {}
-        for res, sub_x, sub_y in schedule:
-            png_bytes = cp_rasters.get((res, sub_x, sub_y))
-            if not isinstance(png_bytes, (bytes, bytearray)) or not png_bytes:
+        if tuple(phases) != (OBSERVABLE_RENDER_PHASE,):
+            raise ValueError(
+                "RASTER_CAPABILITY_GAP: adaptive subpixel phase expansion "
+                f"{tuple(phases)} is not renderable by the approved raster "
+                "query (phase (0.0, 0.0) only)"
+            )
+        for pt, bucket in sorted(slices_by_pt.items()):
+            png_bytes = bucket.get(cp)
+            if png_bytes is None:
                 raise ValueError(
-                    f"RASTER_INGEST_BROWSER_RASTER_MISSING_CP_{cp}_RES_{res}"
+                    f"RASTER_INGEST_CDN_RASTER_MISSING_CP_{cp}_PT_{pt}"
                 )
-            png_bytes = bytes(png_bytes)
-            if not png_bytes.startswith(PNG_MAGIC):
-                raise ValueError(
-                    f"RASTER_INGEST_BROWSER_RASTER_NOT_PNG_CP_{cp}_RES_{res}"
-                )
+            binding = bindings[cp]
             record = ObservationRecord(
                 cache_key=ObservationRecord.build_cache_key(
                     reference_id=reference_id,
                     style_id=style_id,
                     code_point=cp,
                     browser_version=browser_version,
-                    resolution=res,
-                    subpixel_x=sub_x,
-                    subpixel_y=sub_y,
+                    resolution=pt,
+                    subpixel_x=OBSERVABLE_RENDER_PHASE[0],
+                    subpixel_y=OBSERVABLE_RENDER_PHASE[1],
                     config_hash=cfg_h,
                 ),
                 reference_id=reference_id,
                 style_id=style_id,
                 code_point=cp,
-                resolution=res,
-                subpixel_x=sub_x,
-                subpixel_y=sub_y,
+                resolution=pt,
+                subpixel_x=OBSERVABLE_RENDER_PHASE[0],
+                subpixel_y=OBSERVABLE_RENDER_PHASE[1],
                 raster_relative_path=(
-                    f"rasters/{reference_id}/{style_id}/{cp:04X}/{res}_{sub_x}_{sub_y}.png"
+                    f"rasters/{reference_id}/{style_id}/{cp:04X}/"
+                    f"{pt}_{OBSERVABLE_RENDER_PHASE[0]}_{OBSERVABLE_RENDER_PHASE[1]}.png"
                 ),
                 raster_sha256=hashlib.sha256(png_bytes).hexdigest(),
                 raster_size_bytes=len(png_bytes),
@@ -203,13 +242,35 @@ def ingest_raster_pages(
                 config_hash=cfg_h,
             )
             store.save_observation(record, png_bytes)
+            bindings[cp] = {**binding, "observed_at": record.cache_key}
 
-    store.save_coverage(reference_id, style_id, coverage, browser_version=browser_version, config_hash=cfg_h)
+    store.save_coverage(
+        reference_id, style_id, coverage_cdn,
+        browser_version=browser_version, config_hash=cfg_h,
+    )
 
-    # 4. Pairs and features: browser-measured only, provenance verified by
-    #    finalization below.
+    # 4. Capability gate: the immutable snapshot requires disjoint held-out
+    #    raster evidence. The approved render query exposes acs_pt (size) as
+    #    the only raster scale control and renders phase (0.0, 0.0) only, so
+    #    any non-zero held-out/expanded phase is causally unobtainable. Fail
+    #    closed with the exact gap; never synthesize, never recapture.
+    unobservable = [
+        p for p in _config_phase_requirements(config)
+        if tuple(p) != OBSERVABLE_RENDER_PHASE
+    ]
+    if unobservable:
+        gap = ", ".join(f"({x}, {y})" for x, y in unobservable)
+        raise ValueError(
+            "RASTER_CAPABILITY_GAP: held-out/expanded subpixel phase raster "
+            f"evidence {gap} is not exposed by any approved render query "
+            "parameter (rbe, acs_pt, acs_w, acs_l, acs_ar, acs_p, acs_gpp); "
+            "CDN pixel evidence persisted, snapshot completion blocked"
+        )
+
+    # 5. Supplemental pairs/features: browser-measured only, provenance
+    #    verified by finalization below.
     pair_tuples: list[tuple[int, int]] = []
-    for p in browser_measurement.pairs:
+    for p in supplement.pairs:
         left_cp = int(p["left_cp"])
         right_cp = int(p["right_cp"])
         left_adv = float(p["left_advance_upem"])
@@ -235,7 +296,7 @@ def ingest_raster_pages(
 
     required_probes = set(config.feature_probes)
     ingested_probes = set()
-    for f in browser_measurement.features:
+    for f in supplement.features:
         tag = str(f["feature_tag"])
         sample_text = str(f["sample_text"])
         effect_observed = bool(
@@ -262,17 +323,16 @@ def ingest_raster_pages(
     if ingested_probes != required_probes:
         raise ValueError("RASTER_INGEST_FEATURE_PROBES_INCOMPLETE")
 
-    # 5. Finalize through the same strict completeness checks as direct
-    #    collection. The stored browser-measured pair set must match the
-    #    declared pair tuples exactly (same contract as the direct
-    #    collection path with explicit pairs).
+    # 6. Finalize through the same strict completeness checks as direct
+    #    collection. The stored supplemental pair set must match the
+    #    declared pair tuples exactly.
     collector = ObservationCollector(
         session=_IngestSessionIdentity(browser_version), store=store, config=config
     )
     collector.finalize_source_collection(
         reference_id, style_id, source_url=source_url, expected_pairs=pair_tuples
     )
-    return len(coverage)
+    return len(coverage_cdn)
 
 
 async def collect_browser_measurement(
@@ -281,14 +341,14 @@ async def collect_browser_measurement(
     style_name: str,
     code_points: Sequence[int],
     config: ObservationConfig,
-) -> BrowserMeasurementEvidence:
-    """Approved browser-measurement path for the raster fallback.
+) -> BrowserSupplementalEvidence:
+    """Approved browser supplemental path for the raster fallback.
 
-    The raster endpoint supplies raster/coverage only; metrics, pair
-    advances, feature probes, and the observation raster schedule are
-    measured exclusively here through the authorized ChromiumSession canvas
-    path against the observable source page. Any failure raises (fail
-    closed); nothing is synthesized.
+    Measures observable metrics, pair advances, and feature probes against
+    the source page through the authorized ChromiumSession canvas path.
+    NEVER captures rasters: reconstruction pixels come exclusively from the
+    CDN sprite slices. Any failure raises (fail closed); nothing is
+    synthesized.
     """
     from measurement.browser_session import ChromiumSession, close_browser_session
     from typography.models import BOUNDED_FIT_PAIRS
@@ -302,24 +362,10 @@ async def collect_browser_measurement(
         browser_version = session.browser_version
 
         metrics: dict[int, DirectMetrics] = {}
-        rasters: dict[int, dict[tuple[int, float, float], bytes]] = {}
-        eval_res = max(config.resolutions)
         for cp in code_points:
-            dm = await session.measure_glyph_direct(
+            metrics[cp] = await session.measure_glyph_direct(
                 font, cp, font_size_px=config.font_size_px, upem=config.upem
             )
-            metrics[cp] = dm
-            phases = config.get_phases_for_metrics(dm)
-            schedule: list[tuple[int, float, float]] = [
-                (res, sx, sy) for res in config.resolutions for sx, sy in phases
-            ]
-            schedule.extend((eval_res, sx, sy) for sx, sy in config.held_out_subpixel_phases)
-            cp_rasters: dict[tuple[int, float, float], bytes] = {}
-            for res, sx, sy in schedule:
-                cp_rasters[(res, sx, sy)] = await session.capture_lossless_raster(
-                    font, cp, res, (sx, sy)
-                )
-            rasters[cp] = cp_rasters
 
         coverage = set(code_points)
         # Browser-measured pair set: bounded fit pairs within coverage plus
@@ -360,10 +406,9 @@ async def collect_browser_measurement(
             )
             features.append({"feature_tag": tag, "sample_text": text, **probe})
 
-        return BrowserMeasurementEvidence(
+        return BrowserSupplementalEvidence(
             browser_version=browser_version,
             metrics=metrics,
-            rasters=rasters,
             pairs=pairs,
             features=features,
         )
@@ -374,17 +419,27 @@ async def collect_browser_measurement(
 def page_slice_attestation(pages: Sequence[SpriteRasterPage]) -> dict[str, Any]:
     """Sanitized attestation of the consumed raster evidence (trace-safe).
 
-    Validates every page sprite and returns per-code-point slice hashes plus
-    page sprite hashes. Raises ValueError on any validation gap, mirroring
+    Validates every page sprite and returns per-code-point slice bindings
+    (MD5, page index, request parameters, slice hashes) plus page sprite
+    hashes. Raises ValueError on any validation gap, mirroring
     ``ingest_raster_pages`` fail-closed behavior.
     """
-    attestation: dict[str, Any] = {"sprite_sha256": [], "slice_sha256": {}}
+    attestation: dict[str, Any] = {"sprite_sha256": [], "bindings": {}}
     for page in pages:
         payload = page.payload or {}
         sprite_sha = str(payload.get("sprite_sha256", ""))
         if not sprite_sha:
             sprite_sha = hashlib.sha256(page.raster_bytes).hexdigest()
         attestation["sprite_sha256"].append(sprite_sha)
-        for cp, png in _slice_sprite_cells(page).items():
-            attestation["slice_sha256"][str(cp)] = hashlib.sha256(png).hexdigest()
+        _slices, page_bindings = _slice_sprite_cells(page)
+        for cp, binding in page_bindings.items():
+            key = str(cp)
+            # Multiple render sizes legitimately bind the same code point;
+            # identical render parameters would be an evidence collision.
+            existing = attestation["bindings"].get(key)
+            if existing is not None and (
+                existing["md5"], existing["acs_pt"], existing["page_index"]
+            ) == (binding["md5"], binding["acs_pt"], binding["page_index"]):
+                raise ValueError(f"RASTER_INGEST_DUPLICATE_CP_{cp}")
+            attestation["bindings"][key] = binding
     return attestation

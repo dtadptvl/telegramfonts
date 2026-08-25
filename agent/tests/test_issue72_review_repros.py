@@ -36,6 +36,7 @@ from compute.openrouter_client import (
 from compute.source import SourceAcquirer
 from composition import build_production_components
 from config import Settings
+from measurement.models import ObservationConfig
 from queue_client import CloudflareQueueClient, QueueMessage
 from runner import A23Runner, RunnerAction
 from tests.test_issue71_adversarial import (
@@ -87,24 +88,55 @@ def test_PROD_COMPOSITION_real_factory_concrete_dependencies(tmp_path: Path, tes
 # RASTER_HANDOFF
 # =========================================================================
 
-def _raster_pages_for_seed(browser_version: str) -> list[SpriteRasterPage]:
-    """Captured-shape raster page: real binary PNG sprite + observable boxes.
+# Raster-only schedule the approved CDN render can observably satisfy:
+# every phase is (0.0, 0.0); held-out phases absent (capability gap).
+RASTER_ONLY_CONFIG = ObservationConfig(
+    resolutions=(120, 240),
+    base_subpixel_phases=((0.0, 0.0),),
+    expanded_subpixel_phases=((0.0, 0.0),),
+    held_out_subpixel_phases=(),
+    metric_sizes_px=(32.0, 64.0),
+    feature_probes=(("kern", "AV"),),
+)
 
-    Raster-only provider evidence: code-point mapping and sprite-cell boxes
-    only. Never metrics, pairs, or features.
-    """
+SEED_BOXES = {65: (0, 0, 59, 80), 66: (59, 0, 55, 80)}
+
+
+def _build_seed_sprite() -> bytes:
+    """Real binary PNG sprite carrying observable glyph cells."""
     import io
 
     from PIL import Image, ImageDraw
 
-    boxes = {65: (0, 0, 59, 80), 66: (59, 0, 55, 80)}
     img = Image.new("RGB", (200, 100), "white")
     draw = ImageDraw.Draw(img)
-    for x, y, bw, bh in boxes.values():
+    for x, y, bw, bh in SEED_BOXES.values():
         draw.rectangle([x + 5, y + 10, x + bw - 5, y + bh - 5], fill="black")
     buf = io.BytesIO()
     img.save(buf, format="PNG")
-    sprite = buf.getvalue()
+    return buf.getvalue()
+
+
+def _expected_seed_slice(cp: int) -> bytes:
+    """Deterministic re-slice of the seed sprite (test-side expectation)."""
+    import io
+
+    from PIL import Image
+
+    x, y, bw, bh = SEED_BOXES[cp]
+    cell = Image.open(io.BytesIO(_build_seed_sprite())).crop((x, y, x + bw, y + bh))
+    buf = io.BytesIO()
+    cell.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _raster_pages_for_seed(browser_version: str, acs_pt: int = 128) -> list[SpriteRasterPage]:
+    """Captured-shape raster page: real binary PNG sprite + observable boxes.
+
+    Raster-only provider evidence bound to the exact MD5/page/request
+    parameters. Never metrics, pairs, or features.
+    """
+    sprite = _build_seed_sprite()
     payload = {
         "browser_version": browser_version,
         "glyphs": [
@@ -113,33 +145,36 @@ def _raster_pages_for_seed(browser_version: str) -> list[SpriteRasterPage]:
                 "glyph_index": i,
                 "sprite_box": {"x": x, "y": y, "width": bw, "height": bh},
             }
-            for i, (cp, (x, y, bw, bh)) in enumerate(boxes.items())
+            for i, (cp, (x, y, bw, bh)) in enumerate(SEED_BOXES.items())
         ],
         "pairs": [],
         "features": [],
         "sprite_sha256": hashlib.sha256(sprite).hexdigest(),
         "observed_headers": {"content_type": "application/json; charset=utf-8"},
+        "md5": RASTER_HANDOFF_MD5,
+        "acs_pt": acs_pt,
+        "request_params": {
+            "rbe": "gmap", "acs_pt": str(acs_pt), "acs_w": "1500",
+            "acs_l": "1", "acs_ar": "0", "acs_p": "1", "acs_gpp": "100",
+        },
     }
-    return [SpriteRasterPage(page_index=1, glyph_count=len(boxes), raster_bytes=sprite, next_cursor="2", final=False, payload=payload)]
+    return [SpriteRasterPage(page_index=1, glyph_count=len(SEED_BOXES), raster_bytes=sprite, next_cursor="2", final=False, payload=payload)]
 
 
-def _browser_measurement_for_seed(browser_version: str):
-    """Deterministic approved-path-shaped browser measurement evidence.
+def _browser_supplement_for_seed(browser_version: str, config=ISSUE71_CONFIG):
+    """Deterministic approved-path-shaped browser supplemental evidence.
 
     Carries exactly what the production ChromiumSession canvas path
-    produces: per-glyph DirectMetrics, the full config raster schedule,
-    bounded-fit pairs within coverage, and feature probes.
+    produces: per-glyph DirectMetrics, bounded-fit pairs within coverage,
+    and feature probes. Never raster pixels.
     """
-    from acquisition.raster_ingest import BrowserMeasurementEvidence
+    from acquisition.raster_ingest import BrowserSupplementalEvidence
     from measurement.models import DirectMetrics
 
-    config = ISSUE71_CONFIG
     advs = {65: 650.0, 66: 600.0}
     bboxes = {65: (50, 50, 550, 700), 66: (40, 50, 560, 700)}
     scale = float(config.font_size_px) / float(config.upem)
     metrics: dict[int, DirectMetrics] = {}
-    rasters: dict[int, dict[tuple[int, float, float], bytes]] = {}
-    eval_res = max(config.resolutions)
     for cp, adv in advs.items():
         bbox = bboxes[cp]
         metrics[cp] = DirectMetrics(
@@ -161,12 +196,6 @@ def _browser_measurement_for_seed(browser_version: str):
             bbox_width_upem=float(bbox[2] - bbox[0]),
             bbox_height_upem=float(bbox[3] - bbox[1]),
         )
-        schedule = [(res, sx, sy) for res in config.resolutions for sx, sy in config.base_subpixel_phases]
-        schedule.extend((eval_res, sx, sy) for sx, sy in config.held_out_subpixel_phases)
-        rasters[cp] = {
-            (res, sx, sy): _generate_png_bytes(res, bbox, adv, sx, sy)
-            for res, sx, sy in schedule
-        }
     pairs = [
         {"left_cp": 65, "right_cp": 66, "left_advance_upem": 650.0,
          "right_advance_upem": 600.0, "pair_advance_upem": 1230.0},
@@ -184,15 +213,14 @@ def _browser_measurement_for_seed(browser_version: str):
         }
         for tag, text in config.feature_probes
     ]
-    return BrowserMeasurementEvidence(
-        browser_version=browser_version, metrics=metrics, rasters=rasters,
-        pairs=pairs, features=features,
+    return BrowserSupplementalEvidence(
+        browser_version=browser_version, metrics=metrics, pairs=pairs, features=features,
     )
 
 
 class _RasterOnlyClient:
-    def __init__(self, pages):
-        self.pages = pages
+    def __init__(self, browser_version: str = "monotype_render_105"):
+        self.browser_version = browser_version
         self.calls = 0
         self.requests: list[dict] = []
 
@@ -201,7 +229,8 @@ class _RasterOnlyClient:
         self.requests.append(dict(request))
         if cursor:
             return None
-        return self.pages[0]
+        # One full page per requested render size (acs_pt).
+        return _raster_pages_for_seed(self.browser_version, int(request.get("acs_pt", 128)))[0]
 
 
 RASTER_HANDOFF_MD5 = "ab12cd34ef56ab78cd90ef12ab34cd56"
@@ -232,33 +261,91 @@ class _MetadataDumpDom:
         )
 
 
+class _StubChromiumSession:
+    """Deterministic stand-in for the approved ChromiumSession canvas path.
+
+    Raster capture is sabotaged: any call proves the forbidden recapture.
+    """
+
+    capture_calls = 0
+    observed: list[tuple] = []
+
+    def __init__(self, executable_path=None, timeout_seconds=10.0, port=0):
+        self.browser_version = "chromium_stub_v1"
+        self.timeout_seconds = timeout_seconds
+
+    async def start(self):
+        pass
+
+    async def observe_source_font(self, source_url, style_name, family_name=None):
+        _StubChromiumSession.observed.append((source_url, style_name, family_name))
+        return "Stub Fam"
+
+    async def measure_glyph_direct(self, font, code_point, font_size_px=200.0, upem=1000):
+        adv = 650.0 if code_point == 65 else 600.0
+        bbox = (50, 50, 550, 700) if code_point == 65 else (40, 50, 560, 700)
+        from measurement.models import DirectMetrics
+
+        scale = float(font_size_px) / float(upem)
+        return DirectMetrics(
+            code_point=code_point,
+            character=chr(code_point),
+            font_size_px=float(font_size_px),
+            raw_advance_width=adv * scale,
+            raw_actual_left=float(bbox[0]) * scale,
+            raw_actual_right=float(bbox[2]) * scale,
+            raw_actual_ascent=float(bbox[3]) * scale,
+            raw_actual_descent=200.0 * scale,
+            raw_font_ascent=float(bbox[3]) * scale,
+            raw_font_descent=200.0 * scale,
+            advance_width_upem=adv,
+            lsb_upem=float(bbox[0]),
+            rsb_upem=adv - float(bbox[2]),
+            ascent_upem=float(bbox[3]),
+            descent_upem=-200.0,
+            bbox_width_upem=float(bbox[2] - bbox[0]),
+            bbox_height_upem=float(bbox[3] - bbox[1]),
+        )
+
+    async def measure_text_advance(self, font, text, font_size_px=200.0, upem=1000):
+        return 1235.0
+
+    async def probe_opentype_feature(self, font, feature_tag, sample_text, font_size_px=200.0, upem=1000):
+        return {
+            "enabled_advance_upem": 1200.0,
+            "disabled_advance_upem": 1200.0,
+            "enabled_raster_signature": "a",
+            "disabled_raster_signature": "a",
+        }
+
+    async def capture_lossless_raster(self, *args, **kwargs):
+        _StubChromiumSession.capture_calls += 1
+        raise AssertionError("browser raster capture is forbidden on the Monotype path")
+
+
 @pytest.mark.asyncio
-async def test_RASTER_HANDOFF_provider_pages_reach_stage9d_not_legacy_acquirer(
+async def test_RASTER_HANDOFF_cdn_pixels_immutable_no_browser_recapture(
     test_settings: Settings, tmp_path: Path, monkeypatch
 ):
+    """Sabotage repro: on the Monotype fallback the browser never captures
+    rasters; the bounds-checked CDN sprite slices reach immutable
+    observations. Snapshot completion stays blocked on the exact causal
+    capability gap (held-out subpixel phases are not renderable by the
+    approved query).
+    """
+    import measurement.browser_session as browser_session_mod
+
+    _StubChromiumSession.capture_calls = 0
+    _StubChromiumSession.observed = []
+    monkeypatch.setattr(browser_session_mod, "ChromiumSession", _StubChromiumSession)
+
+    async def _noop_close(session):
+        return None
+
+    monkeypatch.setattr(browser_session_mod, "close_browser_session", _noop_close)
+
     store_dir = tmp_path / "obs"
     store_dir.mkdir()
-    measurement_bv = "chromium_measurement_v1"
-    pages = _raster_pages_for_seed("monotype_render_105")
-    evidence = _browser_measurement_for_seed(measurement_bv)
-
-    # The runner must source metrics/pairs/features through the approved
-    # browser-measurement path, bound to the exact raster target.
-    import runner as runner_mod
-
-    measurement_calls: list[dict] = []
-
-    async def _stub_collect_browser_measurement(source_url, family_name, style_name, code_points, config):
-        measurement_calls.append({
-            "source_url": source_url,
-            "family_name": family_name,
-            "style_name": style_name,
-            "code_points": list(code_points),
-            "config_hash": config.compute_hash(),
-        })
-        return evidence
-
-    monkeypatch.setattr(runner_mod, "collect_browser_measurement", _stub_collect_browser_measurement)
 
     class _SabotagedAcquirer(CountingAcquirer):
         async def acquire_source(self, *args, **kwargs):
@@ -266,15 +353,14 @@ async def test_RASTER_HANDOFF_provider_pages_reach_stage9d_not_legacy_acquirer(
             raise AssertionError("legacy acquirer must not run after raster handoff")
 
     settings = test_settings.model_copy(update={"FONT_ARCHIVE_ROOT": tmp_path / "archive_root"})
-    archive_root = settings.FONT_ARCHIVE_ROOT
     from compute.archive import FinalFontArchive
 
-    archive = FinalFontArchive(archive_root, settings.SCRATCH_DIR / "archive_idx.sqlite3")
+    archive = FinalFontArchive(settings.FONT_ARCHIVE_ROOT, settings.SCRATCH_DIR / "archive_idx.sqlite3")
     pipeline = AcquisitionPipeline(
         dump_dom_transport=_MetadataDumpDom("Raster Handoff Fam", RASTER_HANDOFF_MD5),
         binary_fetch=None,
         session_provider=None,
-        raster_provider=MonotypeRasterProvider(_RasterOnlyClient(pages)),
+        raster_provider=MonotypeRasterProvider(_RasterOnlyClient()),
     )
     acquirer = _SabotagedAcquirer(
         client=httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(404))),
@@ -298,39 +384,150 @@ async def test_RASTER_HANDOFF_provider_pages_reach_stage9d_not_legacy_acquirer(
     msg = QueueMessage(id="m_rh", lease_id="lease_rh", body_raw='{"job_id":"job_i71"}', attempts=1, job_id="job_i71")
 
     res = await runner.process_message(msg)
-    assert res.action == RunnerAction.ACKED
+
+    # Sabotage proof: the real supplemental path ran against the stubbed
+    # session and never captured a raster.
+    assert _StubChromiumSession.capture_calls == 0
+    assert _StubChromiumSession.observed == [
+        ("https://www.myfonts.com/collections/raster-handoff-fam", "Regular", "Raster Handoff Fam")
+    ]
     assert acquirer.acquire_calls == 0  # legacy acquirer never invoked
-    assert len(state["uploads"]) == 1
 
-    # Browser measurement was requested for the exact observable target.
-    assert measurement_calls == [{
-        "source_url": "https://www.myfonts.com/collections/raster-handoff-fam",
-        "family_name": "Raster Handoff Fam",
-        "style_name": "Regular",
-        "code_points": [65, 66],
-        "config_hash": ISSUE71_CONFIG.compute_hash(),
-    }]
-
-    events = [e for e in runner.last_reuse_trace["events"] if e["event"] == "RASTER_HANDOFF"]
-    assert events and events[0]["glyphs"] == 2
-    # Consumed CDN sprite evidence is attested in the trace.
-    assert events[0]["sprite_sha256"] == [pages[0].payload["sprite_sha256"]]
-
-    # Observations + completed collection exist under the exact tuple, with
-    # browser-measured metrics/rasters (never provider-supplied).
+    # CDN pixels reached immutable observations under the exact tuples
+    # (one per requested acs_pt render size, phase (0.0, 0.0)).
     cfg_h = ISSUE71_CONFIG.compute_hash()
     cov = acquirer.store.get_coverage(
-        "raster_handoff_fam", "regular", browser_version=measurement_bv, config_hash=cfg_h,
+        "raster_handoff_fam", "regular", browser_version="chromium_stub_v1", config_hash=cfg_h,
     )
     assert cov == [65, 66]
-    obs = acquirer.store.get_glyph_observations(
-        "raster_handoff_fam", "regular", 65, browser_version=measurement_bv, config_hash=cfg_h,
-    )
-    assert obs and obs[0][0].metrics.advance_width_upem == 650.0
-    stored_raster = (acquirer.store.base_dir / obs[0][0].raster_relative_path).read_bytes()
-    assert stored_raster == evidence.rasters[65][(128, 0.0, 0.0)]
+    for pt in ISSUE71_CONFIG.resolutions:
+        obs = acquirer.store.get_glyph_observations(
+            "raster_handoff_fam", "regular", 65, browser_version="chromium_stub_v1", config_hash=cfg_h,
+        )
+        rec = next(r for r, _ in obs if r.resolution == pt)
+        assert rec.subpixel_x == 0.0 and rec.subpixel_y == 0.0
+        stored = (acquirer.store.base_dir / rec.raster_relative_path).read_bytes()
+        assert stored == _expected_seed_slice(65)  # CDN pixels, not recaptured
+        assert rec.metrics.advance_width_upem == 650.0
+
+    # Completion stays blocked on the exact causal capability gap.
+    assert res.action == RunnerAction.FAILED_TERMINAL
     assert acquirer.store.is_source_collection_completed(
-        "raster_handoff_fam", "regular", config_hash=cfg_h, browser_version=measurement_bv,
+        "raster_handoff_fam", "regular", config_hash=cfg_h, browser_version="chromium_stub_v1",
+    ) is False
+
+
+@pytest.mark.asyncio
+async def test_BROWSER_SUPPLEMENT_never_captures_rasters_on_monotype_path():
+    """The production supplemental path measures metrics/pairs/features only."""
+    import measurement.browser_session as browser_session_mod
+
+    from acquisition.raster_ingest import collect_browser_measurement
+
+    _StubChromiumSession.capture_calls = 0
+    _StubChromiumSession.observed = []
+
+    async def _noop_close(session):
+        return None
+
+    original_session = browser_session_mod.ChromiumSession
+    original_close = browser_session_mod.close_browser_session
+    browser_session_mod.ChromiumSession = _StubChromiumSession
+    browser_session_mod.close_browser_session = _noop_close
+    try:
+        supplement = await collect_browser_measurement(
+            "https://www.myfonts.com/collections/sabotage-fam",
+            "Sabotage Fam",
+            "Regular",
+            [65, 66],
+            ISSUE71_CONFIG,
+        )
+    finally:
+        browser_session_mod.ChromiumSession = original_session
+        browser_session_mod.close_browser_session = original_close
+
+    assert _StubChromiumSession.capture_calls == 0
+    assert supplement.browser_version == "chromium_stub_v1"
+    assert sorted(supplement.metrics.keys()) == [65, 66]
+    assert len(supplement.pairs) >= 2
+    assert {(f["feature_tag"], f["sample_text"]) for f in supplement.features} == set(
+        ISSUE71_CONFIG.feature_probes
+    )
+    assert not hasattr(supplement, "rasters")
+
+
+def test_RASTER_CAPABILITY_GAP_cdn_pixels_persisted_completion_blocked(tmp_path: Path):
+    """Held-out subpixel phases are causally unobtainable from the approved
+    render query: CDN pixels persist immutably, completion fails closed with
+    the exact gap, and nothing is synthesized or recaptured."""
+    from acquisition.raster_ingest import ingest_raster_pages
+    from measurement.store import ObservationStore
+
+    pages = [
+        _raster_pages_for_seed("monotype_render_105", acs_pt=pt)[0]
+        for pt in ISSUE71_CONFIG.resolutions
+    ]
+    supplement = _browser_supplement_for_seed("chromium_gap_v1")
+    store = ObservationStore(tmp_path / "obs_gap")
+    cfg_h = ISSUE71_CONFIG.compute_hash()
+
+    with pytest.raises(ValueError, match="RASTER_CAPABILITY_GAP"):
+        ingest_raster_pages(
+            store, ISSUE71_CONFIG, "gap_fam", "regular", supplement, pages,
+        )
+
+    # Pixel evidence persisted under the exact tuples before the gap.
+    for cp in (65, 66):
+        obs = store.get_glyph_observations(
+            "gap_fam", "regular", cp, browser_version="chromium_gap_v1", config_hash=cfg_h,
+        )
+        assert {r.resolution for r, _ in obs} == set(ISSUE71_CONFIG.resolutions)
+        for rec, _ in obs:
+            stored = (store.base_dir / rec.raster_relative_path).read_bytes()
+            assert stored == _expected_seed_slice(cp)
+    assert store.get_coverage(
+        "gap_fam", "regular", browser_version="chromium_gap_v1", config_hash=cfg_h,
+    ) == [65, 66]
+    assert store.is_source_collection_completed(
+        "gap_fam", "regular", config_hash=cfg_h, browser_version="chromium_gap_v1",
+    ) is False
+
+
+def test_RASTER_ONLY_CONFIG_cdn_pixels_complete_observable_snapshot(tmp_path: Path):
+    """Under a schedule the CDN can observably satisfy, the persisted CDN
+    slices complete the immutable collection with browser supplements."""
+    from acquisition.raster_ingest import ingest_raster_pages
+    from measurement.store import ObservationStore
+
+    pages = [
+        _raster_pages_for_seed("monotype_render_105", acs_pt=pt)[0]
+        for pt in RASTER_ONLY_CONFIG.resolutions
+    ]
+    supplement = _browser_supplement_for_seed("chromium_observable_v1", config=RASTER_ONLY_CONFIG)
+    store = ObservationStore(tmp_path / "obs_observable")
+    cfg_h = RASTER_ONLY_CONFIG.compute_hash()
+
+    ingested = ingest_raster_pages(
+        store, RASTER_ONLY_CONFIG, "obs_fam", "regular", supplement, pages,
+        source_url="https://www.myfonts.com/collections/obs-fam",
+    )
+    assert ingested == 2
+    assert store.is_source_collection_completed(
+        "obs_fam", "regular", config_hash=cfg_h, browser_version="chromium_observable_v1",
+    )
+    for cp in (65, 66):
+        obs = store.get_glyph_observations(
+            "obs_fam", "regular", cp, browser_version="chromium_observable_v1", config_hash=cfg_h,
+        )
+        assert {r.resolution for r, _ in obs} == set(RASTER_ONLY_CONFIG.resolutions)
+        for rec, _ in obs:
+            stored = (store.base_dir / rec.raster_relative_path).read_bytes()
+            assert stored == _expected_seed_slice(cp)
+    pairs = store.get_pair_observations(
+        "obs_fam", "regular", browser_version="chromium_observable_v1", config_hash=cfg_h,
+    )
+    assert pairs and all(
+        p["provenance"] == "chromium:chromium_observable_v1:canvas_text_metrics" for p in pairs
     )
 
 
