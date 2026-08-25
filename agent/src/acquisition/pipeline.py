@@ -32,6 +32,7 @@ from acquisition.models import (
     FamilyDiscoveryEnvelope,
     StyleDiscoveryRecord,
     RASTER_STAGE_MONOTYPE_ENDPOINT,
+    is_complete_raster_pages,
 )
 from acquisition.providers import (
     DumpDomTransport,
@@ -268,8 +269,46 @@ class AcquisitionPipeline:
         )
 
         # -------------------------------------------------------------
-        # STEP 2: Authorized Session Binary Provider (if enabled)
+        # STEP 2: Playwright Stealth Persistent Context (Method 2)
         # -------------------------------------------------------------
+        req_pts_raw = (raster_request or {}).get("acs_pts")
+        req_pts = [int(p) for p in req_pts_raw] if req_pts_raw is not None else None
+        stealth_pts = req_pts or [int((raster_request or {}).get("acs_pt", 120))]
+
+        if self.policy.playwright_stealth_enabled and self.playwright_provider is not None and self.playwright_provider.available():
+            pages = ()
+            try:
+                pages = await self.playwright_provider.capture_raster_pages(
+                    source_url, style_rec or StyleDiscoveryRecord(style_id=expected_style, style_name=expected_style), stealth_pts
+                ) or ()
+            except Exception as exc:
+                logger.debug("Playwright raster capture exception: %s", exc)
+                pages = ()
+
+            if pages and is_complete_raster_pages(pages, req_pts):
+                records.append(
+                    AcquisitionStageRecord(
+                        stage=STAGE_PLAYWRIGHT_STEALTH,
+                        attempted=True,
+                        produced_binary=False,
+                        produced_raster=True,
+                        outcome="OK",
+                    )
+                )
+                return outcome_with("raster_authorized", pages=pages)
+            else:
+                records.append(
+                    AcquisitionStageRecord(
+                        stage=STAGE_PLAYWRIGHT_STEALTH,
+                        attempted=True,
+                        produced_binary=False,
+                        produced_raster=False,
+                        outcome="RASTER_ABSENT",
+                        reason_code="STEALTH_RASTER_INCOMPLETE_OR_UNAVAILABLE",
+                    )
+                )
+
+        # Legacy Session Provider fallback (for backward-compatibility with stage 9D test fixtures)
         if self.policy.authorized_session_enabled and self.session_provider is not None and self.session_provider.available():
             try:
                 raw_session = await self.session_provider.fetch_binary_for_envelope(
@@ -346,10 +385,10 @@ class AcquisitionPipeline:
                 target["family"] = family_envelope.family_name or expected_family
                 target["style"] = (style_rec.style_name if style_rec else "") or expected_style
                 target["md5"] = style_md5
+                target["acs_pts"] = req_pts
 
                 pages: tuple = ()
                 try:
-                    # Check if client has fetch_all_sprite_pages
                     client = getattr(self.raster_provider, "client", None)
                     if hasattr(client, "fetch_all_sprite_pages"):
                         pages = await client.fetch_all_sprite_pages(target, self.policy) or ()
@@ -359,7 +398,7 @@ class AcquisitionPipeline:
                     logger.debug("Monotype CDN crawl exception: %s", exc)
                     pages = ()
 
-                if pages and sum(p.glyph_count for p in pages) > 0:
+                if pages and is_complete_raster_pages(pages, req_pts, expected_md5=style_md5):
                     records.append(
                         AcquisitionStageRecord(
                             stage=STAGE_DIRECT_MONOTYPE_CDN,
@@ -378,7 +417,7 @@ class AcquisitionPipeline:
                             produced_binary=False,
                             produced_raster=False,
                             outcome="RASTER_ABSENT",
-                            reason_code="PARTIAL_OR_EMPTY_SPRITES",
+                            reason_code="CDN_RASTER_PARTIAL_OR_EMPTY",
                         )
                     )
         else:
@@ -394,40 +433,70 @@ class AcquisitionPipeline:
             )
 
         # -------------------------------------------------------------
-        # STEP 4: Playwright Stealth Persistent Context Raster Capture (Method 2 fallback)
+        # STEP 4: Algolia Metadata Search -> Monotype CDN Ingestion (Method 4)
         # -------------------------------------------------------------
-        if self.policy.playwright_stealth_enabled and self.playwright_provider is not None and self.playwright_provider.available():
-            pages = ()
-            try:
-                req_pts = (raster_request or {}).get("acs_pts", [120])
-                pages = await self.playwright_provider.capture_raster_pages(
-                    source_url, style_rec or StyleDiscoveryRecord(style_id=expected_style, style_name=expected_style), req_pts
-                ) or ()
-            except Exception as exc:
-                logger.debug("Playwright raster capture exception: %s", exc)
-                pages = ()
+        if (
+            self.policy.algolia_enabled
+            and self.algolia_provider is not None
+            and self.algolia_provider.available()
+            and self.policy.monotype_raster_enabled
+            and self.raster_provider is not None
+            and self.raster_provider.available()
+        ):
+            fam_query = expected_family or (family_envelope.family_name if family_envelope else "")
+            if not fam_query:
+                slug = source_url.rstrip("/").rsplit("/", 1)[-1].split("?", 1)[0]
+                fam_query = slug.replace("-", " ").replace("_", " ")
 
-            if pages and sum(p.glyph_count for p in pages) > 0:
-                records.append(
-                    AcquisitionStageRecord(
-                        stage=STAGE_PLAYWRIGHT_STEALTH,
-                        attempted=True,
-                        produced_binary=False,
-                        produced_raster=True,
-                        outcome="OK",
+            algolia_env = None
+            try:
+                algolia_env = await self.algolia_provider.discover_family(fam_query, source_url)
+            except Exception as exc:
+                logger.debug("Algolia metadata discovery exception: %s", exc)
+                algolia_env = None
+
+            alg_rec = algolia_env.get_style_record(expected_style, expected_style) if algolia_env else None
+            alg_md5 = alg_rec.md5 if alg_rec else ""
+
+            if alg_md5 and len(alg_md5) == 32:
+                target = dict(raster_request or {})
+                target["family"] = (algolia_env.family_name if algolia_env else "") or expected_family
+                target["style"] = (alg_rec.style_name if alg_rec else "") or expected_style
+                target["md5"] = alg_md5
+                target["acs_pts"] = req_pts
+
+                pages = ()
+                try:
+                    client = getattr(self.raster_provider, "client", None)
+                    if hasattr(client, "fetch_all_sprite_pages"):
+                        pages = await client.fetch_all_sprite_pages(target, self.policy) or ()
+                    else:
+                        pages = await self.raster_provider.fetch_sprite_pages(target, self.policy)
+                except Exception as exc:
+                    logger.debug("Algolia-to-CDN crawl exception: %s", exc)
+                    pages = ()
+
+                if pages and is_complete_raster_pages(pages, req_pts, expected_md5=alg_md5):
+                    records.append(
+                        AcquisitionStageRecord(
+                            stage=STAGE_ALGOLIA_METADATA_CDN,
+                            attempted=True,
+                            produced_binary=False,
+                            produced_raster=True,
+                            outcome="OK",
+                        )
                     )
+                    return outcome_with("raster_authorized", pages=pages)
+
+            records.append(
+                AcquisitionStageRecord(
+                    stage=STAGE_ALGOLIA_METADATA_CDN,
+                    attempted=True,
+                    produced_binary=False,
+                    produced_raster=False,
+                    outcome="RASTER_ABSENT",
+                    reason_code="ALGOLIA_METADATA_OR_CDN_UNAVAILABLE",
                 )
-                return outcome_with("raster_authorized", pages=pages)
-            else:
-                records.append(
-                    AcquisitionStageRecord(
-                        stage=STAGE_PLAYWRIGHT_STEALTH,
-                        attempted=True,
-                        produced_binary=False,
-                        produced_raster=False,
-                        outcome="RASTER_ABSENT",
-                        reason_code="STEALTH_RASTER_UNAVAILABLE",
-                    )
-                )
+            )
 
         return outcome_with("insufficient", terminal="ACQUISITION_INSUFFICIENT")

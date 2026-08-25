@@ -237,3 +237,64 @@ class AcquisitionOutcome:
     terminal_reason_code: str = ""
     discovery: DiscoveryEnvelope | None = None
     family_discovery: FamilyDiscoveryEnvelope | None = None
+
+
+def is_complete_raster_pages(
+    pages: tuple[SpriteRasterPage, ...] | list[SpriteRasterPage] | None,
+    requested_pts: list[int] | None = None,
+    expected_md5: str = "",
+) -> bool:
+    """Validate closed raster completion: all requested sizes covered, non-zero glyphs, bounded boxes."""
+    if not pages:
+        return False
+
+    sizes_present = set()
+    for p in pages:
+        if not isinstance(p, SpriteRasterPage) or not p.raster_bytes:
+            return False
+        payload = p.payload or {}
+        pt = payload.get("acs_pt")
+        if pt is not None:
+            try:
+                sizes_present.add(int(pt))
+            except (ValueError, TypeError):
+                return False
+        if expected_md5 and payload.get("md5"):
+            if str(payload["md5"]).lower().strip() != expected_md5.lower().strip():
+                return False
+        glyphs = payload.get("glyphs", [])
+        for g in glyphs:
+            box = g.get("sprite_box", {})
+            if (
+                box.get("width", 0) <= 0
+                or box.get("height", 0) <= 0
+                or box.get("x", 0) < 0
+                or box.get("y", 0) < 0
+            ):
+                return False
+            if g.get("code_point", 0) <= 0:
+                return False
+
+    if requested_pts:
+        for req_pt in requested_pts:
+            if int(req_pt) not in sizes_present:
+                return False
+            pt_pages = [p for p in pages if int((p.payload or {}).get("acs_pt", 0)) == int(req_pt)]
+            if not pt_pages:
+                return False
+            total_glyphs = sum(p.glyph_count for p in pt_pages)
+            if total_glyphs == 0:
+                return False
+            has_terminal = any(p.final or p.glyph_count == 0 or not p.next_cursor for p in pt_pages)
+            if not has_terminal:
+                return False
+    else:
+        total_glyphs = sum(p.glyph_count for p in pages)
+        if total_glyphs == 0:
+            return False
+        has_terminal = any(p.final or p.glyph_count == 0 or not p.next_cursor for p in pages)
+        if not has_terminal:
+            return False
+
+    return True
+

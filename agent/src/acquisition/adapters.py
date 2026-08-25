@@ -464,17 +464,26 @@ class MonotypeRenderClient:
 
         async def fetch_size(pt: int) -> list[SpriteRasterPage] | None:
             size_pages: list[SpriteRasterPage] = []
-            cursor = "1"
-            while cursor and len(size_pages) < policy.max_sprite_pages:
+            cursor = ""
+            for _ in range(policy.max_sprite_pages):
                 req_copy = {**request, "acs_pt": pt}
                 async with semaphore:
                     page = await self.fetch_sprite_page(req_copy, cursor)
                 if page is None:
-                    return None
+                    break
+                if page.glyph_count == 0:
+                    break
                 size_pages.append(page)
-                if page.final or page.glyph_count == 0:
+                if page.final or not page.next_cursor:
                     break
                 cursor = page.next_cursor
+            if not size_pages:
+                return None
+            for p in size_pages:
+                for g in (p.payload or {}).get("glyphs", []):
+                    box = g.get("sprite_box", {})
+                    if box.get("width", 0) <= 0 or box.get("height", 0) <= 0:
+                        return None
             return size_pages
 
         tasks = [fetch_size(int(pt)) for pt in acs_pts]
@@ -484,7 +493,8 @@ class MonotypeRenderClient:
                 return None
             all_pages.extend(res)
 
-        if not all_pages or sum(p.glyph_count for p in all_pages) == 0:
+        from acquisition.models import is_complete_raster_pages
+        if not is_complete_raster_pages(all_pages, requested_pts=[int(pt) for pt in acs_pts], expected_md5=md5):
             return None
         return tuple(all_pages)
 
@@ -495,7 +505,8 @@ class PlaywrightStealthPersistentSession:
     Retains cf_clearance cookies in configured user_data_dir profile.
     Uses persistent context with exact launch args, ignored default args,
     and webdriver/chrome init scripts from canonical specification.
-    Recovers FamilyDiscoveryEnvelope, and can capture raster glyphs if needed.
+    Recovers FamilyDiscoveryEnvelope, and captures complete raster glyphs across
+    all requested acs_pt sizes via persistent Chrome session / offscreen canvas.
     """
 
     LAUNCH_ARGS = [
@@ -517,31 +528,49 @@ class PlaywrightStealthPersistentSession:
         self,
         user_data_dir: Path | None = None,
         timeout_seconds: float = 45.0,
+        transport_override: Callable[..., Awaitable[tuple[SpriteRasterPage, ...] | None]] | None = None,
+        discovery_override: Callable[[str], Awaitable[Any | None]] | None = None,
     ) -> None:
         self.user_data_dir = Path(user_data_dir).resolve() if user_data_dir else None
         self.timeout_seconds = timeout_seconds
+        self._transport_override = transport_override
+        self._discovery_override = discovery_override
 
     def available(self) -> bool:
         return True
 
     async def discover_family(self, source_url: str) -> Any | None:
         """Run stealth persistent session and extract FamilyDiscoveryEnvelope."""
+        if self._discovery_override is not None:
+            return await self._discovery_override(source_url)
+
         from acquisition.providers import parse_family_discovery_from_dump
         from acquisition.models import STAGE_PLAYWRIGHT_STEALTH
 
-        # If playwright library is installed, use async_playwright
+        # If playwright library is installed, use async_playwright persistent context
         try:
             from playwright.async_api import async_playwright
             async with async_playwright() as p:
                 profile_dir = str(self.user_data_dir) if self.user_data_dir else tempfile.mkdtemp(prefix="stealth_")
-                context = await p.chromium.launch_persistent_context(
-                    user_data_dir=profile_dir,
-                    headless=True,
-                    args=self.LAUNCH_ARGS,
-                    ignore_default_args=self.IGNORED_DEFAULT_ARGS,
-                    user_agent=self.DESKTOP_UA,
-                    timeout=self.timeout_seconds * 1000,
-                )
+                try:
+                    context = await p.chromium.launch_persistent_context(
+                        user_data_dir=profile_dir,
+                        channel="chrome",
+                        headless=True,
+                        args=self.LAUNCH_ARGS,
+                        ignore_default_args=self.IGNORED_DEFAULT_ARGS,
+                        user_agent=self.DESKTOP_UA,
+                        timeout=self.timeout_seconds * 1000,
+                    )
+                except Exception:
+                    context = await p.chromium.launch_persistent_context(
+                        user_data_dir=profile_dir,
+                        headless=True,
+                        args=self.LAUNCH_ARGS,
+                        ignore_default_args=self.IGNORED_DEFAULT_ARGS,
+                        user_agent=self.DESKTOP_UA,
+                        timeout=self.timeout_seconds * 1000,
+                    )
                 try:
                     await context.add_init_script(self.STEALTH_INIT_SCRIPT)
                     page = await context.new_page()
@@ -583,7 +612,121 @@ class PlaywrightStealthPersistentSession:
         style_rec: Any,
         requested_sizes: list[int],
     ) -> tuple[SpriteRasterPage, ...] | None:
-        """Capture raster glyphs directly via page canvas if CDN is blocked."""
+        """Capture raster glyphs directly via persistent Chrome canvas if CDN is blocked."""
+        if self._transport_override is not None:
+            return await self._transport_override(source_url, style_rec, requested_sizes)
+
+        from acquisition.models import STAGE_PLAYWRIGHT_STEALTH, is_complete_raster_pages
+
+        try:
+            from playwright.async_api import async_playwright
+            async with async_playwright() as p:
+                profile_dir = str(self.user_data_dir) if self.user_data_dir else tempfile.mkdtemp(prefix="playwright_raster_")
+                try:
+                    context = await p.chromium.launch_persistent_context(
+                        user_data_dir=profile_dir,
+                        channel="chrome",
+                        headless=True,
+                        args=self.LAUNCH_ARGS,
+                        ignore_default_args=self.IGNORED_DEFAULT_ARGS,
+                        user_agent=self.DESKTOP_UA,
+                        timeout=self.timeout_seconds * 1000,
+                    )
+                except Exception:
+                    context = await p.chromium.launch_persistent_context(
+                        user_data_dir=profile_dir,
+                        headless=True,
+                        args=self.LAUNCH_ARGS,
+                        ignore_default_args=self.IGNORED_DEFAULT_ARGS,
+                        user_agent=self.DESKTOP_UA,
+                        timeout=self.timeout_seconds * 1000,
+                    )
+                try:
+                    await context.add_init_script(self.STEALTH_INIT_SCRIPT)
+                    page = await context.new_page()
+                    await page.goto(source_url, timeout=self.timeout_seconds * 1000, wait_until="domcontentloaded")
+
+                    style_name = getattr(style_rec, "style_name", "") or getattr(style_rec, "style_id", "Regular")
+                    canvas_script = """
+                    async (args) => {
+                        const { requested_sizes, style_name } = args;
+                        const results = [];
+                        const codePoints = [];
+                        for (let i = 32; i <= 126; i++) codePoints.push(i);
+                        for (let cp of [192, 193, 194, 195, 200, 201, 202, 204, 205, 210, 211, 212, 213, 217, 218, 221, 224, 225, 226, 227, 232, 233, 234, 236, 237, 242, 243, 244, 245, 249, 250, 253, 272, 273, 416, 417, 431, 432]) {
+                            codePoints.push(cp);
+                        }
+
+                        for (const pt of requested_sizes) {
+                            const canvas = document.createElement('canvas');
+                            canvas.width = 1500;
+                            canvas.height = 1000;
+                            const ctx = canvas.getContext('2d');
+                            ctx.font = `${pt}px "${style_name}", sans-serif`;
+                            ctx.fillStyle = '#000000';
+                            ctx.textBaseline = 'alphabetic';
+
+                            const glyphs = [];
+                            let x = 10, y = pt + 10;
+                            for (const cp of codePoints) {
+                                const ch = String.fromCodePoint(cp);
+                                const metrics = ctx.measureText(ch);
+                                const w = Math.ceil(metrics.width) || pt;
+                                const h = pt;
+                                if (x + w + 10 > canvas.width) {
+                                    x = 10;
+                                    y += h + 20;
+                                }
+                                ctx.fillText(ch, x, y);
+                                glyphs.push({
+                                    code_point: cp,
+                                    glyph_index: glyphs.length,
+                                    sprite_box: { x: Math.floor(x), y: Math.floor(y - pt), width: Math.max(1, w), height: Math.max(1, h) }
+                                });
+                                x += w + 10;
+                            }
+                            const dataUrl = canvas.toDataURL('image/png');
+                            results.push({ pt, dataUrl, glyphs });
+                        }
+                        return results;
+                    }
+                    """
+                    render_results = await page.evaluate(canvas_script, {"requested_sizes": requested_sizes, "style_name": style_name})
+                    if render_results:
+                        out_pages = []
+                        for res in render_results:
+                            pt = res["pt"]
+                            data_url = res["dataUrl"]
+                            glyphs = res["glyphs"]
+                            b64 = data_url.split(",", 1)[-1]
+                            raw_png = base64.b64decode(b64)
+                            sha = hashlib.sha256(raw_png).hexdigest()
+                            out_pages.append(
+                                SpriteRasterPage(
+                                    page_index=1,
+                                    glyph_count=len(glyphs),
+                                    raster_bytes=raw_png,
+                                    next_cursor="",
+                                    final=True,
+                                    payload={
+                                        "browser_version": "playwright_stealth_v1",
+                                        "glyphs": glyphs,
+                                        "pairs": [],
+                                        "features": [],
+                                        "sprite_sha256": sha,
+                                        "md5": getattr(style_rec, "md5", ""),
+                                        "acs_pt": pt,
+                                        "provenance": STAGE_PLAYWRIGHT_STEALTH,
+                                    },
+                                )
+                            )
+                        if is_complete_raster_pages(out_pages, requested_sizes):
+                            return tuple(out_pages)
+                finally:
+                    await context.close()
+        except Exception as exc:
+            logger.debug("Playwright persistent raster capture exception: %s", exc)
+            return None
         return None
 
 
@@ -608,7 +751,7 @@ class AlgoliaMetadataClient:
         self.timeout_seconds = timeout_seconds
 
     def available(self) -> bool:
-        return bool(self.app_id)
+        return bool(self.app_id and self._api_key)
 
     async def discover_family(
         self,
@@ -741,7 +884,7 @@ def build_production_acquisition_pipeline(
 
     # Method 3: Direct Monotype CDN raster client
     raster_provider = None
-    raster_url = str(getattr(settings, "MONOTYPE_RASTER_ENDPOINT_URL", "") or "")
+    raster_url = str(getattr(settings, "MONOTYPE_RASTER_ENDPOINT_URL", "") or "https://sig.monotype.com")
     if raster_url:
         session_cookies = _load_session_cookies(getattr(settings, "AUTHORIZED_SESSION_MATERIAL_FILE", None))
         raster_provider = MonotypeRasterProvider(
@@ -754,7 +897,7 @@ def build_production_acquisition_pipeline(
     algolia_key_obj = getattr(settings, "MYFONTS_ALGOLIA_API_KEY", None)
     algolia_key = algolia_key_obj.get_secret_value() if algolia_key_obj is not None else None
     algolia_index = getattr(settings, "MYFONTS_ALGOLIA_INDEX_NAME", "prod_myfonts_fonts")
-    if algolia_app_id:
+    if algolia_app_id and algolia_key:
         algolia_provider = AlgoliaMetadataClient(
             app_id=algolia_app_id,
             api_key=algolia_key,

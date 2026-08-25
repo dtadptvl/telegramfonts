@@ -144,7 +144,7 @@ async def test_SESSION_HTML_NOT_FONT_html_never_poisons_binary_verification():
         async def material(self):
             return {"cookies": {"cf_clearance": "opaque-runtime-secret"}}
 
-    pages = _raster_pages_for_seed("session_html_v1")
+    pages = _raster_pages_for_seed("session_html_v1", md5=ENVELOPE_MD5)
     raster_client = _RecordingRasterClient(pages)
     session_transport = _HtmlSessionTransport()
 

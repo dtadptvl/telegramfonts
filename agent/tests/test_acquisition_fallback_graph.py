@@ -241,7 +241,7 @@ async def test_DUMP_DOM_PARTIAL_TO_CDN():
     pages_returned = []
     async def mock_fetch_sprite_page(req, cursor):
         pt = req.get("acs_pt", 120)
-        p = _make_dummy_sprite_page(req["md5"], pt, int(cursor), final=True)
+        p = _make_dummy_sprite_page(req["md5"], pt, int(cursor) if cursor else 1, final=True)
         pages_returned.append(p)
         return p
 
@@ -446,3 +446,113 @@ async def test_MULTI_STYLE_ISOLATION():
 
     # Verify dump_dom was still called exactly once
     assert dump_transport.dump_dom.call_count == 1
+
+
+def test_ALGOLIA_AVAILABLE_requires_both_app_id_and_key():
+    """Algolia client reports available only when BOTH app_id and api_key are present."""
+    c1 = AlgoliaMetadataClient(app_id="APP123", api_key=None)
+    assert c1.available() is False
+
+    c2 = AlgoliaMetadataClient(app_id="", api_key="KEY123")
+    assert c2.available() is False
+
+    c3 = AlgoliaMetadataClient(app_id="APP123", api_key="KEY123")
+    assert c3.available() is True
+
+
+def test_CLOSED_RASTER_COMPLETION_contract():
+    """is_complete_raster_pages enforces terminal signals, bounding boxes, and size coverage."""
+    from acquisition.models import is_complete_raster_pages
+
+    # 1. Valid single-size page
+    p1 = _make_dummy_sprite_page("a" * 32, 120, 1, final=True)
+    assert is_complete_raster_pages([p1], [120], expected_md5="a" * 32) is True
+
+    # 2. Missing requested size fails closed
+    assert is_complete_raster_pages([p1], [120, 240], expected_md5="a" * 32) is False
+
+    # 3. MD5 mismatch fails closed
+    assert is_complete_raster_pages([p1], [120], expected_md5="b" * 32) is False
+
+    # 4. Incomplete page without terminal final signal fails closed
+    p_non_final = _make_dummy_sprite_page("a" * 32, 120, 1, final=False)
+    assert is_complete_raster_pages([p_non_final], [120]) is False
+
+    # 5. Invalid/negative bounding box fails closed
+    bad_box_page = SpriteRasterPage(
+        page_index=1,
+        glyph_count=1,
+        raster_bytes=p1.raster_bytes,
+        final=True,
+        payload={"acs_pt": 120, "glyphs": [{"code_point": 65, "sprite_box": {"x": -1, "y": 0, "width": 10, "height": 10}}]}
+    )
+    assert is_complete_raster_pages([bad_box_page], [120]) is False
+
+
+@pytest.mark.asyncio
+async def test_STRICT_ORDER_native_to_playwright_to_cdn_to_algolia():
+    """Verify strict 4-lane fallback order: Native -> Playwright -> CDN -> Algolia-to-CDN."""
+    execution_order = []
+
+    family_envelope = FamilyDiscoveryEnvelope(
+        family_name="Test Fam",
+        styles={"regular": StyleDiscoveryRecord(style_id="regular", style_name="Regular", md5="a" * 32, provenance=STAGE_DUMP_DOM_NATIVE)},
+        provenance=STAGE_DUMP_DOM_NATIVE,
+    )
+
+    dump_transport = MagicMock(spec=DumpDomTransport)
+
+    async def mock_playwright_capture(url, style_rec, sizes):
+        execution_order.append("lane2_playwright")
+        return None  # Lane 2 returns None -> continue to Lane 3
+
+    playwright = PlaywrightStealthPersistentSession(
+        transport_override=mock_playwright_capture
+    )
+
+    client = MagicMock()
+    async def mock_cdn_crawl(target, policy):
+        execution_order.append("lane3_cdn")
+        return None  # Lane 3 returns None -> continue to Lane 4
+    client.fetch_all_sprite_pages = AsyncMock(side_effect=mock_cdn_crawl)
+    raster_provider = MonotypeRasterProvider(client=client)
+
+    algolia = AlgoliaMetadataClient(app_id="APP123", api_key="KEY123")
+    async def mock_algolia_discover(query, url):
+        execution_order.append("lane4_algolia")
+        return FamilyDiscoveryEnvelope(
+            family_name="Test Fam",
+            styles={"regular": StyleDiscoveryRecord(style_id="regular", style_name="Regular", md5="c" * 32, provenance=STAGE_ALGOLIA_METADATA_CDN)},
+            provenance=STAGE_ALGOLIA_METADATA_CDN,
+        )
+    algolia.discover_family = AsyncMock(side_effect=mock_algolia_discover)
+
+    pipeline = AcquisitionPipeline(
+        dump_dom_transport=dump_transport,
+        playwright_provider=playwright,
+        raster_provider=raster_provider,
+        algolia_provider=algolia,
+    )
+
+    outcome = await pipeline.acquire(
+        source_url="https://www.myfonts.com/collections/test-fam",
+        expected_family="Test Fam",
+        expected_style="Regular",
+        raster_request={"md5": "a" * 32},
+        family_envelope=family_envelope,
+    )
+
+    assert outcome.kind == "insufficient"
+    assert execution_order == [
+        "lane2_playwright",
+        "lane3_cdn",
+        "lane4_algolia",
+        "lane3_cdn",  # Algolia invokes the same CDN crawler
+    ]
+    assert outcome.trace.stage_order() == (
+        STAGE_DUMP_DOM_NATIVE,
+        STAGE_PLAYWRIGHT_STEALTH,
+        STAGE_DIRECT_MONOTYPE_CDN,
+        STAGE_ALGOLIA_METADATA_CDN,
+    )
+

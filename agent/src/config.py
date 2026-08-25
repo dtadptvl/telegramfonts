@@ -87,8 +87,8 @@ class Settings(BaseSettings):
         description="Runtime secret file with opaque authorized-session material",
     )
     MONOTYPE_RASTER_ENDPOINT_URL: str = Field(
-        default="",
-        description="Authorized Monotype raster endpoint URL (empty disables the stage)",
+        default="https://sig.monotype.com",
+        description="Authorized Monotype raster endpoint URL",
     )
     MONOTYPE_RASTER_TOKEN: SecretStr | None = Field(
         default=None,

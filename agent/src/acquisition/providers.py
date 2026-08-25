@@ -214,6 +214,17 @@ def parse_family_discovery_from_dump(dump: str, source_url: str, provenance: str
                                 md5=s_md5 if len(s_md5) == 32 else "",
                                 provenance=provenance,
                             )
+            elif node.get("variantName") or node.get("font_md5") or node.get("fontMd5") or node.get("md5"):
+                s_name = str(node.get("variantName") or node.get("styleName") or "Regular")
+                s_id = str(node.get("sku") or node.get("id") or s_name)
+                s_md5 = str(node.get("fontMd5") or node.get("md5") or node.get("font_md5") or "").lower()
+                norm_k = s_id.lower().replace("-", "_").replace(" ", "_")
+                styles[norm_k] = StyleDiscoveryRecord(
+                    style_id=s_id,
+                    style_name=s_name,
+                    md5=s_md5 if len(s_md5) == 32 else "",
+                    provenance=provenance,
+                )
 
     # 2. Next.js __NEXT_DATA__ or embedded state
     next_match = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', dump, re.DOTALL)
