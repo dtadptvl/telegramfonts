@@ -117,6 +117,8 @@ class ObservationStore:
                 CREATE TABLE IF NOT EXISTS pair_observations (
                     reference_id TEXT NOT NULL,
                     style_id TEXT NOT NULL,
+                    browser_version TEXT NOT NULL,
+                    config_hash TEXT NOT NULL,
                     left_cp INTEGER NOT NULL,
                     right_cp INTEGER NOT NULL,
                     left_char TEXT NOT NULL,
@@ -128,10 +130,41 @@ class ObservationStore:
                     confidence REAL NOT NULL,
                     provenance TEXT NOT NULL DEFAULT 'untrusted',
                     created_at TEXT NOT NULL,
-                    PRIMARY KEY (reference_id, style_id, left_cp, right_cp)
+                    PRIMARY KEY (reference_id, style_id, browser_version, config_hash, left_cp, right_cp)
                 )
                 """
             )
+            try:
+                conn.execute(
+                    "ALTER TABLE pair_observations ADD COLUMN provenance TEXT NOT NULL DEFAULT 'untrusted'"
+                )
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute(
+                    "ALTER TABLE pair_observations ADD COLUMN browser_version TEXT NOT NULL DEFAULT ''"
+                )
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute(
+                    "ALTER TABLE pair_observations ADD COLUMN config_hash TEXT NOT NULL DEFAULT ''"
+                )
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute(
+                    "ALTER TABLE observations ADD COLUMN browser_version TEXT NOT NULL DEFAULT ''"
+                )
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute(
+                    "ALTER TABLE observations ADD COLUMN config_hash TEXT NOT NULL DEFAULT ''"
+                )
+            except sqlite3.OperationalError:
+                pass
+
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS metric_observations (
@@ -189,36 +222,11 @@ class ObservationStore:
                 )
                 """
             )
-            try:
-                conn.execute(
-                    "ALTER TABLE pair_observations ADD COLUMN provenance TEXT NOT NULL DEFAULT 'untrusted'"
-                )
-            except sqlite3.OperationalError:
-                pass
-            try:
-                conn.execute(
-                    "ALTER TABLE pair_observations ADD COLUMN browser_version TEXT NOT NULL DEFAULT ''"
-                )
-            except sqlite3.OperationalError:
-                pass
-            try:
-                conn.execute(
-                    "ALTER TABLE pair_observations ADD COLUMN config_hash TEXT NOT NULL DEFAULT ''"
-                )
-            except sqlite3.OperationalError:
-                pass
-            try:
-                conn.execute(
-                    "ALTER TABLE observations ADD COLUMN browser_version TEXT NOT NULL DEFAULT ''"
-                )
-            except sqlite3.OperationalError:
-                pass
-            try:
-                conn.execute(
-                    "ALTER TABLE observations ADD COLUMN config_hash TEXT NOT NULL DEFAULT ''"
-                )
-            except sqlite3.OperationalError:
-                pass
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_pair_env ON pair_observations (reference_id, style_id, browser_version, config_hash)
+                """
+            )
 
             conn.commit()
 
@@ -639,20 +647,26 @@ class ObservationStore:
         config_hash: str = "",
     ) -> None:
         """Persist an observable pair advance measurement into index."""
+        if not reference_id or not style_id or not browser_version or not config_hash:
+            raise ValueError(
+                "PAIR_IDENTITY_REQUIRED: reference_id, style_id, browser_version, and config_hash must be non-empty strings"
+            )
         ts = created_at or datetime.datetime.now(datetime.timezone.utc).isoformat()
         with self._get_connection() as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO pair_observations (
-                    reference_id, style_id, left_cp, right_cp, left_char, right_char,
+                    reference_id, style_id, browser_version, config_hash,
+                    left_cp, right_cp, left_char, right_char,
                     left_advance_upem, right_advance_upem, pair_advance_upem,
-                    inferred_kerning_upem, confidence, provenance, created_at,
-                    browser_version, config_hash
+                    inferred_kerning_upem, confidence, provenance, created_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     reference_id,
                     style_id,
+                    browser_version,
+                    config_hash,
                     left_cp,
                     right_cp,
                     left_char,
@@ -664,8 +678,6 @@ class ObservationStore:
                     confidence,
                     provenance,
                     ts,
-                    browser_version,
-                    config_hash,
                 ),
             )
             conn.commit()
@@ -677,20 +689,58 @@ class ObservationStore:
         browser_version: str | None = None,
         config_hash: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Retrieve all stored observable pair measurements for a style."""
+        """Retrieve all stored observable pair measurements for a style strictly filtered by identity."""
         with self._get_connection() as conn:
             query = "SELECT * FROM pair_observations WHERE reference_id = ? AND style_id = ?"
             params: list[Any] = [reference_id, style_id]
             if browser_version is not None:
-                query += " AND (browser_version = ? OR browser_version = '')"
+                query += " AND browser_version = ?"
                 params.append(browser_version)
             if config_hash is not None:
-                query += " AND (config_hash = ? OR config_hash = '')"
+                query += " AND config_hash = ?"
                 params.append(config_hash)
             query += " ORDER BY left_cp ASC, right_cp ASC"
             cur = conn.execute(query, tuple(params))
             rows = cur.fetchall()
             return [dict(r) for r in rows]
+
+    def record_source_collection_completed(
+        self,
+        reference_id: str,
+        style_id: str,
+        config_hash: str,
+        browser_version: str,
+        source_url: str = "direct_browser",
+    ) -> None:
+        """Mark an authentic source collection attempt as complete and verified in index."""
+        col_key = f"{reference_id}:{style_id}:{browser_version}:{config_hash}"
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO source_collections (
+                    collection_key, source_url, reference_id, style_id, config_hash, browser_version, completed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (col_key, source_url, reference_id, style_id, config_hash, browser_version, now_iso),
+            )
+            conn.commit()
+
+    def is_source_collection_completed(
+        self,
+        reference_id: str,
+        style_id: str,
+        config_hash: str,
+        browser_version: str,
+    ) -> bool:
+        """Check if source collection has been completed and verified for this font style & configuration."""
+        col_key = f"{reference_id}:{style_id}:{browser_version}:{config_hash}"
+        with self._get_connection() as conn:
+            cur = conn.execute(
+                "SELECT 1 FROM source_collections WHERE collection_key = ? LIMIT 1",
+                (col_key,),
+            )
+            return cur.fetchone() is not None
 
     def has_pair_observations(self, reference_id: str, style_id: str) -> bool:
         """Check if any pair observations exist for this reference/style."""

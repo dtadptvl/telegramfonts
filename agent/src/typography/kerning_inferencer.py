@@ -84,6 +84,10 @@ class EvidenceKerningInferencer:
                 is_kerning_applied=is_applied,
                 confidence=float(row.get("confidence", 1.0)),
                 provenance=prov,
+                reference_id=str(row.get("reference_id") or reference_id),
+                style_id=str(row.get("style_id") or style_id),
+                browser_version=str(row.get("browser_version") or "chromium"),
+                config_hash=str(row.get("config_hash") or ""),
             )
             observations.append(obs)
 

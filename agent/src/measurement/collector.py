@@ -104,7 +104,7 @@ class ObservationCollector:
             # 2. Determine adaptive subpixel phase schedule based on metric boundary alignment
             subpixel_phases = self.config.get_phases_for_metrics(direct_metrics)
 
-            # 3. Multi-resolution lossless raster captures + adaptive subpixel phase schedule
+            # 3. Multi-resolution lossless raster captures + adaptive subpixel phase schedule (Fit Evidence)
             for res in self.config.resolutions:
                 for sub_x, sub_y in subpixel_phases:
                     cache_key = ObservationRecord.build_cache_key(
@@ -155,8 +155,65 @@ class ObservationCollector:
                     self.store.save_observation(record, png_bytes)
                     total_rasters += 1
 
+            # 4. Multi-resolution disjoint held-out evaluation schedule captures (Evaluation Evidence)
+            eval_res = max(self.config.resolutions)
+            for sub_x, sub_y in self.config.held_out_subpixel_phases:
+                cache_key = ObservationRecord.build_cache_key(
+                    reference_id=reference_id,
+                    style_id=style_id,
+                    code_point=cp,
+                    browser_version=self.session.browser_version,
+                    resolution=eval_res,
+                    subpixel_x=sub_x,
+                    subpixel_y=sub_y,
+                    config_hash=config_hash,
+                )
+
+                if self.store.has_observation(cache_key):
+                    total_rasters += 1
+                    continue
+
+                png_bytes = await self.session.capture_lossless_raster(
+                    font_family=font_family,
+                    code_point=cp,
+                    resolution_px=eval_res,
+                    subpixel_offset=(sub_x, sub_y),
+                )
+
+                png_sha256 = hashlib.sha256(png_bytes).hexdigest()
+                rel_path = f"{reference_id}/{style_id}/{cp:04X}/{eval_res}px_heldout_{sub_x:.2f}_{sub_y:.2f}.png"
+                now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+                record = ObservationRecord(
+                    cache_key=cache_key,
+                    reference_id=reference_id,
+                    style_id=style_id,
+                    code_point=cp,
+                    resolution=eval_res,
+                    subpixel_x=sub_x,
+                    subpixel_y=sub_y,
+                    raster_relative_path=rel_path,
+                    raster_sha256=png_sha256,
+                    raster_size_bytes=len(png_bytes),
+                    metrics=direct_metrics,
+                    created_at=now_iso,
+                    browser_version=self.session.browser_version,
+                    config_hash=config_hash,
+                )
+
+                self.store.save_observation(record, png_bytes)
+                total_rasters += 1
+
             if progress_cb:
                 progress_cb(idx, total_glyphs)
+
+        # Mark source collection completed and verified in store
+        self.store.record_source_collection_completed(
+            reference_id=reference_id,
+            style_id=style_id,
+            config_hash=config_hash,
+            browser_version=self.session.browser_version,
+        )
 
         elapsed = time.perf_counter() - start_time
         logger.info(
@@ -182,6 +239,7 @@ class ObservationCollector:
         captured = 0
         now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
         provenance = f"chromium:{self.session.browser_version}:canvas_text_metrics"
+        cfg_hash = self.config.compute_hash()
 
         for left_cp, right_cp in target_pairs:
             m_left = await self.session.measure_glyph_direct(
@@ -221,9 +279,10 @@ class ObservationCollector:
                 confidence=1.0,
                 provenance=provenance,
                 created_at=now_iso,
+                browser_version=self.session.browser_version,
+                config_hash=cfg_hash,
             )
             captured += 1
-
         logger.info(f"Captured {captured} observable pair text metrics with provenance {provenance}")
         return captured
 

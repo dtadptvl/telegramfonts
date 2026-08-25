@@ -238,10 +238,12 @@ def test_bounded_pair_set_not_n_squared():
 def test_no_truth_binary_leakage_in_runner_and_inferencer(tmp_path):
     """Verify inferencer and candidate builder never inspect reference font binary."""
     from measurement.store import ObservationStore
+    from measurement.models import ObservationConfig
 
     store = ObservationStore(tmp_path / "obs_store")
     # Save observable measurements into store (pure numeric data)
     valid_prov = "chromium:Chrome/151.0.7922.140:canvas_text_metrics"
+    cfg_hash = ObservationConfig().compute_hash()
     store.save_pair_observation(
         reference_id="test_font",
         style_id="regular",
@@ -255,6 +257,8 @@ def test_no_truth_binary_leakage_in_runner_and_inferencer(tmp_path):
         inferred_kerning_upem=0,  # Store 0: inferencer MUST derive -40 dynamically from raw advances!
         confidence=1.0,
         provenance=valid_prov,
+        browser_version="chromium",
+        config_hash=cfg_hash,
     )
 
     inferencer = EvidenceKerningInferencer(family_name="TestFont MAX", style_name="Regular")
@@ -270,8 +274,10 @@ def test_no_truth_binary_leakage_in_runner_and_inferencer(tmp_path):
 def test_infer_from_store_rejects_untrusted_or_legacy_provenance(tmp_path):
     """Verify infer_from_store fails closed when encountering legacy or untrusted provenance."""
     from measurement.store import ObservationStore
+    from measurement.models import ObservationConfig
 
     store = ObservationStore(tmp_path / "obs_store_untrusted")
+    cfg_hash = ObservationConfig().compute_hash()
     store.save_pair_observation(
         reference_id="font_a",
         style_id="reg",
@@ -285,6 +291,8 @@ def test_infer_from_store_rejects_untrusted_or_legacy_provenance(tmp_path):
         inferred_kerning_upem=-40,
         confidence=0.95,
         provenance="legacy_untrusted_assertion",
+        browser_version="chromium",
+        config_hash=cfg_hash,
     )
 
     inferencer = EvidenceKerningInferencer(family_name="TestFont MAX", style_name="Regular")
@@ -295,9 +303,11 @@ def test_infer_from_store_rejects_untrusted_or_legacy_provenance(tmp_path):
 def test_infer_from_store_derives_adjustments_dynamically_from_raw_advances(tmp_path):
     """Verify infer_from_store recomputes adjustments from raw advances and verifies authentic browser provenance."""
     from measurement.store import ObservationStore
+    from measurement.models import ObservationConfig
 
     store = ObservationStore(tmp_path / "obs_store")
     valid_prov = "chromium:Chrome/151.0.7922.140:canvas_text_metrics"
+    cfg_hash = ObservationConfig().compute_hash()
 
     # Save all 12 bounded fit pairs with authentic Chromium provenance and bogus/inverted stored answers
     for l, r in BOUNDED_FIT_PAIRS:
@@ -319,6 +329,8 @@ def test_infer_from_store_derives_adjustments_dynamically_from_raw_advances(tmp_
             inferred_kerning_upem=999,  # Bogus stored answer to ensure it is ignored
             confidence=1.0,
             provenance=valid_prov,
+            browser_version="chromium",
+            config_hash=cfg_hash,
         )
 
     inferencer = EvidenceKerningInferencer(family_name="TestFont MAX", style_name="Regular")

@@ -47,10 +47,21 @@ class PairKerningObservation:
     is_kerning_applied: bool
     confidence: float = 1.0
     provenance: str = "untrusted"
-    reference_id: str = ""
-    style_id: str = ""
-    browser_version: str = ""
+    reference_id: str = "default_reference"
+    style_id: str = "regular"
+    browser_version: str = "chromium"
     config_hash: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.reference_id or not self.style_id or not self.browser_version:
+            raise ValueError(
+                "PAIR_IDENTITY_REQUIRED: reference_id, style_id, and browser_version must be non-empty strings"
+            )
+        if not self.config_hash:
+            from measurement.models import ObservationConfig
+            object.__setattr__(self, "config_hash", ObservationConfig().compute_hash())
+        elif len(self.config_hash) != 64 or not all(c in "0123456789abcdefABCDEF" for c in self.config_hash):
+            raise ValueError(f"PairKerningObservation config_hash must be a 64-char hex digest, got: '{self.config_hash}'")
 
     @property
     def raw_delta_upem(self) -> float:

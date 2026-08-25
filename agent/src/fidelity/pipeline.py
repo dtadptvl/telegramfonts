@@ -97,34 +97,8 @@ class ObservationStoreSnapshot:
             "style_name": self.style_name,
             "browser_version": self.browser_version,
             "config_hash": cfg_hash,
-            "records": sorted(
-                [
-                    (
-                        r.cache_key,
-                        r.code_point,
-                        r.resolution,
-                        round(r.subpixel_x, 4),
-                        round(r.subpixel_y, 4),
-                        r.raster_sha256,
-                        r.raster_size_bytes,
-                    )
-                    for r in self.records
-                ]
-            ),
-            "pairs": sorted(
-                [
-                    (
-                        p.left_cp,
-                        p.right_cp,
-                        p.left_advance_upem,
-                        p.right_advance_upem,
-                        p.measured_pair_advance_upem,
-                        p.inferred_kerning_upem,
-                        p.provenance,
-                    )
-                    for p in self.pairs
-                ]
-            ),
+            "records": sorted([r.to_dict() for r in self.records], key=lambda x: x["cache_key"]),
+            "pairs": sorted([p.to_dict() for p in self.pairs], key=lambda x: (x["left_cp"], x["right_cp"])),
             "raster_hashes": sorted(
                 [(k, hashlib.sha256(v).hexdigest()) for k, v in self.raster_bytes_map.items()]
             ),
@@ -220,19 +194,19 @@ class ObservationStoreSnapshot:
         for p in self.pairs:
             if not isinstance(p, PairKerningObservation):
                 raise ValueError("SNAPSHOT_VALIDATION_ERROR: pairs must contain PairKerningObservation instances")
-            if p.reference_id and p.reference_id != self.reference_id:
+            if p.reference_id != self.reference_id:
                 raise ValueError(
                     f"SNAPSHOT_VALIDATION_ERROR: Pair reference_id '{p.reference_id}' != snapshot '{self.reference_id}'"
                 )
-            if p.style_id and p.style_id != self.style_id:
+            if p.style_id != self.style_id:
                 raise ValueError(
                     f"SNAPSHOT_VALIDATION_ERROR: Pair style_id '{p.style_id}' != snapshot '{self.style_id}'"
                 )
-            if p.browser_version and p.browser_version != self.browser_version:
+            if p.browser_version != self.browser_version:
                 raise ValueError(
                     f"SNAPSHOT_VALIDATION_ERROR: Pair browser_version '{p.browser_version}' != snapshot '{self.browser_version}'"
                 )
-            if p.config_hash and p.config_hash != cfg_hash:
+            if p.config_hash != cfg_hash:
                 raise ValueError(
                     f"SNAPSHOT_VALIDATION_ERROR: Pair config_hash '{p.config_hash}' != snapshot '{cfg_hash}'"
                 )
@@ -256,7 +230,19 @@ class ObservationStoreSnapshot:
         cfg_hash = config.compute_hash()
 
         with store._get_connection() as conn:
-            # 1. Query Unicode coverage
+            # 1. Require completed and verified source collection marker
+            if not store.is_source_collection_completed(
+                reference_id=reference_id,
+                style_id=style_id,
+                config_hash=cfg_hash,
+                browser_version=browser_version,
+            ):
+                raise ValueError(
+                    f"STORE_LOAD_ERROR: Incomplete or unverified source collection for {reference_id}/{style_id} "
+                    f"matching browser '{browser_version}' and config '{cfg_hash}'"
+                )
+
+            # 2. Query Unicode coverage
             cov_rows = conn.execute(
                 """
                 SELECT code_point FROM unicode_coverage
@@ -271,7 +257,7 @@ class ObservationStoreSnapshot:
                     f"STORE_LOAD_ERROR: No Unicode coverage found for {reference_id}/{style_id}"
                 )
 
-            # 2. Query all matching observation records
+            # 3. Query all matching observation records
             obs_rows = conn.execute(
                 """
                 SELECT * FROM observations
@@ -284,6 +270,12 @@ class ObservationStoreSnapshot:
             if not obs_rows:
                 raise ValueError(
                     f"STORE_LOAD_ERROR: No observations found for {reference_id}/{style_id} matching browser {browser_version} and config {cfg_hash}"
+                )
+
+            observed_cps = sorted(set(int(r["code_point"]) for r in obs_rows))
+            if set(coverage_cps) != set(observed_cps):
+                raise ValueError(
+                    f"STORE_LOAD_ERROR: Declared coverage ({len(coverage_cps)} glyphs) does not match observed glyphs ({len(observed_cps)} glyphs)"
                 )
 
             # 3. Read rasters from disk within store boundary
@@ -562,9 +554,12 @@ class LocalFidelityIntegrationPipeline:
             )
 
         # Verify host capabilities (Chromium, FreeType, HarfBuzz, FontTools)
-        chromium_exe = find_chromium_executable()
-        if not chromium_exe:
-            logger.warning("Chromium executable unavailable on host; returning BLOCKED non-publishable result")
+        try:
+            chromium_exe = find_chromium_executable()
+            if not chromium_exe or not os.path.exists(chromium_exe):
+                raise RuntimeError("Chromium executable unavailable")
+        except Exception:
+            logger.warning("Chromium capability unavailable on host; returning BLOCKED non-publishable result")
             return LocalFidelityPipelineResult(
                 is_publishable=False,
                 status="BLOCKED",
@@ -700,14 +695,12 @@ class LocalFidelityIntegrationPipeline:
             )
 
         # 3. Candidate Font Building & Artifact Attestation
-        temp_dir_obj = None
         try:
             if output_dir is not None:
                 work_dir = Path(output_dir)
                 work_dir.mkdir(parents=True, exist_ok=True)
             else:
-                temp_dir_obj = tempfile.TemporaryDirectory()
-                work_dir = Path(temp_dir_obj.name)
+                work_dir = Path(tempfile.mkdtemp(prefix="telefont_candidate_"))
 
             builder = MaxCandidateFontBuilder(
                 family_name=snapshot.family_name,
@@ -717,7 +710,13 @@ class LocalFidelityIntegrationPipeline:
             family_build = builder.build_candidate_family(
                 glyphs=reconstructed_glyphs,
                 output_dir=work_dir,
-                typography=TypographyDataset(family_name=snapshot.family_name, style_name=snapshot.style_name, units_per_em=1000, kerning_pairs=kerning_map, observations=list(partition.fit_pairs)),
+                typography=TypographyDataset(
+                    family_name=snapshot.family_name,
+                    style_name=snapshot.style_name,
+                    units_per_em=1000,
+                    kerning_pairs=kerning_map,
+                    observations=list(partition.fit_pairs),
+                ),
             )
 
             art_file = family_build.ttf if clean_format == "TTF" else family_build.otf
@@ -738,9 +737,7 @@ class LocalFidelityIntegrationPipeline:
             cand_path = candidate_art.file_path
 
         except Exception as exc:
-            logger.error("Candidate font build/attestation failed: %s", exc)
-            if temp_dir_obj:
-                temp_dir_obj.cleanup()
+            logger.error("Candidate font build/attestation failed: %s", type(exc).__name__)
             return LocalFidelityPipelineResult(
                 is_publishable=False,
                 status="FAIL",
