@@ -391,10 +391,33 @@ class ObservationStore:
                     style_id TEXT NOT NULL,
                     config_hash TEXT NOT NULL,
                     browser_version TEXT NOT NULL,
-                    completed_at TEXT NOT NULL
+                    completed_at TEXT NOT NULL,
+                    capability_json TEXT NOT NULL DEFAULT '',
+                    capability_hash TEXT NOT NULL DEFAULT ''
                 )
                 """
             )
+            # Idempotent migration for legacy production databases: the
+            # capability columns were added after source_collections existed
+            # in production. Detect the legacy shape and add both NOT NULL
+            # default-empty columns without deleting or rewriting rows.
+            # Legacy rows stay direct-browser/no-capability records; provider
+            # capability is never inferred for them.
+            existing_cols = {
+                str(row["name"])
+                for row in conn.execute("PRAGMA table_info(source_collections)").fetchall()
+            }
+            if "capability_json" not in existing_cols:
+                conn.execute(
+                    "ALTER TABLE source_collections "
+                    "ADD COLUMN capability_json TEXT NOT NULL DEFAULT ''"
+                )
+            if "capability_hash" not in existing_cols:
+                conn.execute(
+                    "ALTER TABLE source_collections "
+                    "ADD COLUMN capability_hash TEXT NOT NULL DEFAULT ''"
+                )
+            conn.commit()
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS source_collection_attempts (
@@ -973,20 +996,49 @@ class ObservationStore:
         config_hash: str,
         browser_version: str,
         source_url: str = "direct_browser",
+        capability_json: str = "",
+        capability_hash: str = "",
     ) -> None:
-        """Mark an authentic source collection attempt as complete and verified in index."""
+        """Mark an authentic source collection attempt as complete and verified in index.
+
+        Provider-bound raster capability (when present) is sealed into the
+        completion record and becomes part of the collection identity.
+        """
         col_key = f"{reference_id}:{style_id}:{browser_version}:{config_hash}"
         now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
         with self._get_connection() as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO source_collections (
-                    collection_key, source_url, reference_id, style_id, config_hash, browser_version, completed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    collection_key, source_url, reference_id, style_id, config_hash,
+                    browser_version, completed_at, capability_json, capability_hash
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (col_key, source_url, reference_id, style_id, config_hash, browser_version, now_iso),
+                (
+                    col_key, source_url, reference_id, style_id, config_hash,
+                    browser_version, now_iso, capability_json, capability_hash,
+                ),
             )
             conn.commit()
+
+    def get_source_collection_capability(
+        self,
+        reference_id: str,
+        style_id: str,
+        browser_version: str,
+        config_hash: str,
+    ) -> tuple[str, str]:
+        """Return the sealed (capability_json, capability_hash) for a completed
+        collection; ('', '') for direct-browser collections."""
+        col_key = f"{reference_id}:{style_id}:{browser_version}:{config_hash}"
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT capability_json, capability_hash FROM source_collections WHERE collection_key = ? LIMIT 1",
+                (col_key,),
+            ).fetchone()
+        if row is None:
+            return ("", "")
+        return (str(row["capability_json"] or ""), str(row["capability_hash"] or ""))
 
     def is_source_collection_completed(
         self,

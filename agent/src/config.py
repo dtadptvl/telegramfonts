@@ -77,6 +77,32 @@ class Settings(BaseSettings):
         description="Default HTTP timeout in seconds",
     )
 
+    # Stage 9D acquisition provider settings (runtime secrets; never logged)
+    ACQUISITION_ENABLED: bool = Field(
+        default=False,
+        description="Enable authorized acquisition cascade (dump-dom -> session -> raster)",
+    )
+    AUTHORIZED_SESSION_MATERIAL_FILE: Path | None = Field(
+        default=None,
+        description="Runtime secret file with opaque authorized-session material",
+    )
+    MONOTYPE_RASTER_ENDPOINT_URL: str = Field(
+        default="",
+        description="Authorized Monotype raster endpoint URL (empty disables the stage)",
+    )
+    MONOTYPE_RASTER_TOKEN: SecretStr | None = Field(
+        default=None,
+        description="Authorized Monotype raster endpoint bearer token (runtime secret)",
+    )
+    VIETNAMESE_AI_ENABLED: bool = Field(
+        default=False,
+        description="Enable AI-assisted Vietnamese extension (VIETNAMESE mode only)",
+    )
+    OPENROUTER_API_KEY: SecretStr | None = Field(
+        default=None,
+        description="OpenRouter runtime API key (runtime secret; never logged)",
+    )
+
     @field_validator("EDGE_BASE_URL")
     @classmethod
     def normalize_edge_url(cls, v: str) -> str:

@@ -5,7 +5,7 @@ import datetime
 import hashlib
 import logging
 import time
-from typing import Callable
+from typing import Any, Callable
 
 from measurement.browser_session import ChromiumSession
 from measurement.discovery import ObservableGlyphDiscovery
@@ -359,8 +359,18 @@ class ObservationCollector:
         style_id: str,
         source_url: str = "direct_browser",
         expected_pairs: list[tuple[int, int]] | tuple[tuple[int, int], ...] | None = None,
+        provider_capability: Any = None,
     ) -> None:
-        """Mark source collection as fully finalized only after all glyph, pair, feature, and coverage checks pass for exact identity."""
+        """Mark source collection as fully finalized only after all glyph, pair, feature, and coverage checks pass for exact identity.
+
+        Direct browser collections finalize against the config's phase
+        schedule (provider_capability=None). Provider-capability-bound
+        collections (e.g. Monotype CDN) finalize against the closed
+        descriptor's size schedule at its fixed phase; the descriptor is
+        sealed into the completion record as part of the identity.
+        """
+        if provider_capability is not None:
+            provider_capability.validate()
         bv = self.session.browser_version
         cfg_h = self.config.compute_hash()
         expected_pair_prov = f"chromium:{bv}:canvas_text_metrics"
@@ -395,41 +405,37 @@ class ObservationCollector:
                     f"FINALIZATION_FAILED: missing glyph observations for code point {cp} under exact identity ({bv}, {cfg_h}) in {reference_id}:{style_id}"
                 )
             dm = obs[0][0].metrics
-            # Fit schedule keys
-            for res in self.config.resolutions:
+            if provider_capability is not None:
+                # Closed capability schedule: every observable render size at
+                # the provider's fixed phase, nothing else.
+                schedule_tuples = [
+                    (size, provider_capability.phase[0], provider_capability.phase[1])
+                    for size in provider_capability.all_sizes()
+                ]
+            else:
+                # Fit schedule keys
+                schedule_tuples = []
                 phases = self.config.get_phases_for_metrics(dm)
-                for sub_x, sub_y in phases:
-                    k = ObservationRecord.build_cache_key(
-                        reference_id=reference_id,
-                        style_id=style_id,
-                        code_point=cp,
-                        browser_version=bv,
-                        resolution=res,
-                        subpixel_x=sub_x,
-                        subpixel_y=sub_y,
-                        config_hash=cfg_h,
-                    )
-                    if not self.store.has_observation(k):
-                        raise ValueError(
-                            f"FINALIZATION_FAILED: missing or invalid fit observation {k} for U+{cp:04X} at {res}px phase ({sub_x}, {sub_y}) under ({bv}, {cfg_h})"
-                        )
-                    expected_obs_keys.add(k)
-
-            # Held-out schedule keys
-            for sub_x, sub_y in self.config.held_out_subpixel_phases:
+                for res in self.config.resolutions:
+                    for sub_x, sub_y in phases:
+                        schedule_tuples.append((res, sub_x, sub_y))
+                # Held-out schedule keys
+                for sub_x, sub_y in self.config.held_out_subpixel_phases:
+                    schedule_tuples.append((eval_res, sub_x, sub_y))
+            for res, sub_x, sub_y in schedule_tuples:
                 k = ObservationRecord.build_cache_key(
                     reference_id=reference_id,
                     style_id=style_id,
                     code_point=cp,
                     browser_version=bv,
-                    resolution=eval_res,
+                    resolution=res,
                     subpixel_x=sub_x,
                     subpixel_y=sub_y,
                     config_hash=cfg_h,
                 )
                 if not self.store.has_observation(k):
                     raise ValueError(
-                        f"FINALIZATION_FAILED: missing or invalid held-out observation {k} for U+{cp:04X} at {eval_res}px phase ({sub_x}, {sub_y}) under ({bv}, {cfg_h})"
+                        f"FINALIZATION_FAILED: missing or invalid observation {k} for U+{cp:04X} at {res}px phase ({sub_x}, {sub_y}) under ({bv}, {cfg_h})"
                     )
                 expected_obs_keys.add(k)
 
@@ -497,11 +503,15 @@ class ObservationCollector:
                     f"FINALIZATION_FAILED: untrusted or mismatched feature provenance '{f.get('provenance')}' != '{expected_feat_prov}' for {reference_id}:{style_id}"
                 )
 
-        # 5. Record single canonical completion record
+        # 5. Record single canonical completion record (capability sealed).
+        capability_json = provider_capability.to_json() if provider_capability is not None else ""
+        capability_hash = provider_capability.compute_hash() if provider_capability is not None else ""
         self.store.record_source_collection_completed(
             reference_id=reference_id,
             style_id=style_id,
             config_hash=cfg_h,
             browser_version=bv,
             source_url=source_url,
+            capability_json=capability_json,
+            capability_hash=capability_hash,
         )

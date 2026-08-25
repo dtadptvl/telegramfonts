@@ -181,6 +181,7 @@ class ObservationCalibrator:
         config: ObservationConfig | None = None,
         units_per_em: int = 1000,
         min_confidence: float = 0.5,
+        required_resolutions: "tuple[int, ...] | None" = None,
     ) -> CalibratedGlyphMetrics:
         """Calibrate all observation records for a single glyph into unified UPEM design space metrics."""
         if not records:
@@ -242,10 +243,17 @@ class ObservationCalibrator:
             if r.metrics.confidence < min_confidence:
                 raise ValueError(f"Observation metric confidence ({r.metrics.confidence}) below minimum threshold ({min_confidence})")
 
-        # Verify complete adaptive phase schedule for every required resolution if config specified
+        # Verify complete adaptive phase schedule for every required resolution if config specified.
+        # Provider-capability collections override the required resolutions with
+        # their sealed fit sizes (size-axis partition at fixed phase).
         if config is not None:
             expected_phases = config.get_phases_for_metrics(first_rec.metrics)
-            for req_res in config.resolutions:
+            req_resolutions = (
+                tuple(required_resolutions)
+                if required_resolutions is not None
+                else config.resolutions
+            )
+            for req_res in req_resolutions:
                 for px, py in expected_phases:
                     if (req_res, round(px, 4), round(py, 4)) not in seen_phase_keys:
                         raise ValueError(
@@ -327,6 +335,7 @@ class ObservationCalibrator:
         config: ObservationConfig | None = None,
         units_per_em: int = 1000,
         min_confidence: float = 0.5,
+        required_resolutions: "tuple[int, ...] | None" = None,
     ) -> dict[int, CalibratedGlyphMetrics]:
         """Group and calibrate observations across all glyphs in deterministic code-point order."""
         if not records:
@@ -344,6 +353,7 @@ class ObservationCalibrator:
                 config=config,
                 units_per_em=units_per_em,
                 min_confidence=min_confidence,
+                required_resolutions=required_resolutions,
             )
 
         return calibrated
@@ -355,12 +365,14 @@ class ObservationCalibrator:
         config: ObservationConfig | None = None,
         units_per_em: int = 1000,
         min_confidence: float = 0.5,
+        required_resolutions: "tuple[int, ...] | None" = None,
     ) -> str:
         """Compute authoritative deterministic calibration fingerprint over all glyph calibrations."""
         if not records:
             return ""
         calibrated_map = cls.calibrate_all(
-            records, config=config, units_per_em=units_per_em, min_confidence=min_confidence
+            records, config=config, units_per_em=units_per_em, min_confidence=min_confidence,
+            required_resolutions=required_resolutions,
         )
         combined_payload = ":".join(
             f"{cp}:{calibrated_map[cp].calibration_fingerprint}"

@@ -18,10 +18,27 @@ from compute.models import GeneratedFontFile
 
 logger = logging.getLogger("telegramfonts.agent.archive")
 
-ARCHIVE_SCHEMA_VERSION = 1
+ARCHIVE_SCHEMA_VERSION = 2
 FINAL_FONT_PIPELINE_VERSION = "max-final-font-v1"
 ARCHIVEABLE_FORMATS = frozenset({"TTF", "OTF"})
 ARCHIVE_COPY_CHUNK_BYTES = 1024 * 1024
+
+# Deterministic provenance values bound into final artifact identity.
+PROVENANCE_STAGE9D_RASTER = "stage9d_raster_v1"
+PROVENANCE_BINARY_DUMP_DOM = "authorized_binary_dump_dom_v1"
+PROVENANCE_BINARY_SESSION = "authorized_binary_session_v1"
+PROVENANCE_VIETNAMESE_AI = "vietnamese_ai_v1"
+PROVENANCE_VIETNAMESE_PRESERVED = "vietnamese_preserved_v1"
+
+# Deterministic L1 probe order (no cross-boundary reuse: identity still binds
+# every other dimension; this only enumerates legitimate provenance values).
+PROVENANCE_PROBE_ORDER: tuple[str, ...] = (
+    PROVENANCE_STAGE9D_RASTER,
+    PROVENANCE_BINARY_DUMP_DOM,
+    PROVENANCE_BINARY_SESSION,
+    PROVENANCE_VIETNAMESE_PRESERVED,
+    PROVENANCE_VIETNAMESE_AI,
+)
 
 
 def canonical_source_identity(source_url: str) -> str:
@@ -54,6 +71,8 @@ class ArchiveIdentity:
     observation_identity: str
     pipeline_version: str = FINAL_FONT_PIPELINE_VERSION
     config_version: str = ""
+    provenance: str = PROVENANCE_STAGE9D_RASTER
+    ai_binding: str = ""
 
     def __post_init__(self) -> None:
         for name in (
@@ -64,6 +83,7 @@ class ArchiveIdentity:
             "observation_identity",
             "pipeline_version",
             "config_version",
+            "provenance",
         ):
             if not getattr(self, name).strip():
                 raise ValueError(f"EMPTY_ARCHIVE_IDENTITY_{name.upper()}")
@@ -90,6 +110,8 @@ class ArchiveIdentity:
             "observation_identity": self.observation_identity,
             "pipeline_version": self.pipeline_version,
             "config_version": self.config_version,
+            "provenance": self.provenance,
+            "ai_binding": self.ai_binding,
         }
 
     @property
@@ -180,6 +202,17 @@ class FinalFontArchive:
                     ON final_fonts (source_identity, style_id, mode, format);
                 """
             )
+            # Stage 9D attestation migration: legacy rows keep empty attestation
+            # and are therefore cache misses for attested lookups.
+            existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(final_fonts)")}
+            if "attestation_json" not in existing_cols:
+                conn.execute(
+                    "ALTER TABLE final_fonts ADD COLUMN attestation_json TEXT NOT NULL DEFAULT ''"
+                )
+            if "attestation_hash" not in existing_cols:
+                conn.execute(
+                    "ALTER TABLE final_fonts ADD COLUMN attestation_hash TEXT NOT NULL DEFAULT ''"
+                )
             conn.commit()
 
     def _safe_archive_path(self, relative_path: str) -> Path | None:
@@ -244,7 +277,12 @@ class FinalFontArchive:
             return None
 
         expected = identity.to_dict()
-        if any(row[name] != value for name, value in expected.items() if name != "schema_version"):
+        row_keys = set(row.keys())
+        if any(
+            row[name] != value
+            for name, value in expected.items()
+            if name != "schema_version" and name in row_keys
+        ):
             return None
         if row["schema_version"] != ARCHIVE_SCHEMA_VERSION:
             return None
@@ -334,8 +372,9 @@ class FinalFontArchive:
                         cache_key, schema_version, source_identity, family_name,
                         style_id, style_name, mode, format, observation_identity,
                         pipeline_version, config_version, relative_path, filename,
-                        size_bytes, sha256_hex, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        size_bytes, sha256_hex, created_at,
+                        attestation_json, attestation_hash
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         identity.cache_key,
@@ -354,6 +393,8 @@ class FinalFontArchive:
                         size,
                         sha256_hex,
                         created_at,
+                        "",
+                        "",
                     ),
                 )
                 conn.commit()
@@ -371,6 +412,120 @@ class FinalFontArchive:
             if fd != -1:
                 os.close(fd)
             temp_path.unlink(missing_ok=True)
+
+    def put_attested(
+        self,
+        identity: ArchiveIdentity,
+        font_file: GeneratedFontFile,
+        attestation_json: str,
+        attestation_hash: str,
+    ) -> ArchiveEntry:
+        """Persist one Stage 9 PASS-gated artifact bound to its immutable attestation."""
+        if not attestation_json.strip() or not attestation_hash.strip():
+            raise ValueError("ARCHIVE_ATTESTATION_REQUIRED")
+        entry = self.put(identity, font_file)
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE final_fonts SET attestation_json = ?, attestation_hash = ? WHERE cache_key = ?",
+                (attestation_json, attestation_hash, identity.cache_key),
+            )
+            conn.commit()
+        return entry
+
+    def get_attested(self, identity: ArchiveIdentity) -> ArchiveEntry | None:
+        """Return a verified entry only when a valid Stage 9 attestation is bound.
+
+        Legacy/unattested rows, tampered attestation payloads, and attestation
+        hashes that fail recomputation are cache misses (fail-closed).
+        """
+        entry = self.get(identity)
+        if entry is None:
+            return None
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT attestation_json, attestation_hash FROM final_fonts WHERE cache_key = ?",
+                    (identity.cache_key,),
+                ).fetchone()
+        except sqlite3.Error as exc:
+            logger.warning("Final-font archive attestation read failed: %s", exc)
+            return None
+        if row is None:
+            return None
+        attestation_json = row["attestation_json"]
+        attestation_hash = row["attestation_hash"]
+        if not attestation_json or not attestation_hash:
+            return None
+        try:
+            payload = json.loads(attestation_json)
+        except (ValueError, TypeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        recomputed = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        if recomputed != attestation_hash:
+            return None
+        if payload.get("artifact_sha256") != entry.sha256_hex:
+            return None
+        if int(payload.get("artifact_size_bytes", -1)) != entry.size_bytes:
+            return None
+        if str(payload.get("format", "")).strip().upper() != identity.format:
+            return None
+        # Provenance/AI binding must match the requested identity exactly
+        # (no cross-boundary reuse).
+        if str(payload.get("provenance", "stage9d_raster_v1")) != identity.provenance:
+            return None
+        if str(payload.get("ai_binding", "")) != identity.ai_binding:
+            return None
+        return entry
+
+    def get_attested_any_binding(self, identity: ArchiveIdentity) -> tuple[ArchiveEntry, str] | None:
+        """L1 probe helper: verified attested entry regardless of AI binding.
+
+        Returns the entry plus its bound ai_binding so mixed-hit orders can
+        reuse exact attested artifacts without knowing the binding in advance.
+        Provenance must still match the requested identity exactly.
+        """
+        entry = self.get(identity)
+        if entry is None:
+            return None
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT attestation_json, attestation_hash FROM final_fonts WHERE cache_key = ?",
+                    (identity.cache_key,),
+                ).fetchone()
+        except sqlite3.Error as exc:
+            logger.warning("Final-font archive attestation read failed: %s", exc)
+            return None
+        if row is None:
+            return None
+        attestation_json = row["attestation_json"]
+        attestation_hash = row["attestation_hash"]
+        if not attestation_json or not attestation_hash:
+            return None
+        try:
+            payload = json.loads(attestation_json)
+        except (ValueError, TypeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        recomputed = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        if recomputed != attestation_hash:
+            return None
+        if payload.get("artifact_sha256") != entry.sha256_hex:
+            return None
+        if int(payload.get("artifact_size_bytes", -1)) != entry.size_bytes:
+            return None
+        if str(payload.get("format", "")).strip().upper() != identity.format:
+            return None
+        if str(payload.get("provenance", "stage9d_raster_v1")) != identity.provenance:
+            return None
+        return entry, str(payload.get("ai_binding", ""))
 
     @staticmethod
     def _fsync_directory(directory: Path) -> None:

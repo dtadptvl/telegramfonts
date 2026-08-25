@@ -1091,3 +1091,290 @@ class ProductionConsumerEvidenceProducer:
                 thresholds=thresholds,
             )
         )
+
+
+class BinaryConsumerEvidenceProducer:
+    """Closed four-consumer boundary for authorized binary artifacts.
+
+    Runs the same concrete FontTools/FreeType/HarfBuzz/Chromium evidence
+    producers bound to the exact descriptor bytes. Ground truth is derived
+    deterministically from the binary's own tables and outlines (an authorized
+    binary carries no external observation evidence); nothing is injectable,
+    and capability absence or forged evidence fails closed.
+    """
+
+    BINARY_BROWSER_VERSION = "authorized_binary"
+    SAMPLE_RESOLUTION = 64
+    MAX_SAMPLES = 4
+
+    @classmethod
+    def _derive_material(cls, raw_bytes: bytes):
+        """Deterministic binary-derived model, self-records, and self-pairs."""
+        from compute.binary_gate import extract_glyphs_from_binary
+        from fidelity.evaluator import FidelityEvaluator
+        from reconstruction.font_model import CalibratedGlyph, GlobalFontMetrics
+        from measurement.models import DirectMetrics
+
+        extracted, meta = extract_glyphs_from_binary(raw_bytes)
+        if not extracted:
+            raise ProductionProducerError("BINARY_CONSUMER_NO_GLYPHS")
+
+        sha_tag = hashlib.sha256(raw_bytes).hexdigest()[:16]
+        upem = int(meta["units_per_em"])
+        config = ObservationConfig()
+        cfg_h = config.compute_hash()
+
+        sample_cps = sorted(cp for cp in extracted if 0x21 <= cp <= 0xFFFF)[: cls.MAX_SAMPLES]
+        if not sample_cps:
+            raise ProductionProducerError("BINARY_CONSUMER_NO_PRINTABLE_SAMPLES")
+
+        glyphs: dict[int, CalibratedGlyph] = {}
+        records: list[ObservationRecord] = []
+        raster_map: dict[str, bytes] = {}
+        import math as _math
+
+        scale = _math.floor(cls.SAMPLE_RESOLUTION * 0.72) / float(upem)
+
+        for cp in sample_cps:
+            src = extracted[cp]
+            adv = float(src.advance_width_upem)
+            metrics = DirectMetrics(
+                code_point=cp,
+                character=chr(cp),
+                font_size_px=_math.floor(cls.SAMPLE_RESOLUTION * 0.72),
+                raw_advance_width=round(adv * scale, 2),
+                raw_actual_left=round(float(src.lsb_upem) * scale, 2),
+                raw_actual_right=round((adv - float(src.rsb_upem)) * scale, 2),
+                raw_actual_ascent=round(float(src.ascent_upem) * scale, 2),
+                raw_actual_descent=round(-float(src.descent_upem) * scale, 2),
+                raw_font_ascent=round(float(src.ascent_upem) * scale, 2),
+                raw_font_descent=round(-float(src.descent_upem) * scale, 2),
+                advance_width_upem=adv,
+                lsb_upem=float(src.lsb_upem),
+                rsb_upem=float(src.rsb_upem),
+                ascent_upem=float(src.ascent_upem),
+                descent_upem=float(src.descent_upem),
+                bbox_width_upem=float(src.bounding_box_upem[2] - src.bounding_box_upem[0]),
+                bbox_height_upem=float(src.bounding_box_upem[3] - src.bounding_box_upem[1]),
+                sample_count=1,
+                confidence=1.0,
+            )
+            transform = CalibrationTransform.from_observation(
+                resolution=cls.SAMPLE_RESOLUTION,
+                metrics=metrics,
+                subpixel_x=0.0,
+                subpixel_y=0.0,
+                units_per_em=upem,
+            )
+
+            class _OutlineGlyph:
+                def __init__(self, contours):
+                    self.contours = contours
+
+            mask = FidelityEvaluator._rasterize_glyph_contours(
+                _OutlineGlyph(src.contours), transform, cls.SAMPLE_RESOLUTION
+            )
+            img = Image.fromarray(((1 - mask) * 255).astype("uint8"), mode="L")
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            png_bytes = buf.getvalue()
+
+            record = ObservationRecord(
+                cache_key=ObservationRecord.build_cache_key(
+                    reference_id=f"binary_{sha_tag}",
+                    style_id="regular",
+                    code_point=cp,
+                    browser_version=cls.BINARY_BROWSER_VERSION,
+                    resolution=cls.SAMPLE_RESOLUTION,
+                    subpixel_x=0.0,
+                    subpixel_y=0.0,
+                    config_hash=cfg_h,
+                ),
+                reference_id=f"binary_{sha_tag}",
+                style_id="regular",
+                code_point=cp,
+                resolution=cls.SAMPLE_RESOLUTION,
+                subpixel_x=0.0,
+                subpixel_y=0.0,
+                raster_relative_path=f"binary_self/{sha_tag}/{cp:04X}.png",
+                raster_sha256=hashlib.sha256(png_bytes).hexdigest(),
+                raster_size_bytes=len(png_bytes),
+                metrics=metrics,
+                created_at="1970-01-01T00:00:00+00:00",
+                browser_version=cls.BINARY_BROWSER_VERSION,
+                config_hash=cfg_h,
+            )
+            records.append(record)
+            raster_map[record.cache_key] = png_bytes
+            glyphs[cp] = CalibratedGlyph(
+                code_point=cp,
+                character=chr(cp),
+                advance_width_upem=adv,
+                lsb_upem=float(src.lsb_upem),
+                rsb_upem=float(src.rsb_upem),
+                ascent_upem=float(src.ascent_upem),
+                descent_upem=float(src.descent_upem),
+                bounding_box_upem=src.bounding_box_upem,
+                contours=list(src.contours),
+                confidence=1.0,
+                observation_fingerprints=(
+                    hashlib.sha256(f"binary_self:{sha_tag}:{cp}".encode("utf-8")).hexdigest(),
+                ),
+            )
+
+        global_metrics = GlobalFontMetrics(
+            units_per_em=upem,
+            ascent_upem=float(meta["ascent"]),
+            descent_upem=float(meta["descent"]),
+            line_gap_upem=0.0,
+            cap_height_upem=float(meta["ascent"]),
+            x_height_upem=float(meta["ascent"]) * 0.5,
+            max_advance_width_upem=max(g.advance_width_upem for g in glyphs.values()),
+            avg_char_width_upem=sum(g.advance_width_upem for g in glyphs.values()) / len(glyphs),
+            underline_position_upem=-100.0,
+            underline_thickness_upem=50.0,
+        )
+
+        # Self-pair expectations are deterministic consumer-derived truth bound
+        # to the same bytes (HarfBuzz shaping of the artifact itself).
+        pair_expectations = cls._shape_pair_advances(raw_bytes, sample_cps)
+        pairs: list[PairKerningObservation] = []
+        for i in range(len(sample_cps)):
+            left_cp = sample_cps[i]
+            right_cp = sample_cps[(i + 1) % len(sample_cps)]
+            key = (left_cp, right_cp)
+            pair_adv = pair_expectations.get(
+                key, glyphs[left_cp].advance_width_upem + glyphs[right_cp].advance_width_upem
+            )
+            pairs.append(
+                PairKerningObservation(
+                    left_cp=left_cp,
+                    right_cp=right_cp,
+                    left_char=chr(left_cp),
+                    right_char=chr(right_cp),
+                    left_advance_upem=glyphs[left_cp].advance_width_upem,
+                    right_advance_upem=glyphs[right_cp].advance_width_upem,
+                    measured_pair_advance_upem=pair_adv,
+                    inferred_kerning_upem=int(
+                        round(pair_adv - glyphs[left_cp].advance_width_upem - glyphs[right_cp].advance_width_upem)
+                    ),
+                    is_kerning_applied=False,
+                    reference_id=f"binary_{sha_tag}",
+                    style_id="regular",
+                    browser_version=cls.BINARY_BROWSER_VERSION,
+                    config_hash=cfg_h,
+                    confidence=1.0,
+                    provenance=f"chromium:{cls.BINARY_BROWSER_VERSION}:canvas_text_metrics",
+                )
+            )
+
+        model = CanonicalFontModel(
+            schema_version="1.0.0",
+            family_name=f"binary_{sha_tag}",
+            style_name="regular",
+            reference_id=f"binary_{sha_tag}",
+            style_id="regular",
+            metrics=global_metrics,
+            glyphs=glyphs,
+            config_hash=cfg_h,
+            browser_version=cls.BINARY_BROWSER_VERSION,
+            fit_observations_count=len(records),
+            calibration_fingerprint=hashlib.sha256(f"binary_self:{sha_tag}".encode("utf-8")).hexdigest(),
+            kerning_pairs={},
+        )
+        return model, config, records, pairs, raster_map
+
+    @staticmethod
+    def _shape_pair_advances(raw_bytes: bytes, sample_cps: Sequence[int]) -> dict[tuple[int, int], float]:
+        expectations: dict[tuple[int, int], float] = {}
+        try:
+            blob = hb.Blob(raw_bytes)
+            face = hb.Face(blob)
+            font = hb.Font(face)
+            upem = face.upem
+            for i in range(len(sample_cps)):
+                left_cp = sample_cps[i]
+                right_cp = sample_cps[(i + 1) % len(sample_cps)]
+                buf = hb.Buffer()
+                buf.add_str(chr(left_cp) + chr(right_cp))
+                buf.guess_segment_properties()
+                hb.shape(font, buf)
+                positions = buf.glyph_positions
+                if len(positions) == 2 and all(math.isfinite(p.x_advance) for p in positions):
+                    # uharfbuzz positions are font units at face upem.
+                    expectations[(left_cp, right_cp)] = float(
+                        positions[0].x_advance + positions[1].x_advance
+                    )
+        except Exception:
+            return {}
+        return expectations
+
+    @classmethod
+    async def produce(
+        cls,
+        descriptor: CandidateArtifactDescriptor,
+        thresholds: FidelityThresholds | None = None,
+    ) -> ConsumerEvidenceBundle:
+        """Execute the closed four-consumer boundary for one authorized binary."""
+        if not isinstance(descriptor, CandidateArtifactDescriptor):
+            raise TypeError(
+                f"BinaryConsumerEvidenceProducer requires a CandidateArtifactDescriptor, got {type(descriptor)}"
+            )
+        artifact = CandidateArtifact.from_descriptor(descriptor)
+
+        model, config, records, pairs, raster_map = cls._derive_material(artifact.raw_bytes)
+
+        from fidelity.evaluator import validate_consumer_gate
+
+        sorted_records = sorted(records, key=lambda r: r.code_point)
+        sorted_pairs = sorted(pairs, key=lambda p: (p.left_cp, p.right_cp))
+
+        ft_evidence = FontToolsEvidenceProducer.produce(artifact)
+        fr_evidence = FreeTypeEvidenceProducer.produce(
+            artifact, model, sorted_records, lambda r: raster_map[r.cache_key]
+        )
+        hb_evidence = HarfBuzzEvidenceProducer.produce(artifact, model, sorted_pairs)
+        cr_evidence = await ChromiumEvidenceProducer.produce(artifact, model, sorted_records, sorted_pairs)
+
+        model_hash = model.compute_canonical_hash()
+        config_hash = config.compute_hash()
+        from fidelity.evaluator import FidelityEvaluator
+
+        held_out_raster_fp = FidelityEvaluator._compute_records_fingerprint(sorted_records)
+        held_out_typo_fp = FidelityEvaluator._compute_typography_fingerprint(sorted_pairs)
+        composite_fp = FidelityEvaluator._compute_composite_held_out_fingerprint(sorted_records, sorted_pairs)
+
+        bundle = ConsumerEvidenceBundle(
+            schema_version="1.0.0",
+            model_canonical_hash=model_hash,
+            config_hash=config_hash,
+            held_out_fingerprint=composite_fp,
+            candidate_artifact_sha=artifact.sha256_hex,
+            fonttools=ft_evidence,
+            freetype=fr_evidence,
+            harfbuzz=hb_evidence,
+            chromium=cr_evidence,
+            held_out_raster_fingerprint=held_out_raster_fp,
+            held_out_typography_fingerprint=held_out_typo_fp,
+        )
+
+        gate_result, gate_failures = validate_consumer_gate(
+            bundle=bundle,
+            model=model,
+            config=config,
+            held_out_records=sorted_records,
+            held_out_pairs=sorted_pairs,
+            thresholds=thresholds or FidelityThresholds(),
+        )
+        if gate_result.status != "PASS":
+            reason_summary = "; ".join(gate_failures) if gate_failures else "Binary consumer gate failed"
+            raise ProductionProducerError(f"BINARY_CONSUMER_GATE_FAILED: {reason_summary}")
+        return bundle
+
+    @classmethod
+    def produce_sync(
+        cls,
+        descriptor: CandidateArtifactDescriptor,
+        thresholds: FidelityThresholds | None = None,
+    ) -> ConsumerEvidenceBundle:
+        return asyncio.run(cls.produce(descriptor=descriptor, thresholds=thresholds))

@@ -1,6 +1,7 @@
 """Tests for immutable final-font archive identity, integrity, and runner reuse."""
 import asyncio
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ from compute.archive import ArchiveIdentity, FinalFontArchive
 from compute.models import ArchiveSourceContext, ClaimStyle, GeneratedFontFile
 from compute.source import SourceAcquirer
 from config import Settings
+from fidelity.release_gate import STAGE9D_ATTESTATION_SCHEMA_VERSION, Stage9DAttestation
 from queue_client import QueueMessage
 from runner import JobRunner, RunnerAction
 from worker_client import (
@@ -49,6 +51,35 @@ def _identity(mode: str = "ORIGINAL", fmt: str = "TTF") -> ArchiveIdentity:
         format=fmt,
         observation_identity="observations-v1",
         config_version="config-v1",
+    )
+
+
+def _attested(source_file: GeneratedFontFile) -> tuple[str, str]:
+    """Canonical Stage 9 attestation payload bound to the exact artifact bytes."""
+    attestation = Stage9DAttestation(
+        schema_version=STAGE9D_ATTESTATION_SCHEMA_VERSION,
+        format=source_file.format,
+        artifact_sha256=source_file.sha256_hex,
+        artifact_size_bytes=source_file.size_bytes,
+        reference_id="demo",
+        style_id=source_file.style_id,
+        browser_version="chromium",
+        config_hash="0" * 64,
+        snapshot_fingerprint="s" * 64,
+        fit_set_fingerprint="f" * 64,
+        held_out_set_fingerprint="h" * 64,
+        model_hash="m" * 64,
+        policy_hash="p" * 64,
+        report_id="rep_test",
+        report_hash="r" * 64,
+        consumer_bundle_hash="c" * 64,
+        optimizer_trace_hash="t" * 64,
+        optimizer_converged=True,
+        overall_status="PASS",
+    )
+    return (
+        json.dumps(attestation.to_dict(), sort_keys=True, separators=(",", ":")),
+        attestation.compute_hash(),
     )
 
 
@@ -136,7 +167,7 @@ def test_runner_packages_verified_archive_hit_without_builder(test_settings: Set
         observation_identity=context.observation_identity_for("regular"),
         config_version=context.config_version,
     )
-    archive.put(identity, source_file)
+    archive.put_attested(identity, source_file, *_attested(source_file))
 
     class FailingBuilder:
         def build_font(self, *args, **kwargs):
@@ -210,7 +241,7 @@ async def test_runner_subset_and_reordered_styles_hit_two_style_archive(
             style_name=style_names[style_id],
             filename=f"Demo-{style_names[style_id]}.ttf",
         )
-        archive.put(
+        archive.put_attested(
             ArchiveIdentity(
                 source_identity=source_identity,
                 family_name="Demo",
@@ -222,6 +253,7 @@ async def test_runner_subset_and_reordered_styles_hit_two_style_archive(
                 config_version="config-v1",
             ),
             source_file,
+            *_attested(source_file),
         )
 
     class QueueStub:
