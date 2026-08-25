@@ -573,6 +573,8 @@ class SourceAcquirer:
                         reconstructed_glyphs=glyph_models,
                         observation_reference_id=family_key,
                         observation_style_id=style_key,
+                        observation_browser_version="chromium",
+                        observation_config_hash=self.observation_config.compute_hash(),
                     )
             finally:
                 if browser_session is not None:

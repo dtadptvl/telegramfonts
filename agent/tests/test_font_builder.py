@@ -159,7 +159,7 @@ def _make_reconstructed_glyph(code_point: int, character: str, advance_width: fl
 
 
 def test_font_builder_service_production_entrypoint_identity_and_provenance(tmp_path: Path):
-    """Verify FontBuilderService selects exact requested 4-tuple environment and fails closed on missing/untrusted identity."""
+    """Verify FontBuilderService strictly enforces exact 4-tuple identity, completed collection, and authentic provenance."""
     from compute.models import StyleSourceData
     from fontTools.ttLib import TTFont
     from measurement.store import ObservationStore
@@ -220,7 +220,7 @@ def test_font_builder_service_production_entrypoint_identity_and_provenance(tmp_
         79: _make_reconstructed_glyph(79, "O"),
     }
 
-    # 1. Build selecting Env A
+    # 1. Explicit tuple A selects exactly Env A
     style_a = StyleSourceData(
         style_id="reg",
         style_name="Regular",
@@ -242,7 +242,7 @@ def test_font_builder_service_production_entrypoint_identity_and_provenance(tmp_
                 kern_pairs_a[(st.Coverage.glyphs[0], vr.SecondGlyph)] = vr.Value1.XAdvance
     assert kern_pairs_a.get(("A", "O")) == -40
 
-    # 2. Build selecting Env B
+    # 2. Explicit tuple B selects exactly Env B
     style_b = StyleSourceData(
         style_id="reg",
         style_name="Regular",
@@ -264,18 +264,71 @@ def test_font_builder_service_production_entrypoint_identity_and_provenance(tmp_
                 kern_pairs_b[(st.Coverage.glyphs[0], vr.SecondGlyph)] = vr.Value1.XAdvance
     assert kern_pairs_b.get(("A", "O")) == -15
 
-    # 3. Missing identity fails closed with no artifact produced
-    style_missing = StyleSourceData(
+    # 3. Incomplete observation tuple rejects with no artifact produced
+    style_missing_cfg = StyleSourceData(
         style_id="reg",
         style_name="Regular",
         reconstructed_glyphs=glyphs_dict,
-        observation_reference_id="unknown_font",
+        observation_reference_id="font_a",
         observation_style_id="reg",
+        observation_browser_version="Chromium/128.0",
+        observation_config_hash=None,
     )
-    with pytest.raises(ValueError, match="MISSING_OBSERVATION_IDENTITY"):
-        builder.build_font(style_missing, "Font Unknown", "TTF", tmp_path / "out_missing")
+    out_missing = tmp_path / "out_missing"
+    with pytest.raises(ValueError, match="INCOMPLETE_OBSERVATION_IDENTITY"):
+        builder.build_font(style_missing_cfg, "Font Missing", "TTF", out_missing)
+    assert not out_missing.exists()
 
-    # 4. Untrusted provenance in store fails closed
+    # 4. Ambiguous two-environment input with incomplete caller tuple rejects with no artifact produced
+    style_incomplete = StyleSourceData(
+        style_id="reg",
+        style_name="Regular",
+        reconstructed_glyphs=glyphs_dict,
+        observation_reference_id="font_a",
+        observation_style_id="reg",
+        observation_browser_version=None,  # Ambiguous: store has 2 environments!
+        observation_config_hash=None,
+    )
+    out_incomplete = tmp_path / "out_incomplete"
+    with pytest.raises(ValueError, match="INCOMPLETE_OBSERVATION_IDENTITY"):
+        builder.build_font(style_incomplete, "Font Incomplete", "TTF", out_incomplete)
+    assert not out_incomplete.exists()
+
+    # 5. Uncompleted pair-only identity rejects with no artifact produced
+    cfg_uncompleted = "u" * 64
+    for l, r in BOUNDED_FIT_PAIRS:
+        store.save_pair_observation(
+            reference_id="font_uncompleted",
+            style_id="reg",
+            left_cp=l,
+            right_cp=r,
+            left_char=chr(l),
+            right_char=chr(r),
+            left_advance_upem=700.0,
+            right_advance_upem=700.0,
+            pair_advance_upem=1400.0,
+            inferred_kerning_upem=0,
+            confidence=1.0,
+            provenance="chromium:Chromium/128.0:canvas_text_metrics",
+            browser_version="Chromium/128.0",
+            config_hash=cfg_uncompleted,
+        )
+    # Note: store.record_source_collection_completed is deliberately NOT called!
+    style_uncompleted = StyleSourceData(
+        style_id="reg",
+        style_name="Regular",
+        reconstructed_glyphs=glyphs_dict,
+        observation_reference_id="font_uncompleted",
+        observation_style_id="reg",
+        observation_browser_version="Chromium/128.0",
+        observation_config_hash=cfg_uncompleted,
+    )
+    out_uncompleted = tmp_path / "out_uncompleted"
+    with pytest.raises(ValueError, match="UNCOMPLETED_SOURCE_COLLECTION"):
+        builder.build_font(style_uncompleted, "Font Uncompleted", "TTF", out_uncompleted)
+    assert not out_uncompleted.exists()
+
+    # 6. Untrusted provenance in store fails closed
     store.save_pair_observation(
         reference_id="font_bad_prov",
         style_id="reg",
@@ -302,17 +355,44 @@ def test_font_builder_service_production_entrypoint_identity_and_provenance(tmp_
         observation_browser_version="Chromium/128.0",
         observation_config_hash=cfg_a,
     )
+    out_bad = tmp_path / "out_bad"
     with pytest.raises(ValueError, match="untrusted or missing Chromium provenance"):
-        builder.build_font(style_bad_prov, "Font Bad", "TTF", tmp_path / "out_bad")
+        builder.build_font(style_bad_prov, "Font Bad", "TTF", out_bad)
+    assert not out_bad.exists()
 
 
 def test_candidate_validation_runner_wiring_execution(tmp_path: Path):
-    """Verify candidate_validation_runner executes without NameError or wiring defects."""
+    """Verify candidate_validation_runner executes with completed exact fixture and fails closed on missing/uncompleted identity."""
     from candidate_validation_runner import run_candidate_pipeline
+    from measurement.models import ObservationConfig
     from measurement.store import ObservationStore
+    from typography.models import BOUNDED_FIT_PAIRS
 
     store_dir = tmp_path / "runner_store"
     store = ObservationStore(store_dir)
+    cfg_h = ObservationConfig().compute_hash()
+    browser_ver = "chromium"
+
+    # Setup authentic completed source collection and fit pairs
+    store.record_source_collection_completed("be_vietnam_pro", "regular", cfg_h, browser_ver)
+    for l, r in BOUNDED_FIT_PAIRS:
+        store.save_pair_observation(
+            reference_id="be_vietnam_pro",
+            style_id="regular",
+            left_cp=l,
+            right_cp=r,
+            left_char=chr(l),
+            right_char=chr(r),
+            left_advance_upem=700.0,
+            right_advance_upem=700.0,
+            pair_advance_upem=1400.0,
+            inferred_kerning_upem=0,
+            confidence=1.0,
+            provenance=f"chromium:{browser_ver}:canvas_text_metrics",
+            browser_version=browser_ver,
+            config_hash=cfg_h,
+        )
+
     out_dir = tmp_path / "candidate_out"
     json_out = tmp_path / "report.json"
     truth_file = Path("agent/benchmark_data/ground_truth/BeVietnamPro-Regular.ttf")
@@ -320,6 +400,7 @@ def test_candidate_validation_runner_wiring_execution(tmp_path: Path):
     if not truth_file.exists():
         pytest.skip("Ground truth font not available for runner test")
 
+    # 1. Successful execution with exact completed fixture
     res = run_candidate_pipeline(
         store_dir=store_dir,
         truth_path=truth_file,
@@ -327,8 +408,37 @@ def test_candidate_validation_runner_wiring_execution(tmp_path: Path):
         json_out=json_out,
         reference_id="be_vietnam_pro",
         style_id="regular",
+        browser_version=browser_ver,
+        config_hash=cfg_h,
     )
     assert isinstance(res, dict)
     assert "validation_summary" in res
     assert "all_formats_passed" in res["validation_summary"]
+    assert res["typography"] is not None
     assert json_out.exists()
+
+    # 2. Missing identity components reject with ValueError
+    with pytest.raises(ValueError, match="INCOMPLETE_EXACT_IDENTITY"):
+        run_candidate_pipeline(
+            store_dir=store_dir,
+            truth_path=truth_file,
+            output_dir=out_dir,
+            json_out=json_out,
+            reference_id="be_vietnam_pro",
+            style_id="regular",
+            browser_version=None,
+            config_hash=None,
+        )
+
+    # 3. Uncompleted collection marker rejects with ValueError
+    with pytest.raises(ValueError, match="UNCOMPLETED_SOURCE_COLLECTION"):
+        run_candidate_pipeline(
+            store_dir=store_dir,
+            truth_path=truth_file,
+            output_dir=out_dir,
+            json_out=json_out,
+            reference_id="be_vietnam_pro",
+            style_id="regular",
+            browser_version="other_browser",
+            config_hash=cfg_h,
+        )

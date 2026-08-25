@@ -26,12 +26,12 @@ class FontBuilderService:
     """Production MAX font builder service delegating exclusively to MaxCandidateFontBuilder."""
 
     def __init__(self, observation_store_dir: Path | str | None = None) -> None:
-        if observation_store_dir:
+        if observation_store_dir is not None:
             self.store_dir = Path(observation_store_dir)
+            self.store = ObservationStore(self.store_dir)
         else:
-            self.store_dir = Path("observations/runtime")
-
-        self.store = ObservationStore(self.store_dir)
+            self.store_dir = None
+            self.store = None
 
     def build_font(
         self,
@@ -54,19 +54,23 @@ class FontBuilderService:
         glyph_models: dict[int, ReconstructedGlyph] = dict(style_source.reconstructed_glyphs)
 
         typography = None
-        if self.store and style_source.observation_reference_id:
+        if self.store is not None and style_source.observation_reference_id:
             family_key = style_source.observation_reference_id
             style_key = style_source.observation_style_id or style_source.style_id
             browser_ver = style_source.observation_browser_version
             cfg_h = style_source.observation_config_hash
 
             if not browser_ver or not cfg_h:
-                identities = self.store.get_completed_collection_identities(family_key, style_key)
-                if not identities:
-                    identities = self.store.get_pair_observation_identities(family_key, style_key)
-                if not identities:
-                    raise ValueError(f"MISSING_OBSERVATION_IDENTITY_FOR_{style_source.style_id}: no completed collections in store")
-                browser_ver, cfg_h = identities[0]
+                raise ValueError(
+                    f"INCOMPLETE_OBSERVATION_IDENTITY_FOR_{style_source.style_id}: "
+                    "both observation_browser_version and observation_config_hash must be explicitly provided"
+                )
+
+            if not self.store.is_source_collection_completed(family_key, style_key, cfg_h, browser_ver):
+                raise ValueError(
+                    f"UNCOMPLETED_SOURCE_COLLECTION_FOR_{style_source.style_id}: "
+                    f"collection marker for ({family_key}, {style_key}, {browser_ver}, {cfg_h}) is not completed in store"
+                )
 
             inferencer = EvidenceKerningInferencer(
                 family_name=sanitized_family,
