@@ -495,6 +495,7 @@ def test_RASTER_FALLBACK_E2E_cdn_pixels_as_reconstruction_observations(tmp_path:
     the exact MD5/page/request parameters; browser evidence supplements
     metrics/pairs/features only.
     """
+    from acquisition.capability import PROVIDER_MONOTYPE_RENDER, ProviderRasterCapability
     from acquisition.raster_ingest import ingest_raster_pages
     from measurement.store import ObservationStore
     from tests.test_issue72_review_repros import (
@@ -504,7 +505,10 @@ def test_RASTER_FALLBACK_E2E_cdn_pixels_as_reconstruction_observations(tmp_path:
 
     target = {"family": "E2E Fam", "style": "Regular", "md5": ENVELOPE_MD5}
     supplement = _browser_supplement_for_seed("chromium_e2e_v1", config=RASTER_ONLY_CONFIG)
-    pts = list(RASTER_ONLY_CONFIG.resolutions)
+    capability = ProviderRasterCapability.deterministic_size_schedule(
+        PROVIDER_MONOTYPE_RENDER, RASTER_ONLY_CONFIG.resolutions
+    )
+    pts = list(capability.all_sizes())
 
     def handler(request: httpx.Request) -> httpx.Response:
         params = dict(request.url.params)
@@ -528,7 +532,8 @@ def test_RASTER_FALLBACK_E2E_cdn_pixels_as_reconstruction_observations(tmp_path:
         store = ObservationStore(tmp_path / "obs_e2e")
         ingested = ingest_raster_pages(
             store, RASTER_ONLY_CONFIG, "e2e_fam", "regular",
-            supplement, pages, source_url="https://www.myfonts.com/collections/e2e-fam",
+            supplement, pages, capability,
+            source_url="https://www.myfonts.com/collections/e2e-fam",
         )
         assert ingested == 2
         cfg_h = RASTER_ONLY_CONFIG.compute_hash()
@@ -560,8 +565,9 @@ def test_RASTER_FALLBACK_E2E_cdn_pixels_as_reconstruction_observations(tmp_path:
 
 
 def test_RASTER_FALLBACK_fail_closed_matrix(tmp_path: Path):
-    """Raster-only pages never complete without supplements; bindings and
-    capability gaps fail closed with the exact cause."""
+    """Raster-only pages never complete without supplements; bindings,
+    sizes, and capabilities fail closed with the exact cause."""
+    from acquisition.capability import FIXED_PHASE, PROVIDER_MONOTYPE_RENDER, ProviderRasterCapability
     from acquisition.raster_ingest import (
         BrowserSupplementalEvidence,
         ingest_raster_pages,
@@ -574,7 +580,13 @@ def test_RASTER_FALLBACK_fail_closed_matrix(tmp_path: Path):
         _raster_pages_for_seed,
     )
 
-    pages = _raster_pages_for_seed(MonotypeRenderClient.BROWSER_VERSION)
+    capability = ProviderRasterCapability.deterministic_size_schedule(
+        PROVIDER_MONOTYPE_RENDER, ISSUE71_CONFIG.resolutions
+    )
+    pages = [
+        _raster_pages_for_seed(MonotypeRenderClient.BROWSER_VERSION, acs_pt=pt)[0]
+        for pt in capability.all_sizes()
+    ]
     supplement = _browser_supplement_for_seed("chromium_matrix_v1")
     cfg_h = ISSUE71_CONFIG.compute_hash()
 
@@ -595,10 +607,21 @@ def test_RASTER_FALLBACK_fail_closed_matrix(tmp_path: Path):
     # Raster pages without browser supplement can never complete.
     store = ObservationStore(tmp_path / "obs_matrix_a")
     with pytest.raises(ValueError, match="RASTER_INGEST_BROWSER_SUPPLEMENT_REQUIRED"):
-        ingest_raster_pages(store, ISSUE71_CONFIG, "m_fam", "regular", None, pages)
+        ingest_raster_pages(store, ISSUE71_CONFIG, "m_fam", "regular", None, pages, capability)
     assert store.is_source_collection_completed(
         "m_fam", "regular", config_hash=cfg_h, browser_version="chromium_matrix_v1"
     ) is False
+
+    # Forged/missing capability descriptor fails closed.
+    store_f = ObservationStore(tmp_path / "obs_matrix_f")
+    with pytest.raises(ValueError, match="CAPABILITY_FORGED"):
+        ingest_raster_pages(store_f, ISSUE71_CONFIG, "m_fam", "regular", supplement, pages, None)
+    forged = ProviderRasterCapability(
+        provider=PROVIDER_MONOTYPE_RENDER, phase=FIXED_PHASE,
+        fit_sizes=(128,), held_out_sizes=(128,),
+    )
+    with pytest.raises(ValueError, match="CAPABILITY_FORGED"):
+        ingest_raster_pages(store_f, ISSUE71_CONFIG, "m_fam", "regular", supplement, pages, forged)
 
     # Coverage drift between CDN binding and browser supplement fails closed.
     drifted = BrowserSupplementalEvidence(
@@ -609,7 +632,14 @@ def test_RASTER_FALLBACK_fail_closed_matrix(tmp_path: Path):
     )
     store_b = ObservationStore(tmp_path / "obs_matrix_b")
     with pytest.raises(ValueError, match="RASTER_INGEST_COVERAGE_DRIFT"):
-        ingest_raster_pages(store_b, ISSUE71_CONFIG, "m_fam", "regular", drifted, pages)
+        ingest_raster_pages(store_b, ISSUE71_CONFIG, "m_fam", "regular", drifted, pages, capability)
+
+    # Missing allocated render size fails closed (no silent subset).
+    store_m = ObservationStore(tmp_path / "obs_matrix_m")
+    with pytest.raises(ValueError, match="RASTER_CAPABILITY_MISSING_SIZES"):
+        ingest_raster_pages(
+            store_m, ISSUE71_CONFIG, "m_fam", "regular", supplement, pages[:1], capability,
+        )
 
     # Missing request binding fails closed (no relabeling possible).
     unbound = _raster_pages_for_seed(MonotypeRenderClient.BROWSER_VERSION)
@@ -623,7 +653,9 @@ def test_RASTER_FALLBACK_fail_closed_matrix(tmp_path: Path):
     )
     store_u = ObservationStore(tmp_path / "obs_matrix_u")
     with pytest.raises(ValueError, match="RASTER_INGEST_REQUEST_BINDING_MISSING"):
-        ingest_raster_pages(store_u, ISSUE71_CONFIG, "m_fam", "regular", supplement, [unbound_page])
+        ingest_raster_pages(
+            store_u, ISSUE71_CONFIG, "m_fam", "regular", supplement, [unbound_page], capability,
+        )
 
     # Corrupt sprite evidence fails closed at slice validation.
     broken = _raster_pages_for_seed(MonotypeRenderClient.BROWSER_VERSION)
@@ -640,15 +672,9 @@ def test_RASTER_FALLBACK_fail_closed_matrix(tmp_path: Path):
         page_slice_attestation([broken_page])
     store_c = ObservationStore(tmp_path / "obs_matrix_c")
     with pytest.raises(ValueError, match="RASTER_INGEST_BOX_OUT_OF_BOUNDS"):
-        ingest_raster_pages(store_c, ISSUE71_CONFIG, "m_fam", "regular", supplement, [broken_page])
-
-    # Held-out subpixel phases are a causal capability gap, never synthesized.
-    store_d = ObservationStore(tmp_path / "obs_matrix_d")
-    with pytest.raises(ValueError, match="RASTER_CAPABILITY_GAP"):
-        ingest_raster_pages(store_d, ISSUE71_CONFIG, "m_fam", "regular", supplement, pages)
-    assert store_d.is_source_collection_completed(
-        "m_fam", "regular", config_hash=cfg_h, browser_version="chromium_matrix_v1"
-    ) is False
+        ingest_raster_pages(
+            store_c, ISSUE71_CONFIG, "m_fam", "regular", supplement, [broken_page], capability,
+        )
 
 
 # =========================================================================

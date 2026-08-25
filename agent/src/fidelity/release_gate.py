@@ -245,6 +245,7 @@ class Stage9DReleaseGate:
         optimizer_policy: OptimizerPolicy | None = None,
         mode: str = "ORIGINAL",
         vietnamese_service: Any = None,
+        provider_capability: Any = None,
     ) -> ReleaseGateResult:
         clean_format = format_type.strip().upper()
         if clean_format not in ("TTF", "OTF"):
@@ -269,6 +270,7 @@ class Stage9DReleaseGate:
                 style_name=style_name,
                 config=config,
                 browser_version=browser_version,
+                expected_capability=provider_capability,
             )
         except Exception as exc:
             logger.error("Stage 9D snapshot load failed: %s", type(exc).__name__)
@@ -311,16 +313,25 @@ class Stage9DReleaseGate:
 
         # 5. Calibration and canonical model assembly from fit evidence only.
         model_hash = ""
+        # Provider-capability collections calibrate against the sealed fit
+        # sizes only; held-out sizes stay sealed from fitting.
+        capability_fit_sizes = (
+            tuple(snapshot.provider_capability.fit_sizes)
+            if snapshot.provider_capability is not None
+            else None
+        )
         try:
             calibrated_metrics = ObservationCalibrator.calibrate_all(
                 records=partition.fit_records,
                 config=snapshot.config,
                 units_per_em=1000,
+                required_resolutions=capability_fit_sizes,
             )
             calib_fp = ObservationCalibrator.compute_calibration_fingerprint(
                 records=partition.fit_records,
                 config=snapshot.config,
                 units_per_em=1000,
+                required_resolutions=capability_fit_sizes,
             )
 
             calibrated_glyphs: dict[int, CalibratedGlyph] = {}
@@ -504,6 +515,7 @@ class Stage9DReleaseGate:
                 consumer_bundle=bundle,
                 thresholds=thresholds,
                 raster_provider=lambda r: snapshot.get_raster_bytes(r.cache_key),
+                required_resolutions=capability_fit_sizes,
             )
         except Exception as exc:
             logger.error(
@@ -608,6 +620,7 @@ class Stage9DReleaseGate:
         optimizer_policy: OptimizerPolicy | None = None,
         mode: str = "ORIGINAL",
         vietnamese_service: Any = None,
+        provider_capability: Any = None,
     ) -> ReleaseGateResult:
         kwargs = dict(
             store=store,
@@ -623,6 +636,7 @@ class Stage9DReleaseGate:
             optimizer_policy=optimizer_policy,
             mode=mode,
             vietnamese_service=vietnamese_service,
+            provider_capability=provider_capability,
         )
         try:
             loop = asyncio.get_running_loop()
@@ -655,6 +669,7 @@ class Stage9DReleaseGate:
         cached_ai_binding: str = "",
         output_dir: str | Path | None = None,
         thresholds: FidelityThresholds | None = None,
+        provider_capability: Any = None,
     ) -> ReleaseGateResult:
         """L2 reuse tier: a cached canonical FontModel replaces acquisition,
         reconstruction, and optimization. Only causally replaced work is
@@ -673,6 +688,7 @@ class Stage9DReleaseGate:
                 style_name=style_name,
                 config=config,
                 browser_version=browser_version,
+                expected_capability=provider_capability,
             )
         except Exception as exc:
             logger.error("Stage 9D L2 snapshot load failed: %s", type(exc).__name__)
@@ -780,6 +796,11 @@ class Stage9DReleaseGate:
                 "FAIL", snapshot, "PIPELINE_ERROR: CANDIDATE_ATTESTATION_FAILED", clean_format, model_hash=model_hash
             )
 
+        capability_fit_sizes = (
+            tuple(snapshot.provider_capability.fit_sizes)
+            if snapshot.provider_capability is not None
+            else None
+        )
         try:
             bundle = await ProductionConsumerEvidenceProducer.produce_bundle(
                 descriptor=descriptor,
@@ -800,6 +821,7 @@ class Stage9DReleaseGate:
                 consumer_bundle=bundle,
                 thresholds=thresholds,
                 raster_provider=lambda r: snapshot.get_raster_bytes(r.cache_key),
+                required_resolutions=capability_fit_sizes,
             )
         except Exception as exc:
             logger.error("Stage 9D L2 evaluation failed: %s", type(exc).__name__)

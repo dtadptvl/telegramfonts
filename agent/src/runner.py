@@ -21,6 +21,7 @@ from acquisition.models import (
     BINARY_STAGE_DUMP_DOM,
 )
 from acquisition.pipeline import AcquisitionPipeline
+from acquisition.capability import PROVIDER_MONOTYPE_RENDER, ProviderRasterCapability
 from acquisition.raster_ingest import (
     RASTER_FALLBACK_PROVENANCE,
     collect_browser_measurement,
@@ -343,6 +344,13 @@ class JobRunner:
             output_dir=build_dir / "stage9d" / fmt.lower(),
             mode=mode,
             vietnamese_service=vietnamese_service,
+            provider_capability=self._sealed_provider_capability(
+                gate_store,
+                style_data.observation_reference_id,
+                style_data.observation_style_id or style_id,
+                style_data.observation_browser_version,
+                gate_config.compute_hash(),
+            ),
         )
         if not result.is_publishable or result.attestation is None:
             reason = ";".join(result.failure_reasons)[:128] if result.failure_reasons else ""
@@ -374,6 +382,24 @@ class JobRunner:
         )
         style_key = style_id.lower().replace(" ", "_").replace("-", "_")
         return family_key, style_key
+
+    @staticmethod
+    def _sealed_provider_capability(store, family_key, style_key, browser_version, config_hash):
+        """Recover the sealed provider capability of a completed collection.
+
+        Direct-browser collections carry none (returns None, preserving the
+        phase-held-out partition). Forged or drifted sealed descriptors fail
+        closed at snapshot load.
+        """
+        capability_json, capability_hash = store.get_source_collection_capability(
+            family_key, style_key, browser_version=browser_version, config_hash=config_hash
+        )
+        if not capability_json:
+            return None
+        capability = ProviderRasterCapability.from_json(capability_json)
+        if capability.compute_hash() != capability_hash:
+            raise ValueError("CAPABILITY_FORGED: sealed capability hash drift")
+        return capability
 
     @staticmethod
     def _reference_fingerprint(
@@ -525,6 +551,9 @@ class JobRunner:
                         cached_provenance=provenance,
                         cached_ai_binding=str(metadata.get("ai_binding", "")),
                         output_dir=build_dir / "stage9d_l2" / fmt.lower(),
+                        provider_capability=self._sealed_provider_capability(
+                            store, family_key, style_key, bv, cfg
+                        ),
                     )
                     if result.is_publishable and result.attestation is not None:
                         artifact_path = Path(result.candidate_file_path)
@@ -582,6 +611,9 @@ class JobRunner:
                     output_dir=build_dir / "stage9d" / fmt.lower(),
                     mode=mode,
                     vietnamese_service=self._vietnamese_service(mode, cfg_h, source_hash),
+                    provider_capability=self._sealed_provider_capability(
+                        store, family_key, style_key, bv, cfg
+                    ),
                 )
                 if not result.is_publishable or result.attestation is None:
                     reason = ";".join(result.failure_reasons)[:128] if result.failure_reasons else ""
@@ -906,9 +938,14 @@ class JobRunner:
                                 family_name,
                                 style.display_name,
                                 raster_request={
-                                    # Observable render-size passes: one per
-                                    # active schedule resolution (acs_pt).
-                                    "acs_pts": [int(r) for r in gate_config.resolutions]
+                                    # Observable render-size passes: the closed
+                                    # capability's disjoint fit+held-out sizes.
+                                    "acs_pts": [
+                                        int(r)
+                                        for r in ProviderRasterCapability.deterministic_size_schedule(
+                                            PROVIDER_MONOTYPE_RENDER, gate_config.resolutions
+                                        ).all_sizes()
+                                    ]
                                 },
                             )
                             self.last_reuse_trace["acquisition_traces"][style.id] = (
@@ -957,6 +994,12 @@ class JobRunner:
                                     raster_cps,
                                     gate_config,
                                 )
+                                # Closed capability descriptor: size axis only,
+                                # deterministic disjoint fit/held-out render
+                                # sizes, sealed into the collection identity.
+                                raster_capability = ProviderRasterCapability.deterministic_size_schedule(
+                                    PROVIDER_MONOTYPE_RENDER, gate_config.resolutions
+                                )
                                 attestation = page_slice_attestation(outcome.raster_pages)
                                 ingested = ingest_raster_pages(
                                     gate_store,
@@ -965,6 +1008,7 @@ class JobRunner:
                                     style_key,
                                     supplement,
                                     outcome.raster_pages,
+                                    raster_capability,
                                     source_url=job.source_url,
                                 )
                                 self._trace_record(
@@ -973,6 +1017,9 @@ class JobRunner:
                                     glyphs=ingested,
                                     browser_version=supplement.browser_version,
                                     raster_provenance=RASTER_FALLBACK_PROVENANCE,
+                                    capability_hash=raster_capability.compute_hash(),
+                                    capability_fit_sizes=list(raster_capability.fit_sizes),
+                                    capability_held_out_sizes=list(raster_capability.held_out_sizes),
                                     sprite_sha256=attestation["sprite_sha256"],
                                     slice_bindings=attestation["bindings"],
                                 )

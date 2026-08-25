@@ -38,6 +38,7 @@ from fidelity.producers import (
     CandidateArtifactDescriptor,
     ProductionConsumerEvidenceProducer,
 )
+from acquisition.capability import ProviderRasterCapability
 from measurement.browser_session import find_chromium_executable
 from measurement.calibration import CalibratedGlyphMetrics, ObservationCalibrator
 from measurement.models import DirectMetrics, ObservationConfig, ObservationRecord
@@ -65,6 +66,7 @@ class ObservationStoreSnapshot:
     raster_bytes_map: Mapping[str, bytes]
     pairs: tuple[PairKerningObservation, ...]
     snapshot_fingerprint: str = ""
+    provider_capability: Any = None
 
     def __post_init__(self) -> None:
         # Wrap raster_bytes_map in read-only mapping proxy to guarantee deep immutability
@@ -90,6 +92,9 @@ class ObservationStoreSnapshot:
     def _compute_fingerprint(self) -> str:
         """Compute authoritative deterministic SHA-256 fingerprint for this snapshot."""
         cfg_hash = self.config.compute_hash() if self.config else ""
+        capability_hash = (
+            self.provider_capability.compute_hash() if self.provider_capability is not None else ""
+        )
         payload = {
             "reference_id": self.reference_id,
             "style_id": self.style_id,
@@ -97,6 +102,7 @@ class ObservationStoreSnapshot:
             "style_name": self.style_name,
             "browser_version": self.browser_version,
             "config_hash": cfg_hash,
+            "capability_hash": capability_hash,
             "records": sorted([r.to_dict() for r in self.records], key=lambda x: x["cache_key"]),
             "pairs": sorted([p.to_dict() for p in self.pairs], key=lambda x: (x["left_cp"], x["right_cp"])),
             "raster_hashes": sorted(
@@ -126,6 +132,14 @@ class ObservationStoreSnapshot:
             raise ValueError("SNAPSHOT_VALIDATION_ERROR: browser_version cannot be empty")
         if not isinstance(self.config, ObservationConfig):
             raise ValueError("SNAPSHOT_VALIDATION_ERROR: config must be an ObservationConfig instance")
+        if self.provider_capability is not None and not isinstance(
+            self.provider_capability, ProviderRasterCapability
+        ):
+            raise ValueError(
+                "SNAPSHOT_VALIDATION_ERROR: provider_capability must be a ProviderRasterCapability instance"
+            )
+        if self.provider_capability is not None:
+            self.provider_capability.validate()
         if not self.config.resolutions or self.config.upem <= 0:
             raise ValueError("SNAPSHOT_VALIDATION_ERROR: Invalid ObservationConfig parameters")
 
@@ -225,9 +239,17 @@ class ObservationStoreSnapshot:
         style_name: str,
         config: ObservationConfig,
         browser_version: str,
+        expected_capability: Any = None,
     ) -> ObservationStoreSnapshot:
-        """Atomically load an immutable snapshot from ObservationStore in a single isolated SQLite transaction."""
+        """Atomically load an immutable snapshot from ObservationStore in a single isolated SQLite transaction.
+
+        The sealed provider capability of the completed collection must match
+        ``expected_capability`` exactly; forged, missing, or drifted
+        capabilities fail closed.
+        """
         cfg_hash = config.compute_hash()
+        if expected_capability is not None:
+            expected_capability.validate()
 
         with store._get_connection() as conn:
             # 1. Establish single isolated transaction
@@ -236,7 +258,7 @@ class ObservationStoreSnapshot:
             # 2. Require completed and verified source collection marker on the same transaction
             col_key = f"{reference_id}:{style_id}:{browser_version}:{cfg_hash}"
             marker_row = conn.execute(
-                "SELECT 1 FROM source_collections WHERE collection_key = ? LIMIT 1",
+                "SELECT capability_json, capability_hash FROM source_collections WHERE collection_key = ? LIMIT 1",
                 (col_key,),
             ).fetchone()
             if not marker_row:
@@ -244,6 +266,37 @@ class ObservationStoreSnapshot:
                     f"STORE_LOAD_ERROR: Incomplete or unverified source collection for {reference_id}/{style_id} "
                     f"matching browser '{browser_version}' and config '{cfg_hash}'"
                 )
+            stored_cap_json = str(marker_row["capability_json"] or "")
+            stored_cap_hash = str(marker_row["capability_hash"] or "")
+            if expected_capability is None:
+                if stored_cap_json or stored_cap_hash:
+                    raise ValueError(
+                        "STORE_LOAD_ERROR: provider capability sealed on a direct-browser "
+                        f"collection for {reference_id}/{style_id} (forged/cross-provider reuse)"
+                    )
+                loaded_capability = None
+            else:
+                if not stored_cap_json:
+                    raise ValueError(
+                        "STORE_LOAD_ERROR: expected provider capability is not sealed on "
+                        f"collection {reference_id}/{style_id} ({browser_version}, {cfg_hash})"
+                    )
+                try:
+                    loaded_capability = ProviderRasterCapability.from_json(stored_cap_json)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"STORE_LOAD_ERROR: sealed capability malformed for {reference_id}/{style_id}"
+                    ) from exc
+                if loaded_capability.compute_hash() != stored_cap_hash:
+                    raise ValueError(
+                        f"STORE_LOAD_ERROR: sealed capability hash drift for {reference_id}/{style_id}"
+                    )
+                if loaded_capability.compute_hash() != expected_capability.compute_hash():
+                    raise ValueError(
+                        f"STORE_LOAD_ERROR: capability mismatch (forged or cross-provider reuse) "
+                        f"for {reference_id}/{style_id}: expected {expected_capability.compute_hash()[:16]}, "
+                        f"sealed {stored_cap_hash[:16]}"
+                    )
 
             # 3. Query Unicode coverage on same transaction (exact identity)
             cov_rows = conn.execute(
@@ -401,6 +454,7 @@ class ObservationStoreSnapshot:
             records=tuple(records),
             raster_bytes_map=raster_map,
             pairs=tuple(pairs),
+            provider_capability=loaded_capability,
         )
 
 
@@ -419,10 +473,20 @@ class PartitionedEvidence:
 def partition_snapshot(snapshot: ObservationStoreSnapshot) -> PartitionedEvidence:
     """Deterministically partition snapshot observations into strictly disjoint fit and held-out sets.
 
-    The fit set satisfies the exact active adaptive schedule for snapshot.config.
-    Held-out evidence remains strictly disjoint, non-empty, and untouched by model fitting.
+    Direct-browser snapshots: the fit set satisfies the exact active adaptive
+    schedule for snapshot.config; held-out evidence comes from the config's
+    held-out subpixel phases.
+
+    Provider-capability snapshots (e.g. Monotype CDN, size axis only): fit
+    and held-out are allocated across the descriptor's disjoint observable
+    render sizes at the provider's fixed phase. Held-out evidence remains
+    strictly disjoint, non-empty, and untouched by model fitting — this is
+    the provider's MAX gate, never a zero-held-out bypass.
     """
     snapshot.validate()
+    capability = snapshot.provider_capability
+    if capability is not None:
+        capability.validate()
 
     # Group records by code point
     by_cp: dict[int, list[ObservationRecord]] = {}
@@ -433,37 +497,72 @@ def partition_snapshot(snapshot: ObservationStoreSnapshot) -> PartitionedEvidenc
     held_out_records_list: list[ObservationRecord] = []
 
     for cp, cp_recs in sorted(by_cp.items()):
-        # Determine the exact active schedule required for fitting
         first_m = cp_recs[0].metrics
-        expected_phases = set(snapshot.config.get_phases_for_metrics(first_m))
-
-        required_fit_keys = {
-            (res, round(px, 4), round(py, 4))
-            for res in snapshot.config.resolutions
-            for px, py in expected_phases
-        }
 
         cp_fit: list[ObservationRecord] = []
         cp_held_out: list[ObservationRecord] = []
 
-        for r in cp_recs:
-            r_key = (r.resolution, round(r.subpixel_x, 4), round(r.subpixel_y, 4))
-            if r_key in required_fit_keys:
-                cp_fit.append(r)
-            else:
-                cp_held_out.append(r)
+        if capability is not None:
+            fit_sizes = set(capability.fit_sizes)
+            held_out_sizes = set(capability.held_out_sizes)
+            fixed_phase = capability.phase
+            for r in cp_recs:
+                if (
+                    round(r.subpixel_x, 4) != round(fixed_phase[0], 4)
+                    or round(r.subpixel_y, 4) != round(fixed_phase[1], 4)
+                ):
+                    raise ValueError(
+                        f"CAPABILITY_DRIFT: CP {cp} observation at phase "
+                        f"({r.subpixel_x}, {r.subpixel_y}) outside provider capability "
+                        f"'{capability.provider}' (fixed phase {fixed_phase})"
+                    )
+                if r.resolution in fit_sizes:
+                    cp_fit.append(r)
+                elif r.resolution in held_out_sizes:
+                    cp_held_out.append(r)
+                else:
+                    raise ValueError(
+                        f"CAPABILITY_DRIFT: CP {cp} observation at size {r.resolution} is not "
+                        f"allocated in provider capability '{capability.provider}'"
+                    )
+            missing_fit = fit_sizes - {r.resolution for r in cp_fit}
+            if missing_fit:
+                raise ValueError(
+                    f"INSUFFICIENT_FIT_OBSERVATIONS: CP {cp} missing capability fit sizes {sorted(missing_fit)}"
+                )
+            missing_held = held_out_sizes - {r.resolution for r in cp_held_out}
+            if missing_held:
+                raise ValueError(
+                    f"ZERO_HELD_OUT_OBSERVATIONS: CP {cp} missing capability held-out sizes {sorted(missing_held)}"
+                )
+        else:
+            # Determine the exact active schedule required for fitting
+            expected_phases = set(snapshot.config.get_phases_for_metrics(first_m))
 
-        # Verify that all required fit schedule keys are present
-        present_fit_keys = {
-            (r.resolution, round(r.subpixel_x, 4), round(r.subpixel_y, 4))
-            for r in cp_fit
-        }
-        missing_fit_keys = required_fit_keys - present_fit_keys
-        if missing_fit_keys:
-            sample_missing = next(iter(missing_fit_keys))
-            raise ValueError(
-                f"INSUFFICIENT_FIT_OBSERVATIONS: Missing required adaptive phase ({sample_missing[1]:.4f}, {sample_missing[2]:.4f}) at resolution {sample_missing[0]} for CP {cp}"
-            )
+            required_fit_keys = {
+                (res, round(px, 4), round(py, 4))
+                for res in snapshot.config.resolutions
+                for px, py in expected_phases
+            }
+
+            for r in cp_recs:
+                r_key = (r.resolution, round(r.subpixel_x, 4), round(r.subpixel_y, 4))
+                if r_key in required_fit_keys:
+                    cp_fit.append(r)
+                else:
+                    cp_held_out.append(r)
+
+            # Verify that all required fit schedule keys are present
+            present_fit_keys = {
+                (r.resolution, round(r.subpixel_x, 4), round(r.subpixel_y, 4))
+                for r in cp_fit
+            }
+            missing_fit_keys = required_fit_keys - present_fit_keys
+            if missing_fit_keys:
+                sample_missing = next(iter(missing_fit_keys))
+                raise ValueError(
+                    f"INSUFFICIENT_FIT_OBSERVATIONS: Missing required adaptive phase ({sample_missing[1]:.4f}, {sample_missing[2]:.4f}) at resolution {sample_missing[0]} for CP {cp}"
+                )
 
         # Verify that held-out observations exist and are non-empty for this glyph
         if not cp_held_out:

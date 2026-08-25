@@ -136,6 +136,7 @@ class FidelityEvaluator:
         consumer_bundle: ConsumerEvidenceBundle | None = None,
         thresholds: FidelityThresholds | None = None,
         raster_provider: Callable[[ObservationRecord], bytes] | None = None,
+        required_resolutions: "tuple[int, ...] | None" = None,
     ) -> FidelityReport:
         """Execute full fail-closed multi-gate evaluation and generate immutable FidelityReport."""
         if thresholds is None:
@@ -228,7 +229,8 @@ class FidelityEvaluator:
         if fit_records:
             try:
                 expected_calib_fp = ObservationCalibrator.compute_calibration_fingerprint(
-                    fit_records, config=config, units_per_em=model.metrics.units_per_em, min_confidence=thresholds.min_confidence
+                    fit_records, config=config, units_per_em=model.metrics.units_per_em, min_confidence=thresholds.min_confidence,
+                    required_resolutions=required_resolutions,
                 )
                 if model.calibration_fingerprint != expected_calib_fp:
                     failure_reasons.append(

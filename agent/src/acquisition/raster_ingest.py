@@ -31,6 +31,7 @@ from typing import Any, Mapping, Sequence
 
 from PIL import Image
 
+from acquisition.capability import ProviderRasterCapability
 from acquisition.models import SpriteRasterPage
 from measurement.collector import ObservationCollector
 from measurement.models import DirectMetrics, ObservationConfig, ObservationRecord, OpenTypeFeatureObservation
@@ -41,10 +42,6 @@ PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 # Provenance of raster pixels persisted from the authorized raster fallback.
 # Distinct from chromium canvas provenance by construction.
 RASTER_FALLBACK_PROVENANCE = "monotype_render_105_cdn_sprite"
-
-# The approved render query renders phase (0.0, 0.0) only; no parameter in
-# the captured contract exposes subpixel phase control.
-OBSERVABLE_RENDER_PHASE = (0.0, 0.0)
 
 
 class _IngestSessionIdentity:
@@ -134,13 +131,6 @@ def _slice_sprite_cells(
     return slices, bindings
 
 
-def _config_phase_requirements(config: ObservationConfig) -> tuple[tuple[float, float], ...]:
-    phases = set(config.base_subpixel_phases)
-    phases.update(config.expanded_subpixel_phases)
-    phases.update(config.held_out_subpixel_phases)
-    return tuple(sorted(phases))
-
-
 def ingest_raster_pages(
     store: ObservationStore,
     config: ObservationConfig,
@@ -148,21 +138,26 @@ def ingest_raster_pages(
     style_id: str,
     supplement: BrowserSupplementalEvidence | None,
     pages: Sequence[SpriteRasterPage],
+    capability: ProviderRasterCapability,
     source_url: str = "authorized_raster_provider",
 ) -> int:
     """Persist immutable exact-tuple observations from provider raster pages.
 
     The bounds-checked CDN sprite slices are stored as the raster evidence
-    (one observation per code point per observable render size, phase
-    (0.0, 0.0)); ``supplement`` contributes browser-measured metrics, pairs,
-    and features only. Raises ValueError (fail-closed) on any identity
-    drift, schema violation, coverage mismatch, or capability gap. Returns
-    the ingested glyph count.
+    under the closed capability schedule (one observation per code point per
+    allocated render size at the provider's fixed phase); ``supplement``
+    contributes browser-measured metrics, pairs, and features only. Raises
+    ValueError (fail-closed) on any identity drift, schema violation,
+    coverage mismatch, missing size, or capability forgery. Returns the
+    ingested glyph count.
     """
     if not pages:
         raise ValueError("RASTER_INGEST_EMPTY_PAGES")
     if supplement is None:
         raise ValueError("RASTER_INGEST_BROWSER_SUPPLEMENT_REQUIRED")
+    if not isinstance(capability, ProviderRasterCapability):
+        raise ValueError("CAPABILITY_FORGED: closed capability descriptor required")
+    capability.validate()
     browser_version = str(supplement.browser_version or "")
     if not browser_version:
         raise ValueError("RASTER_INGEST_IDENTITY_REQUIRED")
@@ -192,25 +187,27 @@ def ingest_raster_pages(
     if set(supplement.metrics.keys()) != set(coverage_cdn):
         raise ValueError("RASTER_INGEST_COVERAGE_DRIFT")
 
-    # 3. Persist the observable CDN pixel evidence under the exact tuple:
-    #    one record per code point per render size, phase (0.0, 0.0). The
-    #    resolution label is the requested acs_pt render parameter itself.
+    # 3. Persist the observable CDN pixel evidence under the closed
+    #    capability schedule: one record per code point per allocated render
+    #    size at the provider's fixed phase. The resolution label is the
+    #    requested acs_pt render parameter itself.
+    required_sizes = capability.all_sizes()
+    missing_sizes = [s for s in required_sizes if s not in slices_by_pt]
+    if missing_sizes:
+        raise ValueError(
+            f"RASTER_CAPABILITY_MISSING_SIZES: provider '{capability.provider}' "
+            f"pages lack render sizes {missing_sizes}"
+        )
+    phase = capability.phase
     for cp in coverage_cdn:
         direct_metrics = supplement.metrics[cp]
         if not isinstance(direct_metrics, DirectMetrics):
             raise ValueError(f"RASTER_INGEST_BROWSER_METRICS_MISSING_CP_{cp}")
-        phases = config.get_phases_for_metrics(direct_metrics)
-        if tuple(phases) != (OBSERVABLE_RENDER_PHASE,):
-            raise ValueError(
-                "RASTER_CAPABILITY_GAP: adaptive subpixel phase expansion "
-                f"{tuple(phases)} is not renderable by the approved raster "
-                "query (phase (0.0, 0.0) only)"
-            )
-        for pt, bucket in sorted(slices_by_pt.items()):
-            png_bytes = bucket.get(cp)
+        for size in required_sizes:
+            png_bytes = slices_by_pt[size].get(cp)
             if png_bytes is None:
                 raise ValueError(
-                    f"RASTER_INGEST_CDN_RASTER_MISSING_CP_{cp}_PT_{pt}"
+                    f"RASTER_INGEST_CDN_RASTER_MISSING_CP_{cp}_PT_{size}"
                 )
             binding = bindings[cp]
             record = ObservationRecord(
@@ -219,20 +216,20 @@ def ingest_raster_pages(
                     style_id=style_id,
                     code_point=cp,
                     browser_version=browser_version,
-                    resolution=pt,
-                    subpixel_x=OBSERVABLE_RENDER_PHASE[0],
-                    subpixel_y=OBSERVABLE_RENDER_PHASE[1],
+                    resolution=size,
+                    subpixel_x=phase[0],
+                    subpixel_y=phase[1],
                     config_hash=cfg_h,
                 ),
                 reference_id=reference_id,
                 style_id=style_id,
                 code_point=cp,
-                resolution=pt,
-                subpixel_x=OBSERVABLE_RENDER_PHASE[0],
-                subpixel_y=OBSERVABLE_RENDER_PHASE[1],
+                resolution=size,
+                subpixel_x=phase[0],
+                subpixel_y=phase[1],
                 raster_relative_path=(
                     f"rasters/{reference_id}/{style_id}/{cp:04X}/"
-                    f"{pt}_{OBSERVABLE_RENDER_PHASE[0]}_{OBSERVABLE_RENDER_PHASE[1]}.png"
+                    f"{size}_{phase[0]}_{phase[1]}.png"
                 ),
                 raster_sha256=hashlib.sha256(png_bytes).hexdigest(),
                 raster_size_bytes=len(png_bytes),
@@ -248,24 +245,6 @@ def ingest_raster_pages(
         reference_id, style_id, coverage_cdn,
         browser_version=browser_version, config_hash=cfg_h,
     )
-
-    # 4. Capability gate: the immutable snapshot requires disjoint held-out
-    #    raster evidence. The approved render query exposes acs_pt (size) as
-    #    the only raster scale control and renders phase (0.0, 0.0) only, so
-    #    any non-zero held-out/expanded phase is causally unobtainable. Fail
-    #    closed with the exact gap; never synthesize, never recapture.
-    unobservable = [
-        p for p in _config_phase_requirements(config)
-        if tuple(p) != OBSERVABLE_RENDER_PHASE
-    ]
-    if unobservable:
-        gap = ", ".join(f"({x}, {y})" for x, y in unobservable)
-        raise ValueError(
-            "RASTER_CAPABILITY_GAP: held-out/expanded subpixel phase raster "
-            f"evidence {gap} is not exposed by any approved render query "
-            "parameter (rbe, acs_pt, acs_w, acs_l, acs_ar, acs_p, acs_gpp); "
-            "CDN pixel evidence persisted, snapshot completion blocked"
-        )
 
     # 5. Supplemental pairs/features: browser-measured only, provenance
     #    verified by finalization below.
@@ -324,13 +303,14 @@ def ingest_raster_pages(
         raise ValueError("RASTER_INGEST_FEATURE_PROBES_INCOMPLETE")
 
     # 6. Finalize through the same strict completeness checks as direct
-    #    collection. The stored supplemental pair set must match the
-    #    declared pair tuples exactly.
+    #    collection, under the sealed capability schedule. The stored
+    #    supplemental pair set must match the declared pair tuples exactly.
     collector = ObservationCollector(
         session=_IngestSessionIdentity(browser_version), store=store, config=config
     )
     collector.finalize_source_collection(
-        reference_id, style_id, source_url=source_url, expected_pairs=pair_tuples
+        reference_id, style_id, source_url=source_url,
+        expected_pairs=pair_tuples, provider_capability=capability,
     )
     return len(coverage_cdn)
 

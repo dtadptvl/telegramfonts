@@ -89,7 +89,7 @@ def test_PROD_COMPOSITION_real_factory_concrete_dependencies(tmp_path: Path, tes
 # =========================================================================
 
 # Raster-only schedule the approved CDN render can observably satisfy:
-# every phase is (0.0, 0.0); held-out phases absent (capability gap).
+# size axis only, fixed phase (0.0, 0.0); fit/held-out split across sizes.
 RASTER_ONLY_CONFIG = ObservationConfig(
     resolutions=(120, 240),
     base_subpixel_phases=((0.0, 0.0),),
@@ -99,34 +99,35 @@ RASTER_ONLY_CONFIG = ObservationConfig(
     feature_probes=(("kern", "AV"),),
 )
 
-SEED_BOXES = {65: (0, 0, 59, 80), 66: (59, 0, 55, 80)}
+SEED_ADVS = {65: 650.0, 66: 600.0}
+SEED_BBOXES = {65: (50, 50, 550, 700), 66: (40, 50, 560, 700)}
 
 
-def _build_seed_sprite() -> bytes:
-    """Real binary PNG sprite carrying observable glyph cells."""
-    import io
-
-    from PIL import Image, ImageDraw
-
-    img = Image.new("RGB", (200, 100), "white")
-    draw = ImageDraw.Draw(img)
-    for x, y, bw, bh in SEED_BOXES.values():
-        draw.rectangle([x + 5, y + 10, x + bw - 5, y + bh - 5], fill="black")
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    return buf.getvalue()
+def _seed_boxes(acs_pt: int) -> dict[int, tuple[int, int, int, int]]:
+    return {65: (0, 0, acs_pt, acs_pt), 66: (acs_pt, 0, acs_pt, acs_pt)}
 
 
-def _expected_seed_slice(cp: int) -> bytes:
-    """Deterministic re-slice of the seed sprite (test-side expectation)."""
+def _expected_seed_slice(cp: int, acs_pt: int) -> bytes:
+    """The exact CDN glyph cell: the proven fixture raster at the render size."""
+    return _generate_png_bytes(acs_pt, SEED_BBOXES[cp], SEED_ADVS[cp], 0.0, 0.0)
+
+
+def _build_seed_sprite(acs_pt: int) -> bytes:
+    """Real binary PNG sprite tiling one observable glyph cell per code point.
+
+    Built in the fixture's own 8-bit grayscale mode so that slicing the
+    sprite at the observable boxes re-encodes byte-identical cells.
+    """
     import io
 
     from PIL import Image
 
-    x, y, bw, bh = SEED_BOXES[cp]
-    cell = Image.open(io.BytesIO(_build_seed_sprite())).crop((x, y, x + bw, y + bh))
+    img = Image.new("L", (2 * acs_pt, acs_pt), 255)
+    for cp, (x, y, _w, _h) in _seed_boxes(acs_pt).items():
+        cell = Image.open(io.BytesIO(_expected_seed_slice(cp, acs_pt)))
+        img.paste(cell.convert("L"), (x, y))
     buf = io.BytesIO()
-    cell.save(buf, format="PNG")
+    img.save(buf, format="PNG")
     return buf.getvalue()
 
 
@@ -136,7 +137,7 @@ def _raster_pages_for_seed(browser_version: str, acs_pt: int = 128) -> list[Spri
     Raster-only provider evidence bound to the exact MD5/page/request
     parameters. Never metrics, pairs, or features.
     """
-    sprite = _build_seed_sprite()
+    sprite = _build_seed_sprite(acs_pt)
     payload = {
         "browser_version": browser_version,
         "glyphs": [
@@ -145,7 +146,7 @@ def _raster_pages_for_seed(browser_version: str, acs_pt: int = 128) -> list[Spri
                 "glyph_index": i,
                 "sprite_box": {"x": x, "y": y, "width": bw, "height": bh},
             }
-            for i, (cp, (x, y, bw, bh)) in enumerate(SEED_BOXES.items())
+            for i, (cp, (x, y, bw, bh)) in enumerate(_seed_boxes(acs_pt).items())
         ],
         "pairs": [],
         "features": [],
@@ -158,7 +159,7 @@ def _raster_pages_for_seed(browser_version: str, acs_pt: int = 128) -> list[Spri
             "acs_l": "1", "acs_ar": "0", "acs_p": "1", "acs_gpp": "100",
         },
     }
-    return [SpriteRasterPage(page_index=1, glyph_count=len(SEED_BOXES), raster_bytes=sprite, next_cursor="2", final=False, payload=payload)]
+    return [SpriteRasterPage(page_index=1, glyph_count=len(SEED_ADVS), raster_bytes=sprite, next_cursor="2", final=False, payload=payload)]
 
 
 def _browser_supplement_for_seed(browser_version: str, config=ISSUE71_CONFIG):
@@ -308,7 +309,10 @@ class _StubChromiumSession:
         )
 
     async def measure_text_advance(self, font, text, font_size_px=200.0, upem=1000):
-        return 1235.0
+        # Zero-kerning ground truth: pair advance equals the sum of the
+        # per-glyph advances (A=650, B=600).
+        advs = {"A": 650.0, "B": 600.0}
+        return sum(advs.get(ch, 600.0) for ch in text)
 
     async def probe_opentype_feature(self, font, feature_tag, sample_text, font_size_px=200.0, upem=1000):
         return {
@@ -327,13 +331,14 @@ class _StubChromiumSession:
 async def test_RASTER_HANDOFF_cdn_pixels_immutable_no_browser_recapture(
     test_settings: Settings, tmp_path: Path, monkeypatch
 ):
-    """Sabotage repro: on the Monotype fallback the browser never captures
-    rasters; the bounds-checked CDN sprite slices reach immutable
-    observations. Snapshot completion stays blocked on the exact causal
-    capability gap (held-out subpixel phases are not renderable by the
-    approved query).
+    """Sabotage + positive repro: on the Monotype fallback the browser never
+    captures rasters; the bounds-checked CDN sprite slices reach immutable
+    observations under the sealed size-axis capability, and Stage 9D
+    publishes only after the held-out sizes and four consumers PASS.
     """
     import measurement.browser_session as browser_session_mod
+
+    from acquisition.capability import PROVIDER_MONOTYPE_RENDER, ProviderRasterCapability
 
     _StubChromiumSession.capture_calls = 0
     _StubChromiumSession.observed = []
@@ -393,28 +398,47 @@ async def test_RASTER_HANDOFF_cdn_pixels_immutable_no_browser_recapture(
     ]
     assert acquirer.acquire_calls == 0  # legacy acquirer never invoked
 
-    # CDN pixels reached immutable observations under the exact tuples
-    # (one per requested acs_pt render size, phase (0.0, 0.0)).
+    # Observable CDN schedule completes Stage 9D and publishes.
+    assert res.action == RunnerAction.ACKED
+    assert len(state["uploads"]) == 1
+
+    # Sealed capability partition bound into the collection identity.
+    capability = ProviderRasterCapability.deterministic_size_schedule(
+        PROVIDER_MONOTYPE_RENDER, ISSUE71_CONFIG.resolutions
+    )
     cfg_h = ISSUE71_CONFIG.compute_hash()
+    sealed_json, sealed_hash = acquirer.store.get_source_collection_capability(
+        "raster_handoff_fam", "regular", browser_version="chromium_stub_v1", config_hash=cfg_h,
+    )
+    assert sealed_hash == capability.compute_hash()
+    assert ProviderRasterCapability.from_json(sealed_json) == capability
+
+    # CDN pixels reached immutable observations under the exact tuples:
+    # fit and held-out sizes are disjoint, phase (0.0, 0.0) only.
+    all_sizes = capability.all_sizes()
     cov = acquirer.store.get_coverage(
         "raster_handoff_fam", "regular", browser_version="chromium_stub_v1", config_hash=cfg_h,
     )
     assert cov == [65, 66]
-    for pt in ISSUE71_CONFIG.resolutions:
+    for cp in (65, 66):
         obs = acquirer.store.get_glyph_observations(
-            "raster_handoff_fam", "regular", 65, browser_version="chromium_stub_v1", config_hash=cfg_h,
+            "raster_handoff_fam", "regular", cp, browser_version="chromium_stub_v1", config_hash=cfg_h,
         )
-        rec = next(r for r, _ in obs if r.resolution == pt)
-        assert rec.subpixel_x == 0.0 and rec.subpixel_y == 0.0
-        stored = (acquirer.store.base_dir / rec.raster_relative_path).read_bytes()
-        assert stored == _expected_seed_slice(65)  # CDN pixels, not recaptured
-        assert rec.metrics.advance_width_upem == 650.0
+        assert {r.resolution for r, _ in obs} == set(all_sizes)
+        for rec, _ in obs:
+            assert rec.subpixel_x == 0.0 and rec.subpixel_y == 0.0
+            stored = (acquirer.store.base_dir / rec.raster_relative_path).read_bytes()
+            assert stored == _expected_seed_slice(cp, rec.resolution)  # CDN pixels, never recaptured
 
-    # Completion stays blocked on the exact causal capability gap.
-    assert res.action == RunnerAction.FAILED_TERMINAL
-    assert acquirer.store.is_source_collection_completed(
-        "raster_handoff_fam", "regular", config_hash=cfg_h, browser_version="chromium_stub_v1",
-    ) is False
+    # Trace attests the capability split and CDN provenance.
+    events = [e for e in runner.last_reuse_trace["events"] if e["event"] == "RASTER_HANDOFF"]
+    assert events and events[0]["glyphs"] == 2
+    assert events[0]["raster_provenance"] == "monotype_render_105_cdn_sprite"
+    assert events[0]["capability_fit_sizes"] == list(capability.fit_sizes)
+    assert events[0]["capability_held_out_sizes"] == list(capability.held_out_sizes)
+    fit_sizes = set(capability.fit_sizes)
+    held_sizes = set(capability.held_out_sizes)
+    assert not (fit_sizes & held_sizes)
 
 
 @pytest.mark.asyncio
@@ -456,52 +480,57 @@ async def test_BROWSER_SUPPLEMENT_never_captures_rasters_on_monotype_path():
     assert not hasattr(supplement, "rasters")
 
 
-def test_RASTER_CAPABILITY_GAP_cdn_pixels_persisted_completion_blocked(tmp_path: Path):
-    """Held-out subpixel phases are causally unobtainable from the approved
-    render query: CDN pixels persist immutably, completion fails closed with
-    the exact gap, and nothing is synthesized or recaptured."""
-    from acquisition.raster_ingest import ingest_raster_pages
-    from measurement.store import ObservationStore
+def test_RASTER_CAPABILITY_overlap_and_forged_matrix():
+    """Forged/overlapping/insufficient capability descriptors fail closed."""
+    from acquisition.capability import FIXED_PHASE, ProviderRasterCapability
 
-    pages = [
-        _raster_pages_for_seed("monotype_render_105", acs_pt=pt)[0]
-        for pt in ISSUE71_CONFIG.resolutions
-    ]
-    supplement = _browser_supplement_for_seed("chromium_gap_v1")
-    store = ObservationStore(tmp_path / "obs_gap")
-    cfg_h = ISSUE71_CONFIG.compute_hash()
-
-    with pytest.raises(ValueError, match="RASTER_CAPABILITY_GAP"):
-        ingest_raster_pages(
-            store, ISSUE71_CONFIG, "gap_fam", "regular", supplement, pages,
-        )
-
-    # Pixel evidence persisted under the exact tuples before the gap.
-    for cp in (65, 66):
-        obs = store.get_glyph_observations(
-            "gap_fam", "regular", cp, browser_version="chromium_gap_v1", config_hash=cfg_h,
-        )
-        assert {r.resolution for r, _ in obs} == set(ISSUE71_CONFIG.resolutions)
-        for rec, _ in obs:
-            stored = (store.base_dir / rec.raster_relative_path).read_bytes()
-            assert stored == _expected_seed_slice(cp)
-    assert store.get_coverage(
-        "gap_fam", "regular", browser_version="chromium_gap_v1", config_hash=cfg_h,
-    ) == [65, 66]
-    assert store.is_source_collection_completed(
-        "gap_fam", "regular", config_hash=cfg_h, browser_version="chromium_gap_v1",
-    ) is False
+    # Same-size overlap is forbidden.
+    with pytest.raises(ValueError, match="CAPABILITY_FORGED"):
+        ProviderRasterCapability(
+            provider="p", phase=FIXED_PHASE, fit_sizes=(120, 240), held_out_sizes=(240,)
+        ).validate()
+    # Duplicate sizes, unsorted sizes, non-positive sizes fail closed.
+    with pytest.raises(ValueError, match="CAPABILITY_FORGED"):
+        ProviderRasterCapability(
+            provider="p", phase=FIXED_PHASE, fit_sizes=(120, 120), held_out_sizes=(240,)
+        ).validate()
+    with pytest.raises(ValueError, match="CAPABILITY_FORGED"):
+        ProviderRasterCapability(
+            provider="p", phase=FIXED_PHASE, fit_sizes=(240, 120), held_out_sizes=(360,)
+        ).validate()
+    with pytest.raises(ValueError, match="CAPABILITY_FORGED"):
+        ProviderRasterCapability(
+            provider="p", phase=FIXED_PHASE, fit_sizes=(0,), held_out_sizes=(240,)
+        ).validate()
+    # Forged phase (CDN exposes size axis only at fixed phase).
+    with pytest.raises(ValueError, match="CAPABILITY_FORGED"):
+        ProviderRasterCapability(
+            provider="p", phase=(0.25, 0.25), fit_sizes=(120,), held_out_sizes=(240,)
+        ).validate()
+    # Empty partition / single size: no zero-held-out bypass.
+    with pytest.raises(ValueError, match="CAPABILITY_FORGED"):
+        ProviderRasterCapability(
+            provider="p", phase=FIXED_PHASE, fit_sizes=(120,), held_out_sizes=()
+        ).validate()
+    with pytest.raises(ValueError, match="CAPABILITY_INSUFFICIENT_SIZES"):
+        ProviderRasterCapability.deterministic_size_schedule("p", (120,))
+    with pytest.raises(ValueError, match="CAPABILITY_INSUFFICIENT_SIZES"):
+        ProviderRasterCapability.deterministic_size_schedule("p", (120, 120))
 
 
 def test_RASTER_ONLY_CONFIG_cdn_pixels_complete_observable_snapshot(tmp_path: Path):
-    """Under a schedule the CDN can observably satisfy, the persisted CDN
-    slices complete the immutable collection with browser supplements."""
+    """Under the sealed size-axis capability, persisted CDN slices complete
+    the immutable collection with browser supplements."""
+    from acquisition.capability import PROVIDER_MONOTYPE_RENDER, ProviderRasterCapability
     from acquisition.raster_ingest import ingest_raster_pages
     from measurement.store import ObservationStore
 
+    capability = ProviderRasterCapability.deterministic_size_schedule(
+        PROVIDER_MONOTYPE_RENDER, RASTER_ONLY_CONFIG.resolutions
+    )
     pages = [
         _raster_pages_for_seed("monotype_render_105", acs_pt=pt)[0]
-        for pt in RASTER_ONLY_CONFIG.resolutions
+        for pt in capability.all_sizes()
     ]
     supplement = _browser_supplement_for_seed("chromium_observable_v1", config=RASTER_ONLY_CONFIG)
     store = ObservationStore(tmp_path / "obs_observable")
@@ -509,20 +538,24 @@ def test_RASTER_ONLY_CONFIG_cdn_pixels_complete_observable_snapshot(tmp_path: Pa
 
     ingested = ingest_raster_pages(
         store, RASTER_ONLY_CONFIG, "obs_fam", "regular", supplement, pages,
-        source_url="https://www.myfonts.com/collections/obs-fam",
+        capability, source_url="https://www.myfonts.com/collections/obs-fam",
     )
     assert ingested == 2
     assert store.is_source_collection_completed(
         "obs_fam", "regular", config_hash=cfg_h, browser_version="chromium_observable_v1",
     )
+    sealed_json, sealed_hash = store.get_source_collection_capability(
+        "obs_fam", "regular", browser_version="chromium_observable_v1", config_hash=cfg_h,
+    )
+    assert sealed_hash == capability.compute_hash()
     for cp in (65, 66):
         obs = store.get_glyph_observations(
             "obs_fam", "regular", cp, browser_version="chromium_observable_v1", config_hash=cfg_h,
         )
-        assert {r.resolution for r, _ in obs} == set(RASTER_ONLY_CONFIG.resolutions)
+        assert {r.resolution for r, _ in obs} == set(capability.all_sizes())
         for rec, _ in obs:
             stored = (store.base_dir / rec.raster_relative_path).read_bytes()
-            assert stored == _expected_seed_slice(cp)
+            assert stored == _expected_seed_slice(cp, rec.resolution)
     pairs = store.get_pair_observations(
         "obs_fam", "regular", browser_version="chromium_observable_v1", config_hash=cfg_h,
     )
