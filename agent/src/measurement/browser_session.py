@@ -3,6 +3,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from contextlib import contextmanager
+from dataclasses import dataclass
+import hashlib
+import inspect
+import ipaddress
 import json
 import logging
 import os
@@ -12,15 +17,247 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import urllib.request
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import websockets
 
 from measurement.models import BrowserFontSelection, DirectMetrics
 
 logger = logging.getLogger("telegramfonts.agent.measurement.browser")
+
+_DIAGNOSTIC_TAIL_BYTES = 2048
+_DIAGNOSTIC_MESSAGE_CHARS = 240
+_CAUSE_CHAIN_LIMIT = 6
+_EXPECTED_PAGE_PATH = re.compile(r"^/devtools/page/[^/]+$")
+_PROXY_ENV_NAMES = (
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+)
+
+
+@dataclass(frozen=True)
+class ChromiumExceptionInfo:
+    """Sanitized, bounded exception information safe for diagnostics."""
+
+    type_name: str
+    message: str
+
+
+@dataclass(frozen=True)
+class ChromiumStreamEvidence:
+    """Bounded evidence for a child process stream."""
+
+    size_bytes: int
+    sha256: str
+    safe_tail: str
+
+
+@dataclass(frozen=True)
+class ChromiumEndpoint:
+    """Validated, non-secret CDP endpoint identity without the target id."""
+
+    scheme: str
+    host: str
+    port: int
+    path_prefix: str
+
+
+@dataclass(frozen=True)
+class ChromiumCleanup:
+    """Explicit finalization state for a Chromium session."""
+
+    websocket_closed: bool
+    process_closed: bool
+    profile_removed: bool
+    output_drained: bool
+    error: ChromiumExceptionInfo | None = None
+
+    @property
+    def ok(self) -> bool:
+        return (
+            self.websocket_closed
+            and self.process_closed
+            and self.profile_removed
+            and self.output_drained
+            and self.error is None
+        )
+
+
+@dataclass(frozen=True)
+class ChromiumSessionDiagnostics:
+    """Fail-closed startup/cleanup evidence with no opaque target id or secrets."""
+
+    stage: str
+    error: ChromiumExceptionInfo
+    cause_chain: tuple[ChromiumExceptionInfo, ...]
+    process_state: str
+    endpoint: ChromiumEndpoint | None
+    stdout: ChromiumStreamEvidence | None
+    stderr: ChromiumStreamEvidence | None
+    cleanup: ChromiumCleanup
+
+
+class ChromiumSessionError(RuntimeError):
+    """Typed RuntimeError preserving bounded Chromium session diagnostics."""
+
+    def __init__(self, diagnostics: ChromiumSessionDiagnostics) -> None:
+        self.diagnostics = diagnostics
+        super().__init__(
+            f"CHROMIUM_SESSION_{diagnostics.stage.upper()}_FAILED: "
+            f"{diagnostics.error.type_name}: {diagnostics.error.message}"
+        )
+
+
+class _BoundedPipeCapture:
+    """Drain a child pipe continuously while retaining only bounded tail memory."""
+
+    def __init__(self, stream: Any) -> None:
+        self._stream = stream
+        self._size_bytes = 0
+        self._digest = hashlib.sha256()
+        self._tail = bytearray()
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self._error: ChromiumExceptionInfo | None = None
+
+    def start(self) -> None:
+        if self._stream is None:
+            return
+        self._thread = threading.Thread(target=self._drain, daemon=True)
+        self._thread.start()
+
+    def _drain(self) -> None:
+        try:
+            while True:
+                chunk = self._stream.read(4096)
+                if not chunk:
+                    break
+                if isinstance(chunk, str):
+                    chunk = chunk.encode("utf-8", "replace")
+                with self._lock:
+                    self._size_bytes += len(chunk)
+                    self._digest.update(chunk)
+                    self._tail.extend(chunk)
+                    if len(self._tail) > _DIAGNOSTIC_TAIL_BYTES:
+                        del self._tail[:-_DIAGNOSTIC_TAIL_BYTES]
+        except Exception as exc:  # pragma: no cover - OS pipe failures are platform-specific
+            self._error = _exception_info(exc)
+
+    def finish(self, timeout_seconds: float = 1.0) -> bool:
+        if self._thread is None:
+            return True
+        self._thread.join(timeout_seconds)
+        if self._thread.is_alive():
+            try:
+                self._stream.close()
+            except Exception as exc:  # pragma: no cover - defensive OS cleanup
+                self._error = _exception_info(exc)
+            self._thread.join(timeout_seconds)
+        try:
+            self._stream.close()
+        except Exception as exc:  # pragma: no cover - defensive OS cleanup
+            if self._error is None:
+                self._error = _exception_info(exc)
+        return not self._thread.is_alive() and self._error is None
+
+    @property
+    def error(self) -> ChromiumExceptionInfo | None:
+        return self._error
+
+    def evidence(self) -> ChromiumStreamEvidence:
+        with self._lock:
+            tail = bytes(self._tail)
+            size_bytes = self._size_bytes
+            digest = self._digest.hexdigest()
+        return ChromiumStreamEvidence(
+            size_bytes=size_bytes,
+            sha256=digest,
+            safe_tail=_sanitize_text(tail.decode("utf-8", "replace")),
+        )
+
+
+def _sanitize_text(value: str) -> str:
+    """Redact URLs, paths, target ids, and secret-like values from bounded text."""
+
+    text = str(value).replace("\x00", " ")
+    text = re.sub(r"(?i)wss?://[^\s\"']+", "<ws-endpoint>", text)
+    text = re.sub(r"(?i)(?:https?|file)://[^\s\"']+", "<url>", text)
+    text = re.sub(r"(?i)(target[ _-]?id\s*[:=]\s*)[^\s,;]+", r"\1<redacted>", text)
+    text = re.sub(r"(?i)(/devtools/page/)[^/\s\"']+", r"\1<target>", text)
+    text = re.sub(
+        r"(?i)\b(?:[a-z0-9]+[_-])*(?:token|secret|password|api[_-]?key)"
+        r"\s*[:=]\s*[^\s,;]+",
+        "<credential>=<redacted>",
+        text,
+    )
+    text = re.sub(
+        r"(?i)\b(authorization|token|secret|password)(\s*[:=]\s*)[^\s,;]+",
+        r"\1\2<redacted>",
+        text,
+    )
+    text = re.sub(r"(?:[A-Za-z]:[\\/]|/)(?:[^\s\"'<>|]+)", "<path>", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:_DIAGNOSTIC_MESSAGE_CHARS]
+
+
+def _exception_info(exc: BaseException) -> ChromiumExceptionInfo:
+    return ChromiumExceptionInfo(
+        type_name=type(exc).__name__,
+        message=_sanitize_text(str(exc)) or "<no message>",
+    )
+
+
+def _cause_chain(exc: BaseException) -> tuple[ChromiumExceptionInfo, ...]:
+    chain: list[ChromiumExceptionInfo] = []
+    seen: set[int] = set()
+    current = exc.__cause__ or exc.__context__
+    while current is not None and id(current) not in seen and len(chain) < _CAUSE_CHAIN_LIMIT:
+        seen.add(id(current))
+        chain.append(_exception_info(current))
+        current = current.__cause__ or current.__context__
+    return tuple(chain)
+
+
+def _is_loopback_host(host: str | None) -> bool:
+    if not host:
+        return False
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+@contextmanager
+def _without_proxy_environment():
+    saved = {name: os.environ.get(name) for name in _PROXY_ENV_NAMES}
+    saved_no_proxy = {name: os.environ.get(name) for name in ("NO_PROXY", "no_proxy")}
+    try:
+        for name in _PROXY_ENV_NAMES:
+            os.environ.pop(name, None)
+        os.environ["NO_PROXY"] = "*"
+        os.environ["no_proxy"] = "*"
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        for name, value in saved_no_proxy.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
 def find_chromium_executable() -> str:
@@ -54,7 +291,7 @@ def find_chromium_executable() -> str:
 
 
 class ChromiumSession:
-    """Persistent, long-lived headless Chromium session with bounded timeouts and automatic recovery."""
+    """Persistent, long-lived headless Chromium session with fail-closed CDP transport."""
 
     def __init__(
         self,
@@ -65,93 +302,398 @@ class ChromiumSession:
         self.executable_path = executable_path or find_chromium_executable()
         self.timeout_seconds = timeout_seconds
         self.port = port
-        self.process: subprocess.Popen[str] | None = None
+        self.process: subprocess.Popen[bytes] | None = None
         self.user_data_dir: tempfile.TemporaryDirectory[str] | None = None
         self.ws_url: str | None = None
+        self.cdp_port: int | None = None
+        self.endpoint: ChromiumEndpoint | None = None
         self.ws: Any = None
         self.msg_id: int = 0
         self.pending_responses: dict[int, asyncio.Future[dict[str, Any]]] = {}
         self.event_waiters: dict[str, list[asyncio.Future[dict[str, Any]]]] = {}
         self.read_task: asyncio.Task[None] | None = None
+        self._pending_close_task: asyncio.Task[ChromiumCleanup] | None = None
+        self._stdout_capture: _BoundedPipeCapture | None = None
+        self._stderr_capture: _BoundedPipeCapture | None = None
+        self.last_cleanup: ChromiumCleanup | None = None
+        self.last_diagnostic: ChromiumSessionDiagnostics | None = None
         self.browser_version: str = "unknown"
         self._loaded_fonts: set[str] = set()
         self._loaded_font_blobs: dict[str, bytes] = {}
 
     async def start(self) -> None:
         """Launch headless Chromium subprocess and initialize CDP WebSocket session."""
-        if self.process is not None and self.process.poll() is None and self.ws is not None:
+        if self._pending_close_task is not None:
+            pending_close = self._pending_close_task
+            await pending_close
+
+        if (
+            self.process is not None
+            and self.process.poll() is None
+            and self._is_connected()
+        ):
             return
 
-        self.user_data_dir = tempfile.TemporaryDirectory(prefix="telefont_chrome_")
-        if self.port > 0:
-            target_port = self.port
-        else:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.bind(("", 0))
-                target_port = int(s.getsockname()[1])
+        if self.process is not None or self.ws is not None or self.user_data_dir is not None:
+            await self.aclose(clear_fonts=False)
 
-        cmd = [
-            self.executable_path,
-            "--headless=new",
-            f"--remote-debugging-port={target_port}",
-            f"--user-data-dir={self.user_data_dir.name}",
-            "--disable-gpu",
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-software-rasterizer",
-            "--disable-background-networking",
-            "--disable-sync",
-            "--disable-extensions",
-            "--window-size=1280,800",
-            "about:blank",
-        ]
+        stage = "prepare"
+        target_port: int | None = None
+        last_discovery_error: Exception | None = None
+        try:
+            self._stdout_capture = None
+            self._stderr_capture = None
+            self.last_cleanup = None
+            self.last_diagnostic = None
+            self.ws_url = None
+            self.endpoint = None
+            self.cdp_port = None
 
-        logger.info(f"Launching persistent Chromium session on port {target_port}")
-        self.process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            text=True,
+            self.user_data_dir = tempfile.TemporaryDirectory(prefix="telefont_chrome_")
+            if self.port > 0:
+                target_port = self.port
+            else:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                    sock.bind(("", 0))
+                    target_port = int(sock.getsockname()[1])
+            self.cdp_port = target_port
+
+            cmd = [
+                self.executable_path,
+                "--headless=new",
+                f"--remote-debugging-port={target_port}",
+                f"--user-data-dir={self.user_data_dir.name}",
+                "--disable-gpu",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-software-rasterizer",
+                "--disable-background-networking",
+                "--disable-sync",
+                "--disable-extensions",
+                "--window-size=1280,800",
+                "about:blank",
+            ]
+
+            stage = "launch"
+            logger.info("Launching persistent Chromium session on selected CDP port")
+            self.process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=False,
+                bufsize=0,
+            )
+            self._stdout_capture = _BoundedPipeCapture(self.process.stdout)
+            self._stderr_capture = _BoundedPipeCapture(self.process.stderr)
+            self._stdout_capture.start()
+            self._stderr_capture.start()
+
+            stage = "http_discovery"
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            http_url = f"http://127.0.0.1:{target_port}"
+            page_ws_url: str | None = None
+
+            for _ in range(50):
+                if self.process.poll() is not None:
+                    raise RuntimeError("CHROMIUM_PROCESS_EXITED_DURING_CDP_DISCOVERY")
+                try:
+                    vdata = await asyncio.to_thread(
+                        self._fetch_json, opener, f"{http_url}/json/version"
+                    )
+                    self.browser_version = str(vdata.get("Browser", "Chromium/unknown"))
+                    pages = await asyncio.to_thread(
+                        self._fetch_json, opener, f"{http_url}/json/list"
+                    )
+                    if pages and isinstance(pages, list):
+                        page_ws_url = pages[0].get("webSocketDebuggerUrl")
+                        if page_ws_url:
+                            break
+                except Exception as exc:
+                    last_discovery_error = exc
+                    await asyncio.sleep(0.1)
+
+            if not page_ws_url:
+                if last_discovery_error is not None:
+                    raise RuntimeError("CHROMIUM_CDP_DISCOVERY_TIMEOUT") from last_discovery_error
+                raise RuntimeError("CHROMIUM_CDP_DISCOVERY_TIMEOUT")
+
+            stage = "endpoint_validation"
+            self.endpoint = self._validate_endpoint(page_ws_url, target_port)
+            self.ws_url = page_ws_url
+
+            stage = "websocket_handshake"
+            self.ws = await self._connect_websocket(page_ws_url)
+            self.read_task = asyncio.create_task(self._reader_loop())
+
+            stage = "cdp_initialization"
+            await self.send_command("Page.enable")
+            await self.send_command("Runtime.enable")
+            await self.evaluate_script("void 0")
+            if not self._is_connected():
+                raise RuntimeError("CDP_CONNECTION_NOT_READY")
+
+            stage = "font_restore"
+            if self._loaded_font_blobs:
+                for family_name, blob in list(self._loaded_font_blobs.items()):
+                    await self._inject_font_face(family_name, blob)
+                logger.info(
+                    "Restored %d font faces after session start/recovery",
+                    len(self._loaded_font_blobs),
+                )
+            logger.info("Persistent Chromium session ready")
+        except asyncio.CancelledError:
+            process_state = self._process_state()
+            cleanup_task = asyncio.create_task(
+                self.aclose(clear_fonts=False, raise_on_failure=False)
+            )
+            try:
+                await asyncio.shield(cleanup_task)
+            except asyncio.CancelledError:
+                await cleanup_task
+            raise
+        except Exception as exc:
+            process_state = self._process_state()
+            cleanup = await self.aclose(clear_fonts=False, raise_on_failure=False)
+            diagnostics = self._make_diagnostics(stage, exc, process_state, cleanup)
+            self.last_diagnostic = diagnostics
+            raise ChromiumSessionError(diagnostics) from exc
+
+    @staticmethod
+    def _fetch_json(
+        opener: urllib.request.OpenerDirector,
+        url: str,
+    ) -> Any:
+        request = urllib.request.Request(url)
+        with opener.open(request, timeout=1.0) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    @staticmethod
+    def _validate_endpoint(url: str, selected_port: int) -> ChromiumEndpoint:
+        try:
+            parts = urlsplit(url)
+            host = parts.hostname
+            port = parts.port
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("CDP_ENDPOINT_MALFORMED") from exc
+
+        if parts.scheme != "ws":
+            raise RuntimeError("CDP_ENDPOINT_SCHEME_REJECTED")
+        if not _is_loopback_host(host):
+            raise RuntimeError("CDP_ENDPOINT_HOST_REJECTED")
+        if port != selected_port:
+            raise RuntimeError("CDP_ENDPOINT_PORT_REJECTED")
+        if parts.username or parts.password or parts.query or parts.fragment:
+            raise RuntimeError("CDP_ENDPOINT_METADATA_REJECTED")
+        if not _EXPECTED_PAGE_PATH.fullmatch(parts.path):
+            raise RuntimeError("CDP_ENDPOINT_PATH_REJECTED")
+        return ChromiumEndpoint(
+            scheme="ws",
+            host=str(host).lower(),
+            port=int(port),
+            path_prefix="/devtools/page/",
         )
 
-        # Wait for CDP HTTP endpoint readiness
-        http_url = f"http://127.0.0.1:{target_port}"
-        page_ws_url: str | None = None
+    async def _connect_websocket(self, url: str) -> Any:
+        kwargs: dict[str, Any] = {"max_size": 20 * 1024 * 1024}
+        try:
+            parameters = inspect.signature(websockets.connect).parameters
+        except (TypeError, ValueError):
+            parameters = {}
+        if "proxy" in parameters:
+            kwargs["proxy"] = None
+        with _without_proxy_environment():
+            return await websockets.connect(url, **kwargs)
 
-        for _ in range(50):
+    def _process_state(self) -> str:
+        if self.process is None:
+            return "not_started"
+        try:
+            code = self.process.poll()
+        except Exception:
+            return "unknown"
+        return "running" if code is None else f"exited:{code}"
+
+    def _make_diagnostics(
+        self,
+        stage: str,
+        exc: BaseException,
+        process_state: str,
+        cleanup: ChromiumCleanup,
+    ) -> ChromiumSessionDiagnostics:
+        return ChromiumSessionDiagnostics(
+            stage=stage,
+            error=_exception_info(exc),
+            cause_chain=_cause_chain(exc),
+            process_state=process_state,
+            endpoint=self.endpoint,
+            stdout=self._stdout_capture.evidence() if self._stdout_capture else None,
+            stderr=self._stderr_capture.evidence() if self._stderr_capture else None,
+            cleanup=cleanup,
+        )
+
+    @staticmethod
+    def _terminate_process(process: subprocess.Popen[bytes]) -> tuple[bool, Exception | None]:
+        cleanup_error: Exception | None = None
+        try:
+            if process.poll() is None:
+                process.terminate()
+        except Exception as exc:
+            cleanup_error = exc
+
+        try:
+            if process.poll() is None:
+                process.wait(timeout=2.0)
+        except subprocess.TimeoutExpired as exc:
+            cleanup_error = cleanup_error or exc
             try:
-                req = urllib.request.Request(f"{http_url}/json/version")
-                with urllib.request.urlopen(req, timeout=1.0) as resp:
-                    vdata = json.loads(resp.read().decode("utf-8"))
-                    self.browser_version = vdata.get("Browser", "Chromium/unknown")
-                
-                list_req = urllib.request.Request(f"{http_url}/json/list")
-                with urllib.request.urlopen(list_req, timeout=1.0) as list_resp:
-                    pages = json.loads(list_resp.read().decode("utf-8"))
-                    if pages and len(pages) > 0:
-                        page_ws_url = pages[0].get("webSocketDebuggerUrl")
-                        break
-            except Exception:
-                await asyncio.sleep(0.1)
+                process.kill()
+                process.wait(timeout=2.0)
+            except Exception as kill_exc:
+                cleanup_error = cleanup_error or kill_exc
+        except Exception as exc:
+            cleanup_error = cleanup_error or exc
 
-        if not page_ws_url:
-            self.close()
-            raise RuntimeError(f"FAILED_TO_CONNECT_CHROMIUM_CDP on {http_url}")
+        try:
+            closed = process.poll() is not None
+        except Exception as exc:
+            cleanup_error = cleanup_error or exc
+            closed = False
+        return closed, cleanup_error
 
-        self.ws_url = page_ws_url
-        self.ws = await websockets.connect(self.ws_url, max_size=20 * 1024 * 1024)
-        self.read_task = asyncio.create_task(self._reader_loop())
+    async def _await_websocket_close(self, websocket: Any) -> None:
+        close_result = websocket.close()
+        if inspect.isawaitable(close_result):
+            await asyncio.wait_for(close_result, timeout=2.0)
 
-        # Enable Page and Runtime domains
-        await self.send_command("Page.enable")
-        await self.send_command("Runtime.enable")
-        logger.info(f"Persistent Chromium session ready: {self.browser_version}")
+    async def aclose(
+        self,
+        clear_fonts: bool = True,
+        raise_on_failure: bool = True,
+    ) -> ChromiumCleanup:
+        """Await complete cleanup and expose failures instead of swallowing them."""
+        current_task = asyncio.current_task()
+        if self._pending_close_task is not None and self._pending_close_task is not current_task:
+            await self._pending_close_task
 
-        # Restore any previously registered font faces into the fresh document context
-        if self._loaded_font_blobs:
-            for family_name, blob in list(self._loaded_font_blobs.items()):
-                await self._inject_font_face(family_name, blob)
-            logger.info(f"Restored {len(self._loaded_font_blobs)} font faces after session start/recovery")
+        process_state = self._process_state()
+        cleanup_error: Exception | None = None
+
+        if self.read_task is not None:
+            self.read_task.cancel()
+            try:
+                await self.read_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                cleanup_error = cleanup_error or exc
+            self.read_task = None
+
+        for waiter in self.pending_responses.values():
+            if not waiter.done():
+                waiter.cancel()
+        self.pending_responses.clear()
+        for waiters in self.event_waiters.values():
+            for waiter in waiters:
+                if not waiter.done():
+                    waiter.cancel()
+        self.event_waiters.clear()
+
+        websocket_closed = True
+        websocket = self.ws
+        if websocket is not None:
+            try:
+                await self._await_websocket_close(websocket)
+                state = getattr(websocket, "state", None)
+                state_name = getattr(state, "name", None)
+                if state_name is not None and state_name != "CLOSED":
+                    websocket_closed = False
+                elif state_name is None and getattr(websocket, "closed", None) is False:
+                    websocket_closed = False
+            except Exception as exc:
+                websocket_closed = False
+                cleanup_error = cleanup_error or exc
+            if websocket_closed:
+                self.ws = None
+                self.ws_url = None
+
+        process_closed = True
+        process = self.process
+        if process is not None:
+            process_closed, process_error = await asyncio.to_thread(
+                self._terminate_process, process
+            )
+            cleanup_error = cleanup_error or process_error
+            if process_closed:
+                self.process = None
+
+        captures = [capture for capture in (self._stdout_capture, self._stderr_capture) if capture]
+        output_drained = True
+        if captures:
+            results = await asyncio.gather(
+                *(asyncio.to_thread(capture.finish) for capture in captures),
+                return_exceptions=True,
+            )
+            output_drained = all(result is True for result in results)
+            for result, capture in zip(results, captures):
+                if isinstance(result, Exception):
+                    cleanup_error = cleanup_error or result
+                elif result is not True:
+                    cleanup_error = cleanup_error or capture.error or RuntimeError(
+                        "CHROMIUM_OUTPUT_DRAIN_FAILED"
+                    )
+                elif capture.error is not None:
+                    cleanup_error = cleanup_error or RuntimeError(
+                        "CHROMIUM_OUTPUT_DRAIN_FAILED"
+                    )
+
+        profile_removed = True
+        profile = self.user_data_dir
+        if profile is not None:
+            profile_name = profile.name
+            try:
+                await asyncio.to_thread(profile.cleanup)
+            except Exception as exc:
+                profile_removed = False
+                cleanup_error = cleanup_error or exc
+            try:
+                profile_removed = profile_removed and not os.path.exists(profile_name)
+            except Exception as exc:
+                profile_removed = False
+                cleanup_error = cleanup_error or exc
+            if profile_removed:
+                self.user_data_dir = None
+
+        if not process_closed:
+            cleanup_error = cleanup_error or RuntimeError("CHROMIUM_PROCESS_NOT_CLOSED")
+        if not websocket_closed:
+            cleanup_error = cleanup_error or RuntimeError("CHROMIUM_WEBSOCKET_NOT_CLOSED")
+        if not profile_removed:
+            cleanup_error = cleanup_error or RuntimeError("CHROMIUM_PROFILE_NOT_REMOVED")
+        if not output_drained:
+            cleanup_error = cleanup_error or RuntimeError("CHROMIUM_OUTPUT_NOT_DRAINED")
+
+        cleanup = ChromiumCleanup(
+            websocket_closed=websocket_closed,
+            process_closed=process_closed,
+            profile_removed=profile_removed,
+            output_drained=output_drained,
+            error=_exception_info(cleanup_error) if cleanup_error else None,
+        )
+        self.last_cleanup = cleanup
+        self.cdp_port = None
+        if clear_fonts:
+            self._loaded_fonts.clear()
+            self._loaded_font_blobs.clear()
+        logger.info("Chromium session closed")
+
+        if raise_on_failure and not cleanup.ok:
+            diagnostic_error = cleanup_error or RuntimeError("CHROMIUM_CLEANUP_INCOMPLETE")
+            diagnostics = self._make_diagnostics(
+                "cleanup", diagnostic_error, process_state, cleanup
+            )
+            self.last_diagnostic = diagnostics
+            raise ChromiumSessionError(diagnostics) from diagnostic_error
+        return cleanup
 
     async def _reader_loop(self) -> None:
         """Background reader routing incoming CDP message payloads to waiting futures."""
@@ -172,7 +714,7 @@ class ChromiumSession:
         except asyncio.CancelledError:
             pass
         except Exception as exc:
-            logger.debug(f"CDP reader loop disconnected: {exc}")
+            logger.debug("CDP reader loop disconnected: %s", _sanitize_text(str(exc)))
 
     def _is_connected(self) -> bool:
         """Check if WebSocket connection is open."""
@@ -188,7 +730,7 @@ class ChromiumSession:
     async def send_command(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         """Send a CDP command and await its correlated response with bounded timeout."""
         if not self._is_connected():
-            await self.restart()
+            raise RuntimeError("CDP_NOT_CONNECTED")
 
         self.msg_id += 1
         msg_id = self.msg_id
@@ -559,49 +1101,46 @@ class ChromiumSession:
         return (float(width) / max(font_size_px, 1.0)) * upem
 
     async def restart(self) -> None:
-        """Gracefully restart Chromium process on unexpected termination or timeout."""
+        """Explicitly restart Chromium after a caller has observed a failed session."""
         logger.warning("Restarting persistent Chromium session...")
-        self.close(clear_fonts=False)
+        await self.aclose(clear_fonts=False)
         await self.start()
 
-    def close(self, clear_fonts: bool = True) -> None:
-        """Clean up background tasks, WebSocket, and child Chromium process."""
-        if self.read_task and not self.read_task.done():
-            self.read_task.cancel()
-            self.read_task = None
+    def _close_task_done(self, task: asyncio.Task[ChromiumCleanup]) -> None:
+        if self._pending_close_task is task:
+            self._pending_close_task = None
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            self.last_diagnostic = self._make_diagnostics(
+                "cleanup",
+                RuntimeError("CHROMIUM_CLEANUP_CANCELLED"),
+                self._process_state(),
+                self.last_cleanup
+                or ChromiumCleanup(False, False, False, False, None),
+            )
+        except ChromiumSessionError as exc:
+            self.last_diagnostic = exc.diagnostics
+            logger.error("Chromium session cleanup failed: %s", exc)
+        except Exception as exc:  # pragma: no cover - defensive task boundary
+            cleanup = self.last_cleanup or ChromiumCleanup(False, False, False, False, None)
+            self.last_diagnostic = self._make_diagnostics(
+                "cleanup", exc, self._process_state(), cleanup
+            )
+            logger.error("Chromium session cleanup failed: %s", _sanitize_text(str(exc)))
 
-        for waiters in self.event_waiters.values():
-            for waiter in waiters:
-                if not waiter.done():
-                    waiter.cancel()
-        self.event_waiters.clear()
+    def close(self, clear_fonts: bool = True) -> ChromiumCleanup | None:
+        """Compatibility close wrapper; async callers can await the scheduled cleanup task."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(self.aclose(clear_fonts=clear_fonts))
 
-        if self.ws:
-            try:
-                asyncio.create_task(self.ws.close())
-            except Exception:
-                pass
-            self.ws = None
-
-        if self.process:
-            try:
-                self.process.terminate()
-                self.process.wait(timeout=2.0)
-            except Exception:
-                try:
-                    self.process.kill()
-                except Exception:
-                    pass
-            self.process = None
-
-        if self.user_data_dir:
-            try:
-                self.user_data_dir.cleanup()
-            except Exception:
-                pass
-            self.user_data_dir = None
-
-        self._loaded_fonts.clear()
-        if clear_fonts:
-            self._loaded_font_blobs.clear()
-        logger.info("Chromium session closed")
+        if self._pending_close_task is not None:
+            if not self._pending_close_task.done():
+                return None
+            self._pending_close_task = None
+        task = loop.create_task(self.aclose(clear_fonts=clear_fonts))
+        self._pending_close_task = task
+        task.add_done_callback(self._close_task_done)
+        return None
