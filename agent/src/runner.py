@@ -15,10 +15,12 @@ from urllib.parse import urlparse
 
 from acquisition.models import (
     AcquisitionOutcome,
+    AcquiredBinary,
     BINARY_STAGE_AUTHORIZED_SESSION,
     BINARY_STAGE_DUMP_DOM,
 )
 from acquisition.pipeline import AcquisitionPipeline
+from acquisition.raster_ingest import ingest_raster_pages
 from compute.archive import (
     ARCHIVEABLE_FORMATS,
     PROVENANCE_BINARY_DUMP_DOM,
@@ -29,7 +31,9 @@ from compute.archive import (
     PROVENANCE_VIETNAMESE_PRESERVED,
     ArchiveIdentity,
     FinalFontArchive,
+    canonical_source_identity,
 )
+from compute.binary_cache import AuthorizedBinaryCache, BinaryCacheIdentity
 from compute.binary_gate import BINARY_PIPELINE_VERSION, BinaryConsumerValidator, BinaryGateReport, prepare_binary_artifact
 from compute.font_builder import FontBuilderService
 from compute.models import ArchiveSourceContext, GeneratedFontFile, JobPackageManifest, SourcePayload
@@ -141,8 +145,8 @@ class JobRunner:
         archive: FinalFontArchive | None = None,
         acquisition_pipeline: AcquisitionPipeline | None = None,
         model_cache: CanonicalFontModelCache | None = None,
+        binary_cache: AuthorizedBinaryCache | None = None,
         vietnamese_ai_provider: Any = None,
-        chromium_binary_checker: Any = None,
     ) -> None:
         self.settings = settings
         self.queue_client = queue_client
@@ -159,8 +163,8 @@ class JobRunner:
         self.archive = archive if archive is not None else FinalFontArchive.from_settings(settings)
         self.acquisition_pipeline = acquisition_pipeline
         self.model_cache = model_cache
+        self.binary_cache = binary_cache
         self.vietnamese_ai_provider = vietnamese_ai_provider
-        self.chromium_binary_checker = chromium_binary_checker
         # Deterministic per-job acquisition/reuse call trace (sanitized).
         self.last_reuse_trace: dict[str, Any] = {}
 
@@ -537,7 +541,7 @@ class JobRunner:
             font_file = prepare_binary_artifact(
                 binary, fmt, build_dir / "stage9d_binary" / fmt.lower(), family_name, style.display_name
             )
-            report = BinaryConsumerValidator(self.chromium_binary_checker).validate(
+            report = BinaryConsumerValidator().validate(
                 font_file, provenance=binary.provenance
             )
             if report.overall_status != "PASS":
@@ -851,6 +855,36 @@ class JobRunner:
                         if completed or l2_candidate:
                             self._trace_record(f"PREACQ_{style.id}", "SKIP_BROWSER", l2=l2_candidate)
                             continue
+                        # L3 durable authorized-binary cache probe before any
+                        # provider/network call.
+                        l3_identity = BinaryCacheIdentity(
+                            reference_fingerprint=hashlib.sha256(
+                                canonical_source_identity(job.source_url).encode("utf-8")
+                            ).hexdigest(),
+                            family_name=family_name,
+                            style_id=style.id,
+                            provenance="authorized_binary",
+                        )
+                        if self.binary_cache is not None:
+                            cached_raw, cached_fmt, cached_prov, cache_status = self.binary_cache.get(
+                                l3_identity
+                            )
+                            if cache_status == "CORRUPT":
+                                raise ValueError(
+                                    "ACQUISITION_BINARY_INTEGRITY_FAILED:L3_CACHE_CORRUPT"
+                                )
+                            if cache_status == "HIT" and cached_raw is not None:
+                                reuse_state["binaries"][style.id] = AcquiredBinary(
+                                    raw_bytes=cached_raw,
+                                    format=cached_fmt,
+                                    family_name=family_name,
+                                    style_name=style.display_name,
+                                    provenance=cached_prov or BINARY_STAGE_DUMP_DOM,
+                                )
+                                self._trace_record(
+                                    f"PREACQ_{style.id}", "L3_CACHE_HIT", provenance=cached_prov
+                                )
+                                continue
                         if self.acquisition_pipeline is not None:
                             outcome = await self.acquisition_pipeline.acquire(
                                 job.source_url, family_name, style.display_name
@@ -859,9 +893,47 @@ class JobRunner:
                                 outcome.trace.to_sanitized_dict()
                             )
                             if outcome.kind == "binary" and outcome.binary is not None:
+                                if self.binary_cache is not None:
+                                    self.binary_cache.put(
+                                        l3_identity,
+                                        outcome.binary.raw_bytes,
+                                        outcome.binary.format,
+                                        stage_provenance=outcome.binary.provenance,
+                                    )
                                 reuse_state["binaries"][style.id] = outcome.binary
                                 self._trace_record(
                                     f"PREACQ_{style.id}", "BINARY_WIN", provenance=outcome.binary.provenance
+                                )
+                                continue
+                            if outcome.kind == "raster_authorized" and outcome.raster_pages:
+                                # Raster evidence is never discarded: convert to
+                                # complete exact-tuple observations, then the normal
+                                # Stage 9D raster gate consumes them.
+                                raster_bv = ""
+                                for page in outcome.raster_pages:
+                                    page_bv = str((page.payload or {}).get("browser_version", ""))
+                                    if page_bv:
+                                        raster_bv = page_bv
+                                        break
+                                if not raster_bv:
+                                    raise ValueError("ACQUISITION_RASTER_IDENTITY_MISSING")
+                                family_key, style_key = self._observation_keys(
+                                    job.source_url, style.id
+                                )
+                                ingested = ingest_raster_pages(
+                                    gate_store,
+                                    gate_config,
+                                    family_key,
+                                    style_key,
+                                    raster_bv,
+                                    outcome.raster_pages,
+                                    source_url=job.source_url,
+                                )
+                                self._trace_record(
+                                    f"PREACQ_{style.id}",
+                                    "RASTER_HANDOFF",
+                                    glyphs=ingested,
+                                    browser_version=raster_bv,
                                 )
                                 continue
                             if outcome.kind == "insufficient" and outcome.terminal_reason_code.startswith(

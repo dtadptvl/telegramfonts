@@ -26,21 +26,6 @@ from reconstruction.models import Contour, CubicSegment, LineSegment, Point2D, R
 
 BINARY_PIPELINE_VERSION = "stage9d-binary-v1"
 
-_SHAPE_PROBE_COUNT = 3
-
-
-def _sample_codepoints_from_binary(raw_bytes: bytes) -> tuple[int, ...]:
-    """Deterministic printable sample codepoints drawn from the binary's own cmap."""
-    from fontTools.ttLib import TTFont
-
-    font = TTFont(io.BytesIO(raw_bytes), fontNumber=0, lazy=True)
-    try:
-        cmap = font.getBestCmap() or {}
-    finally:
-        font.close()
-    candidates = sorted(cp for cp in cmap if 0x21 <= cp <= 0xFFFF)
-    return tuple(candidates[:3])
-
 
 @dataclass(frozen=True)
 class BinaryGateReport:
@@ -146,7 +131,9 @@ def _contours_from_recording(operations: Sequence[tuple]) -> list[Contour]:
     def flush() -> None:
         nonlocal current, start
         if current and start is not None:
-            current.append(LineSegment(current[-1].p1 if isinstance(current[-1], LineSegment) else current[-1].p3, start))
+            last = current[-1].p1 if isinstance(current[-1], LineSegment) else current[-1].p3
+            if last.distance_to(start) >= 1.0:
+                current.append(LineSegment(last, start))
             contours.append(Contour(segments=current, is_hole=False))
         current = []
         start = None
@@ -267,89 +254,22 @@ def prepare_binary_artifact(
 
 
 class BinaryConsumerValidator:
-    """Fail-closed four-consumer validation for binary-path artifacts."""
+    """Closed four-consumer validation for binary-path artifacts.
 
-    def __init__(self, chromium_load_check: Callable[[bytes], bool] | None = None) -> None:
-        self.chromium_load_check = chromium_load_check
-
-    def _fonttools_check(self, raw: bytes) -> tuple[bool, str]:
-        from fontTools.ttLib import TTFont
-
-        try:
-            font = TTFont(io.BytesIO(raw), fontNumber=0, lazy=False)
-            cmap = font.getBestCmap()
-            ok = bool(cmap) and int(font["maxp"].numGlyphs) > 0 and int(font["head"].unitsPerEm) > 0
-            font.close()
-            return ok, "" if ok else "FONTTOOLS_LOAD_FAILED"
-        except Exception:
-            return False, "FONTTOOLS_LOAD_FAILED"
-
-    def _freetype_check(self, raw: bytes, samples: tuple[int, ...], source_path: Path) -> tuple[bool, str]:
-        import freetype
-
-        try:
-            face = freetype.Face(str(source_path))
-            face.set_pixel_sizes(0, 64)
-            rendered = 0
-            for cp in samples:
-                idx = face.get_char_index(cp)
-                if idx == 0:
-                    continue
-                face.load_glyph(idx, freetype.FT_LOAD_RENDER | freetype.FT_LOAD_NO_HINTING)
-                bitmap = face.glyph.bitmap
-                if bitmap.width > 0 and bitmap.rows > 0:
-                    rendered += 1
-            return rendered > 0, "" if rendered > 0 else "FREETYPE_RENDER_FAILED"
-        except Exception:
-            return False, "FREETYPE_LOAD_FAILED"
-
-    def _harfbuzz_check(self, raw: bytes, samples: tuple[int, ...]) -> tuple[bool, str]:
-        import uharfbuzz as hb
-
-        try:
-            blob = hb.Blob(raw)
-            face = hb.Face(blob)
-            font = hb.Font(face)
-            chars = [chr(cp) for cp in samples]
-            probes = []
-            if len(chars) >= 2:
-                for i in range(len(chars) - 1):
-                    probes.append(chars[i] + chars[i + 1])
-            if chars:
-                probes.append(chars[0] + chars[0])
-            probes = probes[:_SHAPE_PROBE_COUNT]
-            buf_ok = 0
-            for text in probes:
-                buf = hb.Buffer()
-                buf.add_str(text)
-                buf.guess_segment_properties()
-                hb.shape(font, buf)
-                infos = buf.glyph_infos
-                positions = buf.glyph_positions
-                if not infos or any(i.codepoint == 0 for i in infos):
-                    continue
-                if all(math.isfinite(p.x_advance) for p in positions):
-                    buf_ok += 1
-            return bool(probes) and buf_ok == len(probes), (
-                "" if bool(probes) and buf_ok == len(probes) else "HARFBUZZ_SHAPING_FAILED"
-            )
-        except Exception:
-            return False, "HARFBUZZ_LOAD_FAILED"
-
-    def _chromium_check(self, raw: bytes) -> tuple[bool | None, str]:
-        if self.chromium_load_check is None:
-            return None, "CHROMIUM_CAPABILITY_UNAVAILABLE"
-        try:
-            ok = bool(self.chromium_load_check(raw))
-            return ok, "" if ok else "CHROMIUM_LOAD_FAILED"
-        except Exception:
-            return False, "CHROMIUM_LOAD_FAILED"
+    No capability is injectable: evidence comes exclusively from the closed
+    concrete FontTools/FreeType/HarfBuzz/Chromium producers bound to the exact
+    descriptor bytes. Capability absence or forged evidence fails closed.
+    """
 
     def validate(
         self,
         font_file: GeneratedFontFile,
         provenance: str,
     ) -> BinaryGateReport:
+        from fidelity.models import ProductionProducerError
+        from fidelity.producers import BinaryConsumerEvidenceProducer, CandidateArtifactDescriptor
+        from fidelity import producers as _producers
+
         raw = Path(font_file.file_path).read_bytes()
         if hashlib.sha256(raw).hexdigest() != font_file.sha256_hex or len(raw) != font_file.size_bytes:
             return BinaryGateReport(
@@ -366,15 +286,19 @@ class BinaryConsumerValidator:
                 evaluation_timestamp_utc=datetime.now(timezone.utc).isoformat(),
             )
 
-        ft_ok, ft_reason = self._fonttools_check(raw)
+        descriptor = CandidateArtifactDescriptor(
+            file_path=str(font_file.file_path),
+            expected_format=font_file.format,
+            expected_size_bytes=font_file.size_bytes,
+            expected_sha256_hex=font_file.sha256_hex,
+            raw_bytes=raw,
+        )
         try:
-            samples = _sample_codepoints_from_binary(raw)
+            descriptor.validate()
         except Exception:
-            samples = ()
-        if not samples:
             return BinaryGateReport(
                 overall_status="FAIL",
-                fonttools_passed=ft_ok,
+                fonttools_passed=False,
                 freetype_passed=False,
                 harfbuzz_passed=False,
                 chromium_passed=False,
@@ -382,33 +306,62 @@ class BinaryConsumerValidator:
                 artifact_size_bytes=font_file.size_bytes,
                 format=font_file.format,
                 provenance=provenance,
-                failure_reasons=("BINARY_NO_SAMPLE_CODEPOINTS",),
+                failure_reasons=("BINARY_DESCRIPTOR_ATTESTATION_FAILED",),
                 evaluation_timestamp_utc=datetime.now(timezone.utc).isoformat(),
             )
-        fr_ok, fr_reason = self._freetype_check(raw, samples, Path(font_file.file_path))
-        hb_ok, hb_reason = self._harfbuzz_check(raw, samples)
-        cr_ok, cr_reason = self._chromium_check(raw)
 
-        reasons = [r for r in (ft_reason, fr_reason, hb_reason) if r]
-        if cr_ok is None:
-            overall = "BLOCKED"
-            reasons.append(cr_reason)
-        elif not cr_ok:
-            overall = "FAIL"
-            reasons.append(cr_reason)
-        else:
-            overall = "PASS" if (ft_ok and fr_ok and hb_ok) else "FAIL"
+        # Closed capability probe: absent Chromium can never produce PASS.
+        try:
+            _producers.find_chromium_executable()
+        except Exception:
+            return BinaryGateReport(
+                overall_status="BLOCKED",
+                fonttools_passed=False,
+                freetype_passed=False,
+                harfbuzz_passed=False,
+                chromium_passed=False,
+                artifact_sha256=font_file.sha256_hex,
+                artifact_size_bytes=font_file.size_bytes,
+                format=font_file.format,
+                provenance=provenance,
+                failure_reasons=("CHROMIUM_CAPABILITY_UNAVAILABLE",),
+                evaluation_timestamp_utc=datetime.now(timezone.utc).isoformat(),
+            )
 
+        try:
+            bundle = BinaryConsumerEvidenceProducer.produce_sync(descriptor)
+        except ProductionProducerError as exc:
+            message = str(exc)
+            capability_absent = (
+                "CHROMIUM_NOT_AVAILABLE" in message or "CHROMIUM_CAPABILITY_UNAVAILABLE" in message
+            )
+            return BinaryGateReport(
+                overall_status="BLOCKED" if capability_absent else "FAIL",
+                fonttools_passed=False,
+                freetype_passed=False,
+                harfbuzz_passed=False,
+                chromium_passed=False,
+                artifact_sha256=font_file.sha256_hex,
+                artifact_size_bytes=font_file.size_bytes,
+                format=font_file.format,
+                provenance=provenance,
+                failure_reasons=(
+                    "CHROMIUM_CAPABILITY_UNAVAILABLE" if capability_absent else "BINARY_CONSUMER_GATE_FAILED",
+                ),
+                evaluation_timestamp_utc=datetime.now(timezone.utc).isoformat(),
+            )
+
+        gate = bundle.chromium.result
         return BinaryGateReport(
-            overall_status=overall,
-            fonttools_passed=ft_ok,
-            freetype_passed=fr_ok,
-            harfbuzz_passed=hb_ok,
-            chromium_passed=bool(cr_ok),
+            overall_status="PASS",
+            fonttools_passed=bool(bundle.fonttools.result.is_direct_loadable_fonttools),
+            freetype_passed=bundle.freetype.result.render_error is None,
+            harfbuzz_passed=bundle.harfbuzz.result.error_message is None,
+            chromium_passed=bool(gate.is_direct_loadable_chromium and gate.rendered_canvas_valid),
             artifact_sha256=font_file.sha256_hex,
             artifact_size_bytes=font_file.size_bytes,
             format=font_file.format,
             provenance=provenance,
-            failure_reasons=tuple(sorted(set(reasons))),
+            failure_reasons=(),
             evaluation_timestamp_utc=datetime.now(timezone.utc).isoformat(),
         )

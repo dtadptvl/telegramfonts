@@ -206,10 +206,22 @@ PASS value is ever accepted:
 L1  exact final artifact (attested archive hit, byte-identical)
 L2  canonical FontModel cache (skips acquisition + reconstruction + optimization;
     candidate build + held-out four-consumer gate still run)
-L3  authorized binary acquisition (binary-first; zero geometry reconstruction)
+L3  durable hash-verified authorized-binary cache + authorized binary
+    acquisition (binary-first; zero geometry reconstruction); integrity
+    ambiguity is terminal, drift/corruption fails closed
 L4  exact completed raster observations (MAX reconstruction path)
 L5  authorized browser raster observation (acquisition)
 ```
+
+Successful authorized raster-provider results are never discarded: they are
+converted into complete immutable exact-tuple observations (rasters, metrics,
+pairs, features), finalized with the same strict schedule checks as direct
+browser collection, and then feed the normal Stage 9D raster gate.
+
+Authorized binary artifacts pass the same closed artifact-bound four-consumer
+production boundary (FontTools, FreeType, HarfBuzz, real headless Chromium);
+no capability is injectable, and capability absence or forged evidence fails
+closed.
 
 Final identity binds source/reference fingerprint, family/style, ORIGINAL|VIETNAMESE,
 TTF|OTF, coverage, pipeline/build version, and Vietnamese/AI provenance. Raster
@@ -315,9 +327,16 @@ The Vietnamese branch runs after the canonical model exists:
 - synthesize only missing glyphs from measured components;
 - preserve measured metrics and OpenType truth;
 - validate `ccmp`, `mark`, `mkmk`, collisions, clipping, spacing, and corpus behavior;
-- for missing coverage only, an injectable AI provider may generate/rank
-  candidates; the extension binds AI model/version/prompt/config/source hashes
-  into immutable provenance. ORIGINAL mode never invokes AI work.
+- for missing coverage only, the OpenRouter runtime client may generate/rank
+  candidates under fixed routing: PRIMARY `google/gemma-3-12b-it` for every
+  case, DIFFICULT `google/gemma-3-27b-it` only on deterministic escalation,
+  and a rare ARBITER `google/gemini-3.1-flash-lite` at most once after an
+  unresolved deterministic disagreement; no other model or substitution.
+  Exact hits and complete-source/ORIGINAL paths make zero calls. The extension
+  binds provider/model/role/prompt/schema/config/source/target provenance
+  hashes into immutable provenance. ORIGINAL mode never constructs the service.
+  The runtime API key is a runtime secret; responses are sanitized closed
+  schema only.
 
 AI cannot invent mappings, alter observed glyphs, author PASS, weaken thresholds,
 or bypass FontTools/FreeType/HarfBuzz/Chromium/held-out validators. Forged,

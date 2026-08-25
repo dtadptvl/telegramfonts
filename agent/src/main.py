@@ -6,6 +6,7 @@ import signal
 import sys
 from pathlib import Path
 
+from composition import build_production_components
 from config import Settings
 from logging_utils import setup_logging
 from queue_client import CloudflareQueueClient
@@ -27,11 +28,18 @@ async def main() -> None:
 
     queue_client = CloudflareQueueClient(settings)
     worker_client = WorkerJobClient(settings)
+    # Stage 9D production composition: concrete L2/L3/acquisition/AI deps;
+    # readiness fails closed when an enabled capability is not constructible.
+    components = build_production_components(settings, scratch_manager.root)
     runner = A23Runner(
         settings=settings,
         queue_client=queue_client,
         worker_client=worker_client,
         scratch_manager=scratch_manager,
+        acquisition_pipeline=components["acquisition_pipeline"],
+        model_cache=components["model_cache"],
+        binary_cache=components["binary_cache"],
+        vietnamese_ai_provider=components["vietnamese_ai_provider"],
     )
 
     stop_event = asyncio.Event()

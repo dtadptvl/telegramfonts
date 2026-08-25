@@ -590,7 +590,6 @@ async def test_BINARY_FIRST_valid_binary_zero_geometry_reconstruction(
     state["styles"] = [{"id": "regular", "display_name": "Regular"}]
     runner, state, acquirer, builder, archive, msg = await _make_runner(
         tmp_path, test_settings, state, store_dir, acquisition_pipeline=pipeline,
-        chromium_binary_checker=lambda raw: True,
     )
 
     # Raster gate / reconstruction must never run on the binary path.
