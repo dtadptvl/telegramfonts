@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -94,7 +95,7 @@ async def test_discovered_endpoint_is_rejected_before_connect(monkeypatch):
 
     monkeypatch.setattr(browser_session.subprocess, "Popen", lambda *args, **kwargs: process)
 
-    def fake_fetch(opener, url):
+    def fake_fetch(opener, url, timeout_seconds=1.0):
         if url.endswith("/json/version"):
             return {"Browser": "Chromium/test"}
         return [{"webSocketDebuggerUrl": "ws://192.0.2.10:9222/devtools/page/opaque"}]
@@ -173,7 +174,7 @@ async def test_handshake_failure_keeps_bounded_cause_and_cleanup(monkeypatch):
 
     monkeypatch.setattr(browser_session.subprocess, "Popen", lambda *args, **kwargs: process)
 
-    def fake_fetch(opener, url):
+    def fake_fetch(opener, url, timeout_seconds=1.0):
         if url.endswith("/json/version"):
             return {"Browser": "Chromium/test"}
         return [
@@ -211,6 +212,44 @@ async def test_handshake_failure_keeps_bounded_cause_and_cleanup(monkeypatch):
     assert diagnostics.cleanup.ok
     assert session.process is None
     assert session.user_data_dir is None
+
+
+@pytest.mark.asyncio
+async def test_stalled_cdp_fetch_stops_at_monotonic_deadline(monkeypatch):
+    session = ChromiumSession(executable_path="unused", timeout_seconds=0.05, port=9222)
+    process = FakeProcess()
+    launches = 0
+    fetch_attempts = 0
+    release_fetch = threading.Event()
+
+    def fake_popen(*args, **kwargs):
+        nonlocal launches
+        launches += 1
+        return process
+
+    monkeypatch.setattr(browser_session.subprocess, "Popen", fake_popen)
+
+    def stalled_fetch(*args, **kwargs):
+        nonlocal fetch_attempts
+        fetch_attempts += 1
+        release_fetch.wait(60)
+        return {}
+
+    monkeypatch.setattr(session, "_fetch_json", stalled_fetch)
+
+    started = browser_session.asyncio.get_running_loop().time()
+    try:
+        with pytest.raises(ChromiumSessionError) as caught:
+            await session.start()
+    finally:
+        release_fetch.set()
+    elapsed = browser_session.asyncio.get_running_loop().time() - started
+
+    assert caught.value.diagnostics.stage == "http_discovery"
+    assert launches == 1
+    assert fetch_attempts == 1
+    assert elapsed < 0.5
+    assert caught.value.diagnostics.cleanup.ok
 
 
 @pytest.mark.asyncio
@@ -253,7 +292,7 @@ async def test_controlled_start_and_close_are_single_pass(monkeypatch):
 
     monkeypatch.setattr(browser_session.subprocess, "Popen", lambda *args, **kwargs: process)
 
-    def fake_fetch(opener, url):
+    def fake_fetch(opener, url, timeout_seconds=1.0):
         if url.endswith("/json/version"):
             return {"Browser": "Chromium/controlled"}
         return [{"webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/page/test"}]

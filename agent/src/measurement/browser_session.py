@@ -409,26 +409,38 @@ class ChromiumSession:
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
             http_url = f"http://127.0.0.1:{target_port}"
             page_ws_url: str | None = None
+            loop = asyncio.get_running_loop()
+            discovery_deadline = loop.time() + max(0.0, float(self.timeout_seconds))
 
-            discovery_attempts = max(50, int(self.timeout_seconds * 10))
-            for _ in range(discovery_attempts):
+            async def fetch_discovery_json(url: str) -> Any:
+                remaining = discovery_deadline - loop.time()
+                if remaining <= 0:
+                    raise TimeoutError("CHROMIUM_CDP_DISCOVERY_DEADLINE_EXPIRED")
+                async with asyncio.timeout_at(discovery_deadline):
+                    return await asyncio.to_thread(
+                        self._fetch_json,
+                        opener,
+                        url,
+                        timeout_seconds=remaining,
+                    )
+
+            while loop.time() < discovery_deadline:
                 if self.process.poll() is not None:
                     raise RuntimeError("CHROMIUM_PROCESS_EXITED_DURING_CDP_DISCOVERY")
                 try:
-                    vdata = await asyncio.to_thread(
-                        self._fetch_json, opener, f"{http_url}/json/version"
-                    )
+                    vdata = await fetch_discovery_json(f"{http_url}/json/version")
                     self.browser_version = str(vdata.get("Browser", "Chromium/unknown"))
-                    pages = await asyncio.to_thread(
-                        self._fetch_json, opener, f"{http_url}/json/list"
-                    )
+                    pages = await fetch_discovery_json(f"{http_url}/json/list")
                     if pages and isinstance(pages, list):
                         page_ws_url = pages[0].get("webSocketDebuggerUrl")
                         if page_ws_url:
                             break
                 except Exception as exc:
                     last_discovery_error = exc
-                    await asyncio.sleep(0.1)
+                remaining = discovery_deadline - loop.time()
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(min(0.1, remaining))
 
             if not page_ws_url:
                 if last_discovery_error is not None:
@@ -480,9 +492,10 @@ class ChromiumSession:
     def _fetch_json(
         opener: urllib.request.OpenerDirector,
         url: str,
+        timeout_seconds: float = 1.0,
     ) -> Any:
         request = urllib.request.Request(url)
-        with opener.open(request, timeout=1.0) as response:
+        with opener.open(request, timeout=timeout_seconds) as response:
             return json.loads(response.read().decode("utf-8"))
 
     @staticmethod
