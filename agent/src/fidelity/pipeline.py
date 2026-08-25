@@ -414,7 +414,7 @@ class PartitionedEvidence:
 
 def partition_snapshot(snapshot: ObservationStoreSnapshot) -> PartitionedEvidence:
     """Deterministically partition snapshot observations into strictly disjoint fit and held-out sets.
-    
+
     The fit set satisfies the exact active adaptive schedule for snapshot.config.
     Held-out evidence remains strictly disjoint, non-empty, and untouched by model fitting.
     """

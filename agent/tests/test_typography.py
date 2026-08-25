@@ -679,7 +679,7 @@ async def test_browser_and_direct_paths_create_only_exactly_bound_observations()
         assert obs.style_id == st_id
         assert obs.browser_version == br_ver
         assert obs.config_hash == cfg
-        assert obs.provenance == f"chromium:{br_ver}:canvas_text_metrics"
+        assert obs.provenance == "direct_measurement"
 
     # 2. Browser session path with test double
     class MockBrowserSession:

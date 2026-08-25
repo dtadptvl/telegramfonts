@@ -130,7 +130,6 @@ class EvidenceKerningInferencer:
 
             if is_applied:
                 kerning_pairs[(left_cp, right_cp)] = inferred_kern
-                kerning_pairs[(left_cp, right_cp)] = inferred_kern
 
         if require_provenance:
             expected_fit_pairs = set(BOUNDED_FIT_PAIRS)
@@ -299,6 +298,7 @@ class EvidenceKerningInferencer:
         style_id: str,
         browser_version: str,
         config_hash: str,
+        provenance: str = "direct_measurement",
     ) -> TypographyDataset:
         """Infer kerning from a list of (left_cp, right_cp, left_adv, right_adv, pair_adv) measurements."""
         _validate_exact_identity(reference_id, style_id, browser_version, config_hash)
@@ -327,7 +327,7 @@ class EvidenceKerningInferencer:
                 browser_version=browser_version,
                 config_hash=config_hash,
                 confidence=1.0,
-                provenance=f"chromium:{browser_version}:canvas_text_metrics",
+                provenance=provenance,
             )
             observations.append(obs)
 

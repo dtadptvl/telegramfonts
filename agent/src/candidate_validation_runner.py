@@ -16,6 +16,7 @@ from typing import Any
 
 from measurement.benchmark_runner import get_peak_rss_mb
 from measurement.browser_session import ChromiumSession
+from measurement.models import ObservationConfig
 from measurement.store import ObservationStore
 from reconstruction.candidate_builder import MaxCandidateFontBuilder
 from reconstruction.candidate_validator import MaxCandidateHeldOutValidator
@@ -77,20 +78,26 @@ def run_candidate_pipeline(
         style_name="Regular",
         units_per_em=1000,
     )
-    cfg_hash = ObservationConfig().compute_hash()
-    if store.has_pair_observations(reference_id, style_id):
+    identities = store.get_completed_collection_identities(reference_id, style_id)
+    if not identities:
+        identities = store.get_pair_observation_identities(reference_id, style_id)
+
+    if identities:
+        browser_ver, cfg_hash = identities[0]
         typography_dataset = inferencer.infer_from_store(
             store,
             reference_id=reference_id,
             style_id=style_id,
-            browser_version="chromium",
+            browser_version=browser_ver,
             config_hash=cfg_hash,
-            require_provenance=False,
+            require_provenance=True,
         )
         logger.info(
-            "Loaded %d active kerning pairs (from %d probed pairs) from store",
+            "Loaded %d active kerning pairs (from %d probed pairs) from store for exact identity (%s, %s)",
             typography_dataset.active_kerning_pairs_count,
             typography_dataset.total_pairs_probed,
+            browser_ver,
+            cfg_hash,
         )
     else:
         typography_dataset = None

@@ -54,28 +54,33 @@ class FontBuilderService:
         glyph_models: dict[int, ReconstructedGlyph] = dict(style_source.reconstructed_glyphs)
 
         typography = None
-        if self.store:
-            family_key = style_source.observation_reference_id or sanitized_family.lower().replace(" ", "_").replace("-", "_")
-            style_key = style_source.observation_style_id or sanitized_style.lower().replace(" ", "_").replace("-", "_")
-            browser_ver = getattr(style_source, "observation_browser_version", None) or "chromium"
-            from measurement.models import ObservationConfig
-            cfg_h = getattr(style_source, "observation_config_hash", None) or ObservationConfig().compute_hash()
-            try:
-                inferencer = EvidenceKerningInferencer(
-                    family_name=sanitized_family,
-                    style_name=sanitized_style,
-                    units_per_em=1000,
-                )
-                typography = inferencer.infer_from_store(
-                    self.store,
-                    reference_id=family_key,
-                    style_id=style_key,
-                    browser_version=browser_ver,
-                    config_hash=cfg_h,
-                    require_provenance=False,
-                )
-            except Exception:
-                typography = None
+        if self.store and style_source.observation_reference_id:
+            family_key = style_source.observation_reference_id
+            style_key = style_source.observation_style_id or style_source.style_id
+            browser_ver = style_source.observation_browser_version
+            cfg_h = style_source.observation_config_hash
+
+            if not browser_ver or not cfg_h:
+                identities = self.store.get_completed_collection_identities(family_key, style_key)
+                if not identities:
+                    identities = self.store.get_pair_observation_identities(family_key, style_key)
+                if not identities:
+                    raise ValueError(f"MISSING_OBSERVATION_IDENTITY_FOR_{style_source.style_id}: no completed collections in store")
+                browser_ver, cfg_h = identities[0]
+
+            inferencer = EvidenceKerningInferencer(
+                family_name=sanitized_family,
+                style_name=sanitized_style,
+                units_per_em=1000,
+            )
+            typography = inferencer.infer_from_store(
+                self.store,
+                reference_id=family_key,
+                style_id=style_key,
+                browser_version=browser_ver,
+                config_hash=cfg_h,
+                require_provenance=True,
+            )
 
         builder = MaxCandidateFontBuilder(
             family_name=sanitized_family,

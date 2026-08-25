@@ -838,3 +838,25 @@ class ObservationStore:
                 (reference_id, style_id),
             )
             return cur.fetchone() is not None
+
+    def get_completed_collection_identities(
+        self, reference_id: str, style_id: str
+    ) -> list[tuple[str, str]]:
+        """Return distinct (browser_version, config_hash) pairs with completed collection for this style."""
+        with self._get_connection() as conn:
+            cur = conn.execute(
+                "SELECT DISTINCT browser_version, config_hash FROM source_collections WHERE reference_id = ? AND style_id = ? ORDER BY completed_at DESC",
+                (reference_id, style_id),
+            )
+            return [(str(r[0]), str(r[1])) for r in cur.fetchall() if r[0] and r[1]]
+
+    def get_pair_observation_identities(
+        self, reference_id: str, style_id: str
+    ) -> list[tuple[str, str]]:
+        """Return distinct (browser_version, config_hash) pairs present in pair_observations."""
+        with self._get_connection() as conn:
+            cur = conn.execute(
+                "SELECT DISTINCT browser_version, config_hash FROM pair_observations WHERE reference_id = ? AND style_id = ? AND browser_version != '' AND config_hash != '' ORDER BY created_at DESC",
+                (reference_id, style_id),
+            )
+            return [(str(r[0]), str(r[1])) for r in cur.fetchall() if r[0] and r[1]]

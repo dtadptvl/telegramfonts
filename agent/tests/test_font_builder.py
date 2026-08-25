@@ -131,3 +131,201 @@ async def test_font_builder_fails_closed_without_max_reconstructed_glyphs(tmp_pa
 
     with pytest.raises(ValueError, match="NO_MAX_RECONSTRUCTED_GLYPHS_AVAILABLE_FOR_reg"):
         builder.build_font(style_data, "Test Font", "TTF", tmp_path)
+
+
+def _make_reconstructed_glyph(code_point: int, character: str, advance_width: float = 700.0) -> Any:
+    from reconstruction.models import Contour, LineSegment, Point2D, ReconstructedGlyph
+    contour = Contour(
+        segments=[
+            LineSegment(Point2D(50, 0), Point2D(50, 700)),
+            LineSegment(Point2D(50, 700), Point2D(450, 700)),
+            LineSegment(Point2D(450, 700), Point2D(450, 0)),
+            LineSegment(Point2D(450, 0), Point2D(50, 0)),
+        ]
+    )
+    return ReconstructedGlyph(
+        code_point=code_point,
+        character=character,
+        advance_width_upem=advance_width,
+        lsb_upem=50.0,
+        rsb_upem=50.0,
+        ascent_upem=700.0,
+        descent_upem=0.0,
+        contours=[contour],
+    )
+
+
+def test_font_builder_service_production_entrypoint_identity_and_provenance(tmp_path: Path):
+    """Verify FontBuilderService selects exact requested 4-tuple environment and fails closed on missing/untrusted identity."""
+    from compute.models import StyleSourceData
+    from fontTools.ttLib import TTFont
+    from measurement.store import ObservationStore
+    from typography.models import BOUNDED_FIT_PAIRS
+
+    store_dir = tmp_path / "builder_store"
+    store = ObservationStore(store_dir)
+
+    cfg_a = "a" * 64
+    cfg_b = "b" * 64
+    prov_a = "chromium:Chromium/128.0:canvas_text_metrics"
+    prov_b = "chromium:Chromium/129.0:canvas_text_metrics"
+
+    store.record_source_collection_completed("font_a", "reg", cfg_a, "Chromium/128.0")
+    store.record_source_collection_completed("font_a", "reg", cfg_b, "Chromium/129.0")
+
+    # Env A: all 12 pairs, pair (65, 79) kern = -40
+    for l, r in BOUNDED_FIT_PAIRS:
+        store.save_pair_observation(
+            reference_id="font_a",
+            style_id="reg",
+            left_cp=l,
+            right_cp=r,
+            left_char=chr(l),
+            right_char=chr(r),
+            left_advance_upem=700.0,
+            right_advance_upem=700.0,
+            pair_advance_upem=1360.0 if (l, r) == (65, 79) else 1400.0,
+            inferred_kerning_upem=-40 if (l, r) == (65, 79) else 0,
+            confidence=1.0,
+            provenance=prov_a,
+            browser_version="Chromium/128.0",
+            config_hash=cfg_a,
+        )
+
+    # Env B: all 12 pairs, pair (65, 79) kern = -15
+    for l, r in BOUNDED_FIT_PAIRS:
+        store.save_pair_observation(
+            reference_id="font_a",
+            style_id="reg",
+            left_cp=l,
+            right_cp=r,
+            left_char=chr(l),
+            right_char=chr(r),
+            left_advance_upem=700.0,
+            right_advance_upem=700.0,
+            pair_advance_upem=1385.0 if (l, r) == (65, 79) else 1400.0,
+            inferred_kerning_upem=-15 if (l, r) == (65, 79) else 0,
+            confidence=1.0,
+            provenance=prov_b,
+            browser_version="Chromium/129.0",
+            config_hash=cfg_b,
+        )
+
+    builder = FontBuilderService(observation_store_dir=store_dir)
+    glyphs_dict = {
+        65: _make_reconstructed_glyph(65, "A"),
+        79: _make_reconstructed_glyph(79, "O"),
+    }
+
+    # 1. Build selecting Env A
+    style_a = StyleSourceData(
+        style_id="reg",
+        style_name="Regular",
+        reconstructed_glyphs=glyphs_dict,
+        observation_reference_id="font_a",
+        observation_style_id="reg",
+        observation_browser_version="Chromium/128.0",
+        observation_config_hash=cfg_a,
+    )
+    dir_a = tmp_path / "out_a"
+    res_a = builder.build_font(style_a, "Font A", "TTF", dir_a)
+    tt_a = TTFont(res_a.file_path)
+    assert "GPOS" in tt_a
+    gpos_a = tt_a["GPOS"].table
+    kern_pairs_a = {}
+    for st in gpos_a.LookupList.Lookup[0].SubTable:
+        for pair in st.PairSet:
+            for vr in pair.PairValueRecord:
+                kern_pairs_a[(st.Coverage.glyphs[0], vr.SecondGlyph)] = vr.Value1.XAdvance
+    assert kern_pairs_a.get(("A", "O")) == -40
+
+    # 2. Build selecting Env B
+    style_b = StyleSourceData(
+        style_id="reg",
+        style_name="Regular",
+        reconstructed_glyphs=glyphs_dict,
+        observation_reference_id="font_a",
+        observation_style_id="reg",
+        observation_browser_version="Chromium/129.0",
+        observation_config_hash=cfg_b,
+    )
+    dir_b = tmp_path / "out_b"
+    res_b = builder.build_font(style_b, "Font A", "TTF", dir_b)
+    tt_b = TTFont(res_b.file_path)
+    assert "GPOS" in tt_b
+    gpos_b = tt_b["GPOS"].table
+    kern_pairs_b = {}
+    for st in gpos_b.LookupList.Lookup[0].SubTable:
+        for pair in st.PairSet:
+            for vr in pair.PairValueRecord:
+                kern_pairs_b[(st.Coverage.glyphs[0], vr.SecondGlyph)] = vr.Value1.XAdvance
+    assert kern_pairs_b.get(("A", "O")) == -15
+
+    # 3. Missing identity fails closed with no artifact produced
+    style_missing = StyleSourceData(
+        style_id="reg",
+        style_name="Regular",
+        reconstructed_glyphs=glyphs_dict,
+        observation_reference_id="unknown_font",
+        observation_style_id="reg",
+    )
+    with pytest.raises(ValueError, match="MISSING_OBSERVATION_IDENTITY"):
+        builder.build_font(style_missing, "Font Unknown", "TTF", tmp_path / "out_missing")
+
+    # 4. Untrusted provenance in store fails closed
+    store.save_pair_observation(
+        reference_id="font_bad_prov",
+        style_id="reg",
+        left_cp=65,
+        right_cp=79,
+        left_char="A",
+        right_char="O",
+        left_advance_upem=700.0,
+        right_advance_upem=700.0,
+        pair_advance_upem=1360.0,
+        inferred_kerning_upem=-40,
+        confidence=1.0,
+        provenance="untrusted_source",
+        browser_version="Chromium/128.0",
+        config_hash=cfg_a,
+    )
+    store.record_source_collection_completed("font_bad_prov", "reg", cfg_a, "Chromium/128.0")
+    style_bad_prov = StyleSourceData(
+        style_id="reg",
+        style_name="Regular",
+        reconstructed_glyphs=glyphs_dict,
+        observation_reference_id="font_bad_prov",
+        observation_style_id="reg",
+        observation_browser_version="Chromium/128.0",
+        observation_config_hash=cfg_a,
+    )
+    with pytest.raises(ValueError, match="untrusted or missing Chromium provenance"):
+        builder.build_font(style_bad_prov, "Font Bad", "TTF", tmp_path / "out_bad")
+
+
+def test_candidate_validation_runner_wiring_execution(tmp_path: Path):
+    """Verify candidate_validation_runner executes without NameError or wiring defects."""
+    from candidate_validation_runner import run_candidate_pipeline
+    from measurement.store import ObservationStore
+
+    store_dir = tmp_path / "runner_store"
+    store = ObservationStore(store_dir)
+    out_dir = tmp_path / "candidate_out"
+    json_out = tmp_path / "report.json"
+    truth_file = Path("agent/benchmark_data/ground_truth/BeVietnamPro-Regular.ttf")
+
+    if not truth_file.exists():
+        pytest.skip("Ground truth font not available for runner test")
+
+    res = run_candidate_pipeline(
+        store_dir=store_dir,
+        truth_path=truth_file,
+        output_dir=out_dir,
+        json_out=json_out,
+        reference_id="be_vietnam_pro",
+        style_id="regular",
+    )
+    assert isinstance(res, dict)
+    assert "validation_summary" in res
+    assert "all_formats_passed" in res["validation_summary"]
+    assert json_out.exists()

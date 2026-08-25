@@ -89,15 +89,20 @@ def run_a23_full_style_proof() -> dict:
             print(f"  [{idx + 1}/{len(canonical_coverage)}] glyphs processed (peak RSS: {get_peak_rss_mb():.1f} MB)", flush=True)
 
     # 4. GPOS Kerning Table Inference
-    from measurement.models import ObservationConfig
-    cfg_hash = ObservationConfig().compute_hash()
+    identities = store.get_completed_collection_identities(family_id, style_id)
+    if not identities:
+        identities = store.get_pair_observation_identities(family_id, style_id)
+    if not identities:
+        raise ValueError(f"MISSING_STORE_COLLECTION_IDENTITY: {family_id}/{style_id} has no completed collections")
+
+    browser_ver, cfg_hash = identities[0]
     typography_dataset = inferencer.infer_from_store(
         store,
         reference_id=family_id,
         style_id=style_id,
-        browser_version="chromium",
+        browser_version=browser_ver,
         config_hash=cfg_hash,
-        require_provenance=False,
+        require_provenance=True,
     )
 
     # 5. Font Binary Build (OTF and TTF)

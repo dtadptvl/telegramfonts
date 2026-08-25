@@ -108,15 +108,20 @@ async def run_worker(
     # All glyphs assembled -> build font binaries
     build_dir = job_scratch / "build"
     build_dir.mkdir(parents=True, exist_ok=True)
-    from measurement.models import ObservationConfig
-    cfg_hash = ObservationConfig().compute_hash()
+    identities = store.get_completed_collection_identities("be_vietnam_pro", "regular")
+    if not identities:
+        identities = store.get_pair_observation_identities("be_vietnam_pro", "regular")
+    if not identities:
+        raise ValueError("MISSING_STORE_COLLECTION_IDENTITY: be_vietnam_pro/regular has no completed collections")
+
+    browser_ver, cfg_hash = identities[0]
     typo = inferencer.infer_from_store(
         store,
         reference_id="be_vietnam_pro",
         style_id="regular",
-        browser_version="chromium",
+        browser_version=browser_ver,
         config_hash=cfg_hash,
-        require_provenance=False,
+        require_provenance=True,
     )
     build_result = builder.build_candidate_family(reconstructed_glyphs, build_dir, typography=typo)
 
