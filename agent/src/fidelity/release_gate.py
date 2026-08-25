@@ -506,7 +506,12 @@ class Stage9DReleaseGate:
                 raster_provider=lambda r: snapshot.get_raster_bytes(r.cache_key),
             )
         except Exception as exc:
-            logger.error("Stage 9D consumer evidence/evaluation failed: %s", type(exc).__name__)
+            logger.error(
+                "Stage 9D consumer evidence/evaluation failed: %s: %s",
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
             if temp_dir_obj is not None:
                 temp_dir_obj.cleanup()
             return ReleaseGateResult(
