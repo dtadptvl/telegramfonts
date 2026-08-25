@@ -32,8 +32,12 @@ async def run_worker(
     lease_token: str,
     order_id: str,
     scratch_base: Path,
+    browser_version: str,
+    config_hash: str,
     stop_after_glyph: int | None = None,
 ) -> dict[str, Any]:
+    if not browser_version or not config_hash:
+        raise ValueError("INCOMPLETE_EXACT_IDENTITY: browser_version and config_hash are required")
     settings = Settings()
     w_client = WorkerJobClient(settings)
     store = ObservationStore(str(Path(__file__).parent.parent / "observations" / "benchmark"))
@@ -108,21 +112,18 @@ async def run_worker(
     # All glyphs assembled -> build font binaries
     build_dir = job_scratch / "build"
     build_dir.mkdir(parents=True, exist_ok=True)
-    from measurement.models import ObservationConfig
-    cfg_hash = ObservationConfig().compute_hash()
-    browser_ver = "chromium"
 
-    if not store.is_source_collection_completed("be_vietnam_pro", "regular", cfg_hash, browser_ver):
+    if not store.is_source_collection_completed("be_vietnam_pro", "regular", config_hash, browser_version):
         raise ValueError(
-            f"UNCOMPLETED_STORE_COLLECTION: be_vietnam_pro:regular:{browser_ver}:{cfg_hash} is not completed in store"
+            f"UNCOMPLETED_STORE_COLLECTION: be_vietnam_pro:regular:{browser_version}:{config_hash} is not completed in store"
         )
 
     typo = inferencer.infer_from_store(
         store,
         reference_id="be_vietnam_pro",
         style_id="regular",
-        browser_version=browser_ver,
-        config_hash=cfg_hash,
+        browser_version=browser_version,
+        config_hash=config_hash,
         require_provenance=True,
     )
     build_result = builder.build_candidate_family(reconstructed_glyphs, build_dir, typography=typo)
@@ -179,6 +180,8 @@ if __name__ == "__main__":
     parser.add_argument("--job-id", required=True)
     parser.add_argument("--lease-token", required=True)
     parser.add_argument("--order-id", required=True)
+    parser.add_argument("--browser-version", required=True)
+    parser.add_argument("--config-hash", required=True)
     parser.add_argument("--scratch-dir", default="scratch/a23_max_jobs")
     parser.add_argument("--stop-after-glyph", type=int, default=None)
     args = parser.parse_args()
@@ -188,5 +191,7 @@ if __name__ == "__main__":
         lease_token=args.lease_token,
         order_id=args.order_id,
         scratch_base=Path(args.scratch_dir),
+        browser_version=args.browser_version,
+        config_hash=args.config_hash,
         stop_after_glyph=args.stop_after_glyph,
     ))

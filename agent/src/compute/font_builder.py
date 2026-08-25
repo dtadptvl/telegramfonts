@@ -54,17 +54,18 @@ class FontBuilderService:
         glyph_models: dict[int, ReconstructedGlyph] = dict(style_source.reconstructed_glyphs)
 
         typography = None
-        if self.store is not None and style_source.observation_reference_id:
+        if self.store is not None:
+            if not style_source.observation_reference_id or not style_source.observation_browser_version or not style_source.observation_config_hash:
+                raise ValueError(
+                    f"INCOMPLETE_OBSERVATION_IDENTITY_FOR_{style_source.style_id}: "
+                    "when observation store is attached, style_source must provide explicit non-empty "
+                    "observation_reference_id, observation_browser_version, and observation_config_hash"
+                )
+
             family_key = style_source.observation_reference_id
             style_key = style_source.observation_style_id or style_source.style_id
             browser_ver = style_source.observation_browser_version
             cfg_h = style_source.observation_config_hash
-
-            if not browser_ver or not cfg_h:
-                raise ValueError(
-                    f"INCOMPLETE_OBSERVATION_IDENTITY_FOR_{style_source.style_id}: "
-                    "both observation_browser_version and observation_config_hash must be explicitly provided"
-                )
 
             if not self.store.is_source_collection_completed(family_key, style_key, cfg_h, browser_ver):
                 raise ValueError(

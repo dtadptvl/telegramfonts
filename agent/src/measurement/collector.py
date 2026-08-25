@@ -207,14 +207,6 @@ class ObservationCollector:
             if progress_cb:
                 progress_cb(idx, total_glyphs)
 
-        # Mark source collection completed and verified in store
-        self.store.record_source_collection_completed(
-            reference_id=reference_id,
-            style_id=style_id,
-            config_hash=config_hash,
-            browser_version=self.session.browser_version,
-        )
-
         elapsed = time.perf_counter() - start_time
         logger.info(
             f"Collected {total_glyphs} glyphs ({total_rasters} total observation rasters) in {elapsed:.2f}s"
@@ -324,3 +316,38 @@ class ObservationCollector:
             )
             captured += 1
         return captured
+
+    def finalize_source_collection(
+        self,
+        reference_id: str,
+        style_id: str,
+        source_url: str = "direct_browser",
+        require_fit_pairs: bool = True,
+    ) -> None:
+        """Mark source collection as fully finalized only after all glyph, pair, feature, and coverage checks pass."""
+        coverage = self.store.get_coverage(reference_id, style_id)
+        if not coverage:
+            raise ValueError(f"FINALIZATION_FAILED: no glyph coverage found for {reference_id}:{style_id}")
+
+        if require_fit_pairs:
+            from typography.models import BOUNDED_FIT_PAIRS
+            stored_pairs = self.store.get_pair_observations(
+                reference_id=reference_id,
+                style_id=style_id,
+                browser_version=self.session.browser_version,
+                config_hash=self.config.compute_hash(),
+            )
+            stored_pair_set = {(p["left_cp"], p["right_cp"]) for p in stored_pairs}
+            missing_pairs = set(BOUNDED_FIT_PAIRS) - stored_pair_set
+            if missing_pairs:
+                raise ValueError(
+                    f"FINALIZATION_FAILED: missing {len(missing_pairs)} bounded fit pairs for {reference_id}:{style_id}: {missing_pairs}"
+                )
+
+        self.store.record_source_collection_completed(
+            reference_id=reference_id,
+            style_id=style_id,
+            config_hash=self.config.compute_hash(),
+            browser_version=self.session.browser_version,
+            source_url=source_url,
+        )

@@ -211,6 +211,12 @@ async def test_production_acquire_source_known_store_hit_zero_http_calls(tmp_pat
             client=http_client,
             observation_store_dir=fixture_store,
         )
+        acquirer.store.record_source_collection_completed(
+            reference_id="be_vietnam_pro",
+            style_id="regular",
+            config_hash=acquirer.observation_config.compute_hash(),
+            browser_version="chromium",
+        )
         styles = [ClaimStyle(id="regular", display_name="Regular")]
         payload = await acquirer.acquire_source(
             "https://www.myfonts.com/collections/be-vietnam-pro",

@@ -442,3 +442,154 @@ def test_candidate_validation_runner_wiring_execution(tmp_path: Path):
             browser_version="other_browser",
             config_hash=cfg_h,
         )
+
+
+@pytest.mark.asyncio
+async def test_observation_collector_and_source_acquirer_exact_lifecycle_and_cache_reuse(tmp_path: Path):
+    """Reproduce real flow: glyph-only marker rejects, full finalization accepts, actual browser version survives to builder, cache reuse returns exact tuple."""
+    from compute.source import SourceAcquirer
+    from measurement.collector import ObservationCollector
+    from compute.models import ClaimStyle
+    from measurement.models import ObservationConfig
+    from measurement.store import ObservationStore
+    from typography.models import BOUNDED_FIT_PAIRS
+
+    store_dir = tmp_path / "lifecycle_store"
+    store = ObservationStore(store_dir)
+    config = ObservationConfig()
+    cfg_h = config.compute_hash()
+    real_browser_ver = "Chromium/130.0.6723.58"
+
+    class FakeSession:
+        def __init__(self, ver: str):
+            self.browser_version = ver
+        async def start(self):
+            pass
+        async def aclose(self):
+            pass
+        def close(self):
+            pass
+        async def observe_source_font(self, url, display_name, family):
+            return "TestFamily"
+        async def render_glyph_sample(self, font_family, code_point, font_size_px, render_subpixel_x=0.0, render_subpixel_y=0.0):
+            import numpy as np
+            return np.ones((64, 64), dtype=np.uint8) * 255
+        async def capture_lossless_raster(self, font_family, code_point, resolution_px, subpixel_offset=(0.0, 0.0)):
+            from PIL import Image
+            import io
+            img = Image.new("L", (resolution_px, resolution_px), color=255)
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            return buf.getvalue()
+        async def is_glyph_supported_in_font(self, font_family, code_point):
+            return code_point in (65, 66, 79)
+        async def measure_glyph_direct(self, font_family, code_point, font_size_px, upem):
+            from measurement.models import DirectMetrics
+            scale = font_size_px / upem
+            return DirectMetrics.from_browser_measurements(
+                code_point=code_point,
+                char=chr(code_point),
+                font_size_px=font_size_px,
+                m={
+                    "width": 600.0 * scale,
+                    "actualBoundingBoxLeft": 50.0 * scale,
+                    "actualBoundingBoxRight": 550.0 * scale,
+                    "actualBoundingBoxAscent": 700.0 * scale,
+                    "actualBoundingBoxDescent": 0.0,
+                    "fontBoundingBoxAscent": 800.0 * scale,
+                    "fontBoundingBoxDescent": -200.0 * scale,
+                },
+                upem=upem,
+            )
+        async def measure_text_advance(self, font_family, text, font_size_px, upem):
+            return 1200.0
+        async def probe_opentype_feature(self, font_family, feature_tag, sample_text, font_size_px, upem):
+            return {
+                "enabled_advance_upem": 1200.0,
+                "disabled_advance_upem": 1200.0,
+                "enabled_raster_signature": "a",
+                "disabled_raster_signature": "a",
+            }
+
+    session = FakeSession(real_browser_ver)
+    collector = ObservationCollector(session, store, config)
+
+    # Step 1: Collect ONLY glyphs
+    await collector.collect_font_observations("test_family", "regular", "TestFamily", code_points=[65, 66, 79])
+
+    # 1. Glyph-only marker rejects: store is NOT completed!
+    assert not store.is_source_collection_completed("test_family", "regular", cfg_h, real_browser_ver)
+
+    # Step 2: Collect pairs & features
+    await collector.collect_pair_observations("test_family", "regular", "TestFamily")
+    await collector.collect_feature_observations("test_family", "regular", "TestFamily")
+
+    # Before finalize_source_collection, it is still not marked completed
+    assert not store.is_source_collection_completed("test_family", "regular", cfg_h, real_browser_ver)
+
+    # Step 3: Finalize collection -> accepts!
+    collector.finalize_source_collection("test_family", "regular", source_url="https://www.myfonts.com/collections/test-family")
+    assert store.is_source_collection_completed("test_family", "regular", cfg_h, real_browser_ver)
+
+    # Step 4: SourceAcquirer on fresh collection propagates real_browser_ver
+    acquirer = SourceAcquirer(
+        browser_session_factory=lambda: FakeSession(real_browser_ver),
+        observation_store_dir=store_dir,
+        observation_config=config,
+    )
+    payload_new = await acquirer.acquire_source(
+        source_url="https://www.myfonts.com/collections/test-family-new",
+        styles=[ClaimStyle(id="regular", display_name="Regular")],
+    )
+    style_new = payload_new.styles["regular"]
+    assert style_new.observation_browser_version == real_browser_ver
+    assert style_new.observation_config_hash == cfg_h
+
+    # Step 5: SourceAcquirer on CACHE REUSE returns the exact same tuple
+    payload_cached = await acquirer.acquire_source(
+        source_url="https://www.myfonts.com/collections/test-family-new",
+        styles=[ClaimStyle(id="regular", display_name="Regular")],
+    )
+    style_cached = payload_cached.styles["regular"]
+    assert style_cached.observation_browser_version == real_browser_ver
+    assert style_cached.observation_config_hash == cfg_h
+
+    # Step 6: Builder accepts StyleSourceData with exact tuple
+    builder = FontBuilderService(observation_store_dir=store_dir)
+    out_dir = tmp_path / "build_lifecycle_out"
+    res = builder.build_font(style_cached, "Test Family New", "TTF", out_dir)
+    assert res.file_path.exists()
+
+
+def test_cli_and_script_entrypoints_reject_missing_exact_tuple(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """Verify CLI entrypoints and scripts reject omitted exact 4-tuple before any artifact creation."""
+    import subprocess
+    import sys
+
+    # 1. candidate_validation_runner CLI requires --reference-id, --style-id, --browser-version, --config-hash
+    p1 = subprocess.run(
+        [sys.executable, "-m", "candidate_validation_runner"],
+        cwd="agent/src",
+        capture_output=True,
+        text=True,
+    )
+    assert p1.returncode != 0
+    assert "required" in p1.stderr.lower() or "error" in p1.stderr.lower()
+
+    # 2. real_a23_max_worker requires --browser-version and --config-hash
+    p2 = subprocess.run(
+        [sys.executable, "scripts/real_a23_max_worker.py", "--job-id", "j1", "--lease-token", "l1", "--order-id", "o1"],
+        capture_output=True,
+        text=True,
+    )
+    assert p2.returncode != 0
+    assert "required" in p2.stderr.lower() or "error" in p2.stderr.lower()
+
+    # 3. run_physical_a23_proof requires --browser-version and --config-hash
+    p3 = subprocess.run(
+        [sys.executable, "scripts/run_physical_a23_proof.py"],
+        capture_output=True,
+        text=True,
+    )
+    assert p3.returncode != 0
+    assert "required" in p3.stderr.lower() or "error" in p3.stderr.lower()

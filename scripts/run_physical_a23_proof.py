@@ -23,7 +23,13 @@ from reconstruction_benchmark import REPRESENTATIVE_CODE_POINTS
 from typography.kerning_inferencer import EvidenceKerningInferencer
 
 
-def run_a23_full_style_proof() -> dict:
+def run_a23_full_style_proof(
+    browser_version: str,
+    config_hash: str,
+) -> dict:
+    if not browser_version or not config_hash:
+        raise ValueError("INCOMPLETE_EXACT_IDENTITY: browser_version and config_hash are required")
+
     start_wall_time = time.perf_counter()
     start_rss = get_peak_rss_mb()
 
@@ -89,21 +95,17 @@ def run_a23_full_style_proof() -> dict:
             print(f"  [{idx + 1}/{len(canonical_coverage)}] glyphs processed (peak RSS: {get_peak_rss_mb():.1f} MB)", flush=True)
 
     # 4. GPOS Kerning Table Inference
-    from measurement.models import ObservationConfig
-    cfg_hash = ObservationConfig().compute_hash()
-    browser_ver = "chromium"
-
-    if not store.is_source_collection_completed(family_id, style_id, cfg_hash, browser_ver):
+    if not store.is_source_collection_completed(family_id, style_id, config_hash, browser_version):
         raise ValueError(
-            f"UNCOMPLETED_STORE_COLLECTION: {family_id}:{style_id}:{browser_ver}:{cfg_hash} is not completed in store"
+            f"UNCOMPLETED_STORE_COLLECTION: {family_id}:{style_id}:{browser_version}:{config_hash} is not completed in store"
         )
 
     typography_dataset = inferencer.infer_from_store(
         store,
         reference_id=family_id,
         style_id=style_id,
-        browser_version=browser_ver,
-        config_hash=cfg_hash,
+        browser_version=browser_version,
+        config_hash=config_hash,
         require_provenance=True,
     )
 
@@ -192,8 +194,14 @@ def run_a23_full_style_proof() -> dict:
 
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Run Physical A23 Full-Style Proof")
+    parser.add_argument("--browser-version", required=True, help="Exact observed browser version")
+    parser.add_argument("--config-hash", required=True, help="Exact observation config hash")
+    args = parser.parse_args()
+
     print("=== Running MAX Physical A23 Full-Style Proof ===")
-    rep = run_a23_full_style_proof()
+    rep = run_a23_full_style_proof(browser_version=args.browser_version, config_hash=args.config_hash)
     out_file = Path("ops/max_physical_a23_proof_report.json")
     out_file.parent.mkdir(parents=True, exist_ok=True)
     with open(out_file, "w", encoding="utf-8") as f:

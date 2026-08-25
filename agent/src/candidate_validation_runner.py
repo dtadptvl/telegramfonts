@@ -230,10 +230,10 @@ def main() -> int:
     parser.add_argument("--truth-path", default="agent/benchmark_data/ground_truth/BeVietnamPro-Regular.ttf")
     parser.add_argument("--output-dir", default="build/candidate_fonts")
     parser.add_argument("--json-out", default="ops/max_candidate_validation_report.json")
-    parser.add_argument("--reference-id", default="be_vietnam_pro")
-    parser.add_argument("--style-id", default="regular")
-    parser.add_argument("--browser-version", default="chromium")
-    parser.add_argument("--config-hash", default=ObservationConfig().compute_hash())
+    parser.add_argument("--reference-id", required=True, help="Exact reference family ID (e.g. be_vietnam_pro)")
+    parser.add_argument("--style-id", required=True, help="Exact style ID (e.g. regular)")
+    parser.add_argument("--browser-version", required=True, help="Exact observed browser version")
+    parser.add_argument("--config-hash", required=True, help="Exact observation config hash")
     args = parser.parse_args()
 
     run_candidate_pipeline(

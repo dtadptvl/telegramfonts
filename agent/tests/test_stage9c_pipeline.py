@@ -332,6 +332,17 @@ async def test_e2e_real_collector_to_store_to_snapshot_pipeline_execution() -> N
         )
         assert pairs_count == 2
 
+        # Before finalization, collection marker is not complete
+        assert store.is_source_collection_completed(
+            reference_id="real_font",
+            style_id="regular",
+            config_hash=config.compute_hash(),
+            browser_version=session.browser_version,
+        ) is False
+
+        # Finalize collection
+        collector.finalize_source_collection("real_font", "regular", require_fit_pairs=False)
+
         # Verify completed source collection marker was written
         assert store.is_source_collection_completed(
             reference_id="real_font",

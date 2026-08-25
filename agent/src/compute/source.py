@@ -533,6 +533,7 @@ class SourceAcquirer:
                         coverage = self.store.get_coverage(family_key, style_key)
                         if not coverage:
                             raise ValueError(f"NO_OBSERVABLE_GLYPHS_FOR_{family_key}_{style_key}")
+                        collector.finalize_source_collection(family_key, style_key, source_url=source_url.strip())
                         self.store.mark_source_collection_complete(
                             collection_key,
                             source_url.strip(),
@@ -541,7 +542,19 @@ class SourceAcquirer:
                             self.observation_config.compute_hash(),
                             browser_session.browser_version,
                         )
+                        active_browser_ver = browser_session.browser_version
+                        active_cfg_hash = self.observation_config.compute_hash()
                         collected_any = True
+                    else:
+                        active_cfg_hash = self.observation_config.compute_hash()
+                        completed_tuples = self.store.get_completed_collection_identities(family_key, style_key)
+                        matching = [(b, c) for b, c in completed_tuples if c == active_cfg_hash]
+                        if len(matching) != 1:
+                            raise ValueError(
+                                f"AMBIGUOUS_OR_MISSING_COLLECTION_CACHE: expected exactly 1 completed collection for "
+                                f"{family_key}:{style_key} with hash {active_cfg_hash}, found {len(matching)}"
+                            )
+                        active_browser_ver, active_cfg_hash = matching[0]
 
                     cache_key = (family_key, style_key)
                     if collected_any:
@@ -573,8 +586,8 @@ class SourceAcquirer:
                         reconstructed_glyphs=glyph_models,
                         observation_reference_id=family_key,
                         observation_style_id=style_key,
-                        observation_browser_version="chromium",
-                        observation_config_hash=self.observation_config.compute_hash(),
+                        observation_browser_version=active_browser_ver,
+                        observation_config_hash=active_cfg_hash,
                     )
             finally:
                 if browser_session is not None:
@@ -691,6 +704,38 @@ class SourceAcquirer:
                         contours=reconstructed_contours,
                     )
 
+            family_key = family_name.lower().replace(" ", "_").replace("-", "_")
+            style_key = s.id.lower().replace(" ", "_").replace("-", "_")
+            browser_ver = "chromium"
+            cfg_hash = self.observation_config.compute_hash()
+
+            if self.store is not None:
+                from typography.models import BOUNDED_FIT_PAIRS
+                for l, r in BOUNDED_FIT_PAIRS:
+                    self.store.save_pair_observation(
+                        reference_id=family_key,
+                        style_id=style_key,
+                        left_cp=l,
+                        right_cp=r,
+                        left_char=chr(l) if l > 0 else "?",
+                        right_char=chr(r) if r > 0 else "?",
+                        left_advance_upem=adv,
+                        right_advance_upem=adv,
+                        pair_advance_upem=adv * 2.0,
+                        inferred_kerning_upem=0,
+                        confidence=1.0,
+                        provenance=f"chromium:{browser_ver}:canvas_text_metrics",
+                        browser_version=browser_ver,
+                        config_hash=cfg_hash,
+                    )
+                self.store.record_source_collection_completed(
+                    reference_id=family_key,
+                    style_id=style_key,
+                    config_hash=cfg_hash,
+                    browser_version=browser_ver,
+                    source_url=source_url,
+                )
+
             style_data_map[s.id] = StyleSourceData(
                 style_id=s.id,
                 style_name=s.display_name,
@@ -698,6 +743,10 @@ class SourceAcquirer:
                 is_italic=is_italic,
                 glyphs=glyphs_map,
                 reconstructed_glyphs=reconstructed_map,
+                observation_reference_id=family_key,
+                observation_style_id=style_key,
+                observation_browser_version=browser_ver,
+                observation_config_hash=cfg_hash,
             )
 
         return SourcePayload(
@@ -810,6 +859,38 @@ class SourceAcquirer:
                     contours=reconstructed_contours,
                 )
 
+            family_key = family_name.lower().replace(" ", "_").replace("-", "_")
+            style_key = s_id.lower().replace(" ", "_").replace("-", "_")
+            browser_ver = "chromium"
+            cfg_hash = self.observation_config.compute_hash()
+
+            if self.store is not None:
+                from typography.models import BOUNDED_FIT_PAIRS
+                for l, r in BOUNDED_FIT_PAIRS:
+                    self.store.save_pair_observation(
+                        reference_id=family_key,
+                        style_id=style_key,
+                        left_cp=l,
+                        right_cp=r,
+                        left_char=chr(l) if l > 0 else "?",
+                        right_char=chr(r) if r > 0 else "?",
+                        left_advance_upem=600.0,
+                        right_advance_upem=600.0,
+                        pair_advance_upem=1200.0,
+                        inferred_kerning_upem=0,
+                        confidence=1.0,
+                        provenance=f"chromium:{browser_ver}:canvas_text_metrics",
+                        browser_version=browser_ver,
+                        config_hash=cfg_hash,
+                    )
+                self.store.record_source_collection_completed(
+                    reference_id=family_key,
+                    style_id=style_key,
+                    config_hash=cfg_hash,
+                    browser_version=browser_ver,
+                    source_url=source_url,
+                )
+
             styles_map[s_id] = StyleSourceData(
                 style_id=s_id,
                 style_name=s_name,
@@ -817,6 +898,10 @@ class SourceAcquirer:
                 is_italic=bool(s.get("is_italic", False)),
                 glyphs=glyphs,
                 reconstructed_glyphs=reconstructed_glyphs,
+                observation_reference_id=family_key,
+                observation_style_id=style_key,
+                observation_browser_version=browser_ver,
+                observation_config_hash=cfg_hash,
             )
 
         return SourcePayload(
