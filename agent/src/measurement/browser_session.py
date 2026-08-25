@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -82,7 +83,12 @@ class ChromiumSession:
             return
 
         self.user_data_dir = tempfile.TemporaryDirectory(prefix="telefont_chrome_")
-        target_port = self.port if self.port > 0 else 9222
+        if self.port > 0:
+            target_port = self.port
+        else:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(("", 0))
+                target_port = int(s.getsockname()[1])
 
         cmd = [
             self.executable_path,
@@ -112,7 +118,7 @@ class ChromiumSession:
         http_url = f"http://127.0.0.1:{target_port}"
         page_ws_url: str | None = None
 
-        for _ in range(30):
+        for _ in range(50):
             try:
                 req = urllib.request.Request(f"{http_url}/json/version")
                 with urllib.request.urlopen(req, timeout=1.0) as resp:
