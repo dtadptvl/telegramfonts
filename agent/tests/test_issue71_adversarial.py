@@ -291,7 +291,7 @@ class _SessionTransport:
         self.payload = payload
         self.calls = 0
 
-    async def fetch_binary(self, url, session_material):
+    async def discover(self, envelope, source_url, session_material):
         self.calls += 1
         assert session_material  # opaque material consumed, never inspected here
         return self.payload
@@ -340,7 +340,10 @@ def test_FALLBACK_ORDER_deterministic_trace_and_no_premature_fallback():
             session_provider=PersistentSessionBinaryProvider(_SessionMaterial(None), _SessionTransport(None)),
             raster_provider=MonotypeRasterProvider(_RasterClient([])),
         )
-        outcome2 = await pipeline2.acquire("https://www.myfonts.com/collections/x", "X", "Regular")
+        outcome2 = await pipeline2.acquire(
+            "https://www.myfonts.com/collections/x", "X", "Regular",
+            raster_request={"family": "X", "style": "Regular", "md5": "ab" * 16},
+        )
         assert outcome2.kind == "insufficient"
         assert outcome2.terminal_reason_code == "ACQUISITION_INSUFFICIENT"
         assert outcome2.trace.stage_order() == (
@@ -356,10 +359,15 @@ def test_FALLBACK_ORDER_deterministic_trace_and_no_premature_fallback():
 
 def test_BINARY_TAMPER_integrity_failure_is_terminal_not_fallback():
     async def run():
+        # A font container with mismatched family identity: integrity failure
+        # is terminal and never falls through to later stages. (Non-font
+        # payloads such as HTML are magic-filtered earlier and cannot reach
+        # verification at all; see SESSION_HTML_NOT_FONT.)
+        wrong_family_ttf = _build_real_ttf("Other Family", "Regular")
         session_transport = _SessionTransport(_build_real_ttf())
         pipeline = AcquisitionPipeline(
             dump_dom_transport=_DumpDom(
-                '<a href="data:font/ttf;base64,' + base64.b64encode(b"garbage-not-a-font").decode() + '">x</a>'
+                '<a href="data:font/ttf;base64,' + base64.b64encode(wrong_family_ttf).decode() + '">x</a>'
             ),
             session_provider=PersistentSessionBinaryProvider(_SessionMaterial({"opaque": True}), session_transport),
             raster_provider=MonotypeRasterProvider(_RasterClient([4])),
@@ -378,16 +386,22 @@ def test_BINARY_TAMPER_integrity_failure_is_terminal_not_fallback():
 
 def test_SPRITE_TERMINATION_bounded_page_budget():
     async def run():
+        target = {"family": "Sprite Fam", "style": "Regular", "md5": "ab" * 16}
         policy = BinaryAcquisitionPolicy(max_sprite_pages=3)
         client = _RasterClient(pages=[2, 2, 2, 2, 2], final_at=None)  # never final
         provider = MonotypeRasterProvider(client)
-        pages = await provider.fetch_sprite_pages({}, policy)
+        pages = await provider.fetch_sprite_pages(target, policy)
         assert len(pages) == 3  # bounded termination, no infinite crawl
         assert client.calls == 3
 
         client2 = _RasterClient(pages=[2, 2, 2], final_at=1)
-        pages2 = await MonotypeRasterProvider(client2).fetch_sprite_pages({}, BinaryAcquisitionPolicy(max_sprite_pages=8))
+        pages2 = await MonotypeRasterProvider(client2).fetch_sprite_pages(target, BinaryAcquisitionPolicy(max_sprite_pages=8))
         assert len(pages2) == 2  # stops at the final marker
+
+        # Missing target fails closed without any request.
+        client3 = _RasterClient(pages=[2], final_at=0)
+        pages3 = await MonotypeRasterProvider(client3).fetch_sprite_pages({}, policy)
+        assert pages3 == () and client3.calls == 0
 
     import asyncio
 

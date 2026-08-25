@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 from acquisition.models import (
     AcquisitionOutcome,
     AcquiredBinary,
+    BINARY_PROVENANCE_PROBE_ORDER,
     BINARY_STAGE_AUTHORIZED_SESSION,
     BINARY_STAGE_DUMP_DOM,
 )
@@ -856,35 +857,44 @@ class JobRunner:
                             self._trace_record(f"PREACQ_{style.id}", "SKIP_BROWSER", l2=l2_candidate)
                             continue
                         # L3 durable authorized-binary cache probe before any
-                        # provider/network call.
-                        l3_identity = BinaryCacheIdentity(
-                            reference_fingerprint=hashlib.sha256(
-                                canonical_source_identity(job.source_url).encode("utf-8")
-                            ).hexdigest(),
-                            family_name=family_name,
-                            style_id=style.id,
-                            provenance="authorized_binary",
-                        )
+                        # provider/network call. Identity binds the actual
+                        # acquisition stage provenance; the compatible-reuse
+                        # rule probes the deterministic provenance order.
+                        l3_ref_fp = hashlib.sha256(
+                            canonical_source_identity(job.source_url).encode("utf-8")
+                        ).hexdigest()
+                        l3_hit = None
                         if self.binary_cache is not None:
-                            cached_raw, cached_fmt, cached_prov, cache_status = self.binary_cache.get(
-                                l3_identity
-                            )
-                            if cache_status == "CORRUPT":
-                                raise ValueError(
-                                    "ACQUISITION_BINARY_INTEGRITY_FAILED:L3_CACHE_CORRUPT"
-                                )
-                            if cache_status == "HIT" and cached_raw is not None:
-                                reuse_state["binaries"][style.id] = AcquiredBinary(
-                                    raw_bytes=cached_raw,
-                                    format=cached_fmt,
+                            for prov in BINARY_PROVENANCE_PROBE_ORDER:
+                                l3_identity = BinaryCacheIdentity(
+                                    reference_fingerprint=l3_ref_fp,
                                     family_name=family_name,
-                                    style_name=style.display_name,
-                                    provenance=cached_prov or BINARY_STAGE_DUMP_DOM,
+                                    style_id=style.id,
+                                    provenance=prov,
                                 )
-                                self._trace_record(
-                                    f"PREACQ_{style.id}", "L3_CACHE_HIT", provenance=cached_prov
+                                cached_raw, cached_fmt, cached_prov, cache_status = self.binary_cache.get(
+                                    l3_identity
                                 )
-                                continue
+                                if cache_status == "CORRUPT":
+                                    raise ValueError(
+                                        "ACQUISITION_BINARY_INTEGRITY_FAILED:L3_CACHE_CORRUPT"
+                                    )
+                                if cache_status == "HIT" and cached_raw is not None:
+                                    l3_hit = (cached_raw, cached_fmt, cached_prov or prov)
+                                    break
+                        if l3_hit is not None:
+                            cached_raw, cached_fmt, cached_prov = l3_hit
+                            reuse_state["binaries"][style.id] = AcquiredBinary(
+                                raw_bytes=cached_raw,
+                                format=cached_fmt,
+                                family_name=family_name,
+                                style_name=style.display_name,
+                                provenance=cached_prov,
+                            )
+                            self._trace_record(
+                                f"PREACQ_{style.id}", "L3_CACHE_HIT", provenance=cached_prov
+                            )
+                            continue
                         if self.acquisition_pipeline is not None:
                             outcome = await self.acquisition_pipeline.acquire(
                                 job.source_url, family_name, style.display_name
@@ -895,7 +905,12 @@ class JobRunner:
                             if outcome.kind == "binary" and outcome.binary is not None:
                                 if self.binary_cache is not None:
                                     self.binary_cache.put(
-                                        l3_identity,
+                                        BinaryCacheIdentity(
+                                            reference_fingerprint=l3_ref_fp,
+                                            family_name=family_name,
+                                            style_id=style.id,
+                                            provenance=outcome.binary.provenance,
+                                        ),
                                         outcome.binary.raw_bytes,
                                         outcome.binary.format,
                                         stage_provenance=outcome.binary.provenance,

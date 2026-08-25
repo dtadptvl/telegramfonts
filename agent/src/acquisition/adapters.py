@@ -16,17 +16,19 @@ from typing import Any
 
 import httpx
 
-from acquisition.models import BinaryAcquisitionPolicy, SpriteRasterPage
+from acquisition.models import BinaryAcquisitionPolicy, DiscoveryEnvelope, SpriteRasterPage
 from acquisition.pipeline import AcquisitionPipeline
 from acquisition.providers import (
     MonotypeRasterProvider,
     PersistentSessionBinaryProvider,
+    classify_font_container,
+    looks_like_font_bytes,
 )
 from measurement.browser_session import find_chromium_executable
 
 logger = logging.getLogger("telegramfonts.agent.acquisition.adapters")
 
-_FONT_URL_SUFFIXES = (".ttf", ".otf")
+_FONT_URL_SUFFIXES = (".ttf", ".otf", ".woff", ".woff2")
 
 
 class HeadlessDumpDomTransport:
@@ -116,13 +118,27 @@ class AuthorizedSessionMaterialStore:
 
 
 class AuthorizedSessionHttpTransport:
-    """Fallback capability: authorized persistent session binary retrieval."""
+    """Fallback capability: authorized persistent Chrome/session discovery.
+
+    Fetches authorized binary candidates discovered in the typed envelope using
+    opaque session material. Collection-page HTML is never fetched as a font
+    candidate; responses are magic-classified and container-converted before
+    being returned.
+    """
 
     def __init__(self, timeout_seconds: float = 30.0, max_bytes: int = 10 * 1024 * 1024) -> None:
         self.timeout_seconds = timeout_seconds
         self.max_bytes = max_bytes
 
-    async def fetch_binary(self, url: str, session_material: dict[str, Any]) -> bytes | None:
+    async def discover(
+        self,
+        envelope: DiscoveryEnvelope,
+        source_url: str,
+        session_material: dict[str, Any],
+    ) -> bytes | None:
+        candidates = [c for c in envelope.binary_candidates if not c.embedded]
+        if not candidates:
+            return None
         headers = {}
         cookies = {}
         raw_headers = session_material.get("headers")
@@ -135,19 +151,38 @@ class AuthorizedSessionHttpTransport:
             async with httpx.AsyncClient(
                 timeout=self.timeout_seconds, follow_redirects=True, cookies=cookies or None
             ) as client:
-                resp = await client.get(url, headers=headers or None)
-                if resp.status_code != 200:
-                    return None
-                raw = resp.content
-                if not raw or len(raw) > self.max_bytes:
-                    return None
-                return raw
+                for candidate in candidates:
+                    if not candidate.url.startswith("https://"):
+                        continue
+                    resp = await client.get(candidate.url, headers=headers or None)
+                    if resp.status_code != 200:
+                        continue
+                    raw = resp.content
+                    if not raw or len(raw) > self.max_bytes:
+                        continue
+                    if not looks_like_font_bytes(raw):
+                        # HTML or unknown payloads are never font candidates.
+                        continue
+                    container = classify_font_container(raw)
+                    if container in ("TTF", "OTF"):
+                        return raw
+                    if container in ("WOFF", "WOFF2"):
+                        from compute.binary_gate import convert_container_to_sfnt
+
+                        converted = convert_container_to_sfnt(raw)
+                        if converted and len(converted) <= self.max_bytes:
+                            return converted
+                return None
         except Exception:
             return None
 
 
 class MonotypeRasterHttpClient:
-    """Authorized Monotype raster endpoint client (closed JSON schema)."""
+    """Authorized Monotype raster endpoint client (MD5/style-bound closed schema).
+
+    Every page request carries the exact family/style/MD5 target; responses
+    must echo the same target identity or they are rejected fail-closed.
+    """
 
     def __init__(self, endpoint_url: str, token: str, timeout_seconds: float = 60.0) -> None:
         if not endpoint_url or not token:
@@ -157,17 +192,34 @@ class MonotypeRasterHttpClient:
         self.timeout_seconds = timeout_seconds
 
     async def fetch_sprite_page(self, request: dict[str, Any], cursor: str) -> SpriteRasterPage | None:
+        family = str(request.get("family", "")).strip()
+        style = str(request.get("style", "")).strip()
+        md5 = str(request.get("md5", "")).strip().lower()
+        if not family or not style or not md5 or len(md5) != 32:
+            return None
         try:
             async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
                 resp = await client.post(
                     self.endpoint_url,
                     headers={"Authorization": f"Bearer {self._token}"},
-                    json={"request": request, "cursor": cursor},
+                    json={
+                        "family": family,
+                        "style": style,
+                        "md5": md5,
+                        "cursor": cursor,
+                    },
                 )
                 if resp.status_code != 200:
                     return None
                 data = resp.json()
                 if not isinstance(data, dict):
+                    return None
+                # Cross-style/wrong-target responses fail closed.
+                if str(data.get("family", family)).strip() != family:
+                    return None
+                if str(data.get("style", style)).strip() != style:
+                    return None
+                if str(data.get("md5", md5)).strip().lower() != md5:
                     return None
                 payload = data.get("payload")
                 if not isinstance(payload, dict):

@@ -62,6 +62,30 @@ class BinaryGateReport:
         return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
+def convert_container_to_sfnt(raw_bytes: bytes) -> bytes | None:
+    """Convert an authorized WOFF/WOFF2 container to its raw sfnt payload.
+
+    Deterministic container decompression only (no reconstruction). Returns
+    None when the container is malformed or unsupported. The published output
+    of the pipeline remains strictly TTF/OTF.
+    """
+    try:
+        from fontTools.ttLib import TTFont
+
+        font = TTFont(io.BytesIO(raw_bytes), fontNumber=0, lazy=False)
+        flavor = getattr(font, "flavor", None)
+        if flavor not in ("woff", "woff2"):
+            font.close()
+            return None
+        font.flavor = None
+        buf = io.BytesIO()
+        font.save(buf)
+        font.close()
+        return buf.getvalue()
+    except Exception:
+        return None
+
+
 def extract_glyphs_from_binary(raw_bytes: bytes) -> tuple[dict[int, ReconstructedGlyph], dict[str, Any]]:
     """Extract outline geometry + metrics from a valid sfnt binary (no reconstruction)."""
     from fontTools.ttLib import TTFont

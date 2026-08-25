@@ -164,6 +164,61 @@ class VietnameseExtensionService:
         self.config_hash = config_hash
         self.source_hash = source_hash
 
+    @staticmethod
+    def _build_style_evidence(model: CanonicalFontModel, max_sample_glyphs: int = 4) -> dict:
+        """Bounded, sanitized source style evidence for AI candidate generation.
+
+        Carries deterministic source glyph geometry, metrics, raster sample
+        fingerprints, and global stroke/contrast statistics. Never carries
+        secrets or full observation payloads.
+        """
+        sample_cps = sorted(model.glyphs.keys())[:max_sample_glyphs]
+        sample_glyphs = []
+        for cp in sample_cps:
+            g = model.glyphs[cp]
+            contours = []
+            for c in g.contours[:4]:
+                pts = c.sample_points(samples_per_segment=4)[:24]
+                contours.append([[round(p.x, 1), round(p.y, 1)] for p in pts])
+            sample_glyphs.append(
+                {
+                    "code_point": cp,
+                    "contours": contours,
+                    "advance_width_upem": round(g.advance_width_upem, 2),
+                    "lsb_upem": round(g.lsb_upem, 2),
+                    "rsb_upem": round(g.rsb_upem, 2),
+                    "ascent_upem": round(g.ascent_upem, 2),
+                    "descent_upem": round(g.descent_upem, 2),
+                    "bounding_box_upem": [round(v, 1) for v in g.bounding_box_upem],
+                    "raster_sample_hashes": list(g.observation_fingerprints)[:4],
+                }
+            )
+        advances = [g.advance_width_upem for g in model.glyphs.values()]
+        heights = [
+            g.bounding_box_upem[3] - g.bounding_box_upem[1]
+            for g in model.glyphs.values()
+            if len(g.bounding_box_upem) == 4
+        ]
+        widths = [
+            g.bounding_box_upem[2] - g.bounding_box_upem[0]
+            for g in model.glyphs.values()
+            if len(g.bounding_box_upem) == 4
+        ]
+        mean_height = sum(heights) / len(heights) if heights else 0.0
+        mean_width = sum(widths) / len(widths) if widths else 0.0
+        return {
+            "family_name": model.family_name,
+            "style_name": model.style_name,
+            "units_per_em": model.metrics.units_per_em,
+            "ascent_upem": round(model.metrics.ascent_upem, 2),
+            "descent_upem": round(model.metrics.descent_upem, 2),
+            "glyph_count": len(model.glyphs),
+            "mean_advance_upem": round(sum(advances) / len(advances), 2) if advances else 0.0,
+            "stroke_contrast_proxy": round(mean_height / mean_width, 3) if mean_width else 0.0,
+            "sample_glyphs": sample_glyphs,
+        }
+
+
     async def extend(self, model: CanonicalFontModel) -> tuple[CanonicalFontModel, VietnameseExtensionBinding]:
         missing = missing_vietnamese_codepoints(model)
         preserved = tuple(cp for cp in VIETNAMESE_REQUIRED_CODEPOINTS if cp in model.glyphs)
@@ -194,6 +249,7 @@ class VietnameseExtensionService:
             "source_hash": self.source_hash,
             "missing_codepoints": list(missing),
             "units_per_em": model.metrics.units_per_em,
+            "style_evidence": self._build_style_evidence(model),
         }
         candidates = await self.ai_provider.generate_candidates(request)
         produced = {c.code_point for c in candidates}

@@ -154,12 +154,17 @@ class _RasterOnlyClient:
     def __init__(self, pages):
         self.pages = pages
         self.calls = 0
+        self.requests: list[dict] = []
 
     async def fetch_sprite_page(self, request, cursor):
         self.calls += 1
+        self.requests.append(dict(request))
         if cursor:
             return None
         return self.pages[0]
+
+
+RASTER_HANDOFF_MD5 = "ab12cd34ef56ab78cd90ef12ab34cd56"
 
 
 class _FailingDumpDom:
@@ -171,6 +176,22 @@ class _FailingDumpDom:
         raise RuntimeError("DUMP_DOM_UNAVAILABLE")
 
 
+class _MetadataDumpDom:
+    """Dump carrying typed family/style/MD5 discovery identity, no binaries."""
+
+    def __init__(self, family: str, md5: str):
+        self.family = family
+        self.md5 = md5
+        self.calls = 0
+
+    async def dump_dom(self, url):
+        self.calls += 1
+        return (
+            '<script type="application/ld+json">{"name": "' + self.family
+            + '", "variantName": "Regular", "font_md5": "' + self.md5 + '"}</script>'
+        )
+
+
 @pytest.mark.asyncio
 async def test_RASTER_HANDOFF_provider_pages_reach_stage9d_not_legacy_acquirer(
     test_settings: Settings, tmp_path: Path
@@ -179,6 +200,8 @@ async def test_RASTER_HANDOFF_provider_pages_reach_stage9d_not_legacy_acquirer(
     store_dir.mkdir()
     browser_version = "monotype_authorized_v1"
     pages = _raster_pages_for_seed(browser_version)
+    # The page payload must carry the exact raster target identity.
+    pages[0].payload["browser_version"] = browser_version
 
     class _SabotagedAcquirer(CountingAcquirer):
         async def acquire_source(self, *args, **kwargs):
@@ -191,7 +214,7 @@ async def test_RASTER_HANDOFF_provider_pages_reach_stage9d_not_legacy_acquirer(
 
     archive = FinalFontArchive(archive_root, settings.SCRATCH_DIR / "archive_idx.sqlite3")
     pipeline = AcquisitionPipeline(
-        dump_dom_transport=_FailingDumpDom(),
+        dump_dom_transport=_MetadataDumpDom("Raster Handoff Fam", RASTER_HANDOFF_MD5),
         binary_fetch=None,
         session_provider=None,
         raster_provider=MonotypeRasterProvider(_RasterOnlyClient(pages)),
@@ -399,11 +422,23 @@ def _make_client(missing: list[int], primary_body, difficult_body=None, arbiter_
 
 @pytest.mark.asyncio
 async def test_OPENROUTER_ROUTE_fixed_routing_and_zero_call_paths():
+    style_evidence = {
+        "family_name": "Route Fam",
+        "style_name": "Regular",
+        "units_per_em": 1000,
+        "glyph_count": 2,
+        "sample_glyphs": [
+            {"code_point": 65, "contours": [[[50.0, 50.0], [550.0, 50.0], [550.0, 700.0]]],
+             "advance_width_upem": 600.0, "raster_sample_hashes": ["a" * 64]}
+        ],
+    }
+
     # Routine case: 12B only.
     missing_routine = [0x0110, 0x0111]
     client, calls = _make_client(missing_routine, _valid_candidate_payload)
     specs = await client.generate_candidates(
-        {"missing_codepoints": missing_routine, "units_per_em": 1000, "source_hash": "s" * 64}
+        {"missing_codepoints": missing_routine, "units_per_em": 1000, "source_hash": "s" * 64,
+         "style_evidence": style_evidence}
     )
     assert len(specs) == 2
     assert [c["model"] for c in calls] == [MODEL_PRIMARY]
@@ -414,7 +449,8 @@ async def test_OPENROUTER_ROUTE_fixed_routing_and_zero_call_paths():
         missing_difficult, _valid_candidate_payload, difficult_body=_valid_candidate_payload
     )
     await client2.generate_candidates(
-        {"missing_codepoints": missing_difficult, "units_per_em": 1000, "source_hash": "s" * 64}
+        {"missing_codepoints": missing_difficult, "units_per_em": 1000, "source_hash": "s" * 64,
+         "style_evidence": style_evidence}
     )
     assert [c["model"] for c in calls2] == [MODEL_PRIMARY, MODEL_DIFFICULT]
 
@@ -427,7 +463,8 @@ async def test_OPENROUTER_ROUTE_fixed_routing_and_zero_call_paths():
         arbiter_body='{"choice":"B"}',
     )
     specs3 = await client3.generate_candidates(
-        {"missing_codepoints": missing_disagree, "units_per_em": 1000, "source_hash": "s" * 64}
+        {"missing_codepoints": missing_disagree, "units_per_em": 1000, "source_hash": "s" * 64,
+         "style_evidence": style_evidence}
     )
     assert [c["model"] for c in calls3] == [MODEL_PRIMARY, MODEL_DIFFICULT, MODEL_ARBITER]
     assert len(specs3) == 7

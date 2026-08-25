@@ -9,7 +9,47 @@ BINARY_STAGE_DUMP_DOM = "dump_dom_binary"
 BINARY_STAGE_AUTHORIZED_SESSION = "authorized_session_binary"
 RASTER_STAGE_MONOTYPE_ENDPOINT = "monotype_authorized_raster"
 
+# Deterministic L3 reuse probe order over legitimate binary provenance values
+# (explicit compatible-reuse rule; identity still binds every other dimension).
+BINARY_PROVENANCE_PROBE_ORDER: tuple[str, ...] = (
+    BINARY_STAGE_DUMP_DOM,
+    BINARY_STAGE_AUTHORIZED_SESSION,
+)
+
 VALIDATED_BINARY_FORMATS = frozenset({"TTF", "OTF"})
+
+# Authorized font binary containers the converter accepts as input; the
+# published output remains strictly TTF/OTF.
+CONTAINER_FORMATS = frozenset({"TTF", "OTF", "WOFF", "WOFF2"})
+
+
+@dataclass(frozen=True)
+class BinaryCandidate:
+    """One authorized binary resource discovered in a dump envelope."""
+
+    url: str
+    format: str  # TTF | OTF | WOFF | WOFF2
+    embedded: bool = False  # True for data-URI payloads resolved by the transport
+
+
+@dataclass(frozen=True)
+class DiscoveryEnvelope:
+    """Typed discovery output of one acquisition stage.
+
+    Carries canonical family/style identity, authorized binary candidates,
+    MD5/raster identity for later stages, and provenance. Sanitized: never
+    contains page HTML or secret material.
+    """
+
+    family_name: str = ""
+    style_name: str = ""
+    md5: str = ""
+    binary_candidates: tuple[BinaryCandidate, ...] = ()
+    raster_identity: str = ""
+    provenance: str = ""
+
+    def has_raster_target(self) -> bool:
+        return bool(self.family_name.strip() and self.style_name.strip() and self.md5.strip())
 
 
 @dataclass(frozen=True)
@@ -108,3 +148,4 @@ class AcquisitionOutcome:
     raster_pages: tuple[SpriteRasterPage, ...] = ()
     trace: AcquisitionTrace = field(default_factory=AcquisitionTrace)
     terminal_reason_code: str = ""
+    discovery: DiscoveryEnvelope | None = None

@@ -31,8 +31,10 @@ ROUTING_VERSION = "openrouter-route-v1"
 DIFFICULT_ESCALATION_GLYPH_COUNT = 6
 
 PROMPT_TEMPLATE = (
-    "You are a font geometry generator. For each missing Vietnamese glyph,"
-    " emit ONLY a JSON object matching this schema: "
+    "You are a font geometry generator extending an existing font with missing"
+    " Vietnamese glyphs in the SAME visual style as the source evidence."
+    " Source style evidence (bounded): __STYLE_EVIDENCE__."
+    " Emit ONLY a JSON object matching this schema: "
     '{"glyphs":[{"code_point":int,"contours":[[[x,y],...]], '
     '"advance_width_upem":number,"lsb_upem":number,"rsb_upem":number,'
     '"ascent_upem":number,"descent_upem":number,'
@@ -43,9 +45,13 @@ PROMPT_TEMPLATE = (
 
 ARBITER_PROMPT_TEMPLATE = (
     "Two candidate glyph sets A and B were generated for code points __CODE_POINTS__."
-    ' Choose the set that is more consistent and complete. Reply ONLY with JSON: {"choice":"A"} or {"choice":"B"}.'
-    " Set A: __SET_A__. Set B: __SET_B__."
+    " Candidate evidence A (geometry/metrics/scores): __EVIDENCE_A__."
+    " Candidate evidence B (geometry/metrics/scores): __EVIDENCE_B__."
+    " Source style evidence for comparison: __STYLE_EVIDENCE__."
+    ' Choose the set more consistent with the source style. Reply ONLY with JSON: {"choice":"A"} or {"choice":"B"}.'
 )
+
+MAX_EVIDENCE_CHARS = 4000
 
 
 @dataclass(frozen=True)
@@ -169,14 +175,53 @@ class OpenRouterAIClient:
         return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
     async def _attempt(self, model: str, request: dict) -> list[AICandidateSpec] | None:
+        style_evidence = request.get("style_evidence")
+        if not isinstance(style_evidence, dict) or not style_evidence:
+            raise VietnameseAIIntegrityError("VI_AI_STYLE_EVIDENCE_REQUIRED")
+        evidence_json = json.dumps(style_evidence, sort_keys=True, separators=(",", ":"))
+        if len(evidence_json) > MAX_EVIDENCE_CHARS:
+            evidence_json = evidence_json[:MAX_EVIDENCE_CHARS]
         prompt = (
             PROMPT_TEMPLATE
+            .replace("__STYLE_EVIDENCE__", evidence_json)
             .replace("__UPEM__", str(request.get("units_per_em", 1000)))
             .replace("__SOURCE_HASH__", str(request.get("source_hash", "")))
             .replace("__CODE_POINTS__", json.dumps(request["missing_codepoints"]))
         )
         raw = await self._http(model, prompt)
         return self._parse_candidates(raw, list(request["missing_codepoints"]))
+
+    @staticmethod
+    def _candidate_evidence(specs: list[AICandidateSpec]) -> dict:
+        """Deterministic compact candidate evidence + scores for arbitration."""
+        total_points = sum(len(c) for s in specs for c in s.contours)
+        areas = []
+        for s in specs:
+            for contour in s.contours:
+                area = 0.0
+                pts = list(contour)
+                for i in range(len(pts)):
+                    x0, y0 = pts[i]
+                    x1, y1 = pts[(i + 1) % len(pts)]
+                    area += x0 * y1 - x1 * y0
+                areas.append(abs(area) / 2.0)
+        advances = [s.advance_width_upem for s in specs]
+        sample = None
+        if specs:
+            first = sorted(specs, key=lambda s: s.code_point)[0]
+            sample = {
+                "code_point": first.code_point,
+                "contours": [list(map(list, c)) for c in first.contours[:2]],
+                "anchors": [list(a) for a in first.anchors],
+            }
+        return {
+            "glyph_count": len(specs),
+            "total_contour_points": total_points,
+            "mean_advance_upem": round(sum(advances) / len(advances), 2) if advances else 0.0,
+            "total_outline_area": round(sum(areas), 1) if areas else 0.0,
+            "mean_outline_area": round(sum(areas) / len(areas), 1) if areas else 0.0,
+            "sample_glyph": sample,
+        }
 
     async def generate_candidates(self, request: dict) -> list[AICandidateSpec]:
         missing = list(request["missing_codepoints"])
@@ -217,8 +262,18 @@ class OpenRouterAIClient:
             arbiter_prompt = (
                 ARBITER_PROMPT_TEMPLATE
                 .replace("__CODE_POINTS__", json.dumps(missing))
-                .replace("__SET_A__", self._outline_fingerprint(primary))
-                .replace("__SET_B__", self._outline_fingerprint(difficult))
+                .replace(
+                    "__EVIDENCE_A__",
+                    json.dumps(self._candidate_evidence(primary), sort_keys=True)[:MAX_EVIDENCE_CHARS],
+                )
+                .replace(
+                    "__EVIDENCE_B__",
+                    json.dumps(self._candidate_evidence(difficult), sort_keys=True)[:MAX_EVIDENCE_CHARS],
+                )
+                .replace(
+                    "__STYLE_EVIDENCE__",
+                    json.dumps(request.get("style_evidence", {}), sort_keys=True)[:MAX_EVIDENCE_CHARS],
+                )
             )
             raw_choice = await self._http(MODEL_ARBITER, arbiter_prompt)
             choice = None
