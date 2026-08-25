@@ -1,6 +1,7 @@
 """Tests for source acquisition, live HTML/image preview resolution, and raster extraction."""
 import hashlib
 import io
+import pickle
 import httpx
 import pytest
 import shutil
@@ -212,9 +213,19 @@ async def test_production_acquire_source_known_store_hit_zero_http_calls(tmp_pat
         cfg_h = acquirer.observation_config.compute_hash()
         bv = "chromium"
         bv_hash = hashlib.sha256(bv.encode("utf-8")).hexdigest()
-        shutil.copy2(
-            "observations/benchmark/reconstructed_be_vietnam_pro_regular.pkl",
-            fixture_store / f"reconstructed_be_vietnam_pro_regular_{bv_hash}_{cfg_h}.pkl",
+        cached_models = pickle.loads(
+            Path("observations/benchmark/reconstructed_be_vietnam_pro_regular.pkl").read_bytes()
+        )
+        envelope = {
+            "reference_id": "be_vietnam_pro",
+            "style_id": "regular",
+            "browser_version": bv,
+            "config_hash": cfg_h,
+            "coverage": sorted(cached_models.keys()),
+            "glyph_models": cached_models,
+        }
+        (fixture_store / f"reconstructed_be_vietnam_pro_regular_{bv_hash}_{cfg_h}.pkl").write_bytes(
+            pickle.dumps(envelope)
         )
         with acquirer.store._get_connection() as conn:
             conn.execute(

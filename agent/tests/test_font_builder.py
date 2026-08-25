@@ -1614,8 +1614,12 @@ async def test_causal_reproduction_foreign_reference_style_resume_rejected(tmp_p
 @pytest.mark.asyncio
 async def test_causal_reproduction_reconstruction_cache_typed_envelope_validation(tmp_path: Path):
     """Causal Reproduction:
-    Reconstruction disk cache validates typed metadata envelope, full tuple, and exact coverage.
+    Production reconstruction cache is typed-envelope-only. Untyped legacy dicts and
+    wrong-identity envelopes are rejected by the real SourceAcquirer path while still
+    on disk (zero foreign reuse, fail-closed), then the exact typed envelope is
+    accepted as a valid replacement.
     """
+    from compute import source as source_module
     from compute.source import SourceAcquirer
     from compute.models import ClaimStyle
     from measurement.models import ObservationConfig
@@ -1658,35 +1662,70 @@ async def test_causal_reproduction_reconstruction_cache_typed_envelope_validatio
         )
 
         cache_file = fixture_store / f"reconstructed_be_vietnam_pro_regular_{bv_hash}_{cfg_h}.pkl"
-
-        # 1. Invalid envelope (wrong reference_id): must be rejected
-        bad_envelope = {
-            "reference_id": "wrong_ref_name",
-            "style_id": "regular",
-            "browser_version": bv,
-            "config_hash": cfg_h,
-            "coverage": expected_cps,
-            "glyph_models": cached_models,
-        }
-        cache_file.write_bytes(pickle.dumps(bad_envelope))
-
-        # Attempt to load invalid cache directly -> yields empty / rejected
-        disk_raw = pickle.loads(cache_file.read_bytes())
-        assert disk_raw.get("reference_id") != "be_vietnam_pro"
-
-        # 2. Valid envelope with full exact tuple and exact coverage -> loaded successfully
-        valid_envelope = {
-            "reference_id": "be_vietnam_pro",
-            "style_id": "regular",
-            "browser_version": bv,
-            "config_hash": cfg_h,
-            "coverage": expected_cps,
-            "glyph_models": cached_models,
-        }
-        cache_file.write_bytes(pickle.dumps(valid_envelope))
-
         styles = [ClaimStyle(id="regular", display_name="Regular")]
-        payload = await acquirer.acquire_source("https://www.myfonts.com/collections/be-vietnam-pro", styles)
-        assert len(payload.styles["regular"].reconstructed_glyphs) == len(expected_cps)
-        assert payload.styles["regular"].observation_browser_version == bv
-        assert payload.styles["regular"].observation_config_hash == cfg_h
+        url = "https://www.myfonts.com/collections/be-vietnam-pro"
+
+        def make_acquirer() -> SourceAcquirer:
+            # Drop any process-wide negative-result cache entry so every phase
+            # exercises the real on-disk envelope read path.
+            source_module._RECONSTRUCTED_GLYPH_CACHE.pop(
+                ("be_vietnam_pro", "regular", bv, cfg_h), None
+            )
+            fresh = SourceAcquirer(client=client, observation_store_dir=fixture_store)
+            # Sabotage the solver: any reconstruction attempt proves the on-disk cache
+            # was not reused; foreign models can never reach the payload.
+            def _solver_must_not_run(observations):
+                raise AssertionError("FOREIGN_CACHE_REUSE_OR_SOLVER_CALLED")
+            fresh.solver.reconstruct_glyph = _solver_must_not_run
+            return fresh
+
+        # 1. Untyped legacy raw glyph dict on disk: SourceAcquirer must reject it
+        #    (no identity metadata) and fail closed instead of reusing foreign glyphs.
+        cache_key = ("be_vietnam_pro", "regular", bv, cfg_h)
+        try:
+            untyped_raw = dict(cached_models)
+            assert set(untyped_raw.keys()) == set(expected_cps)
+            cache_file.write_bytes(pickle.dumps(untyped_raw))
+            with pytest.raises(ValueError, match="NO_MAX_RECONSTRUCTION"):
+                await make_acquirer().acquire_source(url, styles)
+            assert set(pickle.loads(cache_file.read_bytes()).keys()) == set(expected_cps)
+
+            # 2. Wrong-identity envelope on disk (reference_id mismatch): same rejection.
+            bad_envelope = {
+                "reference_id": "wrong_ref_name",
+                "style_id": "regular",
+                "browser_version": bv,
+                "config_hash": cfg_h,
+                "coverage": expected_cps,
+                "glyph_models": cached_models,
+            }
+            cache_file.write_bytes(pickle.dumps(bad_envelope))
+            with pytest.raises(ValueError, match="NO_MAX_RECONSTRUCTION"):
+                await make_acquirer().acquire_source(url, styles)
+            assert pickle.loads(cache_file.read_bytes())["reference_id"] == "wrong_ref_name"
+
+            # 3. Valid envelope with full exact tuple and exact coverage -> accepted as
+            #    replacement; solver sabotage proves models came from the envelope only.
+            valid_envelope = {
+                "reference_id": "be_vietnam_pro",
+                "style_id": "regular",
+                "browser_version": bv,
+                "config_hash": cfg_h,
+                "coverage": expected_cps,
+                "glyph_models": cached_models,
+            }
+            cache_file.write_bytes(pickle.dumps(valid_envelope))
+            payload = await make_acquirer().acquire_source(url, styles)
+            style_data = payload.styles["regular"]
+            assert len(style_data.reconstructed_glyphs) == len(expected_cps)
+            assert set(style_data.reconstructed_glyphs.keys()) == set(expected_cps)
+            assert style_data.observation_reference_id == "be_vietnam_pro"
+            assert style_data.observation_style_id == "regular"
+            assert style_data.observation_browser_version == bv
+            assert style_data.observation_config_hash == cfg_h
+            assert style_data.reconstructed_glyphs[expected_cps[0]] == cached_models[expected_cps[0]]
+            # Cache file preserved as the accepted typed envelope (no silent rewrite).
+            assert pickle.loads(cache_file.read_bytes()) == valid_envelope
+        finally:
+            # Do not leak this test's cache entry into later tests sharing the key.
+            source_module._RECONSTRUCTED_GLYPH_CACHE.pop(cache_key, None)

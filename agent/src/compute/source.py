@@ -572,18 +572,18 @@ class SourceAcquirer:
                         if disk_cache_file.exists() and not collected_any:
                             try:
                                 raw_cached = pickle.loads(disk_cache_file.read_bytes())
-                                if isinstance(raw_cached, dict):
-                                    if "glyph_models" in raw_cached:
-                                        if (raw_cached.get("reference_id") == family_key and
-                                            raw_cached.get("style_id") == style_key and
-                                            raw_cached.get("browser_version") == active_browser_ver and
-                                            raw_cached.get("config_hash") == active_cfg_hash and
-                                            set(raw_cached.get("coverage", [])) == set(coverage) and
-                                            isinstance(raw_cached.get("glyph_models"), dict) and
-                                            set(raw_cached["glyph_models"].keys()) == set(coverage)):
-                                            glyph_models = raw_cached["glyph_models"]
-                                    elif set(raw_cached.keys()) == set(coverage):
-                                        glyph_models = raw_cached
+                                if isinstance(raw_cached, dict) and "glyph_models" in raw_cached:
+                                    if (raw_cached.get("reference_id") == family_key and
+                                        raw_cached.get("style_id") == style_key and
+                                        raw_cached.get("browser_version") == active_browser_ver and
+                                        raw_cached.get("config_hash") == active_cfg_hash and
+                                        set(raw_cached.get("coverage", [])) == set(coverage) and
+                                        isinstance(raw_cached.get("glyph_models"), dict) and
+                                        set(raw_cached["glyph_models"].keys()) == set(coverage) and
+                                        all(isinstance(g, ReconstructedGlyph) for g in raw_cached["glyph_models"].values())):
+                                        glyph_models = raw_cached["glyph_models"]
+                                    # Typed-envelope-only: any missing/wrong identity metadata rejects
+                                    # before glyph reuse; recomputation below remains fail-closed.
                             except Exception:
                                 glyph_models = {}
                         if not glyph_models:
