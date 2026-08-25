@@ -94,6 +94,30 @@ class Settings(BaseSettings):
         default=None,
         description="Authorized Monotype raster endpoint bearer token (runtime secret)",
     )
+    # Playwright Stealth persistent Chrome fallback settings
+    PLAYWRIGHT_USER_DATA_DIR: Path | None = Field(
+        default=None,
+        description="Persistent profile directory path for Playwright Stealth (retains cf_clearance)",
+    )
+    PLAYWRIGHT_STEALTH_ENABLED: bool = Field(
+        default=True,
+        description="Enable Playwright Stealth persistent Chrome fallback",
+    )
+
+    # MyFonts Algolia metadata search fallback settings (runtime-only secrets)
+    MYFONTS_ALGOLIA_APP_ID: str = Field(
+        default="N9095TCBC5",
+        description="MyFonts Algolia application ID",
+    )
+    MYFONTS_ALGOLIA_API_KEY: SecretStr | None = Field(
+        default=None,
+        description="MyFonts Algolia Search API Key (runtime-only; never logged)",
+    )
+    MYFONTS_ALGOLIA_INDEX_NAME: str = Field(
+        default="prod_myfonts_fonts",
+        description="MyFonts Algolia fonts index name",
+    )
+
     VIETNAMESE_AI_ENABLED: bool = Field(
         default=False,
         description="Enable AI-assisted Vietnamese extension (VIETNAMESE mode only)",

@@ -14,6 +14,8 @@ from acquisition.models import (
     BinaryAcquisitionPolicy,
     BinaryCandidate,
     DiscoveryEnvelope,
+    FamilyDiscoveryEnvelope,
+    StyleDiscoveryRecord,
     SpriteRasterPage,
 )
 
@@ -50,6 +52,31 @@ class AuthorizedSessionTransport(Protocol):
         session_material: dict[str, Any],
     ) -> bytes | None:
         """Discover and fetch an authorized binary via the persistent session."""
+
+
+class PlaywrightStealthProvider(Protocol):
+    """Fallback capability: Playwright Stealth real-Chrome persistent context."""
+
+    def available(self) -> bool:
+        """True when Playwright/Chrome persistent context is configured."""
+
+    async def discover_family(self, source_url: str) -> FamilyDiscoveryEnvelope | None:
+        """Recover complete FamilyDiscoveryEnvelope using stealth persistent session."""
+
+    async def capture_raster_pages(
+        self, source_url: str, style_rec: StyleDiscoveryRecord, requested_sizes: list[int]
+    ) -> tuple[SpriteRasterPage, ...] | None:
+        """Render and capture raster glyph sprites directly via persistent context."""
+
+
+class AlgoliaMetadataProvider(Protocol):
+    """Fallback capability: MyFonts Algolia metadata client (metadata only)."""
+
+    def available(self) -> bool:
+        """True when Algolia app credentials are configured."""
+
+    async def discover_family(self, family_name_or_slug: str, source_url: str = "") -> FamilyDiscoveryEnvelope | None:
+        """Recover exact FamilyDiscoveryEnvelope from Algolia search index."""
 
 
 class AuthorizedRasterClient(Protocol):
@@ -142,21 +169,19 @@ def _data_uri_format(prefix: str) -> str:
     return "TTF"
 
 
-def parse_discovery_from_dump(dump: str, source_url: str, provenance: str) -> DiscoveryEnvelope:
-    """Build a typed discovery envelope from one dump-dom result.
+def parse_family_discovery_from_dump(dump: str, source_url: str, provenance: str) -> FamilyDiscoveryEnvelope:
+    """Build a complete FamilyDiscoveryEnvelope from one multi-style dump-dom result.
 
-    Extracts canonical family/style identity, authorized binary candidates
-    (direct URLs and data URIs, including WOFF/WOFF2 containers), and MD5/raster
-    identity for later stages. Deterministic and sanitized: page HTML itself is
-    never carried forward.
+    Extracts canonical family identity and all child styles with exact style-bound MD5s,
+    binary candidates, and raster resources.
     """
     if not dump:
-        return DiscoveryEnvelope(provenance=provenance)
+        return FamilyDiscoveryEnvelope(provenance=provenance, family_url=source_url)
 
     family_name = ""
-    style_name = ""
+    styles: dict[str, StyleDiscoveryRecord] = {}
 
-    # JSON-LD product metadata first (deterministic first match).
+    # 1. JSON-LD structured metadata
     for block in re.finditer(
         r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
         dump,
@@ -173,15 +198,61 @@ def parse_discovery_from_dump(dump: str, source_url: str, provenance: str) -> Di
             name = node.get("name") or node.get("familyName")
             if isinstance(name, str) and name.strip():
                 family_name = family_name or name.strip()
-            variant = node.get("variantName") or node.get("styleName")
-            if isinstance(variant, str) and variant.strip():
-                style_name = style_name or variant.strip()
+            # Check for offers / child styles
+            has_variant = node.get("hasVariant") or node.get("offers") or node.get("styleVariants")
+            if isinstance(has_variant, list):
+                for var in has_variant:
+                    if isinstance(var, dict):
+                        s_name = var.get("name") or var.get("variantName") or var.get("styleName") or ""
+                        s_id = str(var.get("sku") or var.get("id") or var.get("styleId") or s_name)
+                        s_md5 = str(var.get("fontMd5") or var.get("md5") or var.get("font_md5") or "").lower()
+                        if s_name:
+                            norm_k = s_id.lower().replace("-", "_").replace(" ", "_")
+                            styles[norm_k] = StyleDiscoveryRecord(
+                                style_id=s_id,
+                                style_name=s_name,
+                                md5=s_md5 if len(s_md5) == 32 else "",
+                                provenance=provenance,
+                            )
 
+    # 2. Next.js __NEXT_DATA__ or embedded state
+    next_match = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', dump, re.DOTALL)
+    if next_match:
+        try:
+            next_data = json.loads(next_match.group(1).strip())
+            page_props = (next_data.get("props") or {}).get("pageProps") or {}
+            fam_data = page_props.get("familyData") or page_props.get("family") or page_props
+            if isinstance(fam_data, dict):
+                family_name = family_name or str(fam_data.get("name") or fam_data.get("familyName") or "")
+                raw_styles = fam_data.get("styles") or fam_data.get("fonts") or []
+                if isinstance(raw_styles, list):
+                    for st in raw_styles:
+                        if isinstance(st, dict):
+                            s_name = str(st.get("name") or st.get("style_name") or "")
+                            s_id = str(st.get("id") or st.get("style_id") or s_name)
+                            s_md5 = str(st.get("font_md5") or st.get("md5") or st.get("fontMd5") or "").lower()
+                            if s_name:
+                                norm_k = s_id.lower().replace("-", "_").replace(" ", "_")
+                                styles[norm_k] = StyleDiscoveryRecord(
+                                    style_id=s_id,
+                                    style_name=s_name,
+                                    md5=s_md5 if len(s_md5) == 32 else "",
+                                    provenance=provenance,
+                                )
+        except Exception:
+            pass
+
+    # 3. Fallback family name from OpenGraph
     if not family_name:
         og = re.search(r'<meta[^>]*property=["\']og:title["\'][^>]*content=["\']([^"\']+)["\']', dump, re.IGNORECASE)
         if og:
             family_name = og.group(1).strip()
+        else:
+            title = re.search(r'<title>([^<]+)</title>', dump, re.IGNORECASE)
+            if title:
+                family_name = title.group(1).split("|")[0].split("-")[0].strip()
 
+    # 4. Embedded font candidates & data URIs
     candidates: list[BinaryCandidate] = []
     seen_urls: set[str] = set()
     for match in _FONT_URL.finditer(dump):
@@ -204,24 +275,84 @@ def parse_discovery_from_dump(dump: str, source_url: str, provenance: str) -> Di
         marker = f"data-uri:{idx}"
         candidates.append(BinaryCandidate(url=marker, format=fmt, embedded=True))
 
-    # MD5/raster identity: prefer explicit keyed values, then URL-embedded MD5s.
-    md5 = ""
-    keyed = re.search(r'["\'](?:font_?md5|md5|fontId)["\']\s*[:=]\s*["\']([0-9a-fA-F]{32})["\']', dump)
-    if keyed:
-        md5 = keyed.group(1).lower()
-    else:
-        for url_match in _FONT_URL.finditer(dump):
-            found = _MD5_HEX.search(url_match.group(0))
-            if found:
-                md5 = found.group(0).lower()
-                break
+    # 5. Extract style rows / font_md5 regex matches if styles map is still empty
+    for style_match in re.finditer(
+        r'data-style-id=["\']([^"\']+)["\'][^>]*data-style-name=["\']([^"\']+)["\'][^>]*data-font-md5=["\']([0-9a-fA-F]{32})["\']',
+        dump,
+        re.IGNORECASE,
+    ):
+        s_id, s_name, s_md5 = style_match.groups()
+        norm_k = s_id.lower().replace("-", "_").replace(" ", "_")
+        styles[norm_k] = StyleDiscoveryRecord(
+            style_id=s_id,
+            style_name=s_name,
+            md5=s_md5.lower(),
+            provenance=provenance,
+        )
 
-    return DiscoveryEnvelope(
+    # 6. If no styles array was parsed, check for single style/md5 or create default
+    if not styles:
+        md5 = ""
+        keyed = re.search(r'["\'](?:font_?md5|md5|fontId)["\']\s*[:=]\s*["\']([0-9a-fA-F]{32})["\']', dump)
+        if keyed:
+            md5 = keyed.group(1).lower()
+        else:
+            for url_match in _FONT_URL.finditer(dump):
+                found = _MD5_HEX.search(url_match.group(0))
+                if found:
+                    md5 = found.group(0).lower()
+                    break
+
+        default_style_name = "Regular"
+        style_title = re.search(r'class=["\'][^"\']*style-name[^"\']*["\']>([^<]+)<', dump, re.IGNORECASE)
+        if style_title:
+            default_style_name = style_title.group(1).strip()
+        norm_id = default_style_name.lower().replace("-", "_").replace(" ", "_")
+        styles[norm_id] = StyleDiscoveryRecord(
+            style_id=norm_id,
+            style_name=default_style_name,
+            md5=md5,
+            binary_candidates=tuple(candidates),
+            provenance=provenance,
+        )
+    else:
+        # Attach binary candidates to all styles if available
+        if candidates:
+            updated_styles = {}
+            for k, rec in styles.items():
+                if not rec.binary_candidates:
+                    updated_styles[k] = StyleDiscoveryRecord(
+                        style_id=rec.style_id,
+                        style_name=rec.style_name,
+                        md5=rec.md5,
+                        binary_candidates=tuple(candidates),
+                        raster_resources=rec.raster_resources,
+                        provenance=rec.provenance,
+                    )
+                else:
+                    updated_styles[k] = rec
+            styles = updated_styles
+
+    canonical_key = family_name.lower().replace("-", "_").replace(" ", "_") if family_name else ""
+    return FamilyDiscoveryEnvelope(
         family_name=family_name,
-        style_name=style_name,
-        md5=md5,
-        binary_candidates=tuple(candidates),
-        raster_identity=md5,
+        family_url=source_url,
+        canonical_family_key=canonical_key,
+        styles=styles,
+        provenance=provenance,
+    )
+
+
+def parse_discovery_from_dump(dump: str, source_url: str, provenance: str) -> DiscoveryEnvelope:
+    """Build a typed discovery envelope from one dump-dom result (backwards compatible)."""
+    fam_env = parse_family_discovery_from_dump(dump, source_url, provenance)
+    first_style = next(iter(fam_env.styles.values())) if fam_env.styles else None
+    return DiscoveryEnvelope(
+        family_name=fam_env.family_name,
+        style_name=first_style.style_name if first_style else "",
+        md5=first_style.md5 if first_style else "",
+        binary_candidates=first_style.binary_candidates if first_style else (),
+        raster_identity=first_style.md5 if first_style else "",
         provenance=provenance,
     )
 

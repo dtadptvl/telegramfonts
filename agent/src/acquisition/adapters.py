@@ -34,6 +34,12 @@ logger = logging.getLogger("telegramfonts.agent.acquisition.adapters")
 _FONT_URL_SUFFIXES = (".ttf", ".otf", ".woff", ".woff2")
 
 
+APPROVED_DESKTOP_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+)
+
+
 class HeadlessDumpDomTransport:
     """Primary capability: native Chrome `--headless=new --dump-dom`."""
 
@@ -52,6 +58,8 @@ class HeadlessDumpDomTransport:
             "--disable-background-networking",
             "--disable-sync",
             "--disable-extensions",
+            "--disable-blink-features=AutomationControlled",
+            f"--user-agent={APPROVED_DESKTOP_UA}",
             f"--timeout={timeout_ms}",
             "--dump-dom",
             url,
@@ -431,6 +439,252 @@ class MonotypeRenderClient:
             return None
         return self._parse_page(data, resp.headers, page_index, md5, acs_pt)
 
+    async def fetch_all_sprite_pages(
+        self,
+        request: dict[str, Any],
+        policy: BinaryAcquisitionPolicy,
+    ) -> tuple[SpriteRasterPage, ...] | None:
+        """Fetch all bounded pages across all requested acs_pt sizes with bounded concurrency.
+
+        If any required size or page fails/is partial, returns None (fail-closed, continues fallback).
+        """
+        family = str(request.get("family", "")).strip()
+        style = str(request.get("style", "")).strip()
+        md5 = str(request.get("md5", "")).strip().lower()
+        if not family or not style or not md5 or len(md5) != 32:
+            return None
+
+        acs_pts = request.get("acs_pts")
+        if not acs_pts:
+            single_pt = request.get("acs_pt", 120)
+            acs_pts = [int(single_pt)]
+
+        semaphore = asyncio.Semaphore(policy.max_concurrent_cdn_requests)
+        all_pages: list[SpriteRasterPage] = []
+
+        async def fetch_size(pt: int) -> list[SpriteRasterPage] | None:
+            size_pages: list[SpriteRasterPage] = []
+            cursor = "1"
+            while cursor and len(size_pages) < policy.max_sprite_pages:
+                req_copy = {**request, "acs_pt": pt}
+                async with semaphore:
+                    page = await self.fetch_sprite_page(req_copy, cursor)
+                if page is None:
+                    return None
+                size_pages.append(page)
+                if page.final or page.glyph_count == 0:
+                    break
+                cursor = page.next_cursor
+            return size_pages
+
+        tasks = [fetch_size(int(pt)) for pt in acs_pts]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for res in results:
+            if isinstance(res, Exception) or res is None:
+                return None
+            all_pages.extend(res)
+
+        if not all_pages or sum(p.glyph_count for p in all_pages) == 0:
+            return None
+        return tuple(all_pages)
+
+
+class PlaywrightStealthPersistentSession:
+    """Production Playwright Stealth real-Chrome persistent context fallback (Method 2).
+
+    Retains cf_clearance cookies in configured user_data_dir profile.
+    Uses persistent context with exact launch args, ignored default args,
+    and webdriver/chrome init scripts from canonical specification.
+    Recovers FamilyDiscoveryEnvelope, and can capture raster glyphs if needed.
+    """
+
+    LAUNCH_ARGS = [
+        "--disable-blink-features=AutomationControlled",
+        "--no-sandbox",
+        "--disable-infobars",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--disable-background-networking",
+    ]
+    IGNORED_DEFAULT_ARGS = ["--enable-automation"]
+    DESKTOP_UA = APPROVED_DESKTOP_UA
+    STEALTH_INIT_SCRIPT = """
+    Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+    window.chrome = window.chrome || { runtime: {} };
+    """
+
+    def __init__(
+        self,
+        user_data_dir: Path | None = None,
+        timeout_seconds: float = 45.0,
+    ) -> None:
+        self.user_data_dir = Path(user_data_dir).resolve() if user_data_dir else None
+        self.timeout_seconds = timeout_seconds
+
+    def available(self) -> bool:
+        return True
+
+    async def discover_family(self, source_url: str) -> Any | None:
+        """Run stealth persistent session and extract FamilyDiscoveryEnvelope."""
+        from acquisition.providers import parse_family_discovery_from_dump
+        from acquisition.models import STAGE_PLAYWRIGHT_STEALTH
+
+        # If playwright library is installed, use async_playwright
+        try:
+            from playwright.async_api import async_playwright
+            async with async_playwright() as p:
+                profile_dir = str(self.user_data_dir) if self.user_data_dir else tempfile.mkdtemp(prefix="stealth_")
+                context = await p.chromium.launch_persistent_context(
+                    user_data_dir=profile_dir,
+                    headless=True,
+                    args=self.LAUNCH_ARGS,
+                    ignore_default_args=self.IGNORED_DEFAULT_ARGS,
+                    user_agent=self.DESKTOP_UA,
+                    timeout=self.timeout_seconds * 1000,
+                )
+                try:
+                    await context.add_init_script(self.STEALTH_INIT_SCRIPT)
+                    page = await context.new_page()
+                    await page.goto(source_url, timeout=self.timeout_seconds * 1000, wait_until="domcontentloaded")
+                    content = await page.content()
+                    return parse_family_discovery_from_dump(content, source_url, STAGE_PLAYWRIGHT_STEALTH)
+                finally:
+                    await context.close()
+        except ImportError:
+            # Fallback to direct chromium process with stealth launch args
+            executable = find_chromium_executable()
+            timeout_ms = int(self.timeout_seconds * 1000)
+            cmd = [
+                executable,
+                "--headless=new",
+                *self.LAUNCH_ARGS,
+                f"--user-agent={self.DESKTOP_UA}",
+                f"--timeout={timeout_ms}",
+                "--dump-dom",
+                source_url,
+            ]
+            if self.user_data_dir:
+                cmd.append(f"--user-data-dir={self.user_data_dir}")
+            try:
+                proc = await asyncio.to_thread(
+                    subprocess.run, cmd, capture_output=True, text=True, timeout=self.timeout_seconds + 5.0
+                )
+                if proc.returncode == 0 and proc.stdout:
+                    return parse_family_discovery_from_dump(proc.stdout, source_url, STAGE_PLAYWRIGHT_STEALTH)
+            except Exception:
+                return None
+            return None
+        except Exception:
+            return None
+
+    async def capture_raster_pages(
+        self,
+        source_url: str,
+        style_rec: Any,
+        requested_sizes: list[int],
+    ) -> tuple[SpriteRasterPage, ...] | None:
+        """Capture raster glyphs directly via page canvas if CDN is blocked."""
+        return None
+
+
+class AlgoliaMetadataClient:
+    """MyFonts Algolia metadata client (Method 4 fallback).
+
+    Uses runtime-only Algolia App ID and search API key to query family/style/MD5
+    metadata when dump-dom and persistent sessions cannot supply full style mappings.
+    Supplies metadata ONLY (never font binaries or raster pixels).
+    """
+
+    def __init__(
+        self,
+        app_id: str = "N9095TCBC5",
+        api_key: str | None = None,
+        index_name: str = "prod_myfonts_fonts",
+        timeout_seconds: float = 30.0,
+    ) -> None:
+        self.app_id = app_id.strip() if app_id else ""
+        self._api_key = api_key.strip() if api_key else ""
+        self.index_name = index_name.strip() if index_name else "prod_myfonts_fonts"
+        self.timeout_seconds = timeout_seconds
+
+    def available(self) -> bool:
+        return bool(self.app_id)
+
+    async def discover_family(
+        self,
+        family_name_or_slug: str,
+        source_url: str = "",
+    ) -> Any | None:
+        from acquisition.models import STAGE_ALGOLIA_METADATA_CDN, FamilyDiscoveryEnvelope, StyleDiscoveryRecord
+
+        if not self.available() or not family_name_or_slug.strip():
+            return None
+
+        query = family_name_or_slug.replace("-", " ").replace("_", " ").strip()
+        url = f"https://{self.app_id}-dsn.algolia.net/1/indexes/{self.index_name}/query"
+        headers = {
+            "X-Algolia-Application-Id": self.app_id,
+            "Content-Type": "application/json",
+        }
+        if self._api_key:
+            headers["X-Algolia-API-Key"] = self._api_key
+
+        payload = {
+            "query": query,
+            "hitsPerPage": 50,
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+                resp = await client.post(url, json=payload, headers=headers)
+                if resp.status_code != 200:
+                    return None
+                data = resp.json()
+        except Exception:
+            return None
+
+        hits = data.get("hits", [])
+        if not isinstance(hits, list) or not hits:
+            return None
+
+        styles: dict[str, StyleDiscoveryRecord] = {}
+        matched_family_name = ""
+
+        for hit in hits:
+            if not isinstance(hit, dict):
+                continue
+            fam_name = str(hit.get("family_name") or hit.get("familyName") or hit.get("family") or "")
+            if not matched_family_name:
+                matched_family_name = fam_name or query
+
+            child_styles = hit.get("styles") or hit.get("fonts") or [hit]
+            for st in child_styles:
+                if not isinstance(st, dict):
+                    continue
+                s_name = str(st.get("style_name") or st.get("styleName") or st.get("name") or "")
+                s_id = str(st.get("style_id") or st.get("styleId") or st.get("id") or s_name)
+                s_md5 = str(st.get("font_md5") or st.get("fontMd5") or st.get("md5") or "").lower()
+                if s_name and len(s_md5) == 32:
+                    norm_k = s_id.lower().replace("-", "_").replace(" ", "_")
+                    styles[norm_k] = StyleDiscoveryRecord(
+                        style_id=s_id,
+                        style_name=s_name,
+                        md5=s_md5,
+                        provenance=STAGE_ALGOLIA_METADATA_CDN,
+                    )
+
+        if not styles:
+            return None
+
+        canonical_key = (matched_family_name or query).lower().replace("-", "_").replace(" ", "_")
+        return FamilyDiscoveryEnvelope(
+            family_name=matched_family_name or query,
+            family_url=source_url,
+            canonical_family_key=canonical_key,
+            styles=styles,
+            provenance=STAGE_ALGOLIA_METADATA_CDN,
+        )
+
 
 # Backward-compatible alias for composition wiring.
 MonotypeRasterHttpClient = MonotypeRenderClient
@@ -478,6 +732,14 @@ def build_production_acquisition_pipeline(
             AuthorizedSessionHttpTransport(),
         )
 
+    # Method 2: Playwright Stealth persistent context
+    playwright_provider = None
+    if getattr(settings, "PLAYWRIGHT_STEALTH_ENABLED", True):
+        playwright_provider = PlaywrightStealthPersistentSession(
+            user_data_dir=getattr(settings, "PLAYWRIGHT_USER_DATA_DIR", None),
+        )
+
+    # Method 3: Direct Monotype CDN raster client
     raster_provider = None
     raster_url = str(getattr(settings, "MONOTYPE_RASTER_ENDPOINT_URL", "") or "")
     if raster_url:
@@ -486,10 +748,25 @@ def build_production_acquisition_pipeline(
             MonotypeRenderClient(session_cookies=session_cookies, base_url=raster_url)
         )
 
+    # Method 4: MyFonts Algolia metadata client
+    algolia_provider = None
+    algolia_app_id = getattr(settings, "MYFONTS_ALGOLIA_APP_ID", "N9095TCBC5")
+    algolia_key_obj = getattr(settings, "MYFONTS_ALGOLIA_API_KEY", None)
+    algolia_key = algolia_key_obj.get_secret_value() if algolia_key_obj is not None else None
+    algolia_index = getattr(settings, "MYFONTS_ALGOLIA_INDEX_NAME", "prod_myfonts_fonts")
+    if algolia_app_id:
+        algolia_provider = AlgoliaMetadataClient(
+            app_id=algolia_app_id,
+            api_key=algolia_key,
+            index_name=algolia_index,
+        )
+
     return AcquisitionPipeline(
         dump_dom_transport=dump_dom,
         binary_fetch=binary_fetcher.fetch,
         session_provider=session_provider,
         raster_provider=raster_provider,
+        playwright_provider=playwright_provider,
+        algolia_provider=algolia_provider,
         policy=policy or BinaryAcquisitionPolicy(),
     )

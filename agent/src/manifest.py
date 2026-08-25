@@ -30,10 +30,12 @@ CORE_SOURCE_PATHS = [
     "agent/src/config.py",
     "agent/src/logging_utils.py",
     "agent/src/main.py",
+    "agent/src/manifest.py",
     "agent/src/queue_client.py",
     "agent/src/readiness.py",
     "agent/src/runner.py",
     "agent/src/scratch.py",
+    "agent/src/soak.py",
     "agent/src/worker_client.py",
     "agent/src/acquisition/adapters.py",
     "agent/src/acquisition/capability.py",
@@ -73,6 +75,8 @@ CORE_SOURCE_PATHS = [
     "agent/src/reconstruction/topology.py",
     "agent/src/typography/kerning_inferencer.py",
     "scripts/a23_preflight.py",
+    "scripts/a23_soak_runner.py",
+    "scripts/generate_deployment_manifest.py",
     "scripts/run_physical_a23_proof.py",
 ]
 

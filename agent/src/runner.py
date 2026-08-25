@@ -860,6 +860,7 @@ class JobRunner:
                 if gated:
                     cfg_h = gate_config.compute_hash()
                     job_mode = (job.mode or "ORIGINAL").strip().upper()
+                    family_envelope = None
                     needs_acquisition = False
                     for style in job.styles:
                         family_key, style_key = self._observation_keys(job.source_url, style.id)
@@ -933,6 +934,12 @@ class JobRunner:
                             )
                             continue
                         if self.acquisition_pipeline is not None:
+                            if family_envelope is None:
+                                family_envelope = await self.acquisition_pipeline.acquire_family_preflight(
+                                    job.source_url,
+                                    expected_family=family_name,
+                                    expected_styles=job.styles,
+                                )
                             outcome = await self.acquisition_pipeline.acquire(
                                 job.source_url,
                                 family_name,
@@ -947,6 +954,7 @@ class JobRunner:
                                         ).all_sizes()
                                     ]
                                 },
+                                family_envelope=family_envelope,
                             )
                             self.last_reuse_trace["acquisition_traces"][style.id] = (
                                 outcome.trace.to_sanitized_dict()
