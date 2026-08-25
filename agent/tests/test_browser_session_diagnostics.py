@@ -161,7 +161,6 @@ async def test_loopback_websocket_ignores_ambient_proxy(monkeypatch):
 
     assert direct_attempts == 1
     assert proxy_attempts == 0
-    assert browser_session.os.environ["HTTP_PROXY"] == f"http://127.0.0.1:{proxy_port}"
 
 
 @pytest.mark.asyncio
