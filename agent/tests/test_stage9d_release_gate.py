@@ -770,7 +770,8 @@ async def test_runner_stage9d_sha_continuity_and_attested_repeat_hit(test_settin
     assert len(state["uploads"]) == 1
     assert len(state["completes"]) == 1
     assert builder.build_calls == 0  # legacy builder never used on gated path
-    assert acquirer.acquire_calls == 1
+    # Completed observation collection is reused without source acquisition.
+    assert acquirer.acquire_calls == 0
     manifest = res.manifest
     assert manifest is not None
     assert len(manifest.files) == 2
@@ -810,7 +811,7 @@ async def test_runner_stage9d_sha_continuity_and_attested_repeat_hit(test_settin
     # acquisition, optimization, candidate build, and consumer evaluation.
     res2 = await runner.process_message(msg)
     assert res2.action == RunnerAction.ACKED
-    assert acquirer.acquire_calls == 1  # no second acquisition
+    assert acquirer.acquire_calls == 0  # no acquisition on repeat
     assert builder.build_calls == 0
     assert len(state["uploads"]) == 2
     assert len(state["completes"]) == 2

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import sqlite3
@@ -12,14 +13,32 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from compute.archive import ARCHIVEABLE_FORMATS, ArchiveIdentity, FinalFontArchive
+from acquisition.models import (
+    AcquisitionOutcome,
+    BINARY_STAGE_AUTHORIZED_SESSION,
+    BINARY_STAGE_DUMP_DOM,
+)
+from acquisition.pipeline import AcquisitionPipeline
+from compute.archive import (
+    ARCHIVEABLE_FORMATS,
+    PROVENANCE_BINARY_DUMP_DOM,
+    PROVENANCE_BINARY_SESSION,
+    PROVENANCE_PROBE_ORDER,
+    PROVENANCE_STAGE9D_RASTER,
+    PROVENANCE_VIETNAMESE_AI,
+    PROVENANCE_VIETNAMESE_PRESERVED,
+    ArchiveIdentity,
+    FinalFontArchive,
+)
+from compute.binary_gate import BINARY_PIPELINE_VERSION, BinaryConsumerValidator, BinaryGateReport, prepare_binary_artifact
 from compute.font_builder import FontBuilderService
 from compute.models import ArchiveSourceContext, GeneratedFontFile, JobPackageManifest, SourcePayload
+from compute.model_cache import CanonicalFontModelCache, FontModelCacheIdentity
 from compute.packager import PackagerService
 from compute.source import SourceAcquirer
 from compute.validator import validate_font_file
 from config import Settings
-from fidelity.release_gate import Stage9DReleaseGate
+from fidelity.release_gate import STAGE9D_ATTESTATION_SCHEMA_VERSION, Stage9DAttestation, Stage9DReleaseGate
 from queue_client import CloudflareQueueClient, QueueMessage
 from scratch import ScratchManager
 from worker_client import ClaimedJob, WorkerJobClient
@@ -43,6 +62,9 @@ TERMINAL_ERROR_CODES = frozenset({
     "UNSUPPORTED_FORMAT",
     "NO_FILES_GENERATED",
     "STAGE9D_GATE_FAILED",
+    "ACQUISITION_BINARY_INTEGRITY_FAILED",
+    "ACQUISITION_INSUFFICIENT",
+    "VIETNAMESE_EXTENSION_FAILED",
 })
 
 KNOWN_ERROR_CODES = frozenset(
@@ -74,6 +96,8 @@ KNOWN_ERROR_PREFIXES = (
     ("EMPTY_ARCHIVE_IDENTITY_", "EMPTY_ARCHIVE_IDENTITY"),
     ("ARTIFACT_PART_EXCEEDS_CAP:", "ARTIFACT_PART_EXCEEDS_CAP"),
     ("STAGE9D_GATE_FAILED_", "STAGE9D_GATE_FAILED"),
+    ("ACQUISITION_BINARY_INTEGRITY_FAILED:", "ACQUISITION_BINARY_INTEGRITY_FAILED"),
+    ("VI_", "VIETNAMESE_EXTENSION_FAILED"),
 )
 
 
@@ -115,6 +139,10 @@ class JobRunner:
         font_builder: FontBuilderService | None = None,
         packager: PackagerService | None = None,
         archive: FinalFontArchive | None = None,
+        acquisition_pipeline: AcquisitionPipeline | None = None,
+        model_cache: CanonicalFontModelCache | None = None,
+        vietnamese_ai_provider: Any = None,
+        chromium_binary_checker: Any = None,
     ) -> None:
         self.settings = settings
         self.queue_client = queue_client
@@ -129,6 +157,12 @@ class JobRunner:
         )
         self.packager = packager or PackagerService()
         self.archive = archive if archive is not None else FinalFontArchive.from_settings(settings)
+        self.acquisition_pipeline = acquisition_pipeline
+        self.model_cache = model_cache
+        self.vietnamese_ai_provider = vietnamese_ai_provider
+        self.chromium_binary_checker = chromium_binary_checker
+        # Deterministic per-job acquisition/reuse call trace (sanitized).
+        self.last_reuse_trace: dict[str, Any] = {}
 
     async def _heartbeat_loop(
         self,
@@ -191,6 +225,8 @@ class JobRunner:
         style_name: str,
         format_type: str,
         context: ArchiveSourceContext,
+        provenance: str = PROVENANCE_STAGE9D_RASTER,
+        ai_binding: str = "",
     ) -> ArchiveIdentity:
         return ArchiveIdentity(
             source_identity=context.source_identity,
@@ -201,6 +237,8 @@ class JobRunner:
             format=format_type,
             observation_identity=context.observation_identity_for(style_id),
             config_version=context.config_version,
+            provenance=provenance,
+            ai_binding=ai_binding,
         )
 
     def _get_archive_hit(
@@ -219,19 +257,48 @@ class JobRunner:
         cached_files: list[GeneratedFontFile] = []
         for style in job.styles:
             for fmt in job.formats:
-                identity = self._make_archive_identity(
-                    job,
-                    family_name,
-                    style.id,
-                    style.display_name,
-                    fmt,
-                    context,
-                )
-                entry = self.archive.get_attested(identity)
-                if entry is None:
+                hit = self._probe_l1(job, family_name, style.id, style.display_name, fmt, context)
+                if hit is None:
                     return None
-                cached_files.append(entry.to_generated_font_file())
+                cached_files.append(hit)
         return cached_files or None
+
+    def _probe_l1(
+        self,
+        job: ClaimedJob,
+        family_name: str,
+        style_id: str,
+        style_name: str,
+        fmt: str,
+        context: ArchiveSourceContext,
+    ) -> GeneratedFontFile | None:
+        """L1 exact final-artifact reuse across the deterministic provenance order."""
+        if self.archive is None:
+            return None
+        for provenance in PROVENANCE_PROBE_ORDER:
+            identity = self._make_archive_identity(
+                job, family_name, style_id, style_name, fmt, context,
+                provenance=provenance, ai_binding="",
+            )
+            found = self.archive.get_attested_any_binding(identity)
+            if found is None:
+                continue
+            entry, ai_binding = found
+            if ai_binding:
+                # Re-resolve with the exact binding so identity stays complete.
+                bound_identity = self._make_archive_identity(
+                    job, family_name, style_id, style_name, fmt, context,
+                    provenance=provenance, ai_binding=ai_binding,
+                )
+                if self.archive.get_attested(bound_identity) is None:
+                    continue
+            self._trace_record(f"L1_{fmt}", "HIT", provenance=provenance)
+            return entry.to_generated_font_file()
+        return None
+
+    def _trace_record(self, key: str, event: str, **fields: Any) -> None:
+        trace = self.last_reuse_trace.setdefault("events", [])
+        trace.append({"key": key, "event": event, **fields})
 
     def _stage9d_gate_artifact(
         self,
@@ -241,6 +308,8 @@ class JobRunner:
         style_name: str,
         fmt: str,
         build_dir: Path,
+        mode: str = "ORIGINAL",
+        vietnamese_service: Any = None,
     ) -> tuple[GeneratedFontFile, Any]:
         """Run the Stage 9D release gate for one style+format; fail-closed.
 
@@ -262,8 +331,13 @@ class JobRunner:
             browser_version=style_data.observation_browser_version,
             format_type=fmt,
             output_dir=build_dir / "stage9d" / fmt.lower(),
+            mode=mode,
+            vietnamese_service=vietnamese_service,
         )
         if not result.is_publishable or result.attestation is None:
+            reason = ";".join(result.failure_reasons)[:128] if result.failure_reasons else ""
+            if "VI_" in reason:
+                raise ValueError(f"VI_GATE_FAILED_{fmt}")
             raise ValueError(f"STAGE9D_GATE_FAILED_{fmt}")
 
         artifact_path = Path(result.candidate_file_path)
@@ -276,7 +350,274 @@ class JobRunner:
             size_bytes=result.candidate_size_bytes,
             sha256_hex=result.candidate_artifact_sha,
         )
-        return font_file, result.attestation
+        return font_file, result.attestation, result
+
+    # ------------------------------------------------------------------
+    # Tiered reuse coordinator: L1 final artifact -> L2 FontModel ->
+    # L3 authorized binary -> L4 exact raster observations -> acquisition.
+    # A tier skips only causally replaced work; all gates stay fail-closed.
+    # ------------------------------------------------------------------
+
+    def _observation_keys(self, source_url: str, style_id: str) -> tuple[str, str]:
+        family_key = (
+            self._family_name_from_url(source_url).lower().replace(" ", "_").replace("-", "_")
+        )
+        style_key = style_id.lower().replace(" ", "_").replace("-", "_")
+        return family_key, style_key
+
+    @staticmethod
+    def _reference_fingerprint(
+        archive_context: ArchiveSourceContext,
+        style_id: str,
+        browser_version: str,
+        config_hash: str,
+        coverage_fingerprint: str,
+    ) -> str:
+        payload = {
+            "source_identity": archive_context.source_identity,
+            "observation_identity": archive_context.observation_identity_for(style_id),
+            "config_version": archive_context.config_version,
+            "browser_version": browser_version,
+            "config_hash": config_hash,
+            "coverage_fingerprint": coverage_fingerprint,
+        }
+        serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+    def _vietnamese_service(self, mode: str, config_hash: str, source_hash: str):
+        """ORIGINAL mode never receives an AI service (zero AI work)."""
+        if mode.strip().upper() != "VIETNAMESE":
+            return None
+        from compute.vietnamese import VietnameseExtensionService
+
+        return VietnameseExtensionService(
+            ai_provider=self.vietnamese_ai_provider,
+            config_hash=config_hash,
+            source_hash=source_hash,
+        )
+
+    @staticmethod
+    def _coverage_fingerprint(coverage: list[int]) -> str:
+        return hashlib.sha256(
+            json.dumps(sorted(coverage), separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+
+    def _completed_identities(self, store: Any, family_key: str, style_key: str, cfg_h: str):
+        try:
+            identities = [
+                (b, c)
+                for b, c in store.get_completed_collection_identities(family_key, style_key)
+                if c == cfg_h and store.is_source_collection_completed(family_key, style_key, c, b)
+            ]
+        except Exception:
+            return []
+        return sorted(identities)
+
+    def _binary_attestation(
+        self,
+        binary: Any,
+        report: BinaryGateReport,
+        family_key: str,
+        style_key: str,
+        config_hash: str,
+    ) -> Stage9DAttestation:
+        provenance = (
+            PROVENANCE_BINARY_DUMP_DOM
+            if binary.provenance == BINARY_STAGE_DUMP_DOM
+            else PROVENANCE_BINARY_SESSION
+        )
+        return Stage9DAttestation(
+            schema_version=STAGE9D_ATTESTATION_SCHEMA_VERSION,
+            format=report.format,
+            artifact_sha256=report.artifact_sha256,
+            artifact_size_bytes=report.artifact_size_bytes,
+            reference_id=family_key,
+            style_id=style_key,
+            browser_version="authorized_binary",
+            config_hash=config_hash,
+            snapshot_fingerprint=binary.sha256_hex,
+            fit_set_fingerprint="",
+            held_out_set_fingerprint="",
+            model_hash="",
+            policy_hash=BINARY_PIPELINE_VERSION,
+            report_id=f"bin_{report.compute_report_hash()[:16]}",
+            report_hash=report.compute_report_hash(),
+            consumer_bundle_hash="",
+            optimizer_trace_hash="",
+            optimizer_converged=True,
+            overall_status=report.overall_status,
+            provenance=provenance,
+            ai_binding="",
+        )
+
+    def _tiered_resolve_artifact(
+        self,
+        job: ClaimedJob,
+        style: Any,
+        family_name: str,
+        archive_context: ArchiveSourceContext | None,
+        fmt: str,
+        build_dir: Path,
+        reuse_state: dict[str, Any],
+    ) -> tuple[GeneratedFontFile, Any, str, str]:
+        """Resolve one style+format through the reuse tiers; fail-closed."""
+        mode = (job.mode or "ORIGINAL").strip().upper()
+        store = getattr(self.source_acquirer, "store", None)
+        config = getattr(self.source_acquirer, "observation_config", None)
+
+        # L1: exact final artifact (per-item; supports mixed hit/miss orders).
+        if archive_context is not None and self.archive is not None:
+            hit = self._probe_l1(job, family_name, style.id, style.display_name, fmt, archive_context)
+            if hit is not None:
+                return hit, None, "", ""
+
+        if store is None or config is None:
+            raise ValueError(f"STAGE9D_GATE_FAILED_{fmt}")
+        cfg_h = config.compute_hash()
+        family_key, style_key = self._observation_keys(job.source_url, style.id)
+        completed = self._completed_identities(store, family_key, style_key, cfg_h)
+
+        # L2: canonical FontModel reuse (skips acquisition + reconstruction +
+        # optimization; candidate build and held-out consumer gating still run).
+        if self.model_cache is not None and archive_context is not None:
+            for bv, cfg in completed:
+                coverage = store.get_coverage(family_key, style_key, browser_version=bv, config_hash=cfg)
+                if not coverage:
+                    continue
+                cov_fp = self._coverage_fingerprint(coverage)
+                ref_fp = self._reference_fingerprint(archive_context, style.id, bv, cfg, cov_fp)
+                for provenance in PROVENANCE_PROBE_ORDER:
+                    mc_identity = FontModelCacheIdentity(
+                        reference_fingerprint=ref_fp,
+                        family_name=family_name,
+                        style_id=style.id,
+                        mode=mode,
+                        coverage_fingerprint=cov_fp,
+                        provenance=provenance,
+                    )
+                    model = self.model_cache.get(mc_identity)
+                    if model is None:
+                        continue
+                    metadata = self.model_cache.get_metadata(mc_identity) or {}
+                    self._trace_record(f"L2_{style.id}_{fmt}", "HIT", provenance=provenance)
+                    result = Stage9DReleaseGate.execute_sync_with_model(
+                        store=store,
+                        config=config,
+                        reference_id=family_key,
+                        style_id=style_key,
+                        family_name=family_name,
+                        style_name=style.display_name,
+                        browser_version=bv,
+                        format_type=fmt,
+                        model=model,
+                        cached_snapshot_fingerprint=str(metadata.get("snapshot_fingerprint", "")),
+                        cached_trace_hash=str(metadata.get("trace_hash", "")),
+                        cached_provenance=provenance,
+                        cached_ai_binding=str(metadata.get("ai_binding", "")),
+                        output_dir=build_dir / "stage9d_l2" / fmt.lower(),
+                    )
+                    if result.is_publishable and result.attestation is not None:
+                        artifact_path = Path(result.candidate_file_path)
+                        font_file = GeneratedFontFile(
+                            style_id=style.id,
+                            style_name=style.display_name,
+                            format=fmt,
+                            filename=artifact_path.name,
+                            file_path=artifact_path,
+                            size_bytes=result.candidate_size_bytes,
+                            sha256_hex=result.candidate_artifact_sha,
+                        )
+                        return font_file, result.attestation, provenance, str(metadata.get("ai_binding", ""))
+                    self._trace_record(f"L2_{style.id}_{fmt}", "GATE_FAIL", provenance=provenance)
+
+        # L3: authorized binary win (zero geometry reconstruction).
+        binary = reuse_state.get("binaries", {}).get(style.id)
+        if binary is not None:
+            self._trace_record(f"L3_{style.id}_{fmt}", "BINARY_REUSE", provenance=binary.provenance)
+            font_file = prepare_binary_artifact(
+                binary, fmt, build_dir / "stage9d_binary" / fmt.lower(), family_name, style.display_name
+            )
+            report = BinaryConsumerValidator(self.chromium_binary_checker).validate(
+                font_file, provenance=binary.provenance
+            )
+            if report.overall_status != "PASS":
+                raise ValueError(f"STAGE9D_GATE_FAILED_{fmt}")
+            attestation = self._binary_attestation(binary, report, family_key, style_key, cfg_h)
+            provenance = (
+                PROVENANCE_BINARY_DUMP_DOM
+                if binary.provenance == BINARY_STAGE_DUMP_DOM
+                else PROVENANCE_BINARY_SESSION
+            )
+            return font_file, attestation, provenance, ""
+
+        # L4: exact raster observations -> full Stage 9D gate (fit-only
+        # optimization + four consumers + held-out evaluation).
+        if completed:
+            bv, cfg = completed[0]
+            coverage = store.get_coverage(family_key, style_key, browser_version=bv, config_hash=cfg)
+            if coverage:
+                self._trace_record(f"L4_{style.id}_{fmt}", "GATE", mode=mode)
+                source_hash = self._reference_fingerprint(
+                    archive_context, style.id, bv, cfg, self._coverage_fingerprint(coverage)
+                ) if archive_context is not None else cfg_h
+                result = Stage9DReleaseGate.execute_sync(
+                    store=store,
+                    config=config,
+                    reference_id=family_key,
+                    style_id=style_key,
+                    family_name=family_name,
+                    style_name=style.display_name,
+                    browser_version=bv,
+                    format_type=fmt,
+                    output_dir=build_dir / "stage9d" / fmt.lower(),
+                    mode=mode,
+                    vietnamese_service=self._vietnamese_service(mode, cfg_h, source_hash),
+                )
+                if not result.is_publishable or result.attestation is None:
+                    reason = ";".join(result.failure_reasons)[:128] if result.failure_reasons else ""
+                    if "VI_" in reason:
+                        raise ValueError(f"VI_GATE_FAILED_{fmt}")
+                    raise ValueError(f"STAGE9D_GATE_FAILED_{fmt}")
+                attestation = result.attestation
+                artifact_path = Path(result.candidate_file_path)
+                font_file = GeneratedFontFile(
+                    style_id=style.id,
+                    style_name=style.display_name,
+                    format=fmt,
+                    filename=artifact_path.name,
+                    file_path=artifact_path,
+                    size_bytes=result.candidate_size_bytes,
+                    sha256_hex=result.candidate_artifact_sha,
+                )
+                # Promote the converged model to the L2 cache for exact reuse.
+                if self.model_cache is not None and archive_context is not None and result.model is not None:
+                    cov_fp = self._coverage_fingerprint(coverage)
+                    ref_fp = self._reference_fingerprint(archive_context, style.id, bv, cfg, cov_fp)
+                    mc_identity = FontModelCacheIdentity(
+                        reference_fingerprint=ref_fp,
+                        family_name=family_name,
+                        style_id=style.id,
+                        mode=mode,
+                        coverage_fingerprint=cov_fp,
+                        provenance=attestation.provenance,
+                    )
+                    try:
+                        self.model_cache.put(
+                            mc_identity,
+                            result.model,
+                            metadata={
+                                "snapshot_fingerprint": result.snapshot_fingerprint,
+                                "trace_hash": result.trace.compute_trace_hash() if result.trace else "",
+                                "provenance": attestation.provenance,
+                                "ai_binding": attestation.ai_binding,
+                            },
+                        )
+                        self._trace_record(f"L2WRITE_{style.id}_{fmt}", "STORED")
+                    except Exception as exc:
+                        logger.warning("L2 model cache write skipped: %s", type(exc).__name__)
+                return font_file, attestation, attestation.provenance, attestation.ai_binding
+
+        raise ValueError(f"STAGE9D_GATE_FAILED_{fmt}")
 
     def _sync_build_validate_and_package(
         self,
@@ -287,8 +628,10 @@ class JobRunner:
         expiry_holder: list[int],
         archive_context: ArchiveSourceContext | None = None,
         cached_files: list[GeneratedFontFile] | None = None,
+        reuse_state: dict[str, Any] | None = None,
     ) -> JobPackageManifest:
         """Build/validate/archive on a miss, or package verified archive files on a hit."""
+        reuse_state = reuse_state if reuse_state is not None else {}
         family_name = job.family_name or (
             source_payload.family_name if source_payload is not None else self._family_name_from_url(job.source_url)
         )
@@ -298,42 +641,41 @@ class JobRunner:
         if cached_files is not None:
             generated_files = list(cached_files)
         else:
-            if source_payload is None:
+            gated = bool(reuse_state.get("gated"))
+            if not gated and source_payload is None:
                 raise RuntimeError("MISSING_SOURCE_PAYLOAD")
             generated_files = []
             # Stage 9D: archive writes are deferred until every requested
             # style+format gate has PASSed, so partial PASS archives nothing.
             pending_attested: list[tuple[ArchiveIdentity, GeneratedFontFile, Any]] = []
             for style in job.styles:
-                style_data = source_payload.styles.get(style.id)
-                if not style_data:
+                style_data = source_payload.styles.get(style.id) if source_payload is not None else None
+                if not gated and not style_data:
                     raise ValueError(f"STYLE_MISSING_IN_SOURCE_{style.id}")
-
-                # Production MAX observation path carries a complete exact 4-tuple;
-                # such artifacts may only publish through the Stage 9D release gate.
-                stage9d_required = bool(
-                    getattr(style_data, "observation_reference_id", None)
-                    and getattr(style_data, "observation_browser_version", None)
-                    and getattr(style_data, "observation_config_hash", None)
-                )
 
                 for fmt in job.formats:
                     now_ms = int(time.time() * 1000)
                     if fenced_event.is_set() or (now_ms + LEASE_SAFETY_MARGIN_MS >= expiry_holder[0]):
                         raise RuntimeError("LEASE_FENCED_OR_EXPIRED")
 
-                    if stage9d_required:
-                        font_file, attestation = self._stage9d_gate_artifact(
-                            style_data,
-                            family_name,
-                            style.id,
-                            style.display_name,
-                            fmt,
-                            build_dir,
+                    if gated:
+                        font_file, attestation, provenance, ai_binding = self._tiered_resolve_artifact(
+                            job=job,
+                            style=style,
+                            family_name=family_name,
+                            archive_context=archive_context,
+                            fmt=fmt,
+                            build_dir=build_dir,
+                            reuse_state=reuse_state,
                         )
                         if not validate_font_file(font_file.file_path, fmt):
                             raise ValueError(f"GENERATED_FONT_INVALID_{fmt}")
-                        if self.archive is not None and archive_context is not None and fmt in ARCHIVEABLE_FORMATS:
+                        if (
+                            attestation is not None
+                            and self.archive is not None
+                            and archive_context is not None
+                            and fmt in ARCHIVEABLE_FORMATS
+                        ):
                             pending_attested.append(
                                 (
                                     self._make_archive_identity(
@@ -343,6 +685,8 @@ class JobRunner:
                                         style.display_name,
                                         fmt,
                                         archive_context,
+                                        provenance=provenance,
+                                        ai_binding=ai_binding,
                                     ),
                                     font_file,
                                     attestation,
@@ -456,20 +800,95 @@ class JobRunner:
         )
 
         try:
-            # Step A: Use a complete verified archive hit, otherwise acquire source and compute.
+            # Step A: tiered reuse. L1 exact archive hit -> package directly.
+            # Otherwise resolve L2/L3 capabilities before any browser acquisition.
             family_name = job.family_name or self._family_name_from_url(job.source_url)
             archive_context = self._get_archive_context(job)
+            self.last_reuse_trace = {"events": [], "acquisition_traces": {}}
             cached_files = self._get_archive_hit(job, family_name, archive_context)
+            reuse_state: dict[str, Any] = {"gated": False, "binaries": {}}
             if cached_files is not None:
                 logger.info("Final-font archive hit for job %s (%d files)", job.job_id, len(cached_files))
                 source_payload = None
             else:
-                source_payload = await self.source_acquirer.acquire_source(
-                    source_url=job.source_url,
-                    styles=job.styles,
-                    preview_input=preview_input,
-                )
-                archive_context = source_payload.archive_context or archive_context
+                gate_store = getattr(self.source_acquirer, "store", None)
+                gate_config = getattr(self.source_acquirer, "observation_config", None)
+                gated = preview_input is None and gate_store is not None and gate_config is not None
+                reuse_state["gated"] = gated
+                if gated:
+                    cfg_h = gate_config.compute_hash()
+                    job_mode = (job.mode or "ORIGINAL").strip().upper()
+                    needs_acquisition = False
+                    for style in job.styles:
+                        family_key, style_key = self._observation_keys(job.source_url, style.id)
+                        completed = self._completed_identities(gate_store, family_key, style_key, cfg_h)
+                        l2_candidate = False
+                        if self.model_cache is not None and completed and archive_context is not None:
+                            for bv, cfg in completed:
+                                coverage = gate_store.get_coverage(
+                                    family_key, style_key, browser_version=bv, config_hash=cfg
+                                )
+                                if not coverage:
+                                    continue
+                                cov_fp = self._coverage_fingerprint(coverage)
+                                ref_fp = self._reference_fingerprint(
+                                    archive_context, style.id, bv, cfg, cov_fp
+                                )
+                                for provenance in PROVENANCE_PROBE_ORDER:
+                                    probe = FontModelCacheIdentity(
+                                        reference_fingerprint=ref_fp,
+                                        family_name=family_name,
+                                        style_id=style.id,
+                                        mode=job_mode,
+                                        coverage_fingerprint=cov_fp,
+                                        provenance=provenance,
+                                    )
+                                    if self.model_cache.get(probe) is not None:
+                                        l2_candidate = True
+                                        break
+                                if l2_candidate:
+                                    break
+                        if completed or l2_candidate:
+                            self._trace_record(f"PREACQ_{style.id}", "SKIP_BROWSER", l2=l2_candidate)
+                            continue
+                        if self.acquisition_pipeline is not None:
+                            outcome = await self.acquisition_pipeline.acquire(
+                                job.source_url, family_name, style.display_name
+                            )
+                            self.last_reuse_trace["acquisition_traces"][style.id] = (
+                                outcome.trace.to_sanitized_dict()
+                            )
+                            if outcome.kind == "binary" and outcome.binary is not None:
+                                reuse_state["binaries"][style.id] = outcome.binary
+                                self._trace_record(
+                                    f"PREACQ_{style.id}", "BINARY_WIN", provenance=outcome.binary.provenance
+                                )
+                                continue
+                            if outcome.kind == "insufficient" and outcome.terminal_reason_code.startswith(
+                                "ACQUISITION_BINARY_INTEGRITY_FAILED"
+                            ):
+                                raise ValueError(outcome.terminal_reason_code)
+                        needs_acquisition = True
+                    if needs_acquisition:
+                        source_payload = await self.source_acquirer.acquire_source(
+                            source_url=job.source_url,
+                            styles=job.styles,
+                            preview_input=preview_input,
+                        )
+                        archive_context = source_payload.archive_context or archive_context
+                    else:
+                        source_payload = None
+                        if archive_context is None:
+                            archive_context = self.source_acquirer.get_archive_context(
+                                job.source_url, job.styles
+                            )
+                else:
+                    source_payload = await self.source_acquirer.acquire_source(
+                        source_url=job.source_url,
+                        styles=job.styles,
+                        preview_input=preview_input,
+                    )
+                    archive_context = source_payload.archive_context or archive_context
 
             # Step B & C: Build fonts, validate, and package in a worker thread off the event loop
             manifest = await asyncio.to_thread(
@@ -481,6 +900,7 @@ class JobRunner:
                 expiry_holder,
                 archive_context,
                 cached_files,
+                reuse_state,
             )
 
             # Step D: Upload ZIP artifact(s) to private R2 storage endpoint

@@ -196,38 +196,66 @@ The A23 is an external HTTP-pull Queue consumer:
 
 Queue delivery is at least once. D1 lease fencing—not Queue visibility—is authoritative for duplicate prevention.
 
-## MAX raster-to-font pipeline
+## MAX font production pipeline (tiered reuse, binary-first)
 
-The reconstruction boundary receives observable browser evidence, never a source font binary or caller-authored PASS value.
+The production runner resolves each requested style+format through a fail-closed
+reuse order. A tier skips only the work it causally replaces; no caller-authored
+PASS value is ever accepted:
+
+```text
+L1  exact final artifact (attested archive hit, byte-identical)
+L2  canonical FontModel cache (skips acquisition + reconstruction + optimization;
+    candidate build + held-out four-consumer gate still run)
+L3  authorized binary acquisition (binary-first; zero geometry reconstruction)
+L4  exact completed raster observations (MAX reconstruction path)
+L5  authorized browser raster observation (acquisition)
+```
+
+Final identity binds source/reference fingerprint, family/style, ORIGINAL|VIETNAMESE,
+TTF|OTF, coverage, pipeline/build version, and Vietnamese/AI provenance. Raster
+identity additionally binds the exact browser/config tuple. Cache or artifact
+corruption, stale versions, ambiguous identity, or failed provenance are misses.
 
 ```text
 Authorized reference URL
-  → catalog/style discovery
-  → exact browser environment identity
-  → lossless raster and typography observation
-  → immutable completed observation snapshot
-  → fit/held-out partition
-  → calibration and normalization
-  → SDF / continuous coverage
-  → topology recovery
-  → cubic Bézier fitting
-  → fit-only deterministic optimization
-  → measured metrics and typography inference
-  → canonical FontModel
-  → optional Vietnamese extension
-  → TTF/glyf and OTF/CFF build
-  → FontTools + FreeType + HarfBuzz + Chromium evidence
-  → held-out fidelity evaluation
-  → exact artifact attestation
-  → immutable archive
+  → catalog/style discovery (pre-payment: catalog only)
+  → verified settlement gate
+  → tiered reuse resolution (L1→L5)
+  → authorized acquisition order:
+      native Chrome --headless=new --dump-dom (primary)
+      → authorized persistent Chrome/session (fallback)
+      → authorized provider raster endpoint (fallback)
+  → valid authorized binary wins: verify bytes/type/family/style/provenance,
+    convert/build requested TTF/OTF only, four-consumer validation
+  → otherwise raster observation:
+      lossless raster + metrics + pairs + features
+      → immutable completed snapshot
+      → fit/held-out partition
+      → calibration → SDF/coverage → topology → Bézier fitting
+      → fit-only deterministic optimization
+      → canonical FontModel
+      → Vietnamese extension (VIETNAMESE mode only)
+      → TTF/glyf and OTF/CFF build
+      → FontTools + FreeType + HarfBuzz + Chromium evidence
+      → held-out fidelity evaluation
+      → exact artifact attestation
+  → immutable attested archive (all items PASS before any archive/package)
   → deterministic package
 ```
 
 ### 1. Source and catalog discovery
 
-Before payment, the Worker performs only URL validation and catalog/style discovery. Expensive observation and reconstruction are deferred until verified payment.
+Before payment, the Worker performs only URL validation and catalog/style discovery. All cache/acquisition/compute runs after verified settlement.
 
-Reference URLs must be canonicalized and authorized. Internal CDN enumeration, anti-bot bypass, clearance-cookie reuse, stealth/fingerprint masking, forged request identity, and source-font extraction are outside the architecture.
+Reference URLs must be canonicalized and authorized. Automated binary/raster
+retrieval operates under written provider authorization covering the approved
+MyFonts/Monotype workflow; a fallback stage starts only after the preceding
+capability proves binary/raster insufficiency, and every retrieval is bounded.
+Unapproved internal CDN enumeration, anti-bot bypass, stealth/fingerprint
+masking, and forged request identity remain outside the architecture.
+Authorization documents, credentials, cookies, and session material are never
+requested, published, committed, logged, or embedded in artifacts; provider
+adapters are injectable and testable without real credentials.
 
 ### 2. Browser observation
 
@@ -287,9 +315,13 @@ The Vietnamese branch runs after the canonical model exists:
 - synthesize only missing glyphs from measured components;
 - preserve measured metrics and OpenType truth;
 - validate `ccmp`, `mark`, `mkmk`, collisions, clipping, spacing, and corpus behavior;
-- optional AI may rank bounded optical alternatives for synthesized glyphs only.
+- for missing coverage only, an injectable AI provider may generate/rank
+  candidates; the extension binds AI model/version/prompt/config/source hashes
+  into immutable provenance. ORIGINAL mode never invokes AI work.
 
-AI cannot invent mappings, alter observed glyphs, or bypass validators.
+AI cannot invent mappings, alter observed glyphs, author PASS, weaken thresholds,
+or bypass FontTools/FreeType/HarfBuzz/Chromium/held-out validators. Forged,
+non-finite, or incomplete AI output fails closed with no publish/archive.
 
 ### 6. Candidate build and four-consumer gate
 

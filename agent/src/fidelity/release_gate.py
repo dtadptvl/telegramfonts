@@ -58,6 +58,10 @@ logger = logging.getLogger("telegramfonts.agent.fidelity.release_gate")
 
 STAGE9D_ATTESTATION_SCHEMA_VERSION = 1
 
+PROVENANCE_STAGE9D_RASTER = "stage9d_raster_v1"
+PROVENANCE_VIETNAMESE_AI = "vietnamese_ai_v1"
+PROVENANCE_VIETNAMESE_PRESERVED = "vietnamese_preserved_v1"
+
 
 @dataclass(frozen=True)
 class Stage9DAttestation:
@@ -82,6 +86,8 @@ class Stage9DAttestation:
     optimizer_trace_hash: str
     optimizer_converged: bool
     overall_status: str
+    provenance: str = PROVENANCE_STAGE9D_RASTER
+    ai_binding: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -104,6 +110,8 @@ class Stage9DAttestation:
             "optimizer_trace_hash": self.optimizer_trace_hash,
             "optimizer_converged": self.optimizer_converged,
             "overall_status": self.overall_status,
+            "provenance": self.provenance,
+            "ai_binding": self.ai_binding,
         }
 
     @staticmethod
@@ -140,6 +148,8 @@ class Stage9DAttestation:
                 optimizer_trace_hash=str(payload["optimizer_trace_hash"]),
                 optimizer_converged=bool(payload["optimizer_converged"]),
                 overall_status=str(payload["overall_status"]),
+                provenance=str(payload.get("provenance", PROVENANCE_STAGE9D_RASTER)),
+                ai_binding=str(payload.get("ai_binding", "")),
             )
         except (ValueError, KeyError, TypeError, json.JSONDecodeError):
             return None
@@ -168,6 +178,7 @@ class ReleaseGateResult:
     attestation: Stage9DAttestation | None = None
     trace: OptimizationTrace | None = None
     failure_reasons: tuple[str, ...] = field(default_factory=tuple)
+    model: Any = field(default=None, repr=False, compare=False)
     _temp_dir: Any = field(default=None, repr=False, compare=False)
 
     def cleanup(self) -> None:
@@ -232,6 +243,8 @@ class Stage9DReleaseGate:
         output_dir: str | Path | None = None,
         thresholds: FidelityThresholds | None = None,
         optimizer_policy: OptimizerPolicy | None = None,
+        mode: str = "ORIGINAL",
+        vietnamese_service: Any = None,
     ) -> ReleaseGateResult:
         clean_format = format_type.strip().upper()
         if clean_format not in ("TTF", "OTF"):
@@ -368,9 +381,37 @@ class Stage9DReleaseGate:
                 kerning_pairs=kerning_map,
             )
             model_hash = model.compute_canonical_hash()
+
+            # VIETNAMESE extension boundary: ORIGINAL never invokes AI work.
+            gate_provenance = PROVENANCE_STAGE9D_RASTER
+            gate_ai_binding = ""
+            if mode.strip().upper() == "VIETNAMESE":
+                if vietnamese_service is None:
+                    from compute.vietnamese import VietnameseExtensionService, missing_vietnamese_codepoints
+
+                    if missing_vietnamese_codepoints(model):
+                        raise ValueError("VI_PROVIDER_REQUIRED_FOR_MISSING_COVERAGE")
+                    gate_provenance = PROVENANCE_VIETNAMESE_PRESERVED
+                else:
+                    model, vi_binding = await vietnamese_service.extend(model)
+                    from compute.vietnamese import validate_nfc_nfd_coverage
+
+                    nfc_failures = validate_nfc_nfd_coverage(model)
+                    if nfc_failures:
+                        raise ValueError("VI_NFC_NFD_VALIDATION_FAILED")
+                    if vi_binding.extended_codepoints:
+                        gate_provenance = PROVENANCE_VIETNAMESE_AI
+                        gate_ai_binding = vi_binding.compute_binding_hash()
+                    else:
+                        gate_provenance = PROVENANCE_VIETNAMESE_PRESERVED
+                    model_hash = model.compute_canonical_hash()
         except Exception as exc:
             logger.error("Stage 9D model assembly failed: %s", type(exc).__name__)
-            return _fail_result("FAIL", snapshot, "PIPELINE_ERROR: MODEL_FITTING_FAILED", clean_format, model_hash=model_hash, trace=trace)
+            reason_code = "PIPELINE_ERROR: MODEL_FITTING_FAILED"
+            message = str(exc)
+            if message.startswith("VI_"):
+                reason_code = f"PIPELINE_ERROR: {message}"
+            return _fail_result("FAIL", snapshot, reason_code, clean_format, model_hash=model_hash, trace=trace)
 
         # 6. Candidate build + attestation + on-disk drift re-verification.
         temp_dir_obj: Any = None
@@ -407,6 +448,12 @@ class Stage9DReleaseGate:
                 raise FileNotFoundError("Candidate font file not built successfully")
 
             raw_font_bytes = Path(art_file.file_path).read_bytes()
+            if mode.strip().upper() == "VIETNAMESE":
+                from compute.vietnamese import validate_candidate_font_bytes
+
+                vi_build_failures = validate_candidate_font_bytes(raw_font_bytes, model)
+                if vi_build_failures:
+                    raise ValueError("VI_CANDIDATE_VALIDATION_FAILED")
             descriptor = CandidateArtifactDescriptor(
                 file_path=str(art_file.file_path),
                 expected_format=clean_format,
@@ -512,6 +559,8 @@ class Stage9DReleaseGate:
             optimizer_trace_hash=trace.compute_trace_hash() if trace else "",
             optimizer_converged=bool(trace and trace.converged),
             overall_status=report.overall_status,
+            provenance=gate_provenance,
+            ai_binding=gate_ai_binding,
         )
 
         return ReleaseGateResult(
@@ -534,6 +583,7 @@ class Stage9DReleaseGate:
             attestation=attestation,
             trace=trace,
             failure_reasons=sanitized_reasons,
+            model=model,
             _temp_dir=temp_dir_obj,
         )
 
@@ -551,6 +601,8 @@ class Stage9DReleaseGate:
         output_dir: str | Path | None = None,
         thresholds: FidelityThresholds | None = None,
         optimizer_policy: OptimizerPolicy | None = None,
+        mode: str = "ORIGINAL",
+        vietnamese_service: Any = None,
     ) -> ReleaseGateResult:
         kwargs = dict(
             store=store,
@@ -564,6 +616,8 @@ class Stage9DReleaseGate:
             output_dir=output_dir,
             thresholds=thresholds,
             optimizer_policy=optimizer_policy,
+            mode=mode,
+            vietnamese_service=vietnamese_service,
         )
         try:
             loop = asyncio.get_running_loop()
@@ -577,3 +631,246 @@ class Stage9DReleaseGate:
                 future = executor.submit(lambda: asyncio.run(cls.execute(**kwargs)))
                 return future.result()
         return asyncio.run(cls.execute(**kwargs))
+
+    @classmethod
+    async def execute_with_model(
+        cls,
+        store: ObservationStore,
+        config: ObservationConfig,
+        reference_id: str,
+        style_id: str,
+        family_name: str,
+        style_name: str,
+        browser_version: str,
+        format_type: str,
+        model: Any,
+        cached_snapshot_fingerprint: str,
+        cached_trace_hash: str,
+        cached_provenance: str,
+        cached_ai_binding: str = "",
+        output_dir: str | Path | None = None,
+        thresholds: FidelityThresholds | None = None,
+    ) -> ReleaseGateResult:
+        """L2 reuse tier: a cached canonical FontModel replaces acquisition,
+        reconstruction, and optimization. Only causally replaced work is
+        skipped: snapshot verification, candidate build, consumer evidence,
+        held-out evaluation, and attestation still run fail-closed."""
+        clean_format = format_type.strip().upper()
+        if clean_format not in ("TTF", "OTF"):
+            return _fail_result("FAIL", None, "PIPELINE_ERROR: UNSUPPORTED_FORMAT", clean_format)
+
+        try:
+            snapshot = ObservationStoreSnapshot.load_from_store(
+                store=store,
+                reference_id=reference_id,
+                style_id=style_id,
+                family_name=family_name,
+                style_name=style_name,
+                config=config,
+                browser_version=browser_version,
+            )
+        except Exception as exc:
+            logger.error("Stage 9D L2 snapshot load failed: %s", type(exc).__name__)
+            return _fail_result("FAIL", None, "PIPELINE_ERROR: SNAPSHOT_LOAD_FAILED", clean_format)
+
+        # The cached model is only reusable when the current evidence snapshot
+        # is byte-identical to the one it was built from (fail-closed drift).
+        if snapshot.snapshot_fingerprint != cached_snapshot_fingerprint:
+            return _fail_result("FAIL", snapshot, "PIPELINE_ERROR: L2_SNAPSHOT_DRIFT", clean_format)
+        if model.config_hash != config.compute_hash():
+            return _fail_result("FAIL", snapshot, "PIPELINE_ERROR: L2_CONFIG_DRIFT", clean_format)
+        if model.reference_id != reference_id or model.style_id != style_id:
+            return _fail_result("FAIL", snapshot, "PIPELINE_ERROR: L2_IDENTITY_DRIFT", clean_format)
+
+        try:
+            partition = partition_snapshot(snapshot)
+        except Exception as exc:
+            logger.error("Stage 9D L2 partition failed: %s", type(exc).__name__)
+            return _fail_result("FAIL", snapshot, "PIPELINE_ERROR: SNAPSHOT_PARTITION_FAILED", clean_format)
+
+        model_hash = ""
+        try:
+            model.validate()
+            model_hash = model.compute_canonical_hash()
+        except Exception as exc:
+            logger.error("Stage 9D L2 cached model invalid: %s", type(exc).__name__)
+            return _fail_result("FAIL", snapshot, "PIPELINE_ERROR: L2_MODEL_INVALID", clean_format)
+
+        temp_dir_obj: Any = None
+        cand_sha = ""
+        cand_path = ""
+        cand_size = 0
+        try:
+            if output_dir is not None:
+                work_dir = Path(output_dir)
+                work_dir.mkdir(parents=True, exist_ok=True)
+            else:
+                temp_dir_obj = tempfile.TemporaryDirectory(prefix="telefont_stage9d_l2_")
+                work_dir = Path(temp_dir_obj.name)
+
+            glyphs = {
+                cp: ReconstructedGlyph(
+                    code_point=cp,
+                    character=g.character,
+                    advance_width_upem=g.advance_width_upem,
+                    lsb_upem=g.lsb_upem,
+                    rsb_upem=g.rsb_upem,
+                    ascent_upem=g.ascent_upem,
+                    descent_upem=g.descent_upem,
+                    contours=list(g.contours),
+                    bounding_box_upem=g.bounding_box_upem,
+                )
+                for cp, g in model.glyphs.items()
+            }
+            builder = MaxCandidateFontBuilder(
+                family_name=model.family_name,
+                style_name=model.style_name,
+                units_per_em=model.metrics.units_per_em,
+            )
+            from typography.models import TypographyDataset
+
+            family_build = builder.build_candidate_family(
+                glyphs=glyphs,
+                output_dir=work_dir,
+                typography=TypographyDataset(
+                    family_name=model.family_name,
+                    style_name=model.style_name,
+                    units_per_em=model.metrics.units_per_em,
+                    kerning_pairs=dict(model.kerning_pairs),
+                    observations=list(partition.fit_pairs),
+                ),
+            )
+            art_file = family_build.ttf if clean_format == "TTF" else family_build.otf
+            if not art_file or not art_file.file_path or not Path(art_file.file_path).is_file():
+                raise FileNotFoundError("Candidate font file not built successfully")
+
+            raw_font_bytes = Path(art_file.file_path).read_bytes()
+            if cached_provenance in (PROVENANCE_VIETNAMESE_AI, PROVENANCE_VIETNAMESE_PRESERVED):
+                from compute.vietnamese import validate_candidate_font_bytes
+
+                vi_build_failures = validate_candidate_font_bytes(raw_font_bytes, model)
+                if vi_build_failures:
+                    raise ValueError("VI_CANDIDATE_VALIDATION_FAILED")
+            descriptor = CandidateArtifactDescriptor(
+                file_path=str(art_file.file_path),
+                expected_format=clean_format,
+                expected_size_bytes=art_file.size_bytes,
+                expected_sha256_hex=art_file.sha256_hex,
+                raw_bytes=raw_font_bytes,
+            )
+            descriptor.validate()
+            candidate_art = CandidateArtifact.from_descriptor(descriptor)
+            cand_sha = candidate_art.sha256_hex
+            cand_path = candidate_art.file_path
+            cand_size = art_file.size_bytes
+
+            reread = Path(cand_path).read_bytes()
+            if len(reread) != cand_size or hashlib.sha256(reread).hexdigest() != cand_sha:
+                raise ValueError("ARTIFACT_DRIFT_DETECTED")
+        except Exception as exc:
+            logger.error("Stage 9D L2 candidate build failed: %s", type(exc).__name__)
+            if temp_dir_obj is not None:
+                temp_dir_obj.cleanup()
+            return _fail_result(
+                "FAIL", snapshot, "PIPELINE_ERROR: CANDIDATE_ATTESTATION_FAILED", clean_format, model_hash=model_hash
+            )
+
+        try:
+            bundle = await ProductionConsumerEvidenceProducer.produce_bundle(
+                descriptor=descriptor,
+                model=model,
+                config=snapshot.config,
+                held_out_records=partition.held_out_records,
+                held_out_pairs=partition.held_out_pairs,
+                raster_provider=lambda r: snapshot.get_raster_bytes(r.cache_key),
+                thresholds=thresholds,
+            )
+            report = FidelityEvaluator.evaluate(
+                model=model,
+                config=snapshot.config,
+                fit_records=partition.fit_records,
+                held_out_records=partition.held_out_records,
+                fit_pairs=partition.fit_pairs,
+                held_out_pairs=partition.held_out_pairs,
+                consumer_bundle=bundle,
+                thresholds=thresholds,
+                raster_provider=lambda r: snapshot.get_raster_bytes(r.cache_key),
+            )
+        except Exception as exc:
+            logger.error("Stage 9D L2 evaluation failed: %s", type(exc).__name__)
+            if temp_dir_obj is not None:
+                temp_dir_obj.cleanup()
+            return _fail_result(
+                "FAIL", snapshot, "PIPELINE_ERROR: FIDELITY_EVALUATION_FAILED", clean_format, model_hash=model_hash
+            )
+
+        is_pass = report.overall_status == "PASS"
+        sanitized_reasons: tuple[str, ...] = ()
+        if not is_pass:
+            sanitized_reasons = tuple(
+                r.split(":")[0] if ":" in r else r for r in report.failure_reasons
+            ) or ("PIPELINE_ERROR: FIDELITY_GATE_FAILED",)
+
+        report_hash = report.compute_report_hash()
+        attestation = Stage9DAttestation(
+            schema_version=STAGE9D_ATTESTATION_SCHEMA_VERSION,
+            format=clean_format,
+            artifact_sha256=cand_sha,
+            artifact_size_bytes=cand_size,
+            reference_id=snapshot.reference_id,
+            style_id=snapshot.style_id,
+            browser_version=snapshot.browser_version,
+            config_hash=snapshot.config.compute_hash(),
+            snapshot_fingerprint=snapshot.snapshot_fingerprint,
+            fit_set_fingerprint=partition.fit_set_fingerprint,
+            held_out_set_fingerprint=partition.held_out_set_fingerprint,
+            model_hash=model_hash,
+            policy_hash=report.policy_hash,
+            report_id=report.report_id,
+            report_hash=report_hash,
+            consumer_bundle_hash=report.consumer_gate.consumer_bundle_hash,
+            optimizer_trace_hash=cached_trace_hash,
+            optimizer_converged=True,
+            overall_status=report.overall_status,
+            provenance=cached_provenance,
+            ai_binding=cached_ai_binding,
+        )
+
+        return ReleaseGateResult(
+            is_publishable=is_pass,
+            status=report.overall_status,
+            family_name=snapshot.family_name,
+            style_name=snapshot.style_name,
+            reference_id=snapshot.reference_id,
+            style_id=snapshot.style_id,
+            format=clean_format,
+            model_hash=model_hash,
+            candidate_file_path=cand_path,
+            candidate_size_bytes=cand_size,
+            candidate_artifact_sha=cand_sha,
+            snapshot_fingerprint=snapshot.snapshot_fingerprint,
+            fit_set_fingerprint=partition.fit_set_fingerprint,
+            held_out_set_fingerprint=partition.held_out_set_fingerprint,
+            report=report,
+            report_hash=report_hash,
+            attestation=attestation,
+            trace=None,
+            failure_reasons=sanitized_reasons,
+            model=model,
+            _temp_dir=temp_dir_obj,
+        )
+
+    @classmethod
+    def execute_sync_with_model(cls, **kwargs) -> ReleaseGateResult:
+        """Synchronous wrapper around execute_with_model for runner threads."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop and loop.is_running():
+            import concurrent.futures
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(lambda: asyncio.run(cls.execute_with_model(**kwargs)))
+                return future.result()
+        return asyncio.run(cls.execute_with_model(**kwargs))
