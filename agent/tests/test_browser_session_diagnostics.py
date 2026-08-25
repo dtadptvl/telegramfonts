@@ -429,8 +429,27 @@ async def test_websocket_attempt_uses_one_minimal_direct_profile(monkeypatch):
     session = ChromiumSession(executable_path="unused")
     calls: list[tuple[str, dict[str, object]]] = []
 
-    async def fake_connect(url: str, **kwargs):
-        calls.append((url, kwargs))
+    async def fake_connect(
+        url: str,
+        *,
+        max_size=None,
+        proxy=None,
+        compression=None,
+        origin=None,
+        user_agent_header=None,
+    ):
+        calls.append(
+            (
+                url,
+                {
+                    "max_size": max_size,
+                    "proxy": proxy,
+                    "compression": compression,
+                    "origin": origin,
+                    "user_agent_header": user_agent_header,
+                },
+            )
+        )
         return object()
 
     monkeypatch.setattr(browser_session.websockets, "connect", fake_connect)
@@ -448,6 +467,50 @@ async def test_websocket_attempt_uses_one_minimal_direct_profile(monkeypatch):
         "compression": None,
         "origin": None,
         "user_agent_header": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_websockets_13_direct_boundary_omits_unsupported_proxy(monkeypatch):
+    session = ChromiumSession(executable_path="unused")
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    async def fake_websockets_13_connect(
+        url: str,
+        *,
+        max_size=None,
+        compression="deflate",
+        origin=None,
+        extra_headers=None,
+    ):
+        calls.append(
+            (
+                url,
+                {
+                    "max_size": max_size,
+                    "compression": compression,
+                    "origin": origin,
+                    "extra_headers": extra_headers,
+                },
+            )
+        )
+        return object()
+
+    monkeypatch.setattr(browser_session.websockets, "connect", fake_websockets_13_connect)
+    monkeypatch.setattr(browser_session.websockets, "__version__", "13.0.1", raising=False)
+
+    result = await session._connect_websocket(
+        "ws://127.0.0.1:9222/devtools/page/target",
+        asyncio.get_running_loop().time() + 1.0,
+    )
+
+    assert result is not None
+    assert len(calls) == 1
+    assert calls[0][1] == {
+        "max_size": 20 * 1024 * 1024,
+        "compression": None,
+        "origin": None,
+        "extra_headers": None,
     }
 
 

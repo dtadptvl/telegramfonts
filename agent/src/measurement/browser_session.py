@@ -587,17 +587,13 @@ class ChromiumSession:
             parameters = inspect.signature(websockets.connect).parameters
         except (TypeError, ValueError):
             parameters = {}
-        accepts_kwargs = any(
-            parameter.kind is inspect.Parameter.VAR_KEYWORD
-            for parameter in parameters.values()
-        )
         for name, value in (
             ("proxy", None),
             ("compression", None),
             ("origin", None),
             ("user_agent_header", None),
         ):
-            if name in parameters or accepts_kwargs:
+            if name in parameters:
                 kwargs[name] = value
 
         async def connect() -> Any:
