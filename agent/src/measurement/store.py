@@ -496,21 +496,19 @@ class ObservationStore:
         self,
         reference_id: str,
         style_id: str,
-        browser_version: str | None = None,
-        config_hash: str | None = None,
+        browser_version: str,
+        config_hash: str,
     ) -> list[dict[str, Any]]:
-        """Return persisted browser feature probes strictly filtered by identity."""
+        """Return persisted browser feature probes strictly filtered by exact identity."""
+        if not browser_version or not config_hash:
+            raise ValueError("EXACT_IDENTITY_REQUIRED: browser_version and config_hash must be non-empty strings")
         with self._get_connection() as conn:
-            query = "SELECT * FROM feature_observations WHERE reference_id = ? AND style_id = ?"
-            params: list[Any] = [reference_id, style_id]
-            if browser_version is not None:
-                query += " AND browser_version = ?"
-                params.append(browser_version)
-            if config_hash is not None:
-                query += " AND config_hash = ?"
-                params.append(config_hash)
-            query += " ORDER BY feature_tag, sample_text"
-            rows = conn.execute(query, tuple(params)).fetchall()
+            query = """
+                SELECT * FROM feature_observations
+                WHERE reference_id = ? AND style_id = ? AND browser_version = ? AND config_hash = ?
+                ORDER BY feature_tag, sample_text
+            """
+            rows = conn.execute(query, (reference_id, style_id, browser_version, config_hash)).fetchall()
             return [dict(row) for row in rows]
 
     def mark_source_collection_started(self, collection_key: str) -> None:
@@ -624,30 +622,28 @@ class ObservationStore:
         reference_id: str,
         style_id: str,
         code_point: int,
-        browser_version: str | None = None,
-        config_hash: str | None = None,
+        browser_version: str,
+        config_hash: str,
     ) -> list[tuple[ObservationRecord, bytes]]:
-        """Retrieve all observation records and raw PNG bytes for a specific glyph, optionally filtered by exact identity."""
+        """Retrieve all observation records and raw PNG bytes for a specific glyph strictly filtered by exact identity."""
+        if not browser_version or not config_hash:
+            raise ValueError("EXACT_IDENTITY_REQUIRED: browser_version and config_hash must be non-empty strings")
         try:
             with self._get_connection() as conn:
-                query = "SELECT * FROM observations WHERE reference_id = ? AND style_id = ? AND code_point = ?"
-                params: list[Any] = [reference_id, style_id, code_point]
-                if browser_version is not None:
-                    query += " AND browser_version = ?"
-                    params.append(browser_version)
-                if config_hash is not None:
-                    query += " AND config_hash = ?"
-                    params.append(config_hash)
-                query += " ORDER BY resolution ASC, subpixel_x ASC, subpixel_y ASC"
-                cur = conn.execute(query, tuple(params))
+                query = """
+                    SELECT * FROM observations
+                    WHERE reference_id = ? AND style_id = ? AND code_point = ? AND browser_version = ? AND config_hash = ?
+                    ORDER BY resolution ASC, subpixel_x ASC, subpixel_y ASC
+                """
+                cur = conn.execute(query, (reference_id, style_id, code_point, browser_version, config_hash))
                 rows = cur.fetchall()
                 results = []
                 for row in rows:
                     rec = self._row_to_record(row)
                     if rec is None:
                         continue
-                    png_path = self.base_dir / rec.raster_relative_path
-                    if not png_path.exists():
+                    png_path = (self.base_dir / rec.raster_relative_path).resolve()
+                    if not png_path.is_relative_to(self.base_dir.resolve()) or not png_path.exists():
                         continue
                     try:
                         png_bytes = png_path.read_bytes()
@@ -664,23 +660,27 @@ class ObservationStore:
         self,
         reference_id: str,
         style_id: str,
-        browser_version: str | None = None,
-        config_hash: str | None = None,
+        browser_version: str,
+        config_hash: str,
     ) -> list[int]:
-        """Retrieve distinct code points having valid observations, strictly filtered by identity."""
+        """Retrieve distinct code points having valid observations, strictly filtered by exact identity."""
+        if not browser_version or not config_hash:
+            raise ValueError("EXACT_IDENTITY_REQUIRED: browser_version and config_hash must be non-empty strings")
         try:
             with self._get_connection() as conn:
-                query = "SELECT DISTINCT code_point FROM observations WHERE reference_id = ? AND style_id = ?"
-                params: list[Any] = [reference_id, style_id]
-                if browser_version is not None:
-                    query += " AND browser_version = ?"
-                    params.append(browser_version)
-                if config_hash is not None:
-                    query += " AND config_hash = ?"
-                    params.append(config_hash)
-                query += " ORDER BY code_point ASC"
-                cur = conn.execute(query, tuple(params))
-                return [int(row[0]) for row in cur.fetchall()]
+                query = """
+                    SELECT DISTINCT code_point FROM observations
+                    WHERE reference_id = ? AND style_id = ? AND browser_version = ? AND config_hash = ?
+                    ORDER BY code_point ASC
+                """
+                cur = conn.execute(query, (reference_id, style_id, browser_version, config_hash))
+                valid_cps = []
+                for row in cur.fetchall():
+                    cp = int(row["code_point"])
+                    obs = self.get_glyph_observations(reference_id, style_id, cp, browser_version, config_hash)
+                    if obs:
+                        valid_cps.append(cp)
+                return valid_cps
         except Exception:
             return []
 
@@ -703,7 +703,9 @@ class ObservationStore:
             if not isinstance(val, str) or len(val) != 64 or not all(c in "0123456789abcdefABCDEF" for c in val):
                 raise ValueError(f"ObservationRecord {name} must be a 64-char hex string, got: '{val}'")
 
-        target_path = self.base_dir / record.raster_relative_path
+        target_path = (self.base_dir / record.raster_relative_path).resolve()
+        if not target_path.is_relative_to(self.base_dir.resolve()):
+            raise ValueError(f"Invalid raster relative path outside store directory: {record.raster_relative_path}")
         target_path.parent.mkdir(parents=True, exist_ok=True)
         target_path.write_bytes(png_bytes)
 
@@ -941,21 +943,19 @@ class ObservationStore:
         self,
         reference_id: str,
         style_id: str,
-        browser_version: str | None = None,
-        config_hash: str | None = None,
+        browser_version: str,
+        config_hash: str,
     ) -> list[dict[str, Any]]:
-        """Retrieve all stored observable pair measurements for a style strictly filtered by identity."""
+        """Retrieve all stored observable pair measurements for a style strictly filtered by exact identity."""
+        if not browser_version or not config_hash:
+            raise ValueError("EXACT_IDENTITY_REQUIRED: browser_version and config_hash must be non-empty strings")
         with self._get_connection() as conn:
-            query = "SELECT * FROM pair_observations WHERE reference_id = ? AND style_id = ?"
-            params: list[Any] = [reference_id, style_id]
-            if browser_version is not None:
-                query += " AND browser_version = ?"
-                params.append(browser_version)
-            if config_hash is not None:
-                query += " AND config_hash = ?"
-                params.append(config_hash)
-            query += " ORDER BY left_cp ASC, right_cp ASC"
-            cur = conn.execute(query, tuple(params))
+            query = """
+                SELECT * FROM pair_observations
+                WHERE reference_id = ? AND style_id = ? AND browser_version = ? AND config_hash = ?
+                ORDER BY left_cp ASC, right_cp ASC
+            """
+            cur = conn.execute(query, (reference_id, style_id, browser_version, config_hash))
             rows = cur.fetchall()
             return [dict(r) for r in rows]
 

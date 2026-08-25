@@ -132,7 +132,12 @@ class EvidenceKerningInferencer:
                 kerning_pairs[(left_cp, right_cp)] = inferred_kern
 
         if require_provenance:
-            expected_fit_pairs = set(BOUNDED_FIT_PAIRS)
+            cov = store.get_coverage(reference_id, style_id, browser_version=browser_version, config_hash=config_hash)
+            cov_set = set(cov) if cov else set()
+            if cov_set:
+                expected_fit_pairs = {p for p in BOUNDED_FIT_PAIRS if p[0] in cov_set and p[1] in cov_set}
+            else:
+                expected_fit_pairs = set(BOUNDED_FIT_PAIRS)
             missing = expected_fit_pairs - valid_pairs_seen
             if missing:
                 raise ValueError(

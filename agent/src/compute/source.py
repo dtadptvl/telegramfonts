@@ -562,7 +562,13 @@ class SourceAcquirer:
                         glyph_models = _RECONSTRUCTED_GLYPH_CACHE[cache_key]
                     else:
                         glyph_models = {}
-                        disk_cache_file = self.store_dir / f"reconstructed_{family_key}_{style_key}_{active_browser_ver}_{active_cfg_hash}.pkl"
+                        safe_fam = re.sub(r"[^a-zA-Z0-9_-]", "_", family_key)
+                        safe_style = re.sub(r"[^a-zA-Z0-9_-]", "_", style_key)
+                        bv_hash = hashlib.sha256(active_browser_ver.encode("utf-8")).hexdigest()[:16]
+                        cache_filename = f"reconstructed_{safe_fam}_{safe_style}_{bv_hash}_{active_cfg_hash}.pkl"
+                        disk_cache_file = (self.store_dir / cache_filename).resolve()
+                        if not disk_cache_file.is_relative_to(self.store_dir.resolve()):
+                            raise ValueError(f"Reconstruction disk cache path escaped store directory: {cache_filename}")
                         if disk_cache_file.exists() and not collected_any:
                             try:
                                 glyph_models = pickle.loads(disk_cache_file.read_bytes())

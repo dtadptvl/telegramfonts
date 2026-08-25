@@ -57,8 +57,16 @@ async def run_worker(
         try:
             with open(checkpoint_file, "r", encoding="utf-8") as f:
                 cp_data = json.load(f)
-                completed_cps = cp_data.get("completed_cps", [])
-                print(f"RESUMING_CHECKPOINT: found {len(completed_cps)} already completed code points", flush=True)
+                chk_bv = cp_data.get("browser_version")
+                chk_cfg = cp_data.get("config_hash")
+                if chk_bv == browser_version and chk_cfg == config_hash:
+                    completed_cps = cp_data.get("completed_cps", [])
+                    print(f"RESUMING_CHECKPOINT: found {len(completed_cps)} already completed code points for exact identity", flush=True)
+                else:
+                    print(
+                        f"REJECTED_CHECKPOINT_IDENTITY_MISMATCH: checkpoint ({chk_bv}, {chk_cfg}) != active ({browser_version}, {config_hash})",
+                        flush=True,
+                    )
         except Exception as e:
             print(f"CHECKPOINT_READ_ERROR: {e}", flush=True)
 
@@ -83,7 +91,7 @@ async def run_worker(
                 print(f"FAILED_TO_LOAD_GLYPH_{cp}: {e}, recomputing...", flush=True)
 
         # Genuinely compute glyph with solver
-        obs = store.get_glyph_observations("be_vietnam_pro", "regular", cp)
+        obs = store.get_glyph_observations("be_vietnam_pro", "regular", cp, browser_version=browser_version, config_hash=config_hash)
         if not obs:
             continue
 
@@ -99,7 +107,14 @@ async def run_worker(
             pickle.dump(glyph, gf)
 
         with open(checkpoint_file, "w", encoding="utf-8") as f:
-            json.dump({"completed_cps": completed_cps, "last_updated": time.time()}, f)
+            json.dump({
+                "completed_cps": completed_cps,
+                "browser_version": browser_version,
+                "config_hash": config_hash,
+                "reference_id": "be_vietnam_pro",
+                "style_id": "regular",
+                "last_updated": time.time(),
+            }, f)
 
         print(f"PROGRESS_GLYPH_{i+1}_{cp}_PID_{os.getpid()}", flush=True)
 

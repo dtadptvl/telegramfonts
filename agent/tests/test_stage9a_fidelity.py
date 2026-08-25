@@ -487,7 +487,9 @@ def test_collector_store_roundtrip_identity_preservation() -> None:
         assert loaded_rec.config_hash == cfg_hash
         assert loaded_rec.validate_cache_key() is True
 
-        glyph_obs = store.get_glyph_observations("test_font", "regular", 65)
+        glyph_obs = store.get_glyph_observations(
+            "test_font", "regular", 65, browser_version="chromium-headless-shell", config_hash=cfg_hash
+        )
         assert len(glyph_obs) == 1
         g_rec, g_bytes = glyph_obs[0]
         assert g_rec.browser_version == "chromium-headless-shell"

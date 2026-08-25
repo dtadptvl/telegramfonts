@@ -522,10 +522,11 @@ async def test_observation_collector_pair_acquisition_with_provenance(tmp_path):
         font_family="ObservedFont",
         pairs=[(65, 79), (66, 79)],
     )
+    real_bv = session.browser_version
     await session.aclose()
 
     assert captured == 2
-    rows = store.get_pair_observations("test_ref", "regular")
+    rows = store.get_pair_observations("test_ref", "regular", browser_version=real_bv, config_hash=collector.config.compute_hash())
     assert len(rows) == 2
     for r in rows:
         assert "chromium:" in r["provenance"]

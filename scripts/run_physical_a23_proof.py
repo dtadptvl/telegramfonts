@@ -53,9 +53,9 @@ def run_a23_full_style_proof(
 
     family_id = "be_vietnam_pro"
     style_id = "regular"
-    canonical_coverage = store.get_coverage(family_id, style_id)
+    canonical_coverage = store.get_coverage(family_id, style_id, browser_version=browser_version, config_hash=config_hash)
     if not canonical_coverage:
-        raise ValueError("No canonical coverage found in observation store")
+        raise ValueError(f"No canonical coverage found in observation store for exact tuple ({browser_version}, {config_hash})")
 
     # 3. Solver & Full-Style Reconstruction
     config = ReconstructionConfig()
@@ -71,7 +71,7 @@ def run_a23_full_style_proof(
         units_per_em=1000,
     )
 
-    # Reconstruct all 481 canonical glyphs
+    # Reconstruct all canonical glyphs
     glyph_timings: dict[str, float] = {}
     reconstructed_glyphs = []
     total_cache_hits = 0
@@ -80,7 +80,7 @@ def run_a23_full_style_proof(
     print(f"Reconstructing full style ({len(canonical_coverage)} glyphs) on {device_info['system']} {device_info['machine']}...")
     for idx, cp in enumerate(canonical_coverage):
         t0 = time.perf_counter()
-        obs = store.get_glyph_observations(family_id, style_id, cp)
+        obs = store.get_glyph_observations(family_id, style_id, cp, browser_version=browser_version, config_hash=config_hash)
         total_cache_hits += len(obs)
         if not obs:
             continue

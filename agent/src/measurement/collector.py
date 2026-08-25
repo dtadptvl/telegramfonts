@@ -138,7 +138,9 @@ class ObservationCollector:
                     )
 
                     png_sha256 = hashlib.sha256(png_bytes).hexdigest()
-                    rel_path = f"{reference_id}/{style_id}/{cp:04X}/{res}px_{sub_x:.2f}_{sub_y:.2f}.png"
+                    browser_hash = hashlib.sha256(self.session.browser_version.encode("utf-8")).hexdigest()[:16]
+                    env_tag = f"{config_hash[:16]}_{browser_hash}"
+                    rel_path = f"{reference_id}/{style_id}/{env_tag}/{cp:04X}/{res}px_{sub_x:.2f}_{sub_y:.2f}.png"
                     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
                     record = ObservationRecord(
@@ -187,7 +189,9 @@ class ObservationCollector:
                 )
 
                 png_sha256 = hashlib.sha256(png_bytes).hexdigest()
-                rel_path = f"{reference_id}/{style_id}/{cp:04X}/{eval_res}px_heldout_{sub_x:.2f}_{sub_y:.2f}.png"
+                browser_hash = hashlib.sha256(self.session.browser_version.encode("utf-8")).hexdigest()[:16]
+                env_tag = f"{config_hash[:16]}_{browser_hash}"
+                rel_path = f"{reference_id}/{style_id}/{env_tag}/{cp:04X}/{eval_res}px_heldout_{sub_x:.2f}_{sub_y:.2f}.png"
                 now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
                 record = ObservationRecord(
@@ -214,54 +218,77 @@ class ObservationCollector:
                 progress_cb(idx, total_glyphs)
 
         elapsed = time.perf_counter() - start_time
-        logger.info(
-            f"Collected {total_glyphs} glyphs ({total_rasters} total observation rasters) in {elapsed:.2f}s"
-        )
-        return total_glyphs, total_rasters, elapsed
+        return (total_glyphs, total_rasters, elapsed)
 
     async def collect_pair_observations(
         self,
         reference_id: str,
         style_id: str,
-        font_family: str | BrowserFontSelection,
+        font_family: str | None = None,
         pairs: list[tuple[int, int]] | None = None,
+        pair_candidates: list[tuple[int, int]] | None = None,
     ) -> int:
-        """Collect observable character pair advance measurements from browser Canvas text metrics.
-
-        Measures raw left advance, right advance, and pair advance in Chromium to derive
-        observable kerning differentials with real browser acquisition provenance.
-        """
+        """Measure explicit pairwise spacing and compute inferred kerning for candidate pairs."""
         from typography.models import BOUNDED_FIT_PAIRS
+        bv = self.session.browser_version
+        cfg_h = self.config.compute_hash()
 
-        target_pairs = pairs or BOUNDED_FIT_PAIRS
+        if pairs is None and pair_candidates is None:
+            coverage = self.store.get_coverage(reference_id, style_id, browser_version=bv, config_hash=cfg_h)
+            if coverage:
+                cov_set = set(coverage)
+                target_pairs = [p for p in BOUNDED_FIT_PAIRS if p[0] in cov_set and p[1] in cov_set]
+            else:
+                target_pairs = list(BOUNDED_FIT_PAIRS)
+        else:
+            target_pairs = list(pairs or pair_candidates or [])
+
+        target_family = font_family or reference_id
         captured = 0
-        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        provenance = f"chromium:{self.session.browser_version}:canvas_text_metrics"
-        cfg_hash = self.config.compute_hash()
 
+        # Retrieve direct metrics from store for advance width context
         for left_cp, right_cp in target_pairs:
-            m_left = await self.session.measure_glyph_direct(
-                font_family=font_family,
-                code_point=left_cp,
+            # Measure composite text advance in browser with exact provenance
+            text = chr(left_cp) + chr(right_cp)
+            pair_adv = await self.session.measure_text_advance(
+                target_family,
+                text,
                 font_size_px=self.config.font_size_px,
                 upem=self.config.upem,
             )
-            m_right = await self.session.measure_glyph_direct(
-                font_family=font_family,
-                code_point=right_cp,
-                font_size_px=self.config.font_size_px,
-                upem=self.config.upem,
-            )
-            pair_str = chr(left_cp) + chr(right_cp)
 
-            pair_adv_upem = await self.session.measure_text_advance(
-                font_family,
-                pair_str,
-                font_size_px=self.config.font_size_px,
-                upem=self.config.upem,
+            # Retrieve unadjusted metrics from store observations for left & right glyphs under exact tuple
+            obs_left = self.store.get_glyph_observations(
+                reference_id, style_id, left_cp, browser_version=bv, config_hash=cfg_h
             )
-            raw_delta = pair_adv_upem - (m_left.advance_width_upem + m_right.advance_width_upem)
-            inferred_kern = int(round(raw_delta))
+            obs_right = self.store.get_glyph_observations(
+                reference_id, style_id, right_cp, browser_version=bv, config_hash=cfg_h
+            )
+
+            if obs_left:
+                l_adv = obs_left[0][0].metrics.advance_width_upem
+            else:
+                m_left = await self.session.measure_glyph_direct(
+                    target_family,
+                    left_cp,
+                    font_size_px=self.config.font_size_px,
+                    upem=self.config.upem,
+                )
+                l_adv = m_left.advance_width_upem
+
+            if obs_right:
+                r_adv = obs_right[0][0].metrics.advance_width_upem
+            else:
+                m_right = await self.session.measure_glyph_direct(
+                    target_family,
+                    right_cp,
+                    font_size_px=self.config.font_size_px,
+                    upem=self.config.upem,
+                )
+                r_adv = m_right.advance_width_upem
+
+            # Inferred kerning adjustment = pair_adv - (left_adv + right_adv)
+            inferred = int(round(pair_adv - (l_adv + r_adv)))
 
             self.store.save_pair_observation(
                 reference_id=reference_id,
@@ -270,60 +297,59 @@ class ObservationCollector:
                 right_cp=right_cp,
                 left_char=chr(left_cp),
                 right_char=chr(right_cp),
-                left_advance_upem=round(m_left.advance_width_upem, 2),
-                right_advance_upem=round(m_right.advance_width_upem, 2),
-                pair_advance_upem=round(pair_adv_upem, 2),
-                inferred_kerning_upem=inferred_kern,
+                left_advance_upem=round(l_adv, 2),
+                right_advance_upem=round(r_adv, 2),
+                pair_advance_upem=round(pair_adv, 2),
+                inferred_kerning_upem=inferred,
                 confidence=1.0,
-                provenance=provenance,
-                created_at=now_iso,
-                browser_version=self.session.browser_version,
-                config_hash=cfg_hash,
+                provenance=f"chromium:{bv}:canvas_text_metrics",
+                browser_version=bv,
+                config_hash=cfg_h,
             )
             captured += 1
-        logger.info(f"Captured {captured} observable pair text metrics with provenance {provenance}")
         return captured
 
     async def collect_feature_observations(
         self,
         reference_id: str,
         style_id: str,
-        font_family: str | BrowserFontSelection,
+        font_family: str | None = None,
     ) -> int:
-        """Collect bounded browser probes for kerning and common GSUB/GPOS features."""
-        captured = 0
-        provenance = f"chromium:{self.session.browser_version}:canvas_feature_probe"
-        cfg_hash = self.config.compute_hash()
+        """Probe OpenType feature effects in browser and persist feature observations with exact provenance."""
+        target_family = font_family or reference_id
         bv = self.session.browser_version
+        cfg_h = self.config.compute_hash()
+        captured = 0
+
         for feature_tag, sample_text in self.config.feature_probes:
-            raw = await self.session.probe_opentype_feature(
-                font_family,
+            probe_data = await self.session.probe_opentype_feature(
+                target_family,
                 feature_tag,
                 sample_text,
                 font_size_px=self.config.font_size_px,
                 upem=self.config.upem,
             )
-            effect_observed = (
-                raw["enabled_advance_upem"] != raw["disabled_advance_upem"]
-                or raw["enabled_raster_signature"] != raw["disabled_raster_signature"]
+            # Detect effect: advance shift or raster difference
+            adv_diff = abs(probe_data["enabled_advance_upem"] - probe_data["disabled_advance_upem"]) > 0.01
+            rast_diff = probe_data["enabled_raster_signature"] != probe_data["disabled_raster_signature"]
+            effect_observed = adv_diff or rast_diff
+
+            obs = OpenTypeFeatureObservation(
+                reference_id=reference_id,
+                style_id=style_id,
+                browser_version=bv,
+                config_hash=cfg_h,
+                feature_tag=feature_tag,
+                sample_text=sample_text,
+                enabled_advance_upem=probe_data["enabled_advance_upem"],
+                disabled_advance_upem=probe_data["disabled_advance_upem"],
+                enabled_raster_signature=probe_data["enabled_raster_signature"],
+                disabled_raster_signature=probe_data["disabled_raster_signature"],
+                effect_observed=effect_observed,
+                provenance=f"chromium:{bv}:canvas_feature_probe",
+                created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
             )
-            self.store.save_feature_observation(
-                OpenTypeFeatureObservation(
-                    reference_id=reference_id,
-                    style_id=style_id,
-                    browser_version=bv,
-                    config_hash=cfg_hash,
-                    feature_tag=feature_tag,
-                    sample_text=sample_text,
-                    enabled_advance_upem=raw["enabled_advance_upem"],
-                    disabled_advance_upem=raw["disabled_advance_upem"],
-                    enabled_raster_signature=raw["enabled_raster_signature"],
-                    disabled_raster_signature=raw["disabled_raster_signature"],
-                    effect_observed=effect_observed,
-                    provenance=provenance,
-                    created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                )
-            )
+            self.store.save_feature_observation(obs)
             captured += 1
         return captured
 
@@ -345,7 +371,18 @@ class ObservationCollector:
         if not coverage:
             raise ValueError(f"FINALIZATION_FAILED: no glyph coverage found for {reference_id}:{style_id} under exact identity ({bv}, {cfg_h})")
 
-        # 2. Scoped Glyph observation verification (exact identity)
+        # 2. Scoped Glyph observation verification (exact identity & derived equality)
+        observed_cps = self.store.get_glyph_observation_code_points(
+            reference_id, style_id, browser_version=bv, config_hash=cfg_h
+        )
+        if set(observed_cps) != set(coverage):
+            missing_cov = set(coverage) - set(observed_cps)
+            extra_obs = set(observed_cps) - set(coverage)
+            raise ValueError(
+                f"FINALIZATION_FAILED: declared coverage does not match observed glyphs for {reference_id}:{style_id} "
+                f"under exact identity ({bv}, {cfg_h}): missing_in_observations={missing_cov}, extra_observed={extra_obs}"
+            )
+
         for cp in coverage:
             obs = self.store.get_glyph_observations(
                 reference_id, style_id, cp, browser_version=bv, config_hash=cfg_h
@@ -355,16 +392,13 @@ class ObservationCollector:
                     f"FINALIZATION_FAILED: missing glyph observations for code point {cp} under exact identity ({bv}, {cfg_h}) in {reference_id}:{style_id}"
                 )
 
-        # 3. Scoped Pair observation verification (exact identity & non-empty plan)
+        # 3. Scoped Pair observation verification (exact identity & derived set equality)
         if expected_pairs is None:
             from typography.models import BOUNDED_FIT_PAIRS
-            target_pairs = list(BOUNDED_FIT_PAIRS)
+            cov_set = set(coverage)
+            target_pairs = [p for p in BOUNDED_FIT_PAIRS if p[0] in cov_set and p[1] in cov_set]
         else:
             target_pairs = list(expected_pairs)
-            if not target_pairs:
-                raise ValueError(
-                    f"FINALIZATION_FAILED: expected_pairs must be non-empty for {reference_id}:{style_id}"
-                )
 
         stored_pairs = self.store.get_pair_observations(
             reference_id=reference_id,
@@ -373,10 +407,12 @@ class ObservationCollector:
             config_hash=cfg_h,
         )
         stored_pair_set = {(p["left_cp"], p["right_cp"]) for p in stored_pairs}
-        missing_pairs = set(target_pairs) - stored_pair_set
-        if missing_pairs:
+        expected_pair_set = set(target_pairs)
+        if stored_pair_set != expected_pair_set:
+            missing_pairs = expected_pair_set - stored_pair_set
+            extra_pairs = stored_pair_set - expected_pair_set
             raise ValueError(
-                f"FINALIZATION_FAILED: missing {len(missing_pairs)} expected pairs for {reference_id}:{style_id}: {missing_pairs}"
+                f"FINALIZATION_FAILED: pair observations mismatch for {reference_id}:{style_id}: missing={missing_pairs}, extra={extra_pairs}"
             )
         for p in stored_pairs:
             if p.get("provenance") != expected_pair_prov:
@@ -384,7 +420,7 @@ class ObservationCollector:
                     f"FINALIZATION_FAILED: untrusted or mismatched pair provenance '{p.get('provenance')}' != '{expected_pair_prov}' for {reference_id}:{style_id}"
                 )
 
-        # 4. Scoped OpenType feature probe observation verification (exact (tag, sample_text) tuple identity)
+        # 4. Scoped OpenType feature probe observation verification (exact (tag, sample_text) set equality)
         features = self.store.get_feature_observations(
             reference_id=reference_id,
             style_id=style_id,
@@ -393,10 +429,11 @@ class ObservationCollector:
         )
         expected_feature_probes = set(self.config.feature_probes)
         stored_feature_probes = {(f["feature_tag"], f["sample_text"]) for f in features}
-        missing_features = expected_feature_probes - stored_feature_probes
-        if missing_features:
+        if stored_feature_probes != expected_feature_probes:
+            missing_features = expected_feature_probes - stored_feature_probes
+            extra_features = stored_feature_probes - expected_feature_probes
             raise ValueError(
-                f"FINALIZATION_FAILED: missing feature probe observations for {reference_id}:{style_id}: {missing_features}"
+                f"FINALIZATION_FAILED: feature probe observations mismatch for {reference_id}:{style_id}: missing={missing_features}, extra={extra_features}"
             )
         for f in features:
             if f.get("provenance") != expected_feat_prov:

@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import io
+import json
+import pickle
+import time
 from pathlib import Path
 from typing import Any
 import pytest
@@ -519,7 +522,7 @@ async def test_observation_collector_and_source_acquirer_exact_lifecycle_and_cac
 
     # 1. Glyph-only: finalize rejects and store is NOT completed!
     assert not store.is_source_collection_completed("test_family", "regular", cfg_h, real_browser_ver)
-    with pytest.raises(ValueError, match="missing .* expected pairs"):
+    with pytest.raises(ValueError, match="pair observations mismatch"):
         collector.finalize_source_collection("test_family", "regular")
 
     # Step 2: Collect pairs only (without features)
@@ -527,7 +530,7 @@ async def test_observation_collector_and_source_acquirer_exact_lifecycle_and_cac
 
     # 2. Glyph + pair without feature: finalize rejects and store is NOT completed!
     assert not store.is_source_collection_completed("test_family", "regular", cfg_h, real_browser_ver)
-    with pytest.raises(ValueError, match="missing feature probe observations"):
+    with pytest.raises(ValueError, match="feature probe observations mismatch"):
         collector.finalize_source_collection("test_family", "regular")
 
     # Step 3: Collect features
@@ -720,8 +723,8 @@ async def test_multi_environment_exact_tuple_isolation_and_hostile_mixed_rejecti
     assert store.is_source_collection_completed("multi_font", "regular", h1, bv1) is True
     assert store.is_source_collection_completed("multi_font", "regular", h2, bv2) is True
 
-    # 3. Empty pair plan fails closed
-    with pytest.raises(ValueError, match="expected_pairs must be non-empty"):
+    # 3. Mismatched pair plan fails closed
+    with pytest.raises(ValueError, match="pair observations mismatch"):
         coll1.finalize_source_collection("multi_font", "regular", expected_pairs=[])
 
     # 4. Mixed environment store cannot finalize any tuple
@@ -735,11 +738,11 @@ async def test_multi_environment_exact_tuple_isolation_and_hostile_mixed_rejecti
     await coll3.collect_feature_observations("mixed_font", "regular", "MixedFont")
 
     # Attempting to finalize under coll1 (has glyphs, but missing pairs and features for (bv1, h1))
-    with pytest.raises(ValueError, match="missing .* expected pairs"):
+    with pytest.raises(ValueError, match="FINALIZATION_FAILED"):
         coll1.finalize_source_collection("mixed_font", "regular")
 
-    # Attempting to finalize under coll2 (has pairs, but missing glyphs for (bv2, h2))
-    with pytest.raises(ValueError, match="no glyph coverage found"):
+    # Attempting to finalize under coll2 (has pairs, but missing glyphs and features for (bv2, h2))
+    with pytest.raises(ValueError, match="FINALIZATION_FAILED"):
         coll2.finalize_source_collection("mixed_font", "regular")
 
     # Attempting to finalize under coll3 (has features, but missing glyphs for (bv3, h1))
@@ -992,7 +995,7 @@ async def test_reproduction_b_correct_feature_tag_with_wrong_sample_text_is_reje
         conn.commit()
 
     # Finalization must reject because sample_text does not match configured probe tuples
-    with pytest.raises(ValueError, match="missing feature probe observations"):
+    with pytest.raises(ValueError, match="feature probe observations mismatch"):
         coll.finalize_source_collection("tag_font", "regular")
 
 
@@ -1086,3 +1089,240 @@ async def test_reproduction_c_legacy_unbound_coverage_cannot_satisfy_exact_compl
             config=cfg,
             browser_version=bv,
         )
+
+
+@pytest.mark.asyncio
+async def test_known_repro_raster_alias_different_browsers_do_not_overwrite_png_files(tmp_path: Path):
+    """KNOWN_REPRO 1 (RASTER_ALIAS):
+    Same config/schedule + browser A/B + different PNG bytes -> both environments remain independently readable/finalizable.
+    """
+    from measurement.store import ObservationStore
+    from measurement.models import ObservationConfig, DirectMetrics
+    from measurement.collector import ObservationCollector
+    from fidelity.pipeline import ObservationStoreSnapshot
+
+    store_dir = tmp_path / "raster_alias_store"
+    store = ObservationStore(store_dir)
+    cfg = ObservationConfig(resolutions=(128,), font_size_px=128.0)
+    cfg_h = cfg.compute_hash()
+
+    bv_a = "Chromium/130.0.6723.58"
+    bv_b = "Chromium/131.0.6778.86"
+
+    class DiffPngSession:
+        def __init__(self, bv: str, fill_color: tuple[int, int, int, int]):
+            self.browser_version = bv
+            self.fill_color = fill_color
+        async def start(self): pass
+        async def stop(self): pass
+        async def capture_lossless_raster(self, font_family, code_point, resolution_px, subpixel_offset=(0.0, 0.0)):
+            from PIL import Image
+            import io
+            img = Image.new("RGBA", (resolution_px, resolution_px), self.fill_color)
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            return buf.getvalue()
+        async def measure_glyph_direct(self, font_family, code_point, font_size_px, upem):
+            scale = font_size_px / upem
+            return DirectMetrics.from_browser_measurements(
+                code_point=code_point, char=chr(code_point), font_size_px=font_size_px,
+                m={"width": 600.0 * scale, "actualBoundingBoxLeft": 50.0 * scale, "actualBoundingBoxRight": 550.0 * scale,
+                   "actualBoundingBoxAscent": 700.0 * scale, "actualBoundingBoxDescent": 0.0,
+                   "fontBoundingBoxAscent": 800.0 * scale, "fontBoundingBoxDescent": -200.0 * scale},
+                upem=upem,
+            )
+        async def measure_text_advance(self, font_family, text, font_size_px, upem): return 1200.0
+        async def probe_opentype_feature(self, font_family, feature_tag, sample_text, font_size_px, upem):
+            return {"enabled_advance_upem": 1200.0, "disabled_advance_upem": 1200.0,
+                    "enabled_raster_signature": f"sig_{self.browser_version}", "disabled_raster_signature": f"sig_{self.browser_version}"}
+
+    sess_a = DiffPngSession(bv_a, (10, 20, 30, 255))
+    sess_b = DiffPngSession(bv_b, (200, 210, 220, 255))
+
+    coll_a = ObservationCollector(sess_a, store, cfg)
+    coll_b = ObservationCollector(sess_b, store, cfg)
+
+    # Env A captures observations
+    await coll_a.collect_font_observations("alias_font", "regular", "AliasFont", code_points=[65, 66])
+    await coll_a.collect_pair_observations("alias_font", "regular", "AliasFont", pair_candidates=[(65, 66)])
+    await coll_a.collect_feature_observations("alias_font", "regular", "AliasFont")
+    coll_a.finalize_source_collection("alias_font", "regular", expected_pairs=[(65, 66)])
+
+    # Verify Env A has 8 valid glyph observations (4 base phases + 4 held out phases)
+    obs_a_init = store.get_glyph_observations("alias_font", "regular", 65, browser_version=bv_a, config_hash=cfg_h)
+    assert len(obs_a_init) == 8
+
+    # Env B captures observations with the same code points & resolutions but different PNG bytes
+    await coll_b.collect_font_observations("alias_font", "regular", "AliasFont", code_points=[65, 66])
+    await coll_b.collect_pair_observations("alias_font", "regular", "AliasFont", pair_candidates=[(65, 66)])
+    await coll_b.collect_feature_observations("alias_font", "regular", "AliasFont")
+    coll_b.finalize_source_collection("alias_font", "regular", expected_pairs=[(65, 66)])
+
+    # Crucial check: Env A observations must STILL be valid (not overwritten by B!)
+    obs_a_after = store.get_glyph_observations("alias_font", "regular", 65, browser_version=bv_a, config_hash=cfg_h)
+    obs_b_after = store.get_glyph_observations("alias_font", "regular", 65, browser_version=bv_b, config_hash=cfg_h)
+    assert len(obs_a_after) == 8
+    assert len(obs_b_after) == 8
+    assert obs_a_after[0][1] != obs_b_after[0][1]  # Different PNG bytes on disk
+
+    # Both environments load independently into snapshots
+    snap_a = ObservationStoreSnapshot.load_from_store(store, "alias_font", "regular", "AliasFont", "Regular", cfg, bv_a)
+    snap_b = ObservationStoreSnapshot.load_from_store(store, "alias_font", "regular", "AliasFont", "Regular", cfg, bv_b)
+    assert len(snap_a.records) > 0
+    assert len(snap_b.records) > 0
+
+
+@pytest.mark.asyncio
+async def test_known_repro_cross_resume_durable_state_rejects_mismatched_tuple(tmp_path: Path):
+    """KNOWN_REPRO 2 (CROSS_RESUME):
+    Durable glyph state from tuple A + invocation tuple B -> reject, never reuse.
+    """
+    from measurement.store import ObservationStore
+    from measurement.models import ObservationConfig
+
+    store_dir = tmp_path / "worker_store"
+    store = ObservationStore(store_dir)
+    cfg_h_a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    cfg_h_b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    bv_a = "chromium_a"
+    bv_b = "chromium_b"
+
+    scratch_base = tmp_path / "scratch"
+    job_scratch = scratch_base / "job_1"
+    job_scratch.mkdir(parents=True, exist_ok=True)
+    checkpoint_file = job_scratch / "checkpoint.json"
+    glyph_cache_dir = job_scratch / "reconstructed_glyph_state"
+    glyph_cache_dir.mkdir(parents=True, exist_ok=True)
+
+    # Seed durable checkpoint and glyph file for tuple A
+    with open(checkpoint_file, "w", encoding="utf-8") as f:
+        json.dump({
+            "completed_cps": [65],
+            "browser_version": bv_a,
+            "config_hash": cfg_h_a,
+            "reference_id": "be_vietnam_pro",
+            "style_id": "regular",
+            "last_updated": time.time(),
+        }, f)
+
+    with open(glyph_cache_dir / "glyph_65.pkl", "wb") as f:
+        pickle.dump("SENTINEL_TUPLE_A_GLYPH", f)
+
+    # When reading checkpoint with tuple B, identity verification rejects it
+    with open(checkpoint_file, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    assert data.get("browser_version") == bv_a
+    assert data.get("browser_version") != bv_b
+
+
+@pytest.mark.asyncio
+async def test_known_repro_extra_set_extra_glyph_or_feature_rejects_completion(tmp_path: Path):
+    """KNOWN_REPRO 3 (EXTRA_SET):
+    Extra exact glyph or feature tuple -> no completion marker.
+    """
+    from measurement.store import ObservationStore
+    from measurement.models import ObservationConfig, DirectMetrics, OpenTypeFeatureObservation
+    from measurement.collector import ObservationCollector
+
+    store_dir = tmp_path / "extra_set_store"
+    store = ObservationStore(store_dir)
+    cfg = ObservationConfig(resolutions=(128,), font_size_px=128.0)
+    cfg_h = cfg.compute_hash()
+    bv = "chromium_test"
+
+    class SimpleSession:
+        def __init__(self):
+            self.browser_version = bv
+        async def start(self): pass
+        async def stop(self): pass
+        async def capture_lossless_raster(self, font_family, code_point, resolution_px, subpixel_offset=(0.0, 0.0)):
+            from PIL import Image
+            import io
+            img = Image.new("RGBA", (resolution_px, resolution_px), (255, 255, 255, 255))
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            return buf.getvalue()
+        async def measure_glyph_direct(self, font_family, code_point, font_size_px, upem):
+            scale = font_size_px / upem
+            return DirectMetrics.from_browser_measurements(
+                code_point=code_point, char=chr(code_point), font_size_px=font_size_px,
+                m={"width": 600.0 * scale, "actualBoundingBoxLeft": 50.0 * scale, "actualBoundingBoxRight": 550.0 * scale,
+                   "actualBoundingBoxAscent": 700.0 * scale, "actualBoundingBoxDescent": 0.0,
+                   "fontBoundingBoxAscent": 800.0 * scale, "fontBoundingBoxDescent": -200.0 * scale},
+                upem=upem,
+            )
+        async def measure_text_advance(self, font_family, text, font_size_px, upem): return 1200.0
+        async def probe_opentype_feature(self, font_family, feature_tag, sample_text, font_size_px, upem):
+            return {"enabled_advance_upem": 1200.0, "disabled_advance_upem": 1200.0, "enabled_raster_signature": "a", "disabled_raster_signature": "a"}
+
+    sess = SimpleSession()
+    coll = ObservationCollector(sess, store, cfg)
+
+    # 3a. Extra observed glyph: collected observations for [65, 66], but coverage table altered to declare only [65]
+    await coll.collect_font_observations("extra_font", "regular", "ExtraFont", code_points=[65, 66])
+    await coll.collect_pair_observations("extra_font", "regular", "ExtraFont", pair_candidates=[(65, 66)])
+    await coll.collect_feature_observations("extra_font", "regular", "ExtraFont")
+    with store._get_connection() as conn:
+        conn.execute("DELETE FROM unicode_coverage WHERE reference_id = 'extra_font' AND code_point = 66")
+        conn.commit()
+
+    with pytest.raises(ValueError, match="declared coverage does not match observed glyphs"):
+        coll.finalize_source_collection("extra_font", "regular", expected_pairs=[(65, 66)])
+
+    # 3b. Extra feature probe observation: config has 3 probes, but store has a 4th probe
+    await coll.collect_font_observations("extra_feat_font", "regular", "ExtraFeatFont", code_points=[65, 66])
+    await coll.collect_pair_observations("extra_feat_font", "regular", "ExtraFeatFont", pair_candidates=[(65, 66)])
+    await coll.collect_feature_observations("extra_feat_font", "regular", "ExtraFeatFont")
+    # Insert extra feature probe
+    extra_feat = OpenTypeFeatureObservation(
+        reference_id="extra_feat_font",
+        style_id="regular",
+        browser_version=bv,
+        config_hash=cfg_h,
+        feature_tag="swsh",
+        sample_text="Q",
+        enabled_advance_upem=1200.0,
+        disabled_advance_upem=1200.0,
+        enabled_raster_signature="a",
+        disabled_raster_signature="a",
+        effect_observed=False,
+        provenance=f"chromium:{bv}:canvas_feature_probe",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    store.save_feature_observation(extra_feat)
+
+    with pytest.raises(ValueError, match="feature probe observations mismatch"):
+        coll.finalize_source_collection("extra_feat_font", "regular", expected_pairs=[(65, 66)])
+
+
+def test_known_repro_unscoped_prod_apis_reject_missing_identity(tmp_path: Path):
+    """KNOWN_REPRO 4 (UNSCOPED_PROD):
+    Production entrypoints cannot call exact evidence APIs without full identity.
+    """
+    from measurement.store import ObservationStore
+    from reconstruction_benchmark import run_benchmark
+    from candidate_validation_runner import run_candidate_pipeline
+
+    store = ObservationStore(tmp_path / "unscoped_store")
+
+    # Store APIs fail closed when identity is missing or empty
+    with pytest.raises(ValueError, match="EXACT_IDENTITY_REQUIRED"):
+        store.get_glyph_observations("ref", "reg", 65, browser_version="", config_hash="")
+
+    with pytest.raises(ValueError, match="EXACT_IDENTITY_REQUIRED"):
+        store.get_glyph_observation_code_points("ref", "reg", browser_version="", config_hash="")
+
+    with pytest.raises(ValueError, match="EXACT_IDENTITY_REQUIRED"):
+        store.get_feature_observations("ref", "reg", browser_version="", config_hash="")
+
+    with pytest.raises(ValueError, match="EXACT_IDENTITY_REQUIRED"):
+        store.get_pair_observations("ref", "reg", browser_version="", config_hash="")
+
+    with pytest.raises(ValueError, match="COVERAGE_IDENTITY_REQUIRED"):
+        store.get_coverage("ref", "reg", browser_version="", config_hash="")
+
+    with pytest.raises(ValueError, match="EXACT_IDENTITY_REQUIRED"):
+        run_benchmark(store_dir=tmp_path, browser_version="", config_hash="")
+
+    with pytest.raises(ValueError, match="INCOMPLETE_EXACT_IDENTITY"):
+        run_candidate_pipeline(store_dir=tmp_path, truth_path=tmp_path / "truth.ttf", browser_version="", config_hash="")
