@@ -39,6 +39,32 @@ class FidelityEvaluator:
         return hashlib.sha256(":".join(sorted_keys).encode("utf-8")).hexdigest()
 
     @staticmethod
+    def _compute_typography_fingerprint(pairs: Sequence[PairKerningObservation]) -> str:
+        if not pairs:
+            return "empty"
+        for p in pairs:
+            if p.left_char != chr(p.left_cp) or p.right_char != chr(p.right_cp):
+                raise ValueError(
+                    f"TYPOGRAPHY_CHAR_CODEPOINT_MISMATCH: left '{p.left_char}' != chr({p.left_cp}) or right '{p.right_char}' != chr({p.right_cp})"
+                )
+        sorted_pairs = sorted(pairs, key=lambda p: (p.left_cp, p.right_cp, p.left_char, p.right_char, p.provenance))
+        payload_items = [
+            f"{p.left_cp}:{p.left_char}:{p.right_cp}:{p.right_char}:{p.left_advance_upem:.2f}:{p.right_advance_upem:.2f}:{p.measured_pair_advance_upem:.2f}:{p.inferred_kerning_upem}:{p.provenance}"
+            for p in sorted_pairs
+        ]
+        return hashlib.sha256(";".join(payload_items).encode("utf-8")).hexdigest()
+
+    @classmethod
+    def _compute_composite_held_out_fingerprint(
+        cls,
+        records: Sequence[ObservationRecord],
+        pairs: Sequence[PairKerningObservation],
+    ) -> str:
+        r_fp = cls._compute_records_fingerprint(records)
+        t_fp = cls._compute_typography_fingerprint(pairs)
+        return hashlib.sha256(f"{r_fp}:{t_fp}".encode("utf-8")).hexdigest()
+
+    @staticmethod
     def _rasterize_glyph_contours(
         glyph,
         transform: CalibrationTransform,
@@ -128,11 +154,18 @@ class FidelityEvaluator:
 
         config_hash = config.compute_hash()
         fit_fp = cls._compute_records_fingerprint(fit_records)
-        held_out_fp = cls._compute_records_fingerprint(held_out_records)
+        held_out_raster_fp = cls._compute_records_fingerprint(held_out_records)
+        held_out_typo_fp = cls._compute_typography_fingerprint(held_out_pairs)
+        composite_held_out_fp = cls._compute_composite_held_out_fingerprint(held_out_records, held_out_pairs)
 
         # ==========================================
         # GATE 0: FIT / HELD-OUT PROVENANCE, LEAKAGE & MODEL BINDING
         # ==========================================
+        if not held_out_records:
+            failure_reasons.append("ZERO_HELD_OUT_RASTER_SAMPLES: Nonempty held-out raster records required")
+        if not held_out_pairs:
+            failure_reasons.append("ZERO_HELD_OUT_TYPOGRAPHY_SAMPLES: Nonempty held-out typography pairs required")
+
         if model.config_hash != config_hash:
             failure_reasons.append(
                 f"CONFIG_HASH_MISMATCH: Model config hash ({model.config_hash}) does not match active config hash ({config_hash})"
@@ -502,81 +535,18 @@ class FidelityEvaluator:
         # ==========================================
         # GATE 6: INDEPENDENT CONSUMERS GATE (MANDATORY & TYPED)
         # ==========================================
-        ft_pass = False
-        freetype_pass = False
-        hb_pass = False
-        chromium_pass = False
-        consumer_status = "FAIL"
-        bundle_hash = ""
-
-        if consumer_bundle is None or not isinstance(consumer_bundle, ConsumerEvidenceBundle):
-            failure_reasons.append("CONSUMER_GATE_FAIL: MISSING_CONSUMER_BUNDLE: Production evaluation requires a valid bound ConsumerEvidenceBundle")
-        else:
-            binding_errors = consumer_bundle.validate_bindings(
-                expected_model_hash=model_hash,
-                expected_config_hash=config_hash,
-                expected_held_out_fingerprint=held_out_fp,
-            )
-            if binding_errors:
-                for err in binding_errors:
-                    failure_reasons.append(f"CONSUMER_GATE_FAIL: {err}")
-            else:
-                bundle_hash = consumer_bundle.compute_bundle_hash()
-                ft = consumer_bundle.fonttools.result
-                ft_pass = bool(
-                    ft.is_direct_loadable_fonttools
-                    and ft.has_valid_cmap
-                    and ft.has_valid_metrics
-                    and ft.decompression_round_trip
-                    and ft.glyph_count > 0
-                    and ft.units_per_em > 0
-                    and getattr(ft, "validation_error", None) is None
-                )
-
-                fr = consumer_bundle.freetype.result
-                freetype_pass = bool(
-                    fr.render_error is None
-                    and fr.render_size_px > 0
-                    and math.isfinite(fr.raster_iou)
-                    and fr.raster_iou >= thresholds.min_raster_iou
-                )
-
-                hb = consumer_bundle.harfbuzz.result
-                hb_pass = bool(
-                    hb.in_candidate_cmap
-                    and hb.glyph_sequence_match
-                    and hb.candidate_glyph_count > 0
-                    and math.isfinite(hb.candidate_total_advance_upem)
-                )
-
-                cr = consumer_bundle.chromium.result
-                chromium_pass = bool(
-                    cr.is_available
-                    and cr.is_direct_loadable_chromium
-                    and cr.fallback_rejection_verified
-                    and cr.rendered_canvas_valid
-                    and cr.error_message is None
-                    and cr.measured_glyph_count > 0
-                    and cr.held_out_pairs_non_regression
-                )
-
-                if ft_pass and freetype_pass and hb_pass and chromium_pass:
-                    consumer_status = "PASS"
-                else:
-                    failure_reasons.append(
-                        f"CONSUMER_GATE_FAIL: Consumers failed: fonttools={ft_pass}, freetype={freetype_pass}, harfbuzz={hb_pass}, chromium={chromium_pass}"
-                    )
-
-        consumer_gate = ConsumerGateResult(
-            status=consumer_status,
-            total_consumers_evaluated=4 if consumer_bundle else 0,
-            fonttools_passed=ft_pass,
-            freetype_passed=freetype_pass,
-            harfbuzz_passed=hb_pass,
-            chromium_passed=chromium_pass,
-            consumer_bundle_hash=bundle_hash,
-            details={"bound_artifact_sha": consumer_bundle.candidate_artifact_sha if consumer_bundle else ""},
+        consumer_gate, gate_failures = validate_consumer_gate(
+            bundle=consumer_bundle,
+            model=model,
+            config=config,
+            held_out_records=held_out_records,
+            held_out_pairs=held_out_pairs,
+            thresholds=thresholds,
         )
+        if gate_failures:
+            failure_reasons.extend(gate_failures)
+        consumer_status = consumer_gate.status
+        bundle_hash = consumer_gate.consumer_bundle_hash
 
         # ==========================================
         # OVERALL STATUS
@@ -593,8 +563,9 @@ class FidelityEvaluator:
         overall_status = "PASS" if all_passed else "FAIL"
 
         policy_hash = thresholds.compute_policy_hash()
+        final_held_out_fp = composite_held_out_fp if (held_out_records and held_out_pairs) else held_out_raster_fp
         report_id = hashlib.sha256(
-            f"{model_hash}:{config_hash}:{fit_fp}:{held_out_fp}:{policy_hash}:{bundle_hash}".encode("utf-8")
+            f"{model_hash}:{config_hash}:{fit_fp}:{final_held_out_fp}:{policy_hash}:{bundle_hash}".encode("utf-8")
         ).hexdigest()[:16]
 
         now_utc = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -605,7 +576,7 @@ class FidelityEvaluator:
             model_canonical_hash=model_hash,
             config_hash=config_hash,
             fit_set_fingerprint=fit_fp,
-            held_out_set_fingerprint=held_out_fp,
+            held_out_set_fingerprint=final_held_out_fp,
             policy_hash=policy_hash,
             policy=thresholds.to_dict(),
             overall_status=overall_status,
@@ -618,3 +589,342 @@ class FidelityEvaluator:
             failure_reasons=sorted(list(set(failure_reasons))),
             evaluation_timestamp_utc=now_utc,
         )
+
+
+def validate_consumer_gate(
+    bundle: ConsumerEvidenceBundle | None,
+    model: CanonicalFontModel,
+    config: ObservationConfig,
+    held_out_records: Sequence[ObservationRecord],
+    held_out_pairs: Sequence[PairKerningObservation] | None = None,
+    thresholds: FidelityThresholds | None = None,
+) -> tuple[ConsumerGateResult, list[str]]:
+    """Validate all four consumer evidence results against model, configuration, held-out sets, and thresholds."""
+    if thresholds is None:
+        thresholds = FidelityThresholds()
+
+    failure_reasons: list[str] = []
+    ft_pass = False
+    freetype_pass = False
+    hb_pass = False
+    chromium_pass = False
+    consumer_status = "FAIL"
+    bundle_hash = ""
+
+    if bundle is None or not isinstance(bundle, ConsumerEvidenceBundle):
+        failure_reasons.append(
+            "CONSUMER_GATE_FAIL: MISSING_CONSUMER_BUNDLE"
+        )
+        return (
+            ConsumerGateResult(
+                status="FAIL",
+                total_consumers_evaluated=0,
+                fonttools_passed=False,
+                freetype_passed=False,
+                harfbuzz_passed=False,
+                chromium_passed=False,
+                consumer_bundle_hash="",
+                details={},
+            ),
+            failure_reasons,
+        )
+
+    model_hash = model.compute_canonical_hash()
+    config_hash = config.compute_hash()
+    held_out_raster_fp = FidelityEvaluator._compute_records_fingerprint(held_out_records) if held_out_records else None
+    held_out_typo_fp = FidelityEvaluator._compute_typography_fingerprint(held_out_pairs) if held_out_pairs else None
+    composite_held_out_fp = (
+        FidelityEvaluator._compute_composite_held_out_fingerprint(held_out_records, held_out_pairs)
+        if (held_out_records and held_out_pairs)
+        else (held_out_raster_fp or "")
+    )
+    expected_bundle_fp = composite_held_out_fp if (held_out_records and held_out_pairs) else (held_out_raster_fp or "")
+
+    binding_errors = bundle.validate_bindings(
+        expected_model_hash=model_hash,
+        expected_config_hash=config_hash,
+        expected_held_out_fingerprint=expected_bundle_fp,
+        expected_raster_fingerprint=held_out_raster_fp,
+        expected_typography_fingerprint=held_out_typo_fp,
+    )
+    if binding_errors:
+        for err in binding_errors:
+            failure_reasons.append(f"CONSUMER_GATE_FAIL: {err}")
+    else:
+        bundle_hash = bundle.compute_bundle_hash()
+
+        # 1. FontTools Format Validation
+        ft = bundle.fonttools.result
+        ft_pass = bool(
+            getattr(ft, "is_direct_loadable_fonttools", False)
+            and getattr(ft, "has_valid_cmap", False)
+            and getattr(ft, "has_valid_metrics", False)
+            and getattr(ft, "decompression_round_trip", False)
+            and getattr(ft, "glyph_count", 0) > 0
+            and getattr(ft, "units_per_em", 0) > 0
+            and getattr(ft, "validation_error", None) is None
+        )
+        if not ft_pass:
+            failure_reasons.append("CONSUMER_GATE_FAIL: FONTTOOLS_VALIDATION_FAILED")
+
+        # 2. FreeType Raster Validation
+        fr = bundle.freetype.result
+        fr_samples = getattr(fr, "samples", ())
+        fr_samples_ok = True
+        if not fr_samples or len(fr_samples) != len(held_out_records):
+            fr_samples_ok = False
+            failure_reasons.append("CONSUMER_GATE_FAIL: FREETYPE_SAMPLE_COUNT_MISMATCH")
+        else:
+            sorted_samples = sorted(fr_samples, key=lambda s: s.cache_key)
+            sorted_records = sorted(held_out_records, key=lambda r: r.cache_key)
+            for s, r in zip(sorted_samples, sorted_records):
+                if s.render_error is not None:
+                    fr_samples_ok = False
+                    failure_reasons.append("CONSUMER_GATE_FAIL: FREETYPE_SAMPLE_RENDER_FAILED")
+                elif (
+                    s.cache_key != r.cache_key
+                    or s.code_point != r.code_point
+                    or s.character != chr(r.code_point)
+                    or s.resolution != r.resolution
+                    or s.raster_sha256 != r.raster_sha256
+                    or not math.isfinite(s.raster_iou)
+                    or not (0.0 <= s.raster_iou <= 1.0)
+                    or s.pixel_delta_count < 0
+                ):
+                    fr_samples_ok = False
+                    failure_reasons.append("CONSUMER_GATE_FAIL: FREETYPE_SAMPLE_VALIDATION_FAILED")
+                elif s.raster_iou < thresholds.min_raster_iou:
+                    fr_samples_ok = False
+                    failure_reasons.append("CONSUMER_GATE_FAIL: FREETYPE_IOU_BELOW_THRESHOLD")
+
+        recomputed_min_iou = min((s.raster_iou for s in fr_samples), default=0.0) if fr_samples else 0.0
+        recomputed_mean_iou = float(np.mean([s.raster_iou for s in fr_samples])) if fr_samples else 0.0
+        recomputed_pixel_deltas = sum((s.pixel_delta_count for s in fr_samples), 0) if fr_samples else 0
+
+        # Verify aggregate consistency against recomputed sample truth
+        fr_aggregates_match = bool(
+            fr_samples
+            and abs(getattr(fr, "min_raster_iou", -1.0) - recomputed_min_iou) <= 1e-3
+            and abs(getattr(fr, "raster_iou", -1.0) - recomputed_mean_iou) <= 1e-3
+            and getattr(fr, "pixel_delta_count", -1) == recomputed_pixel_deltas
+        )
+        if fr_samples and not fr_aggregates_match:
+            failure_reasons.append("CONSUMER_GATE_FAIL: FREETYPE_AGGREGATE_MISMATCH")
+
+        freetype_pass = bool(
+            getattr(fr, "render_error", None) is None
+            and getattr(fr, "render_size_px", 0) > 0
+            and math.isfinite(getattr(fr, "raster_iou", 0.0))
+            and recomputed_min_iou >= thresholds.min_raster_iou
+            and recomputed_mean_iou >= thresholds.min_raster_iou
+            and fr_samples_ok
+            and fr_aggregates_match
+        )
+
+        # 3. HarfBuzz Shaping Validation
+        hb = bundle.harfbuzz.result
+        hb_samples = getattr(hb, "samples", ())
+        hb_samples_ok = True
+        if not hb_samples or len(hb_samples) != len(held_out_pairs or []):
+            hb_samples_ok = False
+            failure_reasons.append("CONSUMER_GATE_FAIL: HARFBUZZ_SAMPLE_COUNT_MISMATCH")
+        else:
+            sorted_hb_samples = sorted(hb_samples, key=lambda s: (s.left_cp, s.right_cp, s.text))
+            sorted_pairs = sorted(
+                held_out_pairs or [], key=lambda p: (p.left_cp, p.right_cp, f"{p.left_char}{p.right_char}")
+            )
+            for s, p in zip(sorted_hb_samples, sorted_pairs):
+                expected_text = f"{p.left_char}{p.right_char}"
+                expected_total_adv = p.measured_pair_advance_upem
+                exp1_adv = model.glyphs[p.left_cp].advance_width_upem + float(
+                    model.kerning_pairs.get((p.left_cp, p.right_cp), 0)
+                )
+                exp2_adv = model.glyphs[p.right_cp].advance_width_upem
+
+                if len(s.positions) == 2:
+                    recomputed_cand_adv = s.positions[0].x_advance + s.positions[1].x_advance
+                    recomputed_d1 = max(
+                        abs(s.positions[0].x_advance - exp1_adv),
+                        abs(s.positions[0].y_advance),
+                        abs(s.positions[0].x_offset),
+                        abs(s.positions[0].y_offset),
+                    )
+                    recomputed_d2 = max(
+                        abs(s.positions[1].x_advance - exp2_adv),
+                        abs(s.positions[1].y_advance),
+                        abs(s.positions[1].x_offset),
+                        abs(s.positions[1].y_offset),
+                    )
+                    recomputed_pos_delta = max(recomputed_d1, recomputed_d2)
+                else:
+                    recomputed_cand_adv = -1.0
+                    recomputed_pos_delta = 10000.0
+
+                recomputed_adv_delta = abs(recomputed_cand_adv - expected_total_adv)
+
+                if s.error_message is not None:
+                    hb_samples_ok = False
+                    failure_reasons.append("CONSUMER_GATE_FAIL: HARFBUZZ_SAMPLE_SHAPING_FAILED")
+                elif (
+                    s.left_cp != p.left_cp
+                    or s.right_cp != p.right_cp
+                    or s.text != expected_text
+                    or not s.in_candidate_cmap
+                    or not s.glyph_sequence_match
+                    or not math.isfinite(s.candidate_total_advance_upem)
+                    or abs(s.expected_total_advance_upem - expected_total_adv) > 1e-3
+                    or abs(s.candidate_total_advance_upem - recomputed_cand_adv) > 1e-3
+                    or abs(s.advance_delta_upem - recomputed_adv_delta) > 1e-3
+                    or abs(s.max_position_delta_upem - recomputed_pos_delta) > 1e-3
+                    or len(s.positions) != 2
+                    or len(s.clusters) != 2
+                    or s.clusters != (0, 1)
+                    or len(s.glyph_ids) != 2
+                    or any(gid == 0 for gid in s.glyph_ids)
+                ):
+                    hb_samples_ok = False
+                    failure_reasons.append("CONSUMER_GATE_FAIL: HARFBUZZ_SAMPLE_VALIDATION_FAILED")
+                elif (
+                    s.advance_delta_upem > thresholds.max_kerning_delta_upem
+                    or recomputed_pos_delta > thresholds.max_kerning_delta_upem
+                ):
+                    hb_samples_ok = False
+                    failure_reasons.append("CONSUMER_GATE_FAIL: HARFBUZZ_POSITION_DELTA_EXCEEDED")
+
+        recomputed_hb_max_pos_delta = max((s.max_position_delta_upem for s in hb_samples), default=0.0) if hb_samples else 0.0
+        recomputed_hb_all_cmap = all(s.in_candidate_cmap for s in hb_samples) if hb_samples else False
+        recomputed_hb_all_seq = all(s.glyph_sequence_match for s in hb_samples) if hb_samples else False
+
+        hb_aggregates_match = bool(
+            hb_samples
+            and getattr(hb, "all_in_cmap", False) == recomputed_hb_all_cmap
+            and getattr(hb, "all_sequence_match", False) == recomputed_hb_all_seq
+            and abs(getattr(hb, "max_position_delta_upem", -1.0) - recomputed_hb_max_pos_delta) <= 1e-3
+        )
+        if hb_samples and not hb_aggregates_match:
+            failure_reasons.append("CONSUMER_GATE_FAIL: HARFBUZZ_AGGREGATE_MISMATCH")
+
+        hb_pass = bool(
+            getattr(hb, "in_candidate_cmap", False)
+            and getattr(hb, "glyph_sequence_match", False)
+            and getattr(hb, "candidate_glyph_count", 0) > 0
+            and math.isfinite(getattr(hb, "candidate_total_advance_upem", 0.0))
+            and recomputed_hb_max_pos_delta <= thresholds.max_kerning_delta_upem
+            and hb_samples_ok
+            and hb_aggregates_match
+            and getattr(hb, "error_message", None) is None
+        )
+
+        # 4. Chromium Session / Canvas Validation
+        cr = bundle.chromium.result
+        cr_pair_samples = getattr(cr, "pair_samples", ())
+        cr_glyph_samples = getattr(cr, "glyph_samples", ())
+        cr_pair_samples_ok = True
+        cr_glyph_samples_ok = True
+
+        expected_unique_cps = sorted(list({r.code_point for r in held_out_records if r.code_point in model.glyphs}))
+        if len(cr_glyph_samples) != len(expected_unique_cps) or len(cr_glyph_samples) == 0:
+            cr_glyph_samples_ok = False
+            failure_reasons.append("CONSUMER_GATE_FAIL: CHROMIUM_GLYPH_COUNT_MISMATCH")
+        else:
+            sorted_cr_glyph_samples = sorted(cr_glyph_samples, key=lambda s: s.code_point)
+            for s, cp in zip(sorted_cr_glyph_samples, expected_unique_cps):
+                exp_glyph_adv = model.glyphs[cp].advance_width_upem
+                exp_glyph_delta = abs(s.candidate_advance_upem - exp_glyph_adv)
+                if (
+                    s.code_point != cp
+                    or s.character != chr(cp)
+                    or not math.isfinite(s.candidate_advance_upem)
+                    or abs(s.expected_advance_upem - exp_glyph_adv) > 1e-3
+                    or abs(s.advance_delta_upem - exp_glyph_delta) > 1e-3
+                ):
+                    cr_glyph_samples_ok = False
+                    failure_reasons.append("CONSUMER_GATE_FAIL: CHROMIUM_GLYPH_SAMPLE_FAILED")
+                elif s.advance_delta_upem > thresholds.max_advance_width_delta_upem:
+                    cr_glyph_samples_ok = False
+                    failure_reasons.append("CONSUMER_GATE_FAIL: CHROMIUM_GLYPH_DELTA_EXCEEDED")
+
+        if not cr_pair_samples or len(cr_pair_samples) != len(held_out_pairs or []):
+            cr_pair_samples_ok = False
+            failure_reasons.append("CONSUMER_GATE_FAIL: CHROMIUM_PAIR_COUNT_MISMATCH")
+        else:
+            sorted_cr_samples = sorted(cr_pair_samples, key=lambda s: (s.left_cp, s.right_cp, s.pair))
+            sorted_pairs = sorted(
+                held_out_pairs or [], key=lambda p: (p.left_cp, p.right_cp, f"{p.left_char}{p.right_char}")
+            )
+            for s, p in zip(sorted_cr_samples, sorted_pairs):
+                expected_pair = f"{p.left_char}{p.right_char}"
+                exp_pair_adv = p.measured_pair_advance_upem
+                exp_gpos_adj = s.candidate_pair_advance_upem - s.baseline_single_sum_upem
+                exp_pair_delta = abs(s.candidate_pair_advance_upem - exp_pair_adv)
+                recomputed_base_err = abs(s.baseline_single_sum_upem - exp_pair_adv)
+                recomputed_non_reg = bool(
+                    exp_pair_delta <= recomputed_base_err + 2.0
+                    and exp_pair_delta <= thresholds.max_kerning_delta_upem
+                )
+
+                if (
+                    s.left_cp != p.left_cp
+                    or s.right_cp != p.right_cp
+                    or s.pair != expected_pair
+                    or not math.isfinite(s.candidate_pair_advance_upem)
+                    or abs(s.expected_pair_advance_upem - exp_pair_adv) > 1e-3
+                    or abs(s.gpos_applied_adjustment_upem - exp_gpos_adj) > 1e-3
+                    or abs(s.advance_delta_upem - exp_pair_delta) > 1e-3
+                ):
+                    cr_pair_samples_ok = False
+                    failure_reasons.append("CONSUMER_GATE_FAIL: CHROMIUM_PAIR_SAMPLE_FAILED")
+                elif not s.non_regression or s.non_regression != recomputed_non_reg:
+                    cr_pair_samples_ok = False
+                    failure_reasons.append("CONSUMER_GATE_FAIL: CHROMIUM_PAIR_REGRESSION")
+                elif s.advance_delta_upem > thresholds.max_kerning_delta_upem:
+                    cr_pair_samples_ok = False
+                    failure_reasons.append("CONSUMER_GATE_FAIL: CHROMIUM_PAIR_DELTA_EXCEEDED")
+
+        recomputed_cr_mean_err = (
+            float(np.mean([s.advance_delta_upem for s in cr_glyph_samples])) if cr_glyph_samples else 0.0
+        )
+        recomputed_cr_all_non_reg = (
+            bool(all(s.non_regression for s in cr_pair_samples)) if cr_pair_samples else False
+        )
+
+        cr_aggregates_match = bool(
+            cr_glyph_samples
+            and cr_pair_samples
+            and getattr(cr, "measured_glyph_count", 0) == len(expected_unique_cps)
+            and getattr(cr, "held_out_pairs_non_regression", False) == recomputed_cr_all_non_reg
+            and abs(getattr(cr, "mean_chromium_advance_error_upem", -1.0) - recomputed_cr_mean_err) <= 1e-3
+        )
+        if (cr_glyph_samples or cr_pair_samples) and not cr_aggregates_match:
+            failure_reasons.append("CONSUMER_GATE_FAIL: CHROMIUM_AGGREGATE_MISMATCH")
+
+        chromium_pass = bool(
+            getattr(cr, "is_available", False)
+            and getattr(cr, "is_direct_loadable_chromium", False)
+            and getattr(cr, "fallback_rejection_verified", False)
+            and getattr(cr, "rendered_canvas_valid", False)
+            and getattr(cr, "error_message", None) is None
+            and cr_glyph_samples_ok
+            and cr_pair_samples_ok
+            and cr_aggregates_match
+            and recomputed_cr_all_non_reg
+        )
+        if getattr(cr, "error_message", None) is not None or not getattr(cr, "rendered_canvas_valid", False):
+            failure_reasons.append("CONSUMER_GATE_FAIL: CHROMIUM_ENVIRONMENT_FAILED")
+
+        if ft_pass and freetype_pass and hb_pass and chromium_pass:
+            consumer_status = "PASS"
+        else:
+            failure_reasons.append("CONSUMER_GATE_FAIL: CONSUMERS_FAILED")
+
+    consumer_gate = ConsumerGateResult(
+        status=consumer_status,
+        total_consumers_evaluated=4 if bundle else 0,
+        fonttools_passed=ft_pass,
+        freetype_passed=freetype_pass,
+        harfbuzz_passed=hb_pass,
+        chromium_passed=chromium_pass,
+        consumer_bundle_hash=bundle_hash,
+        details={"bound_artifact_sha": bundle.candidate_artifact_sha if bundle else ""},
+    )
+    return consumer_gate, failure_reasons

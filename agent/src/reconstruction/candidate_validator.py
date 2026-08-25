@@ -54,6 +54,10 @@ class ShapingTestResult:
     reference_total_advance_upem: int
     advance_delta_upem: int
     max_position_delta_upem: int
+    samples: tuple[Any, ...] = ()
+    all_in_cmap: bool = True
+    all_sequence_match: bool = True
+    error_message: str | None = None
 
 
 @dataclass(frozen=True)
@@ -65,6 +69,8 @@ class RasterComparisonResult:
     raster_iou: float
     pixel_delta_count: int
     render_error: str | None = None
+    samples: tuple[Any, ...] = ()
+    min_raster_iou: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -91,6 +97,8 @@ class ChromiumValidationResult:
     measured_glyph_count: int
     mean_chromium_advance_error_upem: float
     pair_metrics: list[ChromiumPairMetricResult] = field(default_factory=list)
+    glyph_samples: tuple[Any, ...] = ()
+    pair_samples: tuple[Any, ...] = ()
     fit_pairs_material_improvement: bool = False
     held_out_pairs_non_regression: bool = False
     rendered_canvas_valid: bool = False

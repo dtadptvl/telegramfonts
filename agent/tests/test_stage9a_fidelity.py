@@ -19,10 +19,15 @@ from fidelity.models import (
     BoundFontToolsEvidence,
     BoundFreeTypeEvidence,
     BoundHarfBuzzEvidence,
+    ChromiumGlyphSampleEvidence,
+    ChromiumPairSampleEvidence,
     ConsumerEvidenceBundle,
     ConsumerGateResult,
     FidelityReport,
     FidelityThresholds,
+    FreeTypeSampleEvidence,
+    HarfBuzzPositionVector,
+    HarfBuzzSampleEvidence,
 )
 from measurement.calibration import (
     CalibratedGlyphMetrics,
@@ -201,6 +206,8 @@ def _make_valid_consumer_bundle(
     held_out_fp: str,
     artifact_sha: str = "d" * 64,
     file_path: str = "font.ttf",
+    records: Sequence[ObservationRecord] | None = None,
+    pairs: Sequence[PairKerningObservation] | None = None,
 ) -> ConsumerEvidenceBundle:
     fmt = FormatValidationResult(
         format="ttf", file_path=file_path, size_bytes=1024, sha256_hex=artifact_sha,
@@ -209,34 +216,111 @@ def _make_valid_consumer_bundle(
         is_direct_loadable_chromium=True, glyph_count=2, units_per_em=1000,
         has_valid_cmap=True, has_valid_metrics=True, decompression_round_trip=True,
     )
-    raster_res = RasterComparisonResult(
-        code_point=65, character="A", render_size_px=256,
-        raster_iou=0.95, pixel_delta_count=5, render_error=None,
-    )
-    shaping_res = ShapingTestResult(
-        text="AB", category="basic", in_candidate_cmap=True,
-        glyph_sequence_match=True, candidate_glyph_names=["A", "B"],
-        reference_glyph_names=["A", "B"], candidate_glyph_count=2,
-        reference_glyph_count=2, candidate_total_advance_upem=1250,
-        reference_total_advance_upem=1250, advance_delta_upem=0,
-        max_position_delta_upem=0,
-    )
-    chromium_res = ChromiumValidationResult(
-        is_available=True, browser_version="chromium",
-        is_direct_loadable_chromium=True, fallback_rejection_verified=True,
-        measured_glyph_count=2, mean_chromium_advance_error_upem=0.5,
-        rendered_canvas_valid=True, error_message=None, held_out_pairs_non_regression=True,
-    )
+    if records:
+        samples = tuple(
+            FreeTypeSampleEvidence(
+                cache_key=r.cache_key, code_point=r.code_point, character=chr(r.code_point),
+                resolution=r.resolution, raster_sha256=r.raster_sha256, raster_iou=0.95, pixel_delta_count=5,
+            )
+            for r in records
+        )
+        total_px_deltas = sum(s.pixel_delta_count for s in samples)
+        raster_res = RasterComparisonResult(
+            code_point=records[0].code_point, character=chr(records[0].code_point), render_size_px=records[0].resolution,
+            raster_iou=0.95, pixel_delta_count=total_px_deltas, render_error=None, samples=samples, min_raster_iou=0.95,
+        )
+        unique_cps = sorted(list({r.code_point for r in records}))
+        cr_glyph_samples = tuple(
+            ChromiumGlyphSampleEvidence(
+                code_point=cp,
+                character=chr(cp),
+                candidate_advance_upem=650.0 if cp == 65 else 600.0,
+                expected_advance_upem=650.0 if cp == 65 else 600.0,
+                advance_delta_upem=0.0,
+            )
+            for cp in unique_cps
+        )
+    else:
+        cr_glyph_samples = ()
+        raster_res = RasterComparisonResult(
+            code_point=65, character="A", render_size_px=256,
+            raster_iou=0.95, pixel_delta_count=5, render_error=None,
+        )
+
+    if pairs:
+        hb_samples = tuple(
+            HarfBuzzSampleEvidence(
+                left_cp=p.left_cp, right_cp=p.right_cp, text=f"{p.left_char}{p.right_char}",
+                in_candidate_cmap=True, glyph_sequence_match=True, glyph_ids=(1, 2), clusters=(0, 1),
+                positions=(
+                    HarfBuzzPositionVector(p.left_advance_upem + float(p.inferred_kerning_upem), 0, 0, 0),
+                    HarfBuzzPositionVector(p.right_advance_upem, 0, 0, 0),
+                ),
+                candidate_total_advance_upem=p.measured_pair_advance_upem, expected_total_advance_upem=p.measured_pair_advance_upem,
+                advance_delta_upem=0.0, max_position_delta_upem=0.0,
+            )
+            for p in pairs
+        )
+        shaping_res = ShapingTestResult(
+            text=f"{pairs[0].left_char}{pairs[0].right_char}", category="basic", in_candidate_cmap=True,
+            glyph_sequence_match=True, candidate_glyph_names=["A", "B"],
+            reference_glyph_names=["A", "B"], candidate_glyph_count=2,
+            reference_glyph_count=2, candidate_total_advance_upem=int(pairs[0].measured_pair_advance_upem),
+            reference_total_advance_upem=int(pairs[0].measured_pair_advance_upem), advance_delta_upem=0,
+            max_position_delta_upem=0, samples=hb_samples, all_in_cmap=True, all_sequence_match=True,
+        )
+        cr_pair_samples = tuple(
+            ChromiumPairSampleEvidence(
+                left_cp=p.left_cp, right_cp=p.right_cp, pair=f"{p.left_char}{p.right_char}",
+                baseline_single_sum_upem=p.left_advance_upem + p.right_advance_upem,
+                candidate_pair_advance_upem=p.measured_pair_advance_upem,
+                expected_pair_advance_upem=p.measured_pair_advance_upem,
+                gpos_applied_adjustment_upem=float(p.inferred_kerning_upem),
+                advance_delta_upem=0.0, non_regression=True,
+            )
+            for p in pairs
+        )
+        chromium_res = ChromiumValidationResult(
+            is_available=True, browser_version="chromium",
+            is_direct_loadable_chromium=True, fallback_rejection_verified=True,
+            measured_glyph_count=len(cr_glyph_samples) if cr_glyph_samples else 2,
+            mean_chromium_advance_error_upem=0.0,
+            rendered_canvas_valid=True, error_message=None, held_out_pairs_non_regression=True,
+            glyph_samples=cr_glyph_samples,
+            pair_samples=cr_pair_samples,
+        )
+    else:
+        shaping_res = ShapingTestResult(
+            text="AB", category="basic", in_candidate_cmap=True,
+            glyph_sequence_match=True, candidate_glyph_names=["A", "B"],
+            reference_glyph_names=["A", "B"], candidate_glyph_count=2,
+            reference_glyph_count=2, candidate_total_advance_upem=1250,
+            reference_total_advance_upem=1250, advance_delta_upem=0,
+            max_position_delta_upem=0,
+        )
+        chromium_res = ChromiumValidationResult(
+            is_available=True, browser_version="chromium",
+            is_direct_loadable_chromium=True, fallback_rejection_verified=True,
+            measured_glyph_count=2, mean_chromium_advance_error_upem=0.5,
+            rendered_canvas_valid=True, error_message=None, held_out_pairs_non_regression=True,
+        )
+
+    r_fp = FidelityEvaluator._compute_records_fingerprint(records) if records else held_out_fp
+    t_fp = FidelityEvaluator._compute_typography_fingerprint(pairs) if pairs else "empty"
+    comp_fp = FidelityEvaluator._compute_composite_held_out_fingerprint(records, pairs) if (records and pairs) else held_out_fp
+
     return ConsumerEvidenceBundle(
         schema_version="1.0.0",
         model_canonical_hash=model_hash,
         config_hash=config_hash,
-        held_out_fingerprint=held_out_fp,
+        held_out_fingerprint=comp_fp,
         candidate_artifact_sha=artifact_sha,
         fonttools=BoundFontToolsEvidence(candidate_artifact_sha=artifact_sha, result=fmt),
         freetype=BoundFreeTypeEvidence(candidate_artifact_sha=artifact_sha, result=raster_res),
         harfbuzz=BoundHarfBuzzEvidence(candidate_artifact_sha=artifact_sha, result=shaping_res),
         chromium=BoundChromiumEvidence(candidate_artifact_sha=artifact_sha, result=chromium_res),
+        held_out_raster_fingerprint=r_fp,
+        held_out_typography_fingerprint=t_fp,
     )
 
 
@@ -667,10 +751,14 @@ def test_real_typography_provenance_and_browser_drift() -> None:
         calibration_fingerprint=calib_fp, glyphs={65: glyph},
     )
 
+    valid_pair = PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False, provenance="chromium:chromium:canvas_text_metrics")
+
     bundle = _make_valid_consumer_bundle(
         model_hash=model.compute_canonical_hash(),
         config_hash=cfg_hash,
         held_out_fp=FidelityEvaluator._compute_records_fingerprint([r_held]),
+        records=[r_held],
+        pairs=[valid_pair],
     )
 
     # 1. Synthetic label -> FAIL
@@ -1066,17 +1154,21 @@ def test_fidelity_report_e2e_positive_fixture() -> None:
             held_out_fp=held_fp,
             artifact_sha=ttf_artifact.sha256_hex,
             file_path=str(ttf_artifact.file_path),
+            records=held_out_records,
+            pairs=[held_out_pair],
         )
         bundle = ConsumerEvidenceBundle(
             schema_version="1.0.0",
             model_canonical_hash=model_hash,
             config_hash=cfg_hash,
-            held_out_fingerprint=held_fp,
+            held_out_fingerprint=bundle.held_out_fingerprint,
             candidate_artifact_sha=ttf_artifact.sha256_hex,
             fonttools=BoundFontToolsEvidence(candidate_artifact_sha=ttf_artifact.sha256_hex, result=fmt_result),
             freetype=bundle.freetype,
             harfbuzz=bundle.harfbuzz,
             chromium=bundle.chromium,
+            held_out_raster_fingerprint=bundle.held_out_raster_fingerprint,
+            held_out_typography_fingerprint=bundle.held_out_typography_fingerprint,
         )
 
         report = FidelityEvaluator.evaluate(

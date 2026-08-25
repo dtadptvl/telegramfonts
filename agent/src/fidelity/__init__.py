@@ -1,19 +1,34 @@
-"""Fidelity evaluation, quality gates, and canonical verification models (Stage 9A)."""
-from fidelity.evaluator import FidelityEvaluator
+"""Fidelity evaluation, quality gates, and canonical verification models (Stage 9A / 9B)."""
+from fidelity.evaluator import FidelityEvaluator, validate_consumer_gate
 from fidelity.models import (
     BoundChromiumEvidence,
     BoundFontToolsEvidence,
     BoundFreeTypeEvidence,
     BoundHarfBuzzEvidence,
+    ChromiumGlyphSampleEvidence,
+    ChromiumPairSampleEvidence,
     ConsumerEvidenceBundle,
     ConsumerGateResult,
     CoverageGateResult,
     FidelityReport,
     FidelityThresholds,
+    FreeTypeSampleEvidence,
     GeometryRasterGateResult,
+    HarfBuzzPositionVector,
+    HarfBuzzSampleEvidence,
     MetricsGateResult,
+    ProductionProducerError,
     TopologyGateResult,
     TypographyGateResult,
+)
+from fidelity.producers import (
+    CandidateArtifact,
+    CandidateArtifactDescriptor,
+    ChromiumEvidenceProducer,
+    FontToolsEvidenceProducer,
+    FreeTypeEvidenceProducer,
+    HarfBuzzEvidenceProducer,
+    ProductionConsumerEvidenceProducer,
 )
 
 __all__ = [
@@ -21,14 +36,28 @@ __all__ = [
     "BoundFontToolsEvidence",
     "BoundFreeTypeEvidence",
     "BoundHarfBuzzEvidence",
+    "CandidateArtifact",
+    "CandidateArtifactDescriptor",
+    "ChromiumEvidenceProducer",
+    "ChromiumGlyphSampleEvidence",
+    "ChromiumPairSampleEvidence",
     "ConsumerEvidenceBundle",
     "ConsumerGateResult",
     "CoverageGateResult",
     "FidelityEvaluator",
     "FidelityReport",
     "FidelityThresholds",
+    "FontToolsEvidenceProducer",
+    "FreeTypeEvidenceProducer",
+    "FreeTypeSampleEvidence",
     "GeometryRasterGateResult",
+    "HarfBuzzEvidenceProducer",
+    "HarfBuzzPositionVector",
+    "HarfBuzzSampleEvidence",
     "MetricsGateResult",
+    "ProductionConsumerEvidenceProducer",
+    "ProductionProducerError",
     "TopologyGateResult",
     "TypographyGateResult",
+    "validate_consumer_gate",
 ]
