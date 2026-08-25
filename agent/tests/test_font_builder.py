@@ -519,7 +519,7 @@ async def test_observation_collector_and_source_acquirer_exact_lifecycle_and_cac
 
     # 1. Glyph-only: finalize rejects and store is NOT completed!
     assert not store.is_source_collection_completed("test_family", "regular", cfg_h, real_browser_ver)
-    with pytest.raises(ValueError, match="missing .* bounded fit pairs"):
+    with pytest.raises(ValueError, match="missing .* expected pairs"):
         collector.finalize_source_collection("test_family", "regular")
 
     # Step 2: Collect pairs only (without features)
@@ -633,3 +633,145 @@ def test_cli_and_script_entrypoints_reject_missing_exact_tuple(monkeypatch: pyte
     )
     assert p3.returncode != 0
     assert "required" in p3.stderr.lower() or "error" in p3.stderr.lower()
+
+
+@pytest.mark.asyncio
+async def test_multi_environment_exact_tuple_isolation_and_hostile_mixed_rejection(tmp_path: Path):
+    """Architect Blockers verification:
+    1. Multi-environment independence & non-overwriting.
+    2. Mixed A-glyph/B-pair/C-feature store cannot finalize any tuple.
+    3. Legacy unbound feature rows reject.
+    4. Exact environments coexist and finalize independently.
+    5. Empty pair plan fails closed.
+    """
+    from measurement.store import ObservationStore
+    from measurement.models import ObservationConfig, DirectMetrics
+    from measurement.collector import ObservationCollector
+
+    store_dir = tmp_path / "multi_env_store"
+    store = ObservationStore(store_dir)
+
+    cfg1 = ObservationConfig(resolutions=(128,), font_size_px=128.0)
+    cfg2 = ObservationConfig(resolutions=(256,), font_size_px=256.0)
+    h1 = cfg1.compute_hash()
+    h2 = cfg2.compute_hash()
+    bv1 = "chromium_128_win"
+    bv2 = "chromium_129_linux"
+
+    class MockSession:
+        def __init__(self, bv):
+            self.browser_version = bv
+        async def start(self):
+            pass
+        async def stop(self):
+            pass
+        async def capture_lossless_raster(self, font_family, code_point, resolution_px, subpixel_offset=(0.0, 0.0)):
+            from PIL import Image
+            import io
+            img = Image.new("RGBA", (resolution_px, resolution_px), (255, 255, 255, 255))
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            return buf.getvalue()
+        async def measure_glyph_direct(self, font_family, code_point, font_size_px, upem):
+            scale = font_size_px / upem
+            return DirectMetrics.from_browser_measurements(
+                code_point=code_point,
+                char=chr(code_point),
+                font_size_px=font_size_px,
+                m={
+                    "width": 600.0 * scale,
+                    "actualBoundingBoxLeft": 50.0 * scale,
+                    "actualBoundingBoxRight": 550.0 * scale,
+                    "actualBoundingBoxAscent": 700.0 * scale,
+                    "actualBoundingBoxDescent": 0.0,
+                    "fontBoundingBoxAscent": 800.0 * scale,
+                    "fontBoundingBoxDescent": -200.0 * scale,
+                },
+                upem=upem,
+            )
+        async def measure_text_advance(self, font_family, text, font_size_px, upem):
+            return 1200.0
+        async def probe_opentype_feature(self, font_family, feature_tag, sample_text, font_size_px, upem):
+            return {
+                "enabled_advance_upem": 1200.0,
+                "disabled_advance_upem": 1200.0,
+                "enabled_raster_signature": "sig_a",
+                "disabled_raster_signature": "sig_a",
+            }
+
+    sess1 = MockSession(bv1)
+    sess2 = MockSession(bv2)
+    coll1 = ObservationCollector(sess1, store, cfg1)
+    coll2 = ObservationCollector(sess2, store, cfg2)
+
+    # 1. Independent full collection under env1
+    await coll1.collect_font_observations("multi_font", "regular", "MultiFont", code_points=[65, 66])
+    await coll1.collect_pair_observations("multi_font", "regular", "MultiFont")
+    await coll1.collect_feature_observations("multi_font", "regular", "MultiFont")
+
+    # 2. Independent full collection under env2 (same family/style, different env)
+    await coll2.collect_font_observations("multi_font", "regular", "MultiFont", code_points=[65, 66])
+    await coll2.collect_pair_observations("multi_font", "regular", "MultiFont")
+    await coll2.collect_feature_observations("multi_font", "regular", "MultiFont")
+
+    # Verify both finalize independently without collisions
+    coll1.finalize_source_collection("multi_font", "regular")
+    coll2.finalize_source_collection("multi_font", "regular")
+    assert store.is_source_collection_completed("multi_font", "regular", h1, bv1) is True
+    assert store.is_source_collection_completed("multi_font", "regular", h2, bv2) is True
+
+    # 3. Empty pair plan fails closed
+    with pytest.raises(ValueError, match="expected_pairs must be non-empty"):
+        coll1.finalize_source_collection("multi_font", "regular", expected_pairs=[])
+
+    # 4. Mixed environment store cannot finalize any tuple
+    # Collect glyphs under env1 only
+    await coll1.collect_font_observations("mixed_font", "regular", "MixedFont", code_points=[65, 66])
+    # Collect pairs under env2 only
+    await coll2.collect_pair_observations("mixed_font", "regular", "MixedFont")
+    # Collect features under a third environment (sess3, cfg1)
+    sess3 = MockSession("chromium_130_mac")
+    coll3 = ObservationCollector(sess3, store, cfg1)
+    await coll3.collect_feature_observations("mixed_font", "regular", "MixedFont")
+
+    # Attempting to finalize under coll1 (has glyphs, but missing pairs and features for (bv1, h1))
+    with pytest.raises(ValueError, match="missing .* expected pairs"):
+        coll1.finalize_source_collection("mixed_font", "regular")
+
+    # Attempting to finalize under coll2 (has pairs, but missing glyphs for (bv2, h2))
+    with pytest.raises(ValueError, match="missing glyph observations"):
+        coll2.finalize_source_collection("mixed_font", "regular")
+
+    # Attempting to finalize under coll3 (has features, but missing glyphs for (bv3, h1))
+    with pytest.raises(ValueError, match="missing glyph observations"):
+        coll3.finalize_source_collection("mixed_font", "regular")
+
+    # None of the tuples are completed
+    assert store.is_source_collection_completed("mixed_font", "regular", h1, bv1) is False
+    assert store.is_source_collection_completed("mixed_font", "regular", h2, bv2) is False
+    assert store.is_source_collection_completed("mixed_font", "regular", h1, "chromium_130_mac") is False
+
+    # 5. Legacy unbound / untrusted feature rows reject
+    # Ingest fake legacy feature observations with untrusted provenance
+    with store._get_connection() as conn:
+        for tag, txt in cfg1.feature_probes:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO feature_observations (
+                    reference_id, style_id, browser_version, config_hash,
+                    feature_tag, sample_text, enabled_advance_upem,
+                    disabled_advance_upem, enabled_raster_signature,
+                    disabled_raster_signature, effect_observed,
+                    provenance, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "legacy_font", "regular", bv1, h1, tag, txt,
+                    1200.0, 1200.0, "a", "a", 0, "untrusted", "2026-01-01T00:00:00Z"
+                ),
+            )
+        conn.commit()
+    await coll1.collect_font_observations("legacy_font", "regular", "LegacyFont", code_points=[65, 66])
+    await coll1.collect_pair_observations("legacy_font", "regular", "LegacyFont")
+    with pytest.raises(ValueError, match="untrusted or mismatched feature provenance"):
+        coll1.finalize_source_collection("legacy_font", "regular")

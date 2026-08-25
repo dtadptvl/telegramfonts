@@ -238,24 +238,98 @@ class ObservationStore:
                 )
                 """
             )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS feature_observations (
-                    reference_id TEXT NOT NULL,
-                    style_id TEXT NOT NULL,
-                    feature_tag TEXT NOT NULL,
-                    sample_text TEXT NOT NULL,
-                    enabled_advance_upem REAL NOT NULL,
-                    disabled_advance_upem REAL NOT NULL,
-                    enabled_raster_signature TEXT NOT NULL,
-                    disabled_raster_signature TEXT NOT NULL,
-                    effect_observed INTEGER NOT NULL,
-                    provenance TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    PRIMARY KEY (reference_id, style_id, feature_tag, sample_text)
+            # Create or migrate feature_observations table to 6-column composite primary key
+            cur = conn.execute("PRAGMA table_info(feature_observations)")
+            feat_columns = {row[1]: row for row in cur.fetchall()}
+            if not feat_columns:
+                conn.execute(
+                    """
+                    CREATE TABLE feature_observations (
+                        reference_id TEXT NOT NULL,
+                        style_id TEXT NOT NULL,
+                        browser_version TEXT NOT NULL,
+                        config_hash TEXT NOT NULL,
+                        feature_tag TEXT NOT NULL,
+                        sample_text TEXT NOT NULL,
+                        enabled_advance_upem REAL NOT NULL,
+                        disabled_advance_upem REAL NOT NULL,
+                        enabled_raster_signature TEXT NOT NULL,
+                        disabled_raster_signature TEXT NOT NULL,
+                        effect_observed INTEGER NOT NULL,
+                        provenance TEXT NOT NULL DEFAULT 'untrusted',
+                        created_at TEXT NOT NULL,
+                        PRIMARY KEY (reference_id, style_id, browser_version, config_hash, feature_tag, sample_text)
+                    )
+                    """
                 )
-                """
-            )
+            else:
+                bv_info = feat_columns.get("browser_version")
+                cfg_info = feat_columns.get("config_hash")
+                needs_feat_pk_migration = not (
+                    bv_info is not None and bv_info[5] > 0 and
+                    cfg_info is not None and cfg_info[5] > 0
+                )
+                if needs_feat_pk_migration:
+                    if not bv_info:
+                        try:
+                            conn.execute("ALTER TABLE feature_observations ADD COLUMN browser_version TEXT NOT NULL DEFAULT ''")
+                        except sqlite3.OperationalError:
+                            pass
+                    if not cfg_info:
+                        try:
+                            conn.execute("ALTER TABLE feature_observations ADD COLUMN config_hash TEXT NOT NULL DEFAULT ''")
+                        except sqlite3.OperationalError:
+                            pass
+                    if "provenance" not in feat_columns:
+                        try:
+                            conn.execute("ALTER TABLE feature_observations ADD COLUMN provenance TEXT NOT NULL DEFAULT 'untrusted'")
+                        except sqlite3.OperationalError:
+                            pass
+
+                    conn.execute(
+                        """
+                        CREATE TABLE feature_observations_new (
+                            reference_id TEXT NOT NULL,
+                            style_id TEXT NOT NULL,
+                            browser_version TEXT NOT NULL,
+                            config_hash TEXT NOT NULL,
+                            feature_tag TEXT NOT NULL,
+                            sample_text TEXT NOT NULL,
+                            enabled_advance_upem REAL NOT NULL,
+                            disabled_advance_upem REAL NOT NULL,
+                            enabled_raster_signature TEXT NOT NULL,
+                            disabled_raster_signature TEXT NOT NULL,
+                            effect_observed INTEGER NOT NULL,
+                            provenance TEXT NOT NULL DEFAULT 'untrusted',
+                            created_at TEXT NOT NULL,
+                            PRIMARY KEY (reference_id, style_id, browser_version, config_hash, feature_tag, sample_text)
+                        )
+                        """
+                    )
+                    conn.execute(
+                        """
+                        INSERT OR IGNORE INTO feature_observations_new (
+                            reference_id, style_id, browser_version, config_hash,
+                            feature_tag, sample_text, enabled_advance_upem,
+                            disabled_advance_upem, enabled_raster_signature,
+                            disabled_raster_signature, effect_observed,
+                            provenance, created_at
+                        )
+                        SELECT
+                            reference_id, style_id,
+                            COALESCE(browser_version, ''),
+                            COALESCE(config_hash, ''),
+                            feature_tag, sample_text, enabled_advance_upem,
+                            disabled_advance_upem, enabled_raster_signature,
+                            disabled_raster_signature, effect_observed,
+                            COALESCE(provenance, 'untrusted'),
+                            created_at
+                        FROM feature_observations
+                        """
+                    )
+                    conn.execute("DROP TABLE feature_observations")
+                    conn.execute("ALTER TABLE feature_observations_new RENAME TO feature_observations")
+
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS source_collections (
@@ -280,6 +354,11 @@ class ObservationStore:
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_pair_env ON pair_observations (reference_id, style_id, browser_version, config_hash)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_feature_env ON feature_observations (reference_id, style_id, browser_version, config_hash)
                 """
             )
 
@@ -322,20 +401,27 @@ class ObservationStore:
             return [dict(row) for row in rows]
 
     def save_feature_observation(self, observation: OpenTypeFeatureObservation) -> None:
-        """Persist an immutable browser OpenType feature probe."""
+        """Persist an immutable browser OpenType feature probe bound to exact environment identity."""
+        if not observation.browser_version or not observation.config_hash:
+            raise ValueError(
+                "FEATURE_IDENTITY_REQUIRED: browser_version and config_hash must be non-empty strings"
+            )
         with self._get_connection() as conn:
             conn.execute(
                 """
-                INSERT OR IGNORE INTO feature_observations (
-                    reference_id, style_id, feature_tag, sample_text,
-                    enabled_advance_upem, disabled_advance_upem,
-                    enabled_raster_signature, disabled_raster_signature,
-                    effect_observed, provenance, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT OR REPLACE INTO feature_observations (
+                    reference_id, style_id, browser_version, config_hash,
+                    feature_tag, sample_text, enabled_advance_upem,
+                    disabled_advance_upem, enabled_raster_signature,
+                    disabled_raster_signature, effect_observed,
+                    provenance, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     observation.reference_id,
                     observation.style_id,
+                    observation.browser_version,
+                    observation.config_hash,
                     observation.feature_tag,
                     observation.sample_text,
                     observation.enabled_advance_upem,
@@ -349,17 +435,25 @@ class ObservationStore:
             )
             conn.commit()
 
-    def get_feature_observations(self, reference_id: str, style_id: str) -> list[dict[str, Any]]:
-        """Return persisted browser feature probes."""
+    def get_feature_observations(
+        self,
+        reference_id: str,
+        style_id: str,
+        browser_version: str | None = None,
+        config_hash: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return persisted browser feature probes strictly filtered by identity."""
         with self._get_connection() as conn:
-            rows = conn.execute(
-                """
-                SELECT * FROM feature_observations
-                WHERE reference_id = ? AND style_id = ?
-                ORDER BY feature_tag, sample_text
-                """,
-                (reference_id, style_id),
-            ).fetchall()
+            query = "SELECT * FROM feature_observations WHERE reference_id = ? AND style_id = ?"
+            params: list[Any] = [reference_id, style_id]
+            if browser_version is not None:
+                query += " AND browser_version = ?"
+                params.append(browser_version)
+            if config_hash is not None:
+                query += " AND config_hash = ?"
+                params.append(config_hash)
+            query += " ORDER BY feature_tag, sample_text"
+            rows = conn.execute(query, tuple(params)).fetchall()
             return [dict(row) for row in rows]
 
     def mark_source_collection_started(self, collection_key: str) -> None:
@@ -469,19 +563,26 @@ class ObservationStore:
             return None
 
     def get_glyph_observations(
-        self, reference_id: str, style_id: str, code_point: int
+        self,
+        reference_id: str,
+        style_id: str,
+        code_point: int,
+        browser_version: str | None = None,
+        config_hash: str | None = None,
     ) -> list[tuple[ObservationRecord, bytes]]:
-        """Retrieve all observation records and raw PNG bytes for a specific glyph."""
+        """Retrieve all observation records and raw PNG bytes for a specific glyph, optionally filtered by exact identity."""
         try:
             with self._get_connection() as conn:
-                cur = conn.execute(
-                    """
-                    SELECT * FROM observations
-                    WHERE reference_id = ? AND style_id = ? AND code_point = ?
-                    ORDER BY resolution ASC, subpixel_x ASC, subpixel_y ASC
-                    """,
-                    (reference_id, style_id, code_point),
-                )
+                query = "SELECT * FROM observations WHERE reference_id = ? AND style_id = ? AND code_point = ?"
+                params: list[Any] = [reference_id, style_id, code_point]
+                if browser_version is not None:
+                    query += " AND browser_version = ?"
+                    params.append(browser_version)
+                if config_hash is not None:
+                    query += " AND config_hash = ?"
+                    params.append(config_hash)
+                query += " ORDER BY resolution ASC, subpixel_x ASC, subpixel_y ASC"
+                cur = conn.execute(query, tuple(params))
                 rows = cur.fetchall()
                 results = []
                 for row in rows:
@@ -499,6 +600,30 @@ class ObservationStore:
                     except Exception:
                         continue
                 return results
+        except Exception:
+            return []
+
+    def get_glyph_observation_code_points(
+        self,
+        reference_id: str,
+        style_id: str,
+        browser_version: str | None = None,
+        config_hash: str | None = None,
+    ) -> list[int]:
+        """Retrieve distinct code points having valid observations, strictly filtered by identity."""
+        try:
+            with self._get_connection() as conn:
+                query = "SELECT DISTINCT code_point FROM observations WHERE reference_id = ? AND style_id = ?"
+                params: list[Any] = [reference_id, style_id]
+                if browser_version is not None:
+                    query += " AND browser_version = ?"
+                    params.append(browser_version)
+                if config_hash is not None:
+                    query += " AND config_hash = ?"
+                    params.append(config_hash)
+                query += " ORDER BY code_point ASC"
+                cur = conn.execute(query, tuple(params))
+                return [int(row[0]) for row in cur.fetchall()]
         except Exception:
             return []
 

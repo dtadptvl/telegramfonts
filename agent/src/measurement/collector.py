@@ -287,6 +287,8 @@ class ObservationCollector:
         """Collect bounded browser probes for kerning and common GSUB/GPOS features."""
         captured = 0
         provenance = f"chromium:{self.session.browser_version}:canvas_feature_probe"
+        cfg_hash = self.config.compute_hash()
+        bv = self.session.browser_version
         for feature_tag, sample_text in self.config.feature_probes:
             raw = await self.session.probe_opentype_feature(
                 font_family,
@@ -303,6 +305,8 @@ class ObservationCollector:
                 OpenTypeFeatureObservation(
                     reference_id=reference_id,
                     style_id=style_id,
+                    browser_version=bv,
+                    config_hash=cfg_hash,
                     feature_tag=feature_tag,
                     sample_text=sample_text,
                     enabled_advance_upem=raw["enabled_advance_upem"],
@@ -322,45 +326,65 @@ class ObservationCollector:
         reference_id: str,
         style_id: str,
         source_url: str = "direct_browser",
-        require_fit_pairs: bool = True,
+        expected_pairs: list[tuple[int, int]] | tuple[tuple[int, int], ...] | None = None,
     ) -> None:
-        """Mark source collection as fully finalized only after all glyph, pair, feature, and coverage checks pass."""
+        """Mark source collection as fully finalized only after all glyph, pair, feature, and coverage checks pass for exact identity."""
+        bv = self.session.browser_version
+        cfg_h = self.config.compute_hash()
+        expected_pair_prov = f"chromium:{bv}:canvas_text_metrics"
+        expected_feat_prov = f"chromium:{bv}:canvas_feature_probe"
+
         # 1. Coverage verification
         coverage = self.store.get_coverage(reference_id, style_id)
         if not coverage:
             raise ValueError(f"FINALIZATION_FAILED: no glyph coverage found for {reference_id}:{style_id}")
 
-        # 2. Glyph observation verification
+        # 2. Scoped Glyph observation verification (exact identity)
         for cp in coverage:
-            obs = self.store.get_glyph_observations(reference_id, style_id, cp)
+            obs = self.store.get_glyph_observations(
+                reference_id, style_id, cp, browser_version=bv, config_hash=cfg_h
+            )
             if not obs:
                 raise ValueError(
-                    f"FINALIZATION_FAILED: missing glyph observations for code point {cp} in {reference_id}:{style_id}"
+                    f"FINALIZATION_FAILED: missing glyph observations for code point {cp} under exact identity ({bv}, {cfg_h}) in {reference_id}:{style_id}"
                 )
 
-        # 3. Pair observation verification
-        if require_fit_pairs:
+        # 3. Scoped Pair observation verification (exact identity & non-empty plan)
+        if expected_pairs is None:
             from typography.models import BOUNDED_FIT_PAIRS
-            stored_pairs = self.store.get_pair_observations(
-                reference_id=reference_id,
-                style_id=style_id,
-                browser_version=self.session.browser_version,
-                config_hash=self.config.compute_hash(),
-            )
-            stored_pair_set = {(p["left_cp"], p["right_cp"]) for p in stored_pairs}
-            missing_pairs = set(BOUNDED_FIT_PAIRS) - stored_pair_set
-            if missing_pairs:
+            target_pairs = list(BOUNDED_FIT_PAIRS)
+        else:
+            target_pairs = list(expected_pairs)
+            if not target_pairs:
                 raise ValueError(
-                    f"FINALIZATION_FAILED: missing {len(missing_pairs)} bounded fit pairs for {reference_id}:{style_id}: {missing_pairs}"
+                    f"FINALIZATION_FAILED: expected_pairs must be non-empty for {reference_id}:{style_id}"
                 )
-            for p in stored_pairs:
-                if not str(p.get("provenance", "")).startswith("chromium:"):
-                    raise ValueError(
-                        f"FINALIZATION_FAILED: untrusted pair provenance '{p.get('provenance')}' for {reference_id}:{style_id}"
-                    )
 
-        # 4. OpenType feature probe observation verification
-        features = self.store.get_feature_observations(reference_id, style_id)
+        stored_pairs = self.store.get_pair_observations(
+            reference_id=reference_id,
+            style_id=style_id,
+            browser_version=bv,
+            config_hash=cfg_h,
+        )
+        stored_pair_set = {(p["left_cp"], p["right_cp"]) for p in stored_pairs}
+        missing_pairs = set(target_pairs) - stored_pair_set
+        if missing_pairs:
+            raise ValueError(
+                f"FINALIZATION_FAILED: missing {len(missing_pairs)} expected pairs for {reference_id}:{style_id}: {missing_pairs}"
+            )
+        for p in stored_pairs:
+            if p.get("provenance") != expected_pair_prov:
+                raise ValueError(
+                    f"FINALIZATION_FAILED: untrusted or mismatched pair provenance '{p.get('provenance')}' != '{expected_pair_prov}' for {reference_id}:{style_id}"
+                )
+
+        # 4. Scoped OpenType feature probe observation verification (exact identity)
+        features = self.store.get_feature_observations(
+            reference_id=reference_id,
+            style_id=style_id,
+            browser_version=bv,
+            config_hash=cfg_h,
+        )
         expected_feature_tags = {tag for tag, _ in self.config.feature_probes}
         stored_feature_tags = {f["feature_tag"] for f in features}
         missing_features = expected_feature_tags - stored_feature_tags
@@ -369,16 +393,16 @@ class ObservationCollector:
                 f"FINALIZATION_FAILED: missing feature observations for {reference_id}:{style_id}: {missing_features}"
             )
         for f in features:
-            if not str(f.get("provenance", "")).startswith("chromium:"):
+            if f.get("provenance") != expected_feat_prov:
                 raise ValueError(
-                    f"FINALIZATION_FAILED: untrusted feature provenance '{f.get('provenance')}' for {reference_id}:{style_id}"
+                    f"FINALIZATION_FAILED: untrusted or mismatched feature provenance '{f.get('provenance')}' != '{expected_feat_prov}' for {reference_id}:{style_id}"
                 )
 
         # 5. Record single canonical completion record
         self.store.record_source_collection_completed(
             reference_id=reference_id,
             style_id=style_id,
-            config_hash=self.config.compute_hash(),
-            browser_version=self.session.browser_version,
+            config_hash=cfg_h,
+            browser_version=bv,
             source_url=source_url,
         )

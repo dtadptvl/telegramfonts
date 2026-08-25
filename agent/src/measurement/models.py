@@ -92,6 +92,8 @@ class OpenTypeFeatureObservation:
 
     reference_id: str
     style_id: str
+    browser_version: str
+    config_hash: str
     feature_tag: str
     sample_text: str
     enabled_advance_upem: float

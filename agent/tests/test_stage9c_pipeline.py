@@ -353,7 +353,7 @@ async def test_e2e_real_collector_to_store_to_snapshot_pipeline_execution() -> N
         ) is False
 
         # Finalize collection
-        collector.finalize_source_collection("real_font", "regular", require_fit_pairs=False)
+        collector.finalize_source_collection("real_font", "regular", expected_pairs=[(65, 66), (66, 65)])
 
         # Verify completed source collection marker was written
         assert store.is_source_collection_completed(
