@@ -362,36 +362,6 @@ class ObservationStore:
             ).fetchall()
             return [dict(row) for row in rows]
 
-    def mark_source_collection_complete(
-        self,
-        collection_key: str,
-        source_url: str,
-        reference_id: str,
-        style_id: str,
-        config_hash: str,
-        browser_version: str,
-    ) -> None:
-        """Atomically mark a fully persisted source/style observation collection complete."""
-        with self._get_connection() as conn:
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO source_collections (
-                    collection_key, source_url, reference_id, style_id,
-                    config_hash, browser_version, completed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    collection_key,
-                    source_url,
-                    reference_id,
-                    style_id,
-                    config_hash,
-                    browser_version,
-                    datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                ),
-            )
-            conn.commit()
-
     def mark_source_collection_started(self, collection_key: str) -> None:
         """Record a resumable source collection before any partial observations are written."""
         with self._get_connection() as conn:
@@ -405,14 +375,6 @@ class ObservationStore:
         with self._get_connection() as conn:
             return conn.execute(
                 "SELECT 1 FROM source_collection_attempts WHERE collection_key = ?",
-                (collection_key,),
-            ).fetchone() is not None
-
-    def is_source_collection_complete(self, collection_key: str) -> bool:
-        """Check the durable no-recrawl completion marker for unchanged inputs."""
-        with self._get_connection() as conn:
-            return conn.execute(
-                "SELECT 1 FROM source_collections WHERE collection_key = ?",
                 (collection_key,),
             ).fetchone() is not None
 

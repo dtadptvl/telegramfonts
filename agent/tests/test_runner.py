@@ -32,6 +32,8 @@ class FixtureSourceAcquirer(SourceAcquirer):
     def __init__(self, preview_bytes: bytes, **kwargs):
         super().__init__(**kwargs)
         self.preview_bytes = preview_bytes
+        self.store_dir = None
+        self.store = None
 
     async def acquire_source(self, source_url, styles, preview_input=None, allow_web_fallback=False):
         return await super().acquire_source(
@@ -103,7 +105,7 @@ async def test_runner_default_live_preview_and_durable_completion(test_settings:
                httpx.AsyncClient(transport=httpx.MockTransport(source_handler)) as s_http:
         q_client = CloudflareQueueClient(test_settings, client=q_http)
         w_client = WorkerJobClient(test_settings, client=w_http)
-        s_acquirer = SourceAcquirer(client=s_http)
+        s_acquirer = FixtureSourceAcquirer(preview_bytes, client=s_http)
         runner = A23Runner(test_settings, q_client, w_client, source_acquirer=s_acquirer)
 
         msg = QueueMessage(id="m1", lease_id="l_live", body_raw='{"job_id":"job_live_1"}', attempts=1, job_id="job_live_1")
@@ -163,7 +165,7 @@ async def test_runner_does_not_ack_queue_when_upload_alone_succeeds(test_setting
                httpx.AsyncClient(transport=httpx.MockTransport(source_handler)) as s_http:
         q_client = CloudflareQueueClient(test_settings, client=q_http)
         w_client = WorkerJobClient(test_settings, client=w_http)
-        runner = A23Runner(test_settings, q_client, w_client, source_acquirer=SourceAcquirer(client=s_http))
+        runner = A23Runner(test_settings, q_client, w_client, source_acquirer=FixtureSourceAcquirer(preview_bytes, client=s_http))
 
         msg = QueueMessage(id="m1", lease_id="l_no_ack", body_raw='{"job_id":"job_no_ack"}', attempts=1, job_id="job_no_ack")
         res = await runner.process_message(msg, preview_input=preview_bytes)
@@ -221,7 +223,7 @@ async def test_runner_ambiguous_completion_failure_does_not_call_fail(test_setti
                httpx.AsyncClient(transport=httpx.MockTransport(source_handler)) as s_http:
         q_client = CloudflareQueueClient(test_settings, client=q_http)
         w_client = WorkerJobClient(test_settings, client=w_http)
-        runner = A23Runner(test_settings, q_client, w_client, source_acquirer=SourceAcquirer(client=s_http))
+        runner = A23Runner(test_settings, q_client, w_client, source_acquirer=FixtureSourceAcquirer(preview_bytes, client=s_http))
 
         msg = QueueMessage(id="m1", lease_id="l_ambig", body_raw='{"job_id":"job_ambig"}', attempts=1, job_id="job_ambig")
         res = await runner.process_message(msg, preview_input=preview_bytes)
@@ -274,7 +276,7 @@ async def test_runner_completion_409_conflict_terminal_acks_queue(test_settings:
                httpx.AsyncClient(transport=httpx.MockTransport(source_handler)) as s_http:
         q_client = CloudflareQueueClient(test_settings, client=q_http)
         w_client = WorkerJobClient(test_settings, client=w_http)
-        runner = A23Runner(test_settings, q_client, w_client, source_acquirer=SourceAcquirer(client=s_http))
+        runner = A23Runner(test_settings, q_client, w_client, source_acquirer=FixtureSourceAcquirer(preview_bytes, client=s_http))
 
         msg = QueueMessage(id="m1", lease_id="l_conf", body_raw='{"job_id":"job_term_conflict"}', attempts=1, job_id="job_term_conflict")
         res = await runner.process_message(msg, preview_input=preview_bytes)

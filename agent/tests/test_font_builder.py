@@ -517,21 +517,30 @@ async def test_observation_collector_and_source_acquirer_exact_lifecycle_and_cac
     # Step 1: Collect ONLY glyphs
     await collector.collect_font_observations("test_family", "regular", "TestFamily", code_points=[65, 66, 79])
 
-    # 1. Glyph-only marker rejects: store is NOT completed!
+    # 1. Glyph-only: finalize rejects and store is NOT completed!
     assert not store.is_source_collection_completed("test_family", "regular", cfg_h, real_browser_ver)
+    with pytest.raises(ValueError, match="missing .* bounded fit pairs"):
+        collector.finalize_source_collection("test_family", "regular")
 
-    # Step 2: Collect pairs & features
+    # Step 2: Collect pairs only (without features)
     await collector.collect_pair_observations("test_family", "regular", "TestFamily")
+
+    # 2. Glyph + pair without feature: finalize rejects and store is NOT completed!
+    assert not store.is_source_collection_completed("test_family", "regular", cfg_h, real_browser_ver)
+    with pytest.raises(ValueError, match="missing feature observations"):
+        collector.finalize_source_collection("test_family", "regular")
+
+    # Step 3: Collect features
     await collector.collect_feature_observations("test_family", "regular", "TestFamily")
 
     # Before finalize_source_collection, it is still not marked completed
     assert not store.is_source_collection_completed("test_family", "regular", cfg_h, real_browser_ver)
 
-    # Step 3: Finalize collection -> accepts!
+    # Step 4: Finalize collection -> accepts!
     collector.finalize_source_collection("test_family", "regular", source_url="https://www.myfonts.com/collections/test-family")
     assert store.is_source_collection_completed("test_family", "regular", cfg_h, real_browser_ver)
 
-    # Step 4: SourceAcquirer on fresh collection propagates real_browser_ver
+    # Step 5: SourceAcquirer on fresh collection propagates real_browser_ver
     acquirer = SourceAcquirer(
         browser_session_factory=lambda: FakeSession(real_browser_ver),
         observation_store_dir=store_dir,
@@ -545,7 +554,7 @@ async def test_observation_collector_and_source_acquirer_exact_lifecycle_and_cac
     assert style_new.observation_browser_version == real_browser_ver
     assert style_new.observation_config_hash == cfg_h
 
-    # Step 5: SourceAcquirer on CACHE REUSE returns the exact same tuple
+    # Step 6: SourceAcquirer on CACHE REUSE returns the exact same tuple
     payload_cached = await acquirer.acquire_source(
         source_url="https://www.myfonts.com/collections/test-family-new",
         styles=[ClaimStyle(id="regular", display_name="Regular")],
@@ -554,11 +563,42 @@ async def test_observation_collector_and_source_acquirer_exact_lifecycle_and_cac
     assert style_cached.observation_browser_version == real_browser_ver
     assert style_cached.observation_config_hash == cfg_h
 
-    # Step 6: Builder accepts StyleSourceData with exact tuple
+    # Step 7: Builder accepts StyleSourceData with exact tuple
     builder = FontBuilderService(observation_store_dir=store_dir)
     out_dir = tmp_path / "build_lifecycle_out"
     res = builder.build_font(style_cached, "Test Family New", "TTF", out_dir)
     assert res.file_path.exists()
+
+    # Step 8: Fixture and raster preview paths cannot pass the production builder gate
+    from tests.test_runner import _make_test_image_bytes
+    preview_bytes = _make_test_image_bytes(20, 60)
+    payload_bytes = await acquirer.acquire_source(
+        source_url="https://www.myfonts.com/collections/test-family-bytes",
+        styles=[ClaimStyle(id="regular", display_name="Regular")],
+        preview_input=preview_bytes,
+    )
+    style_bytes = payload_bytes.styles["regular"]
+    assert style_bytes.observation_reference_id is None
+    with pytest.raises(ValueError, match="INCOMPLETE_OBSERVATION_IDENTITY"):
+        builder.build_font(style_bytes, "Test Family Bytes", "TTF", out_dir)
+
+    payload_fixture = await acquirer.acquire_source(
+        source_url="https://www.myfonts.com/collections/test-family-fixture",
+        styles=[ClaimStyle(id="regular", display_name="Regular")],
+        preview_input={
+            "source_url": "https://www.myfonts.com/collections/test-family-fixture",
+            "family_name": "Test Family Fixture",
+            "styles": [{
+                "style_id": "regular",
+                "style_name": "Regular",
+                "glyphs": {"A": {"contours": [[[0, 0], [100, 0], [100, 100], [0, 100]]], "advance_width": 600, "lsb": 50}},
+            }],
+        },
+    )
+    style_fixture = payload_fixture.styles["regular"]
+    assert style_fixture.observation_reference_id is None
+    with pytest.raises(ValueError, match="INCOMPLETE_OBSERVATION_IDENTITY"):
+        builder.build_font(style_fixture, "Test Family Fixture", "TTF", out_dir)
 
 
 def test_cli_and_script_entrypoints_reject_missing_exact_tuple(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):

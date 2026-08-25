@@ -325,10 +325,20 @@ class ObservationCollector:
         require_fit_pairs: bool = True,
     ) -> None:
         """Mark source collection as fully finalized only after all glyph, pair, feature, and coverage checks pass."""
+        # 1. Coverage verification
         coverage = self.store.get_coverage(reference_id, style_id)
         if not coverage:
             raise ValueError(f"FINALIZATION_FAILED: no glyph coverage found for {reference_id}:{style_id}")
 
+        # 2. Glyph observation verification
+        for cp in coverage:
+            obs = self.store.get_glyph_observations(reference_id, style_id, cp)
+            if not obs:
+                raise ValueError(
+                    f"FINALIZATION_FAILED: missing glyph observations for code point {cp} in {reference_id}:{style_id}"
+                )
+
+        # 3. Pair observation verification
         if require_fit_pairs:
             from typography.models import BOUNDED_FIT_PAIRS
             stored_pairs = self.store.get_pair_observations(
@@ -343,7 +353,28 @@ class ObservationCollector:
                 raise ValueError(
                     f"FINALIZATION_FAILED: missing {len(missing_pairs)} bounded fit pairs for {reference_id}:{style_id}: {missing_pairs}"
                 )
+            for p in stored_pairs:
+                if not str(p.get("provenance", "")).startswith("chromium:"):
+                    raise ValueError(
+                        f"FINALIZATION_FAILED: untrusted pair provenance '{p.get('provenance')}' for {reference_id}:{style_id}"
+                    )
 
+        # 4. OpenType feature probe observation verification
+        features = self.store.get_feature_observations(reference_id, style_id)
+        expected_feature_tags = {tag for tag, _ in self.config.feature_probes}
+        stored_feature_tags = {f["feature_tag"] for f in features}
+        missing_features = expected_feature_tags - stored_feature_tags
+        if missing_features:
+            raise ValueError(
+                f"FINALIZATION_FAILED: missing feature observations for {reference_id}:{style_id}: {missing_features}"
+            )
+        for f in features:
+            if not str(f.get("provenance", "")).startswith("chromium:"):
+                raise ValueError(
+                    f"FINALIZATION_FAILED: untrusted feature provenance '{f.get('provenance')}' for {reference_id}:{style_id}"
+                )
+
+        # 5. Record single canonical completion record
         self.store.record_source_collection_completed(
             reference_id=reference_id,
             style_id=style_id,

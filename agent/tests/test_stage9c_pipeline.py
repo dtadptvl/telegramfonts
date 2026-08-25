@@ -305,9 +305,18 @@ async def test_e2e_real_collector_to_store_to_snapshot_pipeline_execution() -> N
                 return 1230.0
             return 1240.0
 
+        def fake_probe_feature(font_family, feature_tag, sample_text, font_size_px, upem):
+            return {
+                "enabled_advance_upem": 1200.0,
+                "disabled_advance_upem": 1200.0,
+                "enabled_raster_signature": "a",
+                "disabled_raster_signature": "a",
+            }
+
         session.measure_glyph_direct = AsyncMock(side_effect=fake_measure_glyph)
         session.capture_lossless_raster = AsyncMock(side_effect=fake_capture_raster)
         session.measure_text_advance = AsyncMock(side_effect=fake_measure_advance)
+        session.probe_opentype_feature = AsyncMock(side_effect=fake_probe_feature)
 
         # 1. Run real collector
         collector = ObservationCollector(session=session, store=store, config=config)
@@ -331,6 +340,9 @@ async def test_e2e_real_collector_to_store_to_snapshot_pipeline_execution() -> N
             pairs=[(65, 66), (66, 65)],
         )
         assert pairs_count == 2
+
+        # Collect feature observations
+        await collector.collect_feature_observations("real_font", "regular", "RealFont")
 
         # Before finalization, collection marker is not complete
         assert store.is_source_collection_completed(
