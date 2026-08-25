@@ -458,12 +458,12 @@ async def test_observation_collector_pair_acquisition_with_provenance(tmp_path):
     try:
         await session.start()
     except Exception as e:
-        session.close()
+        await session.aclose()
         pytest.skip(f"Chromium CDP session failed to start: {e}")
 
     ttf_path = Path("agent/benchmark_data/ground_truth/BeVietnamPro-Regular.ttf")
     if not ttf_path.exists():
-        session.close()
+        await session.aclose()
         pytest.skip("Ground truth font not available")
 
     await session.load_font_data("ObservedFont", ttf_path.read_bytes())
@@ -475,7 +475,7 @@ async def test_observation_collector_pair_acquisition_with_provenance(tmp_path):
         font_family="ObservedFont",
         pairs=[(65, 79), (66, 79)],
     )
-    session.close()
+    await session.aclose()
 
     assert captured == 2
     rows = store.get_pair_observations("test_ref", "regular")

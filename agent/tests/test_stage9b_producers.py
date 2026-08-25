@@ -1087,4 +1087,4 @@ async def test_test_chromium_custom_session_internal() -> None:
             )
             assert evidence.result.is_direct_loadable_chromium is True
         finally:
-            session.close()
+            await session.aclose()
