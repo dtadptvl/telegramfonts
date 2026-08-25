@@ -47,6 +47,10 @@ class PairKerningObservation:
     is_kerning_applied: bool
     confidence: float = 1.0
     provenance: str = "untrusted"
+    reference_id: str = ""
+    style_id: str = ""
+    browser_version: str = ""
+    config_hash: str = ""
 
     @property
     def raw_delta_upem(self) -> float:

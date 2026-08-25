@@ -15,9 +15,10 @@ import math
 import os
 import shutil
 import tempfile
+import types
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 
@@ -52,7 +53,7 @@ logger = logging.getLogger("telegramfonts.agent.fidelity.pipeline")
 
 @dataclass(frozen=True)
 class ObservationStoreSnapshot:
-    """Immutable, fully identified snapshot of observations for a single font style."""
+    """Immutable, cryptographic snapshot of observations, pairs, and raster bytes."""
 
     reference_id: str
     style_id: str
@@ -61,11 +62,81 @@ class ObservationStoreSnapshot:
     browser_version: str
     config: ObservationConfig
     records: tuple[ObservationRecord, ...]
-    raster_bytes_map: dict[str, bytes]
+    raster_bytes_map: Mapping[str, bytes]
     pairs: tuple[PairKerningObservation, ...]
+    snapshot_fingerprint: str = ""
 
     def __post_init__(self) -> None:
+        # Wrap raster_bytes_map in read-only mapping proxy to guarantee deep immutability
+        if not isinstance(self.raster_bytes_map, types.MappingProxyType):
+            object.__setattr__(
+                self,
+                "raster_bytes_map",
+                types.MappingProxyType(dict(self.raster_bytes_map)),
+            )
+
+        # Validate structural integrity and cryptographic identity
         self.validate()
+
+        # Compute and bind snapshot fingerprint
+        computed_fp = self._compute_fingerprint()
+        if self.snapshot_fingerprint and self.snapshot_fingerprint != computed_fp:
+            raise ValueError(
+                f"SNAPSHOT_VALIDATION_ERROR: Supplied snapshot_fingerprint '{self.snapshot_fingerprint}' != computed '{computed_fp}'"
+            )
+        if not self.snapshot_fingerprint:
+            object.__setattr__(self, "snapshot_fingerprint", computed_fp)
+
+    def _compute_fingerprint(self) -> str:
+        """Compute authoritative deterministic SHA-256 fingerprint for this snapshot."""
+        cfg_hash = self.config.compute_hash() if self.config else ""
+        payload = {
+            "reference_id": self.reference_id,
+            "style_id": self.style_id,
+            "family_name": self.family_name,
+            "style_name": self.style_name,
+            "browser_version": self.browser_version,
+            "config_hash": cfg_hash,
+            "records": sorted(
+                [
+                    (
+                        r.cache_key,
+                        r.code_point,
+                        r.resolution,
+                        round(r.subpixel_x, 4),
+                        round(r.subpixel_y, 4),
+                        r.raster_sha256,
+                        r.raster_size_bytes,
+                    )
+                    for r in self.records
+                ]
+            ),
+            "pairs": sorted(
+                [
+                    (
+                        p.left_cp,
+                        p.right_cp,
+                        p.left_advance_upem,
+                        p.right_advance_upem,
+                        p.measured_pair_advance_upem,
+                        p.inferred_kerning_upem,
+                        p.provenance,
+                    )
+                    for p in self.pairs
+                ]
+            ),
+            "raster_hashes": sorted(
+                [(k, hashlib.sha256(v).hexdigest()) for k, v in self.raster_bytes_map.items()]
+            ),
+        }
+        serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+    def get_raster_bytes(self, cache_key: str) -> bytes:
+        """Safe read-only accessor for raster image bytes."""
+        if cache_key not in self.raster_bytes_map:
+            raise KeyError(f"Cache key '{cache_key}' not found in snapshot raster map")
+        return self.raster_bytes_map[cache_key]
 
     def validate(self) -> None:
         """Enforce strict identity, non-emptiness, byte integrity, and hash stability."""
@@ -105,38 +176,69 @@ class ObservationStoreSnapshot:
                 raise ValueError(
                     f"SNAPSHOT_VALIDATION_ERROR: Record browser_version '{r.browser_version}' != snapshot '{self.browser_version}'"
                 )
-            if r.config_hash and r.config_hash != cfg_hash:
+            if r.config_hash != cfg_hash:
                 raise ValueError(
                     f"SNAPSHOT_VALIDATION_ERROR: Record config_hash '{r.config_hash}' != snapshot config '{cfg_hash}'"
                 )
+            if not r.validate_cache_key():
+                raise ValueError(
+                    f"SNAPSHOT_VALIDATION_ERROR: Record cache_key '{r.cache_key}' failed deterministic validation"
+                )
             if r.cache_key in seen_cache_keys:
-                raise ValueError(f"SNAPSHOT_VALIDATION_ERROR: Duplicate record cache_key: {r.cache_key}")
+                raise ValueError(
+                    f"SNAPSHOT_VALIDATION_ERROR: Duplicate record cache_key detected: '{r.cache_key}'"
+                )
             seen_cache_keys.add(r.cache_key)
 
+            # Validate raster presence, byte count, and SHA256
             if r.cache_key not in self.raster_bytes_map:
-                raise ValueError(f"SNAPSHOT_VALIDATION_ERROR: Missing raster bytes for record: {r.cache_key}")
+                raise ValueError(
+                    f"SNAPSHOT_VALIDATION_ERROR: Missing raster bytes for record cache_key '{r.cache_key}'"
+                )
             png_bytes = self.raster_bytes_map[r.cache_key]
+            if not isinstance(png_bytes, (bytes, bytearray)):
+                raise ValueError(
+                    f"SNAPSHOT_VALIDATION_ERROR: Raster for '{r.cache_key}' is not bytes"
+                )
             if len(png_bytes) != r.raster_size_bytes:
                 raise ValueError(
-                    f"SNAPSHOT_VALIDATION_ERROR: Byte size mismatch for {r.cache_key}: {len(png_bytes)} != {r.raster_size_bytes}"
+                    f"SNAPSHOT_VALIDATION_ERROR: Raster size mismatch for '{r.cache_key}': expected {r.raster_size_bytes}, got {len(png_bytes)}"
                 )
             actual_sha = hashlib.sha256(png_bytes).hexdigest()
             if actual_sha != r.raster_sha256:
                 raise ValueError(
-                    f"SNAPSHOT_VALIDATION_ERROR: SHA-256 mismatch for {r.cache_key}: {actual_sha} != {r.raster_sha256}"
+                    f"SNAPSHOT_VALIDATION_ERROR: Raster SHA256 mismatch for '{r.cache_key}': expected {r.raster_sha256}, got {actual_sha}"
                 )
 
+        if len(self.raster_bytes_map) != len(seen_cache_keys):
+            raise ValueError(
+                f"SNAPSHOT_VALIDATION_ERROR: raster_bytes_map contains {len(self.raster_bytes_map)} entries but records have {len(seen_cache_keys)}"
+            )
+
+        # Validate typography pair observations
         seen_pairs: set[tuple[int, int]] = set()
         for p in self.pairs:
             if not isinstance(p, PairKerningObservation):
                 raise ValueError("SNAPSHOT_VALIDATION_ERROR: pairs must contain PairKerningObservation instances")
-            if p.left_cp <= 0 or p.right_cp <= 0:
-                raise ValueError(f"SNAPSHOT_VALIDATION_ERROR: Invalid pair code points: ({p.left_cp}, {p.right_cp})")
-            if p.left_char != chr(p.left_cp) or p.right_char != chr(p.right_cp):
-                raise ValueError(f"SNAPSHOT_VALIDATION_ERROR: Character drift in pair: '{p.left_char}{p.right_char}'")
+            if p.reference_id and p.reference_id != self.reference_id:
+                raise ValueError(
+                    f"SNAPSHOT_VALIDATION_ERROR: Pair reference_id '{p.reference_id}' != snapshot '{self.reference_id}'"
+                )
+            if p.style_id and p.style_id != self.style_id:
+                raise ValueError(
+                    f"SNAPSHOT_VALIDATION_ERROR: Pair style_id '{p.style_id}' != snapshot '{self.style_id}'"
+                )
+            if p.browser_version and p.browser_version != self.browser_version:
+                raise ValueError(
+                    f"SNAPSHOT_VALIDATION_ERROR: Pair browser_version '{p.browser_version}' != snapshot '{self.browser_version}'"
+                )
+            if p.config_hash and p.config_hash != cfg_hash:
+                raise ValueError(
+                    f"SNAPSHOT_VALIDATION_ERROR: Pair config_hash '{p.config_hash}' != snapshot '{cfg_hash}'"
+                )
             pair_key = (p.left_cp, p.right_cp)
             if pair_key in seen_pairs:
-                raise ValueError(f"SNAPSHOT_VALIDATION_ERROR: Duplicate pair observation for ({p.left_cp}, {p.right_cp})")
+                raise ValueError(f"SNAPSHOT_VALIDATION_ERROR: Duplicate pair observation: {pair_key}")
             seen_pairs.add(pair_key)
 
     @classmethod
@@ -148,52 +250,138 @@ class ObservationStoreSnapshot:
         family_name: str,
         style_name: str,
         config: ObservationConfig,
-        browser_version: str = "chromium",
+        browser_version: str,
     ) -> ObservationStoreSnapshot:
-        """Load and strictly validate an immutable snapshot from an ObservationStore."""
-        coverage = store.get_coverage(reference_id, style_id)
-        if not coverage:
-            with store._get_connection() as conn:
-                cur = conn.execute(
-                    "SELECT DISTINCT code_point FROM observations WHERE reference_id = ? AND style_id = ? ORDER BY code_point ASC",
-                    (reference_id, style_id),
+        """Atomically load an immutable snapshot from ObservationStore SQLite index and disk rasters."""
+        cfg_hash = config.compute_hash()
+
+        with store._get_connection() as conn:
+            # 1. Query Unicode coverage
+            cov_rows = conn.execute(
+                """
+                SELECT code_point FROM unicode_coverage
+                WHERE reference_id = ? AND style_id = ?
+                ORDER BY code_point ASC
+                """,
+                (reference_id, style_id),
+            ).fetchall()
+            coverage_cps = [int(r["code_point"]) for r in cov_rows]
+            if not coverage_cps:
+                raise ValueError(
+                    f"STORE_LOAD_ERROR: No Unicode coverage found for {reference_id}/{style_id}"
                 )
-                coverage = [row["code_point"] for row in cur.fetchall()]
 
-        if not coverage:
-            raise ValueError(f"SNAPSHOT_LOAD_ERROR: No observations or coverage found for {reference_id}/{style_id}")
+            # 2. Query all matching observation records
+            obs_rows = conn.execute(
+                """
+                SELECT * FROM observations
+                WHERE reference_id = ? AND style_id = ? AND browser_version = ? AND config_hash = ?
+                ORDER BY code_point ASC, resolution ASC, subpixel_x ASC, subpixel_y ASC
+                """,
+                (reference_id, style_id, browser_version, cfg_hash),
+            ).fetchall()
 
-        records: list[ObservationRecord] = []
-        raster_map: dict[str, bytes] = {}
+            if not obs_rows:
+                raise ValueError(
+                    f"STORE_LOAD_ERROR: No observations found for {reference_id}/{style_id} matching browser {browser_version} and config {cfg_hash}"
+                )
 
-        for cp in coverage:
-            glyph_obs = store.get_glyph_observations(reference_id, style_id, cp)
-            for rec, png_bytes in glyph_obs:
-                if rec.browser_version == browser_version and (not rec.config_hash or rec.config_hash == config.compute_hash()):
-                    records.append(rec)
-                    raster_map[rec.cache_key] = png_bytes
+            # 3. Read rasters from disk within store boundary
+            records: list[ObservationRecord] = []
+            raster_map: dict[str, bytes] = {}
 
-        if not records:
-            raise ValueError(
-                f"SNAPSHOT_LOAD_ERROR: No matching observations for {reference_id}/{style_id} (browser={browser_version})"
-            )
+            for row in obs_rows:
+                r_dict = dict(row)
+                m = DirectMetrics(
+                    code_point=r_dict["code_point"],
+                    character=chr(r_dict["code_point"]),
+                    font_size_px=float(r_dict["resolution"]) * 0.72,
+                    raw_advance_width=float(r_dict["advance_width_px"]),
+                    raw_actual_left=float(r_dict["lsb_px"]),
+                    raw_actual_right=float(r_dict["advance_width_px"]) - float(r_dict["rsb_px"]),
+                    raw_actual_ascent=float(r_dict["ascent_px"]),
+                    raw_actual_descent=-float(r_dict["descent_px"]),
+                    raw_font_ascent=float(r_dict["ascent_px"]),
+                    raw_font_descent=-float(r_dict["descent_px"]),
+                    advance_width_upem=float(r_dict["advance_width_upem"]),
+                    lsb_upem=float(r_dict["lsb_upem"]),
+                    rsb_upem=float(r_dict["rsb_upem"]),
+                    ascent_upem=float(r_dict["ascent_upem"]),
+                    descent_upem=float(r_dict["descent_upem"]),
+                    bbox_width_upem=float(r_dict["bbox_width_upem"]),
+                    bbox_height_upem=float(r_dict["bbox_height_upem"]),
+                    sample_count=int(r_dict["sample_count"]),
+                    confidence=float(r_dict["confidence"]),
+                )
+                rec = ObservationRecord(
+                    cache_key=r_dict["cache_key"],
+                    reference_id=r_dict["reference_id"],
+                    style_id=r_dict["style_id"],
+                    code_point=r_dict["code_point"],
+                    resolution=r_dict["resolution"],
+                    subpixel_x=float(r_dict["subpixel_x"]),
+                    subpixel_y=float(r_dict["subpixel_y"]),
+                    raster_relative_path=r_dict["raster_relative_path"],
+                    raster_sha256=r_dict["raster_sha256"],
+                    raster_size_bytes=int(r_dict["raster_size_bytes"]),
+                    metrics=m,
+                    created_at=r_dict["created_at"],
+                    browser_version=r_dict["browser_version"],
+                    config_hash=r_dict["config_hash"],
+                )
+                records.append(rec)
 
-        raw_pairs = store.get_pair_observations(reference_id, style_id)
-        pairs: list[PairKerningObservation] = []
-        for row in raw_pairs:
-            p = PairKerningObservation(
-                left_cp=int(row["left_cp"]),
-                right_cp=int(row["right_cp"]),
-                left_char=str(row["left_char"]),
-                right_char=str(row["right_char"]),
-                left_advance_upem=float(row["left_advance_upem"]),
-                right_advance_upem=float(row["right_advance_upem"]),
-                measured_pair_advance_upem=float(row["pair_advance_upem"]),
-                inferred_kerning_upem=int(row.get("inferred_kerning_upem", 0)),
-                is_kerning_applied=bool(int(row.get("inferred_kerning_upem", 0)) != 0),
-                provenance=str(row.get("provenance", "untrusted")),
-            )
-            pairs.append(p)
+                # Read raster file from disk
+                png_path = store.base_dir / rec.raster_relative_path
+                if not png_path.is_file():
+                    raise ValueError(
+                        f"STORE_LOAD_ERROR: Missing raster file on disk: {png_path}"
+                    )
+                png_bytes = png_path.read_bytes()
+                if len(png_bytes) != rec.raster_size_bytes:
+                    raise ValueError(
+                        f"STORE_LOAD_ERROR: Disk raster size mismatch for {rec.cache_key}: expected {rec.raster_size_bytes}, got {len(png_bytes)}"
+                    )
+                actual_sha = hashlib.sha256(png_bytes).hexdigest()
+                if actual_sha != rec.raster_sha256:
+                    raise ValueError(
+                        f"STORE_LOAD_ERROR: Disk raster SHA256 mismatch for {rec.cache_key}: expected {rec.raster_sha256}, got {actual_sha}"
+                    )
+                raster_map[rec.cache_key] = png_bytes
+
+            # 4. Query pair observations matching snapshot identity
+            pair_rows = conn.execute(
+                """
+                SELECT * FROM pair_observations
+                WHERE reference_id = ? AND style_id = ?
+                  AND (browser_version = ? OR browser_version = '')
+                  AND (config_hash = ? OR config_hash = '')
+                ORDER BY left_cp ASC, right_cp ASC
+                """,
+                (reference_id, style_id, browser_version, cfg_hash),
+            ).fetchall()
+
+            pairs: list[PairKerningObservation] = []
+            for p_row in pair_rows:
+                p_dict = dict(p_row)
+                pair_obs = PairKerningObservation(
+                    left_cp=int(p_dict["left_cp"]),
+                    right_cp=int(p_dict["right_cp"]),
+                    left_char=str(p_dict["left_char"]),
+                    right_char=str(p_dict["right_char"]),
+                    left_advance_upem=float(p_dict["left_advance_upem"]),
+                    right_advance_upem=float(p_dict["right_advance_upem"]),
+                    measured_pair_advance_upem=float(p_dict["pair_advance_upem"]),
+                    inferred_kerning_upem=int(p_dict["inferred_kerning_upem"]),
+                    is_kerning_applied=(int(p_dict["inferred_kerning_upem"]) != 0),
+                    confidence=float(p_dict.get("confidence", 1.0)),
+                    provenance=str(p_dict.get("provenance", "untrusted")),
+                    reference_id=reference_id,
+                    style_id=style_id,
+                    browser_version=browser_version,
+                    config_hash=cfg_hash,
+                )
+                pairs.append(pair_obs)
 
         return cls(
             reference_id=reference_id,
@@ -210,99 +398,130 @@ class ObservationStoreSnapshot:
 
 @dataclass(frozen=True)
 class PartitionedEvidence:
-    """Disjoint, non-empty partition of fit and held-out observations and pairs."""
+    """Deterministically partitioned fit and held-out evidence sets."""
 
     fit_records: tuple[ObservationRecord, ...]
     held_out_records: tuple[ObservationRecord, ...]
     fit_pairs: tuple[PairKerningObservation, ...]
     held_out_pairs: tuple[PairKerningObservation, ...]
-
-    def __post_init__(self) -> None:
-        self.validate()
-
-    def validate(self) -> None:
-        """Enforce strict non-emptiness, disjointness, and anti-leakage invariants."""
-        if not self.fit_records:
-            raise ValueError("PARTITION_ERROR: fit_records cannot be empty")
-        if not self.held_out_records:
-            raise ValueError("PARTITION_ERROR: held_out_records cannot be empty")
-
-        fit_keys = {r.cache_key for r in self.fit_records}
-        held_keys = {r.cache_key for r in self.held_out_records}
-        key_overlap = fit_keys & held_keys
-        if key_overlap:
-            raise ValueError(f"PARTITION_LEAKAGE: Fit and held-out cache keys overlap: {key_overlap}")
-
-        fit_shas = {r.raster_sha256 for r in self.fit_records}
-        held_shas = {r.raster_sha256 for r in self.held_out_records}
-        sha_overlap = fit_shas & held_shas
-        if sha_overlap:
-            raise ValueError(f"PARTITION_LEAKAGE: Fit and held-out raster SHA-256 digests overlap: {sha_overlap}")
-
-        if not self.fit_pairs:
-            raise ValueError("PARTITION_ERROR: fit_pairs cannot be empty")
-        if not self.held_out_pairs:
-            raise ValueError("PARTITION_ERROR: held_out_pairs cannot be empty")
-
-        fit_pair_keys = {(p.left_cp, p.right_cp) for p in self.fit_pairs}
-        held_pair_keys = {(p.left_cp, p.right_cp) for p in self.held_out_pairs}
-        pair_overlap = fit_pair_keys & held_pair_keys
-        if pair_overlap:
-            raise ValueError(f"PARTITION_LEAKAGE: Fit and held-out typography pairs overlap: {pair_overlap}")
+    fit_set_fingerprint: str
+    held_out_set_fingerprint: str
 
 
 def partition_snapshot(snapshot: ObservationStoreSnapshot) -> PartitionedEvidence:
-    """Deterministically partition snapshot observations and pairs into disjoint fit and held-out sets."""
+    """Deterministically partition snapshot observations into strictly disjoint fit and held-out sets.
+    
+    The fit set satisfies the exact active adaptive schedule for snapshot.config.
+    Held-out evidence remains strictly disjoint, non-empty, and untouched by model fitting.
+    """
     snapshot.validate()
 
-    grouped: dict[int, list[ObservationRecord]] = {}
+    # Group records by code point
+    by_cp: dict[int, list[ObservationRecord]] = {}
     for r in snapshot.records:
-        grouped.setdefault(r.code_point, []).append(r)
+        by_cp.setdefault(r.code_point, []).append(r)
 
-    fit_recs: list[ObservationRecord] = []
-    held_recs: list[ObservationRecord] = []
+    fit_records_list: list[ObservationRecord] = []
+    held_out_records_list: list[ObservationRecord] = []
 
-    for cp in sorted(grouped.keys()):
-        recs = sorted(grouped[cp], key=lambda r: (r.resolution, r.subpixel_x, r.subpixel_y, r.cache_key))
-        if len(recs) < 2:
+    for cp, cp_recs in sorted(by_cp.items()):
+        # Determine the exact active schedule required for fitting
+        first_m = cp_recs[0].metrics
+        expected_phases = set(snapshot.config.get_phases_for_metrics(first_m))
+
+        required_fit_keys = {
+            (res, round(px, 4), round(py, 4))
+            for res in snapshot.config.resolutions
+            for px, py in expected_phases
+        }
+
+        cp_fit: list[ObservationRecord] = []
+        cp_held_out: list[ObservationRecord] = []
+
+        for r in cp_recs:
+            r_key = (r.resolution, round(r.subpixel_x, 4), round(r.subpixel_y, 4))
+            if r_key in required_fit_keys:
+                cp_fit.append(r)
+            else:
+                cp_held_out.append(r)
+
+        # Verify that all required fit schedule keys are present
+        present_fit_keys = {
+            (r.resolution, round(r.subpixel_x, 4), round(r.subpixel_y, 4))
+            for r in cp_fit
+        }
+        missing_fit_keys = required_fit_keys - present_fit_keys
+        if missing_fit_keys:
+            sample_missing = next(iter(missing_fit_keys))
             raise ValueError(
-                f"PARTITION_ERROR: INSUFFICIENT_OBSERVATIONS_FOR_GLYPH_{cp}: Glyph requires at least 2 distinct observations for fit/held-out split, got {len(recs)}"
+                f"INSUFFICIENT_FIT_OBSERVATIONS: Missing required adaptive phase ({sample_missing[1]:.4f}, {sample_missing[2]:.4f}) at resolution {sample_missing[0]} for CP {cp}"
             )
 
-        zero_phase = [r for r in recs if r.subpixel_x == 0.0 and r.subpixel_y == 0.0]
-        non_zero_phase = [r for r in recs if r.subpixel_x != 0.0 or r.subpixel_y != 0.0]
+        # Verify that held-out observations exist and are non-empty for this glyph
+        if not cp_held_out:
+            raise ValueError(
+                f"ZERO_HELD_OUT_OBSERVATIONS: CP {cp} has no disjoint held-out observations for evaluation"
+            )
 
-        if zero_phase and non_zero_phase:
-            fit_recs.extend(zero_phase)
-            held_recs.extend(non_zero_phase)
-        else:
-            fit_recs.extend(recs[:-1])
-            held_recs.append(recs[-1])
+        fit_records_list.extend(cp_fit)
+        held_out_records_list.extend(cp_held_out)
 
-    if not snapshot.pairs or len(snapshot.pairs) < 2:
+    # Partition typography pair observations deterministically
+    sorted_pairs = sorted(snapshot.pairs, key=lambda p: (p.left_cp, p.right_cp))
+    if len(sorted_pairs) < 2:
         raise ValueError(
-            f"PARTITION_ERROR: INSUFFICIENT_TYPOGRAPHY_PAIRS: Snapshot requires at least 2 distinct pair observations, got {len(snapshot.pairs)}"
+            f"INSUFFICIENT_PAIRS_FOR_PARTITION: Snapshot must contain at least 2 pair observations to form disjoint fit/held-out sets, got {len(sorted_pairs)}"
         )
 
-    sorted_pairs = sorted(snapshot.pairs, key=lambda p: (p.left_cp, p.right_cp, p.provenance))
-    fit_pairs = [p for i, p in enumerate(sorted_pairs) if i % 2 == 0]
-    held_pairs = [p for i, p in enumerate(sorted_pairs) if i % 2 == 1]
+    # Alternating assignment gives deterministic, balanced fit and held-out pairs
+    fit_pairs = tuple(sorted_pairs[0::2])
+    held_out_pairs = tuple(sorted_pairs[1::2])
 
-    partition = PartitionedEvidence(
-        fit_records=tuple(fit_recs),
-        held_out_records=tuple(held_recs),
-        fit_pairs=tuple(fit_pairs),
-        held_out_pairs=tuple(held_pairs),
+    if not fit_pairs or not held_out_pairs:
+        raise ValueError("PARTITION_ERROR: Pair partition yielded an empty fit or held-out set")
+
+    # Strict Anti-Leakage Verification
+    fit_keys = set(r.cache_key for r in fit_records_list)
+    held_out_keys = set(r.cache_key for r in held_out_records_list)
+    key_overlap = fit_keys & held_out_keys
+    if key_overlap:
+        raise ValueError(f"LEAKAGE_DETECTED: Cache key overlap between fit and held-out sets: {key_overlap}")
+
+    fit_shas = set(r.raster_sha256 for r in fit_records_list)
+    held_out_shas = set(r.raster_sha256 for r in held_out_records_list)
+    sha_overlap = fit_shas & held_out_shas
+    if sha_overlap:
+        raise ValueError(f"LEAKAGE_DETECTED: Raster SHA256 overlap between fit and held-out sets: {sha_overlap}")
+
+    fit_pair_tuples = set((p.left_cp, p.right_cp) for p in fit_pairs)
+    held_out_pair_tuples = set((p.left_cp, p.right_cp) for p in held_out_pairs)
+    pair_overlap = fit_pair_tuples & held_out_pair_tuples
+    if pair_overlap:
+        raise ValueError(f"LEAKAGE_DETECTED: Typography pair overlap between fit and held-out sets: {pair_overlap}")
+
+    # Compute deterministic fingerprints for fit and held-out partitions
+    fit_fp_payload = sorted(list(fit_keys))
+    fit_fp = hashlib.sha256(json.dumps(fit_fp_payload).encode("utf-8")).hexdigest()
+
+    held_fp_payload = sorted(list(held_out_keys))
+    held_fp = hashlib.sha256(json.dumps(held_fp_payload).encode("utf-8")).hexdigest()
+
+    return PartitionedEvidence(
+        fit_records=tuple(fit_records_list),
+        held_out_records=tuple(held_out_records_list),
+        fit_pairs=fit_pairs,
+        held_out_pairs=held_out_pairs,
+        fit_set_fingerprint=fit_fp,
+        held_out_set_fingerprint=held_fp,
     )
-    return partition
 
 
 @dataclass(frozen=True)
 class LocalFidelityPipelineResult:
-    """Typed publishability decision and authoritative outcome of local integration pipeline."""
+    """Authoritative result returned by the Local Fidelity Integration Pipeline."""
 
     is_publishable: bool
-    status: str  # "PASS" | "FAIL" | "BLOCKED"
+    status: str
     family_name: str
     style_name: str
     reference_id: str
@@ -310,46 +529,42 @@ class LocalFidelityPipelineResult:
     model_hash: str
     candidate_artifact_sha: str
     candidate_file_path: str
-    report: FidelityReport | None
-    failure_reasons: tuple[str, ...] = ()
+    report: FidelityReport | None = None
+    failure_reasons: tuple[str, ...] = field(default_factory=tuple)
 
 
 class LocalFidelityIntegrationPipeline:
-    """Authoritative local integration pipeline executing raster snapshot to verified fidelity report."""
+    """Local library boundary orchestrating raster-to-fidelity model fitting and authoritative gating."""
 
     @classmethod
     async def execute(
         cls,
         snapshot: ObservationStoreSnapshot,
-        output_dir: Path | str,
-        format_type: str = "TTF",
         thresholds: FidelityThresholds | None = None,
+        output_dir: str | Path | None = None,
+        format_type: str = "TTF",
     ) -> LocalFidelityPipelineResult:
-        """Run the complete end-to-end local integration pipeline in fail-closed mode."""
-        if thresholds is None:
-            thresholds = FidelityThresholds()
-        thresholds.validate()
-
+        """Asynchronously execute the Stage 9C local raster-to-fidelity pipeline."""
         clean_format = format_type.strip().upper()
         if clean_format not in ("TTF", "OTF"):
             return LocalFidelityPipelineResult(
                 is_publishable=False,
                 status="FAIL",
-                family_name=snapshot.family_name,
-                style_name=snapshot.style_name,
-                reference_id=snapshot.reference_id,
-                style_id=snapshot.style_id,
+                family_name=snapshot.family_name if snapshot else "",
+                style_name=snapshot.style_name if snapshot else "",
+                reference_id=snapshot.reference_id if snapshot else "",
+                style_id=snapshot.style_id if snapshot else "",
                 model_hash="",
                 candidate_artifact_sha="",
                 candidate_file_path="",
                 report=None,
-                failure_reasons=(f"UNSUPPORTED_FORMAT: '{format_type}'",),
+                failure_reasons=("PIPELINE_ERROR: UNSUPPORTED_FORMAT",),
             )
 
-        # 1. Capability Preflight
-        try:
-            find_chromium_executable()
-        except Exception as exc:
+        # Verify host capabilities (Chromium, FreeType, HarfBuzz, FontTools)
+        chromium_exe = find_chromium_executable()
+        if not chromium_exe:
+            logger.warning("Chromium executable unavailable on host; returning BLOCKED non-publishable result")
             return LocalFidelityPipelineResult(
                 is_publishable=False,
                 status="BLOCKED",
@@ -361,15 +576,14 @@ class LocalFidelityIntegrationPipeline:
                 candidate_artifact_sha="",
                 candidate_file_path="",
                 report=None,
-                failure_reasons=(f"CHROMIUM_CAPABILITY_UNAVAILABLE: {exc}",),
+                failure_reasons=("PIPELINE_ERROR: CHROMIUM_CAPABILITY_UNAVAILABLE",),
             )
 
-        # 2. Snapshot Validation & Partitioning
+        # 1. Deterministic Fit / Held-Out Partitioning
         try:
-            snapshot.validate()
             partition = partition_snapshot(snapshot)
-            partition.validate()
         except Exception as exc:
+            logger.error("Snapshot partitioning failed: %s", exc)
             return LocalFidelityPipelineResult(
                 is_publishable=False,
                 status="FAIL",
@@ -381,33 +595,32 @@ class LocalFidelityIntegrationPipeline:
                 candidate_artifact_sha="",
                 candidate_file_path="",
                 report=None,
-                failure_reasons=(f"SNAPSHOT_PARTITION_FAILED: {exc}",),
+                failure_reasons=("PIPELINE_ERROR: SNAPSHOT_PARTITION_FAILED",),
             )
 
-        # 3. Master Outline Reconstruction & Model Fitting (FIT SET ONLY)
+        # 2. Master Glyph Reconstruction & Canonical Model Assembly
         try:
             solver = MaxReconstructionSolver()
-            reconstructed_glyphs: dict[int, ReconstructedGlyph] = {}
-
-            grouped_fit: dict[int, list[ObservationRecord]] = {}
+            fit_by_cp: dict[int, list[ObservationRecord]] = {}
             for r in partition.fit_records:
-                grouped_fit.setdefault(r.code_point, []).append(r)
+                fit_by_cp.setdefault(r.code_point, []).append(r)
 
-            for cp in sorted(grouped_fit.keys()):
+            reconstructed_glyphs: dict[int, ReconstructedGlyph] = {}
+            for cp, cp_fit_recs in fit_by_cp.items():
                 glyph_fit_obs = [
-                    (r, snapshot.raster_bytes_map[r.cache_key])
-                    for r in grouped_fit[cp]
+                    (r, snapshot.get_raster_bytes(r.cache_key))
+                    for r in cp_fit_recs
                 ]
                 reconstructed_glyphs[cp] = solver.reconstruct_glyph(glyph_fit_obs)
 
             calibrated_metrics = ObservationCalibrator.calibrate_all(
                 records=partition.fit_records,
-                config=None,
+                config=snapshot.config,
                 units_per_em=1000,
             )
             calib_fp = ObservationCalibrator.compute_calibration_fingerprint(
                 records=partition.fit_records,
-                config=None,
+                config=snapshot.config,
                 units_per_em=1000,
             )
 
@@ -462,17 +675,16 @@ class LocalFidelityIntegrationPipeline:
                 style_id=snapshot.style_id,
                 metrics=global_metrics,
                 glyphs=calibrated_glyphs,
-                kerning_pairs=kerning_map,
                 config_hash=snapshot.config.compute_hash(),
                 browser_version=snapshot.browser_version,
                 fit_observations_count=len(partition.fit_records),
                 calibration_fingerprint=calib_fp,
-                fit_provenance="browser_observed_multi_res",
+                kerning_pairs=kerning_map,
             )
-            model.validate()
             model_hash = model.compute_canonical_hash()
 
         except Exception as exc:
+            logger.error("Model fitting failed: %s", exc)
             return LocalFidelityPipelineResult(
                 is_publishable=False,
                 status="FAIL",
@@ -484,23 +696,19 @@ class LocalFidelityIntegrationPipeline:
                 candidate_artifact_sha="",
                 candidate_file_path="",
                 report=None,
-                failure_reasons=(f"MODEL_FITTING_FAILED: {exc}",),
+                failure_reasons=("PIPELINE_ERROR: MODEL_FITTING_FAILED",),
             )
 
-        # 4. Candidate Font Binary Building & Attestation
+        # 3. Candidate Font Building & Artifact Attestation
+        temp_dir_obj = None
         try:
-            out_p = Path(output_dir)
-            out_p.mkdir(parents=True, exist_ok=True)
+            if output_dir is not None:
+                work_dir = Path(output_dir)
+                work_dir.mkdir(parents=True, exist_ok=True)
+            else:
+                temp_dir_obj = tempfile.TemporaryDirectory()
+                work_dir = Path(temp_dir_obj.name)
 
-            typo_dataset = TypographyDataset(
-                family_name=snapshot.family_name,
-                style_name=snapshot.style_name,
-                units_per_em=1000,
-                kerning_pairs=kerning_map,
-                observations=list(partition.fit_pairs),
-                active_kerning_pairs_count=len(kerning_map),
-                total_pairs_probed=len(partition.fit_pairs),
-            )
             builder = MaxCandidateFontBuilder(
                 family_name=snapshot.family_name,
                 style_name=snapshot.style_name,
@@ -508,8 +716,8 @@ class LocalFidelityIntegrationPipeline:
             )
             family_build = builder.build_candidate_family(
                 glyphs=reconstructed_glyphs,
-                output_dir=out_p,
-                typography=typo_dataset,
+                output_dir=work_dir,
+                typography=TypographyDataset(family_name=snapshot.family_name, style_name=snapshot.style_name, units_per_em=1000, kerning_pairs=kerning_map, observations=list(partition.fit_pairs)),
             )
 
             art_file = family_build.ttf if clean_format == "TTF" else family_build.otf
@@ -526,8 +734,13 @@ class LocalFidelityIntegrationPipeline:
             )
             descriptor.validate()
             candidate_art = CandidateArtifact.from_descriptor(descriptor)
+            cand_sha = candidate_art.sha256_hex
+            cand_path = candidate_art.file_path
 
         except Exception as exc:
+            logger.error("Candidate font build/attestation failed: %s", exc)
+            if temp_dir_obj:
+                temp_dir_obj.cleanup()
             return LocalFidelityPipelineResult(
                 is_publishable=False,
                 status="FAIL",
@@ -539,34 +752,57 @@ class LocalFidelityIntegrationPipeline:
                 candidate_artifact_sha="",
                 candidate_file_path="",
                 report=None,
-                failure_reasons=(f"CANDIDATE_BUILD_ATTESTATION_FAILED: {exc}",),
+                failure_reasons=("PIPELINE_ERROR: CANDIDATE_ATTESTATION_FAILED",),
             )
 
-        # 5. Production Consumer Evidence Production & Fidelity Evaluation (HELD-OUT SET ONLY)
+        # 4. Production Consumer Evidence Production & Authoritative Gating
         try:
             bundle = await ProductionConsumerEvidenceProducer.produce_bundle(
                 descriptor=descriptor,
                 model=model,
                 config=snapshot.config,
-                held_out_records=list(partition.held_out_records),
-                held_out_pairs=list(partition.held_out_pairs),
-                raster_provider=lambda r: snapshot.raster_bytes_map[r.cache_key],
+                held_out_records=partition.held_out_records,
+                held_out_pairs=partition.held_out_pairs,
+                raster_provider=lambda r: snapshot.get_raster_bytes(r.cache_key),
                 thresholds=thresholds,
             )
 
             report = FidelityEvaluator.evaluate(
                 model=model,
                 config=snapshot.config,
-                fit_records=list(partition.fit_records),
-                held_out_records=list(partition.held_out_records),
-                fit_pairs=list(partition.fit_pairs),
-                held_out_pairs=list(partition.held_out_pairs),
+                fit_records=partition.fit_records,
+                held_out_records=partition.held_out_records,
+                fit_pairs=partition.fit_pairs,
+                held_out_pairs=partition.held_out_pairs,
                 consumer_bundle=bundle,
-                raster_provider=lambda r: snapshot.raster_bytes_map[r.cache_key],
                 thresholds=thresholds,
+                raster_provider=lambda r: snapshot.get_raster_bytes(r.cache_key),
+            )
+
+            is_pass = (report.overall_status == "PASS")
+            sanitized_reasons: tuple[str, ...] = ()
+            if not is_pass:
+                sanitized_reasons = tuple(
+                    r.split(":")[0] if ":" in r else r
+                    for r in report.failure_reasons
+                ) or ("PIPELINE_ERROR: FIDELITY_GATE_FAILED",)
+
+            return LocalFidelityPipelineResult(
+                is_publishable=is_pass,
+                status=report.overall_status,
+                family_name=snapshot.family_name,
+                style_name=snapshot.style_name,
+                reference_id=snapshot.reference_id,
+                style_id=snapshot.style_id,
+                model_hash=model_hash,
+                candidate_artifact_sha=cand_sha,
+                candidate_file_path=cand_path,
+                report=report,
+                failure_reasons=sanitized_reasons,
             )
 
         except Exception as exc:
+            logger.error("Consumer evidence production or fidelity evaluation failed: %s", exc)
             return LocalFidelityPipelineResult(
                 is_publishable=False,
                 status="FAIL",
@@ -575,42 +811,46 @@ class LocalFidelityIntegrationPipeline:
                 reference_id=snapshot.reference_id,
                 style_id=snapshot.style_id,
                 model_hash=model_hash,
-                candidate_artifact_sha=candidate_art.sha256_hex,
-                candidate_file_path=candidate_art.file_path,
+                candidate_artifact_sha=cand_sha,
+                candidate_file_path=cand_path,
                 report=None,
-                failure_reasons=(f"EVIDENCE_OR_EVALUATION_FAILED: {exc}",),
+                failure_reasons=("PIPELINE_ERROR: FIDELITY_EVALUATION_FAILED",),
             )
-
-        # 6. Publishability Decision
-        is_pass = report.overall_status == "PASS"
-        return LocalFidelityPipelineResult(
-            is_publishable=is_pass,
-            status=report.overall_status,
-            family_name=snapshot.family_name,
-            style_name=snapshot.style_name,
-            reference_id=snapshot.reference_id,
-            style_id=snapshot.style_id,
-            model_hash=model_hash,
-            candidate_artifact_sha=candidate_art.sha256_hex,
-            candidate_file_path=candidate_art.file_path,
-            report=report,
-            failure_reasons=tuple(report.failure_reasons) if not is_pass else (),
-        )
 
     @classmethod
     def execute_sync(
         cls,
         snapshot: ObservationStoreSnapshot,
-        output_dir: Path | str,
-        format_type: str = "TTF",
         thresholds: FidelityThresholds | None = None,
+        output_dir: str | Path | None = None,
+        format_type: str = "TTF",
     ) -> LocalFidelityPipelineResult:
-        """Synchronous wrapper for execute."""
-        return asyncio.run(
-            cls.execute(
-                snapshot=snapshot,
-                output_dir=output_dir,
-                format_type=format_type,
-                thresholds=thresholds,
+        """Synchronous wrapper for executing the pipeline."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(
+                    lambda: asyncio.run(
+                        cls.execute(
+                            snapshot=snapshot,
+                            thresholds=thresholds,
+                            output_dir=output_dir,
+                            format_type=format_type,
+                        )
+                    )
+                )
+                return future.result()
+        else:
+            return asyncio.run(
+                cls.execute(
+                    snapshot=snapshot,
+                    thresholds=thresholds,
+                    output_dir=output_dir,
+                    format_type=format_type,
+                )
             )
-        )

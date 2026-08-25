@@ -189,10 +189,21 @@ class ObservationStore:
                 )
                 """
             )
-            # Automatic schema migration for existing databases
             try:
                 conn.execute(
                     "ALTER TABLE pair_observations ADD COLUMN provenance TEXT NOT NULL DEFAULT 'untrusted'"
+                )
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute(
+                    "ALTER TABLE pair_observations ADD COLUMN browser_version TEXT NOT NULL DEFAULT ''"
+                )
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute(
+                    "ALTER TABLE pair_observations ADD COLUMN config_hash TEXT NOT NULL DEFAULT ''"
                 )
             except sqlite3.OperationalError:
                 pass
@@ -624,6 +635,8 @@ class ObservationStore:
         confidence: float = 1.0,
         provenance: str = "untrusted",
         created_at: str | None = None,
+        browser_version: str = "",
+        config_hash: str = "",
     ) -> None:
         """Persist an observable pair advance measurement into index."""
         ts = created_at or datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -633,8 +646,9 @@ class ObservationStore:
                 INSERT OR REPLACE INTO pair_observations (
                     reference_id, style_id, left_cp, right_cp, left_char, right_char,
                     left_advance_upem, right_advance_upem, pair_advance_upem,
-                    inferred_kerning_upem, confidence, provenance, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    inferred_kerning_upem, confidence, provenance, created_at,
+                    browser_version, config_hash
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     reference_id,
@@ -650,23 +664,31 @@ class ObservationStore:
                     confidence,
                     provenance,
                     ts,
+                    browser_version,
+                    config_hash,
                 ),
             )
             conn.commit()
 
     def get_pair_observations(
-        self, reference_id: str, style_id: str
+        self,
+        reference_id: str,
+        style_id: str,
+        browser_version: str | None = None,
+        config_hash: str | None = None,
     ) -> list[dict[str, Any]]:
         """Retrieve all stored observable pair measurements for a style."""
         with self._get_connection() as conn:
-            cur = conn.execute(
-                """
-                SELECT * FROM pair_observations
-                WHERE reference_id = ? AND style_id = ?
-                ORDER BY left_cp ASC, right_cp ASC
-                """,
-                (reference_id, style_id),
-            )
+            query = "SELECT * FROM pair_observations WHERE reference_id = ? AND style_id = ?"
+            params: list[Any] = [reference_id, style_id]
+            if browser_version is not None:
+                query += " AND (browser_version = ? OR browser_version = '')"
+                params.append(browser_version)
+            if config_hash is not None:
+                query += " AND (config_hash = ? OR config_hash = '')"
+                params.append(config_hash)
+            query += " ORDER BY left_cp ASC, right_cp ASC"
+            cur = conn.execute(query, tuple(params))
             rows = cur.fetchall()
             return [dict(r) for r in rows]
 

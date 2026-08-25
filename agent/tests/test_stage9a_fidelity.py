@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
 import hashlib
 import io
 import math
@@ -514,8 +515,7 @@ def test_save_observation_rejects_mismatched_and_corrupt_bytes() -> None:
             store.save_observation(rec, png_bytes + b"extra")
 
         # 2. SHA256 mismatch
-        bad_rec = copy.deepcopy(rec)
-        bad_rec.raster_sha256 = "b" * 64
+        bad_rec = dataclasses.replace(rec, raster_sha256="b" * 64)
         with pytest.raises(ValueError, match="Raster SHA256 mismatch"):
             store.save_observation(bad_rec, png_bytes)
 

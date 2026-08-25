@@ -101,7 +101,7 @@ class OpenTypeFeatureObservation:
     created_at: str
 
 
-@dataclass
+@dataclass(frozen=True)
 class DirectMetrics:
     """Direct glyph metrics measured from browser CanvasRenderingContext2D / DOM APIs."""
 
@@ -184,7 +184,7 @@ class DirectMetrics:
         )
 
 
-@dataclass
+@dataclass(frozen=True)
 class ObservationRecord:
     """Immutable persistent observation record for a single glyph at a specific resolution & subpixel phase."""
 
