@@ -95,14 +95,22 @@ async def test_discovered_endpoint_is_rejected_before_connect(monkeypatch):
 
     monkeypatch.setattr(browser_session.subprocess, "Popen", lambda *args, **kwargs: process)
 
-    def fake_fetch(opener, url, timeout_seconds=1.0):
+    requests: list[tuple[str, str]] = []
+
+    def fake_fetch(opener, url, timeout_seconds=1.0, method="GET"):
+        requests.append((url, method))
         if url.endswith("/json/version"):
             return {"Browser": "Chromium/test"}
-        return [{"webSocketDebuggerUrl": "ws://192.0.2.10:9222/devtools/page/opaque"}]
+        assert not url.endswith("/json/list")
+        return {
+            "type": "page",
+            "url": "about:blank",
+            "webSocketDebuggerUrl": "ws://192.0.2.10:9222/devtools/page/opaque",
+        }
 
     monkeypatch.setattr(session, "_fetch_json", fake_fetch)
 
-    async def unexpected_connect(url: str):
+    async def unexpected_connect(url: str, deadline=None):
         nonlocal connect_calls
         connect_calls += 1
         raise AssertionError("websocket connect must not run for rejected endpoint")
@@ -114,7 +122,89 @@ async def test_discovered_endpoint_is_rejected_before_connect(monkeypatch):
 
     assert caught.value.diagnostics.stage == "endpoint_validation"
     assert connect_calls == 0
+    assert requests == [
+        ("http://127.0.0.1:9222/json/version", "GET"),
+        ("http://127.0.0.1:9222/json/new?about:blank", "PUT"),
+    ]
     assert caught.value.diagnostics.cleanup.ok
+
+
+@pytest.mark.parametrize(
+    "target,reason",
+    [
+        ([], "CDP_PAGE_TARGET_RESPONSE_REJECTED"),
+        (
+            {
+                "type": "worker",
+                "url": "about:blank",
+                "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/page/target",
+            },
+            "CDP_PAGE_TARGET_TYPE_REJECTED",
+        ),
+        (
+            {
+                "type": "page",
+                "url": "https://example.invalid/",
+                "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/page/target",
+            },
+            "CDP_PAGE_TARGET_URL_REJECTED",
+        ),
+        (
+            {
+                "type": "page",
+                "url": "about:blank",
+                "webSocketDebuggerUrl": "ws://192.0.2.10:9222/devtools/page/target",
+            },
+            "CDP_ENDPOINT_HOST_REJECTED",
+        ),
+        (
+            {
+                "type": "page",
+                "url": "about:blank",
+                "webSocketDebuggerUrl": "ws://127.0.0.1:9223/devtools/page/target",
+            },
+            "CDP_ENDPOINT_PORT_REJECTED",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_explicit_page_target_is_validated_before_websocket_connect(
+    monkeypatch, target, reason
+):
+    session = ChromiumSession(executable_path="unused", port=9222)
+    process = FakeProcess()
+    connect_calls = 0
+    requests: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(browser_session.subprocess, "Popen", lambda *args, **kwargs: process)
+
+    def fake_fetch(opener, url, timeout_seconds=1.0, method="GET"):
+        requests.append((url, method))
+        if url.endswith("/json/version"):
+            return {"Browser": "Chromium/test"}
+        if url.endswith("/json/list"):
+            raise AssertionError("stale /json/list target must not be consumed")
+        return target
+
+    monkeypatch.setattr(session, "_fetch_json", fake_fetch)
+
+    async def unexpected_connect(url: str, deadline=None):
+        nonlocal connect_calls
+        connect_calls += 1
+        raise AssertionError("websocket connect must not run for invalid target")
+
+    monkeypatch.setattr(session, "_connect_websocket", unexpected_connect)
+
+    with pytest.raises(ChromiumSessionError, match=reason):
+        await session.start()
+
+    assert connect_calls == 0
+    assert requests == [
+        ("http://127.0.0.1:9222/json/version", "GET"),
+        ("http://127.0.0.1:9222/json/new?about:blank", "PUT"),
+    ]
+    assert session.last_diagnostic is not None
+    assert session.last_diagnostic.cleanup.ok
 
 
 @pytest.mark.asyncio
@@ -174,19 +264,18 @@ async def test_handshake_failure_keeps_bounded_cause_and_cleanup(monkeypatch):
 
     monkeypatch.setattr(browser_session.subprocess, "Popen", lambda *args, **kwargs: process)
 
-    def fake_fetch(opener, url, timeout_seconds=1.0):
+    def fake_fetch(opener, url, timeout_seconds=1.0, method="GET"):
         if url.endswith("/json/version"):
             return {"Browser": "Chromium/test"}
-        return [
-            {
-                "webSocketDebuggerUrl":
-                "ws://127.0.0.1:9222/devtools/page/opaque-target"
-            }
-        ]
+        return {
+            "type": "page",
+            "url": "about:blank",
+            "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/page/opaque-target",
+        }
 
     monkeypatch.setattr(session, "_fetch_json", fake_fetch)
 
-    async def fake_connect(url: str):
+    async def fake_connect(url: str, deadline=None):
         try:
             raise ConnectionError("target_id=opaque-target upstream refused")
         except ConnectionError as cause:
@@ -203,6 +292,9 @@ async def test_handshake_failure_keeps_bounded_cause_and_cleanup(monkeypatch):
     assert diagnostics.error.message == "did not receive a valid HTTP response"
     assert diagnostics.cause_chain
     assert diagnostics.process_state == "running"
+    assert diagnostics.browser_version == "Chromium/test"
+    assert diagnostics.handshake_profile == "minimal-direct"
+    assert diagnostics.websockets_version_class in {"13-16", "17-plus", "unknown"}
     assert diagnostics.endpoint is not None
     assert diagnostics.endpoint.path_prefix == "/devtools/page/"
     assert diagnostics.stderr is not None
@@ -292,14 +384,18 @@ async def test_controlled_start_and_close_are_single_pass(monkeypatch):
 
     monkeypatch.setattr(browser_session.subprocess, "Popen", lambda *args, **kwargs: process)
 
-    def fake_fetch(opener, url, timeout_seconds=1.0):
+    def fake_fetch(opener, url, timeout_seconds=1.0, method="GET"):
         if url.endswith("/json/version"):
             return {"Browser": "Chromium/controlled"}
-        return [{"webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/page/test"}]
+        return {
+            "type": "page",
+            "url": "about:blank",
+            "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/page/test",
+        }
 
     monkeypatch.setattr(session, "_fetch_json", fake_fetch)
 
-    async def fake_connect(url: str):
+    async def fake_connect(url: str, deadline=None):
         return websocket
 
     async def fake_send(method: str, params=None):
@@ -326,6 +422,53 @@ async def test_controlled_start_and_close_are_single_pass(monkeypatch):
     assert process.terminate_calls == 1
     assert session.process is None
     assert session.user_data_dir is None
+
+
+@pytest.mark.asyncio
+async def test_websocket_attempt_uses_one_minimal_direct_profile(monkeypatch):
+    session = ChromiumSession(executable_path="unused")
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    async def fake_connect(url: str, **kwargs):
+        calls.append((url, kwargs))
+        return object()
+
+    monkeypatch.setattr(browser_session.websockets, "connect", fake_connect)
+
+    deadline = asyncio.get_running_loop().time() + 1.0
+    result = await session._connect_websocket(
+        "ws://127.0.0.1:9222/devtools/page/target", deadline
+    )
+
+    assert result is not None
+    assert len(calls) == 1
+    assert calls[0][1] == {
+        "max_size": 20 * 1024 * 1024,
+        "proxy": None,
+        "compression": None,
+        "origin": None,
+        "user_agent_header": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_websocket_attempt_respects_remaining_startup_deadline(monkeypatch):
+    session = ChromiumSession(executable_path="unused")
+    calls = 0
+
+    async def hanging_connect(url: str, **kwargs):
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(60)
+
+    monkeypatch.setattr(browser_session.websockets, "connect", hanging_connect)
+
+    with pytest.raises(TimeoutError, match="CHROMIUM_WEBSOCKET_DEADLINE_EXPIRED"):
+        await session._connect_websocket(
+            "ws://127.0.0.1:9222/devtools/page/target",
+            asyncio.get_running_loop().time() + 0.01,
+        )
+    assert calls == 1
 
 
 @pytest.mark.asyncio
