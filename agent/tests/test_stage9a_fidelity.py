@@ -224,9 +224,10 @@ def _make_valid_consumer_bundle(
             )
             for r in records
         )
+        total_px_deltas = sum(s.pixel_delta_count for s in samples)
         raster_res = RasterComparisonResult(
             code_point=records[0].code_point, character=chr(records[0].code_point), render_size_px=records[0].resolution,
-            raster_iou=0.95, pixel_delta_count=5, render_error=None, samples=samples, min_raster_iou=0.95,
+            raster_iou=0.95, pixel_delta_count=total_px_deltas, render_error=None, samples=samples, min_raster_iou=0.95,
         )
         unique_cps = sorted(list({r.code_point for r in records}))
         cr_glyph_samples = tuple(
@@ -251,7 +252,10 @@ def _make_valid_consumer_bundle(
             HarfBuzzSampleEvidence(
                 left_cp=p.left_cp, right_cp=p.right_cp, text=f"{p.left_char}{p.right_char}",
                 in_candidate_cmap=True, glyph_sequence_match=True, glyph_ids=(1, 2), clusters=(0, 1),
-                positions=(HarfBuzzPositionVector(p.left_advance_upem, 0, 0, 0), HarfBuzzPositionVector(p.right_advance_upem, 0, 0, 0)),
+                positions=(
+                    HarfBuzzPositionVector(p.left_advance_upem + float(p.inferred_kerning_upem), 0, 0, 0),
+                    HarfBuzzPositionVector(p.right_advance_upem, 0, 0, 0),
+                ),
                 candidate_total_advance_upem=p.measured_pair_advance_upem, expected_total_advance_upem=p.measured_pair_advance_upem,
                 advance_delta_upem=0.0, max_position_delta_upem=0.0,
             )
@@ -261,8 +265,8 @@ def _make_valid_consumer_bundle(
             text=f"{pairs[0].left_char}{pairs[0].right_char}", category="basic", in_candidate_cmap=True,
             glyph_sequence_match=True, candidate_glyph_names=["A", "B"],
             reference_glyph_names=["A", "B"], candidate_glyph_count=2,
-            reference_glyph_count=2, candidate_total_advance_upem=1250,
-            reference_total_advance_upem=1250, advance_delta_upem=0,
+            reference_glyph_count=2, candidate_total_advance_upem=int(pairs[0].measured_pair_advance_upem),
+            reference_total_advance_upem=int(pairs[0].measured_pair_advance_upem), advance_delta_upem=0,
             max_position_delta_upem=0, samples=hb_samples, all_in_cmap=True, all_sequence_match=True,
         )
         cr_pair_samples = tuple(
@@ -280,7 +284,7 @@ def _make_valid_consumer_bundle(
             is_available=True, browser_version="chromium",
             is_direct_loadable_chromium=True, fallback_rejection_verified=True,
             measured_glyph_count=len(cr_glyph_samples) if cr_glyph_samples else 2,
-            mean_chromium_advance_error_upem=0.5,
+            mean_chromium_advance_error_upem=0.0,
             rendered_canvas_valid=True, error_message=None, held_out_pairs_non_regression=True,
             glyph_samples=cr_glyph_samples,
             pair_samples=cr_pair_samples,
