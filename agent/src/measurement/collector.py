@@ -138,9 +138,9 @@ class ObservationCollector:
                     )
 
                     png_sha256 = hashlib.sha256(png_bytes).hexdigest()
-                    browser_hash = hashlib.sha256(self.session.browser_version.encode("utf-8")).hexdigest()[:16]
-                    env_tag = f"{config_hash[:16]}_{browser_hash}"
-                    rel_path = f"{reference_id}/{style_id}/{env_tag}/{cp:04X}/{res}px_{sub_x:.2f}_{sub_y:.2f}.png"
+                    browser_hash = hashlib.sha256(self.session.browser_version.encode("utf-8")).hexdigest()
+                    env_tag = f"{config_hash}_{browser_hash}"
+                    rel_path = f"{reference_id}/{style_id}/{env_tag}/{cp:04X}/{res}px_{cache_key}.png"
                     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
                     record = ObservationRecord(
@@ -189,9 +189,9 @@ class ObservationCollector:
                 )
 
                 png_sha256 = hashlib.sha256(png_bytes).hexdigest()
-                browser_hash = hashlib.sha256(self.session.browser_version.encode("utf-8")).hexdigest()[:16]
-                env_tag = f"{config_hash[:16]}_{browser_hash}"
-                rel_path = f"{reference_id}/{style_id}/{env_tag}/{cp:04X}/{eval_res}px_heldout_{sub_x:.2f}_{sub_y:.2f}.png"
+                browser_hash = hashlib.sha256(self.session.browser_version.encode("utf-8")).hexdigest()
+                env_tag = f"{config_hash}_{browser_hash}"
+                rel_path = f"{reference_id}/{style_id}/{env_tag}/{cp:04X}/{eval_res}px_heldout_{cache_key}.png"
                 now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
                 record = ObservationRecord(
@@ -383,6 +383,9 @@ class ObservationCollector:
                 f"under exact identity ({bv}, {cfg_h}): missing_in_observations={missing_cov}, extra_observed={extra_obs}"
             )
 
+        expected_obs_keys: set[str] = set()
+        eval_res = max(self.config.resolutions)
+
         for cp in coverage:
             obs = self.store.get_glyph_observations(
                 reference_id, style_id, cp, browser_version=bv, config_hash=cfg_h
@@ -391,6 +394,59 @@ class ObservationCollector:
                 raise ValueError(
                     f"FINALIZATION_FAILED: missing glyph observations for code point {cp} under exact identity ({bv}, {cfg_h}) in {reference_id}:{style_id}"
                 )
+            dm = obs[0][0].metrics
+            # Fit schedule keys
+            for res in self.config.resolutions:
+                phases = self.config.get_phases_for_metrics(dm)
+                for sub_x, sub_y in phases:
+                    k = ObservationRecord.build_cache_key(
+                        reference_id=reference_id,
+                        style_id=style_id,
+                        code_point=cp,
+                        browser_version=bv,
+                        resolution=res,
+                        subpixel_x=sub_x,
+                        subpixel_y=sub_y,
+                        config_hash=cfg_h,
+                    )
+                    if not self.store.has_observation(k):
+                        raise ValueError(
+                            f"FINALIZATION_FAILED: missing or invalid fit observation {k} for U+{cp:04X} at {res}px phase ({sub_x}, {sub_y}) under ({bv}, {cfg_h})"
+                        )
+                    expected_obs_keys.add(k)
+
+            # Held-out schedule keys
+            for sub_x, sub_y in self.config.held_out_subpixel_phases:
+                k = ObservationRecord.build_cache_key(
+                    reference_id=reference_id,
+                    style_id=style_id,
+                    code_point=cp,
+                    browser_version=bv,
+                    resolution=eval_res,
+                    subpixel_x=sub_x,
+                    subpixel_y=sub_y,
+                    config_hash=cfg_h,
+                )
+                if not self.store.has_observation(k):
+                    raise ValueError(
+                        f"FINALIZATION_FAILED: missing or invalid held-out observation {k} for U+{cp:04X} at {eval_res}px phase ({sub_x}, {sub_y}) under ({bv}, {cfg_h})"
+                    )
+                expected_obs_keys.add(k)
+
+        with self.store._get_connection() as conn:
+            stored_rows = conn.execute(
+                "SELECT cache_key FROM observations WHERE reference_id = ? AND style_id = ? AND browser_version = ? AND config_hash = ?",
+                (reference_id, style_id, bv, cfg_h),
+            ).fetchall()
+            stored_obs_keys = {r["cache_key"] for r in stored_rows}
+
+        if stored_obs_keys != expected_obs_keys:
+            missing_keys = expected_obs_keys - stored_obs_keys
+            extra_keys = stored_obs_keys - expected_obs_keys
+            raise ValueError(
+                f"FINALIZATION_FAILED: observation keys mismatch for {reference_id}:{style_id} under ({bv}, {cfg_h}): "
+                f"missing={missing_keys}, extra={extra_keys}"
+            )
 
         # 3. Scoped Pair observation verification (exact identity & derived set equality)
         if expected_pairs is None:

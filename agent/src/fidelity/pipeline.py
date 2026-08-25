@@ -326,8 +326,12 @@ class ObservationStoreSnapshot:
                 )
                 records.append(rec)
 
-                # Read raster file from disk
-                png_path = store.base_dir / rec.raster_relative_path
+                # Read raster file from disk strictly within store boundary
+                png_path = (store.base_dir / rec.raster_relative_path).resolve()
+                if not png_path.is_relative_to(store.base_dir.resolve()):
+                    raise ValueError(
+                        f"STORE_LOAD_ERROR: Raster path escaped store directory: {rec.raster_relative_path}"
+                    )
                 if not png_path.is_file():
                     raise ValueError(
                         f"STORE_LOAD_ERROR: Missing raster file on disk: {png_path}"

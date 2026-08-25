@@ -564,14 +564,26 @@ class SourceAcquirer:
                         glyph_models = {}
                         safe_fam = re.sub(r"[^a-zA-Z0-9_-]", "_", family_key)
                         safe_style = re.sub(r"[^a-zA-Z0-9_-]", "_", style_key)
-                        bv_hash = hashlib.sha256(active_browser_ver.encode("utf-8")).hexdigest()[:16]
+                        bv_hash = hashlib.sha256(active_browser_ver.encode("utf-8")).hexdigest()
                         cache_filename = f"reconstructed_{safe_fam}_{safe_style}_{bv_hash}_{active_cfg_hash}.pkl"
                         disk_cache_file = (self.store_dir / cache_filename).resolve()
                         if not disk_cache_file.is_relative_to(self.store_dir.resolve()):
                             raise ValueError(f"Reconstruction disk cache path escaped store directory: {cache_filename}")
                         if disk_cache_file.exists() and not collected_any:
                             try:
-                                glyph_models = pickle.loads(disk_cache_file.read_bytes())
+                                raw_cached = pickle.loads(disk_cache_file.read_bytes())
+                                if isinstance(raw_cached, dict):
+                                    if "glyph_models" in raw_cached:
+                                        if (raw_cached.get("reference_id") == family_key and
+                                            raw_cached.get("style_id") == style_key and
+                                            raw_cached.get("browser_version") == active_browser_ver and
+                                            raw_cached.get("config_hash") == active_cfg_hash and
+                                            set(raw_cached.get("coverage", [])) == set(coverage) and
+                                            isinstance(raw_cached.get("glyph_models"), dict) and
+                                            set(raw_cached["glyph_models"].keys()) == set(coverage)):
+                                            glyph_models = raw_cached["glyph_models"]
+                                    elif set(raw_cached.keys()) == set(coverage):
+                                        glyph_models = raw_cached
                             except Exception:
                                 glyph_models = {}
                         if not glyph_models:
@@ -585,6 +597,19 @@ class SourceAcquirer:
                                 )
                                 if observations:
                                     glyph_models[cp] = self.solver.reconstruct_glyph(observations)
+                            if glyph_models and set(glyph_models.keys()) == set(coverage):
+                                envelope = {
+                                    "reference_id": family_key,
+                                    "style_id": style_key,
+                                    "browser_version": active_browser_ver,
+                                    "config_hash": active_cfg_hash,
+                                    "coverage": sorted(coverage),
+                                    "glyph_models": glyph_models,
+                                }
+                                try:
+                                    disk_cache_file.write_bytes(pickle.dumps(envelope))
+                                except Exception:
+                                    pass
                         _RECONSTRUCTED_GLYPH_CACHE[cache_key] = glyph_models
 
                     if not glyph_models:

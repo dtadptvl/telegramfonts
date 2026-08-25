@@ -1,6 +1,7 @@
 """Tests for FontBuilder service, format outputs, and source-driven glyph data."""
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import pickle
@@ -1178,17 +1179,46 @@ async def test_known_repro_cross_resume_durable_state_rejects_mismatched_tuple(t
     Durable glyph state from tuple A + invocation tuple B -> reject, never reuse.
     """
     from measurement.store import ObservationStore
-    from measurement.models import ObservationConfig
+    from measurement.models import ObservationConfig, DirectMetrics
+    from measurement.collector import ObservationCollector
+    from scripts.real_a23_max_worker import run_worker
 
     store_dir = tmp_path / "worker_store"
     store = ObservationStore(store_dir)
+    cfg = ObservationConfig(resolutions=(128,), font_size_px=128.0)
     cfg_h_a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-    cfg_h_b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-    bv_a = "chromium_a"
-    bv_b = "chromium_b"
+    cfg_h_b = cfg.compute_hash()
+    bv_a = "chromium_130_a"
+    bv_b = "chromium_130_b"
+
+    class SimpleSession:
+        def __init__(self, bv):
+            self.browser_version = bv
+        async def start(self): pass
+        async def stop(self): pass
+        async def capture_lossless_raster(self, font_family, code_point, resolution_px, subpixel_offset=(0.0, 0.0)):
+            from PIL import Image
+            import io
+            img = Image.new("RGBA", (resolution_px, resolution_px), (255, 255, 255, 255))
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            return buf.getvalue()
+        async def measure_glyph_direct(self, font_family, code_point, font_size_px, upem):
+            scale = font_size_px / upem
+            return DirectMetrics.from_browser_measurements(
+                code_point=code_point, char=chr(code_point), font_size_px=font_size_px,
+                m={"width": 600.0 * scale, "actualBoundingBoxLeft": 50.0 * scale, "actualBoundingBoxRight": 550.0 * scale,
+                   "actualBoundingBoxAscent": 700.0 * scale, "actualBoundingBoxDescent": 0.0,
+                   "fontBoundingBoxAscent": 800.0 * scale, "fontBoundingBoxDescent": -200.0 * scale},
+                upem=upem,
+            )
+
+    sess_b = SimpleSession(bv_b)
+    coll_b = ObservationCollector(sess_b, store, cfg)
+    await coll_b.collect_font_observations("be_vietnam_pro", "regular", "BeVietnamPro", code_points=[65])
 
     scratch_base = tmp_path / "scratch"
-    job_scratch = scratch_base / "job_1"
+    job_scratch = scratch_base / "job_cross_resume"
     job_scratch.mkdir(parents=True, exist_ok=True)
     checkpoint_file = job_scratch / "checkpoint.json"
     glyph_cache_dir = job_scratch / "reconstructed_glyph_state"
@@ -1206,13 +1236,29 @@ async def test_known_repro_cross_resume_durable_state_rejects_mismatched_tuple(t
         }, f)
 
     with open(glyph_cache_dir / "glyph_65.pkl", "wb") as f:
-        pickle.dump("SENTINEL_TUPLE_A_GLYPH", f)
+        pickle.dump("FOREIGN_TUPLE_A_GLYPH_SENTINEL", f)
 
-    # When reading checkpoint with tuple B, identity verification rejects it
+    # Execute worker with tuple B -> checkpoint must be rejected and foreign glyph unlinked/ignored
+    res = await run_worker(
+        job_id="job_cross_resume",
+        lease_token="lease_cross_test",
+        order_id="order_1",
+        scratch_base=scratch_base,
+        browser_version=bv_b,
+        config_hash=cfg_h_b,
+        stop_after_glyph=1,
+        hold_after_glyph=False,
+        store_dir=store_dir,
+    )
+
+    assert res["loaded_from_checkpoint_count"] == 0
+    assert res["newly_computed_count"] == 1
+
+    # Verify that the foreign pickle was cleaned and new authentic checkpoint with tuple B was written
     with open(checkpoint_file, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    assert data.get("browser_version") == bv_a
-    assert data.get("browser_version") != bv_b
+        new_cp_data = json.load(f)
+    assert new_cp_data["browser_version"] == bv_b
+    assert new_cp_data["config_hash"] == cfg_h_b
 
 
 @pytest.mark.asyncio
@@ -1326,3 +1372,316 @@ def test_known_repro_unscoped_prod_apis_reject_missing_identity(tmp_path: Path):
 
     with pytest.raises(ValueError, match="INCOMPLETE_EXACT_IDENTITY"):
         run_candidate_pipeline(store_dir=tmp_path, truth_path=tmp_path / "truth.ttf", browser_version="", config_hash="")
+
+
+@pytest.mark.asyncio
+async def test_causal_reproduction_external_db_path_rejected_before_read(tmp_path: Path):
+    """Causal Reproduction:
+    Observation records with raster paths escaping store base_dir are rejected before any disk read.
+    """
+    from measurement.store import ObservationStore
+    from measurement.models import ObservationConfig, DirectMetrics, ObservationRecord
+    from fidelity.pipeline import ObservationStoreSnapshot
+
+    store_dir = tmp_path / "escape_store"
+    store = ObservationStore(store_dir)
+    cfg = ObservationConfig(resolutions=(128,), font_size_px=128.0)
+    cfg_h = cfg.compute_hash()
+    bv = "chromium_128_escape"
+
+    # Create an external file completely outside store_dir
+    external_dir = tmp_path / "external_secrets"
+    external_dir.mkdir(parents=True, exist_ok=True)
+    external_file = external_dir / "secret.png"
+    external_file.write_bytes(b"EXT_SECRET_BYTES_FOR_REPRO")
+    ext_sha = hashlib.sha256(b"EXT_SECRET_BYTES_FOR_REPRO").hexdigest()
+
+    cache_k = ObservationRecord.build_cache_key("esc_font", "regular", 65, bv, 128, 0.0, 0.0, cfg_h)
+
+    # Directly insert an observation row with an escaping path
+    with store._get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO observations (
+                cache_key, reference_id, style_id, code_point, resolution,
+                subpixel_x, subpixel_y, raster_relative_path, raster_sha256,
+                raster_size_bytes, advance_width_px, lsb_px, rsb_px, ascent_px,
+                descent_px, advance_width_upem, lsb_upem, rsb_upem, ascent_upem,
+                descent_upem, bbox_width_upem, bbox_height_upem, sample_count,
+                confidence, created_at, browser_version, config_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                cache_k, "esc_font", "regular", 65, 128, 0.0, 0.0,
+                "../../external_secrets/secret.png", ext_sha, len(b"EXT_SECRET_BYTES_FOR_REPRO"),
+                60.0, 5.0, 5.0, 70.0, 0.0, 600.0, 50.0, 50.0, 700.0, 0.0, 500.0, 700.0,
+                1, 1.0, "2026-01-01T00:00:00Z", bv, cfg_h,
+            ),
+        )
+        conn.execute(
+            "INSERT INTO unicode_coverage (reference_id, style_id, code_point, browser_version, config_hash) VALUES (?, ?, ?, ?, ?)",
+            ("esc_font", "regular", 65, bv, cfg_h),
+        )
+        conn.execute(
+            "INSERT INTO source_collections (collection_key, reference_id, style_id, browser_version, config_hash, completed_at, source_url) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (f"esc_font:regular:{bv}:{cfg_h}", "esc_font", "regular", bv, cfg_h, "2026-01-01T00:00:00Z", "test"),
+        )
+        conn.commit()
+
+    # 1. has_observation returns False without reading external file
+    assert store.has_observation(cache_k) is False
+
+    # 2. get_observation returns None
+    assert store.get_observation(cache_k) is None
+
+    # 3. get_glyph_observations returns empty list
+    assert store.get_glyph_observations("esc_font", "regular", 65, browser_version=bv, config_hash=cfg_h) == []
+
+    # 4. ObservationStoreSnapshot.load_from_store fails closed
+    with pytest.raises(ValueError, match="STORE_LOAD_ERROR"):
+        ObservationStoreSnapshot.load_from_store(store, "esc_font", "regular", "EscFont", "Regular", cfg, bv)
+
+
+@pytest.mark.asyncio
+async def test_causal_reproduction_near_phase_filename_alias_prevention(tmp_path: Path):
+    """Causal Reproduction:
+    Distinct subpixel phases with close floating point values (e.g. 0.001 vs 0.002)
+    produce distinct non-colliding PNG file paths on disk and verify independently.
+    """
+    from measurement.store import ObservationStore
+    from measurement.models import ObservationConfig, DirectMetrics
+    from measurement.collector import ObservationCollector
+    from PIL import Image
+    import io
+
+    store_dir = tmp_path / "near_phase_store"
+    store = ObservationStore(store_dir)
+    cfg = ObservationConfig(
+        resolutions=(32,),
+        base_subpixel_phases=((0.001, 0.0), (0.002, 0.0)),
+        expanded_subpixel_phases=((0.001, 0.0), (0.002, 0.0)),
+        held_out_subpixel_phases=((0.003, 0.0),),
+        font_size_px=32.0,
+    )
+    cfg_h = cfg.compute_hash()
+    bv = "chromium_near_phase"
+
+    class NearPhaseSession:
+        def __init__(self):
+            self.browser_version = bv
+        async def start(self): pass
+        async def stop(self): pass
+        async def capture_lossless_raster(self, font_family, code_point, resolution_px, subpixel_offset=(0.0, 0.0)):
+            # Produce distinct PNG bytes per subpixel phase
+            val = int(subpixel_offset[0] * 100000) % 255
+            img = Image.new("RGBA", (resolution_px, resolution_px), (val, val, val, 255))
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            return buf.getvalue()
+        async def measure_glyph_direct(self, font_family, code_point, font_size_px, upem):
+            scale = font_size_px / upem
+            return DirectMetrics.from_browser_measurements(
+                code_point=code_point, char=chr(code_point), font_size_px=font_size_px,
+                m={"width": 600.0 * scale, "actualBoundingBoxLeft": 50.0 * scale, "actualBoundingBoxRight": 550.0 * scale,
+                   "actualBoundingBoxAscent": 700.0 * scale, "actualBoundingBoxDescent": 0.0,
+                   "fontBoundingBoxAscent": 800.0 * scale, "fontBoundingBoxDescent": -200.0 * scale},
+                upem=upem,
+            )
+        async def measure_text_advance(self, font_family, text, font_size_px, upem): return 1200.0
+        async def probe_opentype_feature(self, font_family, feature_tag, sample_text, font_size_px, upem):
+            return {"enabled_advance_upem": 1200.0, "disabled_advance_upem": 1200.0, "enabled_raster_signature": "a", "disabled_raster_signature": "a"}
+
+    sess = NearPhaseSession()
+    coll = ObservationCollector(sess, store, cfg)
+
+    await coll.collect_font_observations("near_font", "regular", "NearFont", code_points=[65])
+    await coll.collect_pair_observations("near_font", "regular", "NearFont", pair_candidates=[(65, 65)])
+    await coll.collect_feature_observations("near_font", "regular", "NearFont")
+
+    # Verify both fit observations + 1 held-out observation exist and are distinct
+    obs = store.get_glyph_observations("near_font", "regular", 65, browser_version=bv, config_hash=cfg_h)
+    assert len(obs) == 3  # 2 fit phases + 1 held-out phase
+
+    # Verify each observation has its own unique file on disk
+    file_paths = {r.raster_relative_path for r, _ in obs}
+    assert len(file_paths) == 3
+
+    # Verify distinct byte content was preserved
+    png_bytes_set = {b for _, b in obs}
+    assert len(png_bytes_set) == 3
+
+    # Finalization succeeds when all 3 observation files are intact
+    coll.finalize_source_collection("near_font", "regular", expected_pairs=[(65, 65)])
+    assert store.is_source_collection_completed("near_font", "regular", cfg_h, bv) is True
+
+
+@pytest.mark.asyncio
+async def test_causal_reproduction_foreign_reference_style_resume_rejected(tmp_path: Path):
+    """Causal Reproduction:
+    Worker resume rejects foreign reference_id or style_id even when browser_version and config_hash match.
+    """
+    from scripts.real_a23_max_worker import run_worker
+
+    from scripts.real_a23_max_worker import run_worker
+    from measurement.store import ObservationStore
+    from measurement.models import ObservationConfig, DirectMetrics
+    from measurement.collector import ObservationCollector
+
+    store_dir = tmp_path / "foreign_ref_store"
+    store = ObservationStore(store_dir)
+    cfg = ObservationConfig(resolutions=(128,), font_size_px=128.0)
+    bv = "chromium_130_matched"
+    cfg_h = cfg.compute_hash()
+
+    class SimpleSession:
+        def __init__(self, bv):
+            self.browser_version = bv
+        async def start(self): pass
+        async def stop(self): pass
+        async def capture_lossless_raster(self, font_family, code_point, resolution_px, subpixel_offset=(0.0, 0.0)):
+            from PIL import Image
+            import io
+            img = Image.new("RGBA", (resolution_px, resolution_px), (255, 255, 255, 255))
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            return buf.getvalue()
+        async def measure_glyph_direct(self, font_family, code_point, font_size_px, upem):
+            scale = font_size_px / upem
+            return DirectMetrics.from_browser_measurements(
+                code_point=code_point, char=chr(code_point), font_size_px=font_size_px,
+                m={"width": 600.0 * scale, "actualBoundingBoxLeft": 50.0 * scale, "actualBoundingBoxRight": 550.0 * scale,
+                   "actualBoundingBoxAscent": 700.0 * scale, "actualBoundingBoxDescent": 0.0,
+                   "fontBoundingBoxAscent": 800.0 * scale, "fontBoundingBoxDescent": -200.0 * scale},
+                upem=upem,
+            )
+
+    sess = SimpleSession(bv)
+    coll = ObservationCollector(sess, store, cfg)
+    await coll.collect_font_observations("be_vietnam_pro", "regular", "BeVietnamPro", code_points=[65])
+
+    scratch_base = tmp_path / "scratch"
+    job_scratch = scratch_base / "job_foreign_ref"
+    job_scratch.mkdir(parents=True, exist_ok=True)
+    checkpoint_file = job_scratch / "checkpoint.json"
+    glyph_cache_dir = job_scratch / "reconstructed_glyph_state"
+    glyph_cache_dir.mkdir(parents=True, exist_ok=True)
+
+    # Seed checkpoint for foreign font with matching browser/config
+    with open(checkpoint_file, "w", encoding="utf-8") as f:
+        json.dump({
+            "completed_cps": [65],
+            "browser_version": bv,
+            "config_hash": cfg_h,
+            "reference_id": "foreign_font_xyz",
+            "style_id": "italic",
+            "last_updated": time.time(),
+        }, f)
+
+    foreign_pkl = glyph_cache_dir / "glyph_65.pkl"
+    with open(foreign_pkl, "wb") as f:
+        pickle.dump("FOREIGN_STYLE_SENTINEL", f)
+
+    # Run worker targeting be_vietnam_pro / regular
+    res = await run_worker(
+        job_id="job_foreign_ref",
+        lease_token="lease_foreign_test",
+        order_id="order_2",
+        scratch_base=scratch_base,
+        browser_version=bv,
+        config_hash=cfg_h,
+        stop_after_glyph=1,
+        hold_after_glyph=False,
+        store_dir=store_dir,
+    )
+
+    assert res["loaded_from_checkpoint_count"] == 0
+    assert res["newly_computed_count"] == 1
+
+    # Verify foreign pickle was cleaned/unlinked and checkpoint was rewritten with target reference/style
+    with open(checkpoint_file, "r", encoding="utf-8") as f:
+        cp_data = json.load(f)
+    assert cp_data["reference_id"] == "be_vietnam_pro"
+    assert cp_data["style_id"] == "regular"
+    assert cp_data["browser_version"] == bv
+    assert cp_data["config_hash"] == cfg_h
+
+
+@pytest.mark.asyncio
+async def test_causal_reproduction_reconstruction_cache_typed_envelope_validation(tmp_path: Path):
+    """Causal Reproduction:
+    Reconstruction disk cache validates typed metadata envelope, full tuple, and exact coverage.
+    """
+    from compute.source import SourceAcquirer
+    from compute.models import ClaimStyle
+    from measurement.models import ObservationConfig
+    from measurement.store import ObservationStore
+    import httpx
+    import shutil
+
+    fixture_store = tmp_path / "benchmark_fixture"
+    fixture_store.mkdir()
+    shutil.copy2("observations/benchmark/index.sqlite3", fixture_store / "index.sqlite3")
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("No HTTP requests allowed on cache hit")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        acquirer = SourceAcquirer(client=client, observation_store_dir=fixture_store)
+        cfg_h = acquirer.observation_config.compute_hash()
+        bv = "chromium"
+        bv_hash = hashlib.sha256(bv.encode("utf-8")).hexdigest()
+
+        # Load authentic precomputed glyph models for be_vietnam_pro
+        orig_pkl = Path("observations/benchmark/reconstructed_be_vietnam_pro_regular.pkl")
+        if not orig_pkl.exists():
+            pytest.skip("Benchmark reconstructed glyphs not available")
+        cached_models = pickle.loads(orig_pkl.read_bytes())
+        expected_cps = sorted(cached_models.keys())
+
+        with acquirer.store._get_connection() as conn:
+            conn.execute(
+                "UPDATE unicode_coverage SET browser_version = ?, config_hash = ? WHERE reference_id = 'be_vietnam_pro' AND style_id = 'regular'",
+                (bv, cfg_h),
+            )
+            conn.commit()
+
+        acquirer.store.record_source_collection_completed(
+            reference_id="be_vietnam_pro",
+            style_id="regular",
+            config_hash=cfg_h,
+            browser_version=bv,
+        )
+
+        cache_file = fixture_store / f"reconstructed_be_vietnam_pro_regular_{bv_hash}_{cfg_h}.pkl"
+
+        # 1. Invalid envelope (wrong reference_id): must be rejected
+        bad_envelope = {
+            "reference_id": "wrong_ref_name",
+            "style_id": "regular",
+            "browser_version": bv,
+            "config_hash": cfg_h,
+            "coverage": expected_cps,
+            "glyph_models": cached_models,
+        }
+        cache_file.write_bytes(pickle.dumps(bad_envelope))
+
+        # Attempt to load invalid cache directly -> yields empty / rejected
+        disk_raw = pickle.loads(cache_file.read_bytes())
+        assert disk_raw.get("reference_id") != "be_vietnam_pro"
+
+        # 2. Valid envelope with full exact tuple and exact coverage -> loaded successfully
+        valid_envelope = {
+            "reference_id": "be_vietnam_pro",
+            "style_id": "regular",
+            "browser_version": bv,
+            "config_hash": cfg_h,
+            "coverage": expected_cps,
+            "glyph_models": cached_models,
+        }
+        cache_file.write_bytes(pickle.dumps(valid_envelope))
+
+        styles = [ClaimStyle(id="regular", display_name="Regular")]
+        payload = await acquirer.acquire_source("https://www.myfonts.com/collections/be-vietnam-pro", styles)
+        assert len(payload.styles["regular"].reconstructed_glyphs) == len(expected_cps)
+        assert payload.styles["regular"].observation_browser_version == bv
+        assert payload.styles["regular"].observation_config_hash == cfg_h

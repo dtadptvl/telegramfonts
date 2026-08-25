@@ -567,6 +567,13 @@ class ObservationStore:
                 confidence=float(row["confidence"]),
             )
 
+            rel_path = str(row["raster_relative_path"]).strip()
+            if not rel_path:
+                return None
+            target_path = (self.base_dir / rel_path).resolve()
+            if not target_path.is_relative_to(self.base_dir.resolve()):
+                return None
+
             rec = ObservationRecord(
                 cache_key=cache_key,
                 reference_id=str(row["reference_id"]),
@@ -575,7 +582,7 @@ class ObservationStore:
                 resolution=int(row["resolution"]),
                 subpixel_x=float(row["subpixel_x"]),
                 subpixel_y=float(row["subpixel_y"]),
-                raster_relative_path=str(row["raster_relative_path"]),
+                raster_relative_path=rel_path,
                 raster_sha256=raster_sha,
                 raster_size_bytes=int(row["raster_size_bytes"]),
                 metrics=metrics,
@@ -595,8 +602,8 @@ class ObservationStore:
             rec = self.get_observation(cache_key)
             if rec is None:
                 return False
-            png_path = self.base_dir / rec.raster_relative_path
-            if not png_path.exists():
+            png_path = (self.base_dir / rec.raster_relative_path).resolve()
+            if not png_path.is_relative_to(self.base_dir.resolve()) or not png_path.is_file():
                 return False
             png_bytes = png_path.read_bytes()
             if len(png_bytes) != rec.raster_size_bytes:
@@ -643,7 +650,7 @@ class ObservationStore:
                     if rec is None:
                         continue
                     png_path = (self.base_dir / rec.raster_relative_path).resolve()
-                    if not png_path.is_relative_to(self.base_dir.resolve()) or not png_path.exists():
+                    if not png_path.is_relative_to(self.base_dir.resolve()) or not png_path.is_file():
                         continue
                     try:
                         png_bytes = png_path.read_bytes()

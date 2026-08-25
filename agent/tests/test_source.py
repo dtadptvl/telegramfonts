@@ -211,7 +211,7 @@ async def test_production_acquire_source_known_store_hit_zero_http_calls(tmp_pat
         )
         cfg_h = acquirer.observation_config.compute_hash()
         bv = "chromium"
-        bv_hash = hashlib.sha256(bv.encode("utf-8")).hexdigest()[:16]
+        bv_hash = hashlib.sha256(bv.encode("utf-8")).hexdigest()
         shutil.copy2(
             "observations/benchmark/reconstructed_be_vietnam_pro_regular.pkl",
             fixture_store / f"reconstructed_be_vietnam_pro_regular_{bv_hash}_{cfg_h}.pkl",
