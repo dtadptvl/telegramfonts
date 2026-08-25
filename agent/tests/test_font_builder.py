@@ -5,11 +5,16 @@ import hashlib
 import io
 import json
 import pickle
+import sys
 import time
 from pathlib import Path
 from typing import Any
 import pytest
 from PIL import Image, ImageDraw
+
+repo_root = Path(__file__).resolve().parent.parent.parent
+if str(repo_root) not in sys.path:
+    sys.path.insert(0, str(repo_root))
 
 from compute.font_builder import FontBuilderService
 from compute.models import ClaimStyle
