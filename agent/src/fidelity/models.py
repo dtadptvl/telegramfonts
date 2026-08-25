@@ -76,6 +76,22 @@ class FreeTypeSampleEvidence:
     pixel_delta_count: int
     render_error: str | None = None
 
+    def __post_init__(self) -> None:
+        if not self.cache_key:
+            raise ValueError("FreeTypeSampleEvidence cache_key cannot be empty")
+        if self.code_point <= 0:
+            raise ValueError(f"FreeTypeSampleEvidence invalid code_point: {self.code_point}")
+        if self.character != chr(self.code_point):
+            raise ValueError(f"FreeTypeSampleEvidence character drift: '{self.character}' != chr({self.code_point})")
+        if self.resolution <= 0:
+            raise ValueError(f"FreeTypeSampleEvidence resolution must be positive: {self.resolution}")
+        if len(self.raster_sha256) != 64:
+            raise ValueError(f"FreeTypeSampleEvidence invalid raster_sha256 length: {len(self.raster_sha256)}")
+        if not math.isfinite(self.raster_iou) or not (0.0 <= self.raster_iou <= 1.0):
+            raise ValueError(f"FreeTypeSampleEvidence non-finite or out-of-range raster_iou: {self.raster_iou}")
+        if self.pixel_delta_count < 0:
+            raise ValueError(f"FreeTypeSampleEvidence pixel_delta_count cannot be negative: {self.pixel_delta_count}")
+
 
 @dataclass(frozen=True)
 class HarfBuzzPositionVector:
@@ -85,6 +101,15 @@ class HarfBuzzPositionVector:
     y_advance: float
     x_offset: float
     y_offset: float
+
+    def __post_init__(self) -> None:
+        if not (
+            math.isfinite(self.x_advance)
+            and math.isfinite(self.y_advance)
+            and math.isfinite(self.x_offset)
+            and math.isfinite(self.y_offset)
+        ):
+            raise ValueError("HarfBuzzPositionVector components must all be finite floats")
 
 
 @dataclass(frozen=True)
@@ -105,6 +130,29 @@ class HarfBuzzSampleEvidence:
     max_position_delta_upem: float
     error_message: str | None = None
 
+    def __post_init__(self) -> None:
+        if self.left_cp <= 0 or self.right_cp <= 0:
+            raise ValueError(f"HarfBuzzSampleEvidence invalid code points: ({self.left_cp}, {self.right_cp})")
+        expected_text = f"{chr(self.left_cp)}{chr(self.right_cp)}"
+        if self.text != expected_text:
+            raise ValueError(f"HarfBuzzSampleEvidence text drift: '{self.text}' != '{expected_text}'")
+        if not (
+            math.isfinite(self.candidate_total_advance_upem)
+            and math.isfinite(self.expected_total_advance_upem)
+            and math.isfinite(self.advance_delta_upem)
+            and math.isfinite(self.max_position_delta_upem)
+        ):
+            raise ValueError("HarfBuzzSampleEvidence numeric fields must be finite floats")
+        if self.advance_delta_upem < 0 or self.max_position_delta_upem < 0:
+            raise ValueError("HarfBuzzSampleEvidence deltas cannot be negative")
+        if self.error_message is None:
+            if len(self.positions) != 2:
+                raise ValueError(f"HarfBuzzSampleEvidence expected 2 position vectors, got {len(self.positions)}")
+            if len(self.clusters) != 2 or self.clusters != (0, 1):
+                raise ValueError(f"HarfBuzzSampleEvidence invalid clusters: {self.clusters}")
+            if len(self.glyph_ids) != 2:
+                raise ValueError(f"HarfBuzzSampleEvidence expected 2 glyph IDs, got {len(self.glyph_ids)}")
+
 
 @dataclass(frozen=True)
 class ChromiumGlyphSampleEvidence:
@@ -115,6 +163,20 @@ class ChromiumGlyphSampleEvidence:
     candidate_advance_upem: float
     expected_advance_upem: float
     advance_delta_upem: float
+
+    def __post_init__(self) -> None:
+        if self.code_point <= 0:
+            raise ValueError(f"ChromiumGlyphSampleEvidence invalid code_point: {self.code_point}")
+        if self.character != chr(self.code_point):
+            raise ValueError(f"ChromiumGlyphSampleEvidence character drift: '{self.character}' != chr({self.code_point})")
+        if not (
+            math.isfinite(self.candidate_advance_upem)
+            and math.isfinite(self.expected_advance_upem)
+            and math.isfinite(self.advance_delta_upem)
+        ):
+            raise ValueError("ChromiumGlyphSampleEvidence advances and deltas must be finite floats")
+        if self.advance_delta_upem < 0:
+            raise ValueError("ChromiumGlyphSampleEvidence advance_delta_upem cannot be negative")
 
 
 @dataclass(frozen=True)
@@ -130,6 +192,23 @@ class ChromiumPairSampleEvidence:
     gpos_applied_adjustment_upem: float
     advance_delta_upem: float
     non_regression: bool
+
+    def __post_init__(self) -> None:
+        if self.left_cp <= 0 or self.right_cp <= 0:
+            raise ValueError(f"ChromiumPairSampleEvidence invalid code points: ({self.left_cp}, {self.right_cp})")
+        expected_pair = f"{chr(self.left_cp)}{chr(self.right_cp)}"
+        if self.pair != expected_pair:
+            raise ValueError(f"ChromiumPairSampleEvidence pair text drift: '{self.pair}' != '{expected_pair}'")
+        if not (
+            math.isfinite(self.baseline_single_sum_upem)
+            and math.isfinite(self.candidate_pair_advance_upem)
+            and math.isfinite(self.expected_pair_advance_upem)
+            and math.isfinite(self.gpos_applied_adjustment_upem)
+            and math.isfinite(self.advance_delta_upem)
+        ):
+            raise ValueError("ChromiumPairSampleEvidence numeric fields must be finite floats")
+        if self.advance_delta_upem < 0:
+            raise ValueError("ChromiumPairSampleEvidence advance_delta_upem cannot be negative")
 
 
 @dataclass(frozen=True)

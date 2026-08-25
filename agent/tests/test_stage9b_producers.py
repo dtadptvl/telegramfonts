@@ -10,11 +10,13 @@ import os
 import tempfile
 from pathlib import Path
 from typing import Sequence
+from unittest.mock import patch
 
 import numpy as np
 import pytest
 from PIL import Image, ImageDraw
 
+import fidelity
 from fidelity.evaluator import FidelityEvaluator
 from fidelity.models import (
     BoundChromiumEvidence,
@@ -39,7 +41,6 @@ from fidelity.producers import (
     FreeTypeEvidenceProducer,
     HarfBuzzEvidenceProducer,
     ProductionConsumerEvidenceProducer,
-    TestChromiumEvidenceProducerAdapter,
 )
 from measurement.browser_session import ChromiumSession, find_chromium_executable
 from measurement.calibration import ObservationCalibrator
@@ -209,7 +210,154 @@ def _make_sample_contour(offset_x: float = 0.0, offset_y: float = 0.0) -> Contou
 
 
 # =========================================================================
-# 1. Architect Reproduction 1: Zero-Sample Aggregate Bundle Fails Gate
+# 1. Merge-Blocking Reproduction 1: Direct CandidateArtifact Rejection
+# =========================================================================
+
+def test_architect_reproduction_1_direct_candidate_artifact_rejected_immediately() -> None:
+    """Reproduction 1: Passing CandidateArtifact directly must raise descriptor TypeError immediately."""
+    art = CandidateArtifact.from_source(b"\x00\x01\x00\x00" + b"\x00" * 100, format_hint="TTF")
+    glyph = CalibratedGlyph(65, "A", 650.0, 50.0, 50.0, 750.0, -200.0, (50.0, 50.0, 550.0, 700.0), [_make_sample_contour()], observation_fingerprints=("a" * 64,))
+    model = CanonicalFontModel(
+        family_name="F", style_name="R", reference_id="ref", style_id="reg",
+        config_hash="a" * 64, browser_version="chromium", fit_observations_count=1,
+        calibration_fingerprint="b" * 64, glyphs={65: glyph},
+    )
+    rec, _ = _make_observation_record(code_point=65)
+    pair = PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False, provenance="chromium:chromium:canvas_text_metrics")
+
+    with pytest.raises(TypeError, match="ProductionConsumerEvidenceProducer requires a CandidateArtifactDescriptor"):
+        asyncio.run(
+            ProductionConsumerEvidenceProducer.produce_bundle(
+                descriptor=art,  # type: ignore[arg-type]
+                model=model,
+                config=ObservationConfig(),
+                held_out_records=[rec],
+                held_out_pairs=[pair],
+                raster_provider=lambda r: b"",
+            )
+        )
+
+
+# =========================================================================
+# 2. Merge-Blocking Reproduction 2: Partial Policy Fail Bundle Not Returned
+# =========================================================================
+
+def test_architect_reproduction_2_partial_policy_failure_bundle_not_returned() -> None:
+    """Reproduction 2: If FreeType has low IoU or Chromium fails canvas/fallback, produce_bundle must raise ProductionProducerError and return no bundle."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir)
+        file_a = tmp_path / "font.ttf"
+        font_bytes = b"\x00\x01\x00\x00" + b"\x00" * 100
+        file_a.write_bytes(font_bytes)
+        desc = CandidateArtifactDescriptor(file_a, "TTF", len(font_bytes), hashlib.sha256(font_bytes).hexdigest(), font_bytes)
+
+        glyph = CalibratedGlyph(65, "A", 650.0, 50.0, 50.0, 750.0, -200.0, (50.0, 50.0, 550.0, 700.0), [_make_sample_contour()], observation_fingerprints=("a" * 64,))
+        model = CanonicalFontModel(
+            family_name="F", style_name="R", reference_id="ref", style_id="reg",
+            config_hash="a" * 64, browser_version="chromium", fit_observations_count=1,
+            calibration_fingerprint="b" * 64, glyphs={65: glyph},
+        )
+        rec, png_bytes = _make_observation_record(code_point=65)
+        pair = PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False, provenance="chromium:chromium:canvas_text_metrics")
+
+        # Mock FreeType producer with low IoU
+        fr_low_sample = FreeTypeSampleEvidence(rec.cache_key, 65, "A", 256, rec.raster_sha256, 0.10, 50)
+        fr_low_res = RasterComparisonResult(65, "A", 256, 0.10, 50, samples=(fr_low_sample,), min_raster_iou=0.10)
+        fr_low_evidence = BoundFreeTypeEvidence(desc.expected_sha256_hex, fr_low_res)
+
+        ft_res = FormatValidationResult("TTF", str(file_a), len(font_bytes), desc.expected_sha256_hex, True, False, False, False, False, 1, 1000, True, True, True)
+        ft_evidence = BoundFontToolsEvidence(desc.expected_sha256_hex, ft_res)
+
+        with patch.object(FontToolsEvidenceProducer, "produce", return_value=ft_evidence):
+            with patch.object(FreeTypeEvidenceProducer, "produce", return_value=fr_low_evidence):
+                with pytest.raises(ProductionProducerError, match="CONSUMER_PRODUCER_FAILED: FreeType raster rendering verification failed"):
+                    asyncio.run(
+                        ProductionConsumerEvidenceProducer.produce_bundle(
+                            descriptor=desc,
+                            model=model,
+                            config=ObservationConfig(),
+                            held_out_records=[rec],
+                            held_out_pairs=[pair],
+                            raster_provider=lambda r: png_bytes,
+                        )
+                    )
+
+
+# =========================================================================
+# 3. Merge-Blocking Reproduction 3: Forged / NaN / Underived Samples Fail Gate
+# =========================================================================
+
+def test_architect_reproduction_3_forged_nan_underived_samples_fail_consumer_gate() -> None:
+    """Reproduction 3: NaN/Inf, underived deltas, or missing Chromium glyph samples must fail closed."""
+    # 1. NaN in sample dataclass constructor must raise ValueError in __post_init__
+    with pytest.raises(ValueError, match="HarfBuzzPositionVector components must all be finite floats"):
+        HarfBuzzPositionVector(float("nan"), 0.0, 0.0, 0.0)
+
+    with pytest.raises(ValueError, match="FreeTypeSampleEvidence non-finite or out-of-range raster_iou"):
+        FreeTypeSampleEvidence("k", 65, "A", 256, "a" * 64, float("nan"), 0)
+
+    with pytest.raises(ValueError, match="ChromiumGlyphSampleEvidence advances and deltas must be finite floats"):
+        ChromiumGlyphSampleEvidence(65, "A", float("nan"), 650.0, 0.0)
+
+    with pytest.raises(ValueError, match="ChromiumPairSampleEvidence numeric fields must be finite floats"):
+        ChromiumPairSampleEvidence(65, 65, "AA", 1300.0, float("nan"), 1300.0, 0.0, 0.0, True)
+
+    # 2. Gate 6 must fail if Chromium glyph samples are empty ()
+    art = CandidateArtifact.from_source(b"\x00\x01\x00\x00" + b"\x00" * 100, format_hint="TTF")
+    cfg = ObservationConfig()
+    cfg_hash = cfg.compute_hash()
+    rec, png_bytes = _make_observation_record(code_point=65, config_hash=cfg_hash)
+    glyph = CalibratedGlyph(65, "A", 650.0, 50.0, 50.0, 750.0, -200.0, (50.0, 50.0, 550.0, 700.0), [_make_sample_contour()], observation_fingerprints=("a" * 64,))
+    model = CanonicalFontModel(
+        family_name="F", style_name="R", reference_id="ref", style_id="reg",
+        config_hash=cfg_hash, browser_version="chromium", fit_observations_count=1,
+        calibration_fingerprint="b" * 64, glyphs={65: glyph},
+    )
+    pair = PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False, provenance="chromium:chromium:canvas_text_metrics")
+
+    ft_res = FormatValidationResult("TTF", "f.ttf", 100, art.sha256_hex, True, False, False, False, False, 1, 1000, True, True, True)
+    fr_sample = FreeTypeSampleEvidence(rec.cache_key, 65, "A", 256, rec.raster_sha256, 0.95, 0)
+    fr_res = RasterComparisonResult(65, "A", 256, 0.95, 0, samples=(fr_sample,), min_raster_iou=0.95)
+
+    pos_vec = HarfBuzzPositionVector(650.0, 0.0, 0.0, 0.0)
+    hb_sample = HarfBuzzSampleEvidence(65, 65, "AA", True, True, (1, 1), (0, 1), (pos_vec, pos_vec), 1300.0, 1300.0, 0.0, 0.0)
+    hb_res = ShapingTestResult("AA", "c", True, True, ["A", "A"], ["A", "A"], 2, 2, 1300, 1300, 0, 0, samples=(hb_sample,), all_in_cmap=True, all_sequence_match=True)
+
+    cr_pair_s = ChromiumPairSampleEvidence(65, 65, "AA", 1300.0, 1300.0, 1300.0, 0.0, 0.0, True)
+    # Empty glyph_samples
+    cr_res_no_glyph = ChromiumValidationResult(True, "cr", True, True, 1, 0.0, [], glyph_samples=(), pair_samples=(cr_pair_s,), fit_pairs_material_improvement=True, held_out_pairs_non_regression=True, rendered_canvas_valid=True)
+
+    bundle = ConsumerEvidenceBundle(
+        schema_version="1.0.0",
+        model_canonical_hash=model.compute_canonical_hash(),
+        config_hash=cfg_hash,
+        held_out_fingerprint=FidelityEvaluator._compute_composite_held_out_fingerprint([rec], [pair]),
+        held_out_raster_fingerprint=FidelityEvaluator._compute_records_fingerprint([rec]),
+        held_out_typography_fingerprint=FidelityEvaluator._compute_typography_fingerprint([pair]),
+        candidate_artifact_sha=art.sha256_hex,
+        fonttools=BoundFontToolsEvidence(candidate_artifact_sha=art.sha256_hex, result=ft_res),
+        freetype=BoundFreeTypeEvidence(candidate_artifact_sha=art.sha256_hex, result=fr_res),
+        harfbuzz=BoundHarfBuzzEvidence(candidate_artifact_sha=art.sha256_hex, result=hb_res),
+        chromium=BoundChromiumEvidence(candidate_artifact_sha=art.sha256_hex, result=cr_res_no_glyph),
+    )
+
+    report = FidelityEvaluator.evaluate(
+        model=model,
+        config=cfg,
+        fit_records=[rec],
+        held_out_records=[rec],
+        held_out_pairs=[pair],
+        consumer_bundle=bundle,
+        raster_provider=lambda r: png_bytes,
+    )
+    assert report.overall_status == "FAIL"
+    assert report.consumer_gate.status == "FAIL"
+    assert report.consumer_gate.chromium_passed is False
+    assert any("Chromium glyph sample count 0 != expected 1" in r for r in report.failure_reasons)
+
+
+# =========================================================================
+# 4. Zero Samples & Descriptor Drift Tests
 # =========================================================================
 
 def test_architect_reproduction_1_zero_sample_bundle_fails_consumer_gate() -> None:
@@ -258,148 +406,6 @@ def test_architect_reproduction_1_zero_sample_bundle_fails_consumer_gate() -> No
     assert report.consumer_gate.freetype_passed is False
     assert report.consumer_gate.harfbuzz_passed is False
     assert report.consumer_gate.chromium_passed is False
-
-
-# =========================================================================
-# 2. Architect Reproduction 2: Descriptor Path vs Bytes Drift Rejected
-# =========================================================================
-
-def test_architect_reproduction_2_descriptor_path_bytes_drift_rejected() -> None:
-    """Reproduction 2: Descriptor with mismatched path on disk vs raw_bytes must be rejected."""
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        tmp_path = Path(tmp_dir)
-        file_b = tmp_path / "font_b.ttf"
-        bytes_b = b"\x00\x01\x00\x00" + b"\xBB" * 100
-        file_b.write_bytes(bytes_b)
-
-        bytes_a = b"\x00\x01\x00\x00" + b"\xAA" * 100
-        size_a = len(bytes_a)
-        sha_a = hashlib.sha256(bytes_a).hexdigest()
-
-        # Attesting size and SHA of A, but pointing file_path to B with disk bytes B != A
-        desc = CandidateArtifactDescriptor(file_path=file_b, expected_format="TTF", expected_size_bytes=size_a, expected_sha256_hex=sha_a, raw_bytes=bytes_a)
-
-        with pytest.raises(ValueError, match="ARTIFACT_PATH_BYTES_DRIFT"):
-            CandidateArtifact.from_descriptor(desc)
-
-
-# =========================================================================
-# 3. Production Outcome Fail-Closed & Source Verification
-# =========================================================================
-
-def test_production_producer_requires_attested_descriptor() -> None:
-    rec, _ = _make_observation_record(code_point=65)
-    pair = PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False, provenance="chromium:chromium:canvas_text_metrics")
-    model = CanonicalFontModel(
-        family_name="F", style_name="R", reference_id="ref", style_id="reg",
-        config_hash="a" * 64, browser_version="chromium", fit_observations_count=1,
-        calibration_fingerprint="b" * 64,
-        glyphs={65: CalibratedGlyph(65, "A", 650.0, 50.0, 50.0, 750.0, -200.0, (50.0, 50.0, 550.0, 700.0), [_make_sample_contour()], observation_fingerprints=("a" * 64,))},
-    )
-
-    with pytest.raises(TypeError, match="ProductionConsumerEvidenceProducer requires a CandidateArtifactDescriptor"):
-        asyncio.run(
-            ProductionConsumerEvidenceProducer.produce_bundle(
-                descriptor="raw_unattested_path.ttf",  # type: ignore
-                model=model,
-                config=ObservationConfig(),
-                held_out_records=[rec],
-                held_out_pairs=[pair],
-                raster_provider=lambda r: b"",
-            )
-        )
-
-
-def test_production_producer_corrupt_font_raises_production_error() -> None:
-    corrupt_bytes = b"\x00\x01\x00\x00" + b"\x00" * 100
-    desc = CandidateArtifactDescriptor(
-        file_path="corrupt.ttf",
-        expected_format="TTF",
-        expected_size_bytes=len(corrupt_bytes),
-        expected_sha256_hex=hashlib.sha256(corrupt_bytes).hexdigest(),
-        raw_bytes=corrupt_bytes,
-    )
-    rec, png_bytes = _make_observation_record(code_point=65)
-    pair = PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False, provenance="chromium:chromium:canvas_text_metrics")
-    model = CanonicalFontModel(
-        family_name="F", style_name="R", reference_id="ref", style_id="reg",
-        config_hash="a" * 64, browser_version="chromium", fit_observations_count=1,
-        calibration_fingerprint="b" * 64,
-        glyphs={65: CalibratedGlyph(65, "A", 650.0, 50.0, 50.0, 750.0, -200.0, (50.0, 50.0, 550.0, 700.0), [_make_sample_contour()], observation_fingerprints=("a" * 64,))},
-    )
-
-    # Corrupt font must raise ProductionProducerError (no usable PASS bundle)
-    with pytest.raises(ProductionProducerError, match="CONSUMER_PRODUCER_FAILED"):
-        asyncio.run(
-            ProductionConsumerEvidenceProducer.produce_bundle(
-                descriptor=desc,
-                model=model,
-                config=ObservationConfig(),
-                held_out_records=[rec],
-                held_out_pairs=[pair],
-                raster_provider=lambda r: png_bytes,
-            )
-        )
-
-
-# =========================================================================
-# 4. Typography / Character-Codepoint Drift & Exact Sample Coverage
-# =========================================================================
-
-def test_typography_fingerprint_rejects_character_codepoint_drift() -> None:
-    bad_pair = PairKerningObservation(65, 66, "Z", "B", 650, 600, 1250, 0, False, provenance="chromium:chromium:canvas_text_metrics")
-    with pytest.raises(ValueError, match="TYPOGRAPHY_CHAR_CODEPOINT_MISMATCH"):
-        FidelityEvaluator._compute_typography_fingerprint([bad_pair])
-
-
-def test_freetype_sample_level_drift_rejected_in_evaluator() -> None:
-    art = CandidateArtifact.from_source(b"\x00\x01\x00\x00" + b"\x00" * 100, format_hint="TTF")
-    rec, png_bytes = _make_observation_record(code_point=65)
-    glyph = CalibratedGlyph(65, "A", 650.0, 50.0, 50.0, 750.0, -200.0, (50.0, 50.0, 550.0, 700.0), [_make_sample_contour()], observation_fingerprints=("a" * 64,))
-    model = CanonicalFontModel(
-        family_name="F", style_name="R", reference_id="ref", style_id="reg",
-        config_hash="a" * 64, browser_version="chromium", fit_observations_count=1,
-        calibration_fingerprint="b" * 64, glyphs={65: glyph},
-    )
-    pair = PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False, provenance="chromium:chromium:canvas_text_metrics")
-
-    # Sample with drifted cache_key
-    bad_sample = FreeTypeSampleEvidence("drifted_key", 65, "A", 256, rec.raster_sha256, 0.95, 0)
-    fr_res = RasterComparisonResult(65, "A", 256, 0.95, 0, samples=(bad_sample,), min_raster_iou=0.95)
-
-    pos_vec = HarfBuzzPositionVector(650.0, 0.0, 0.0, 0.0)
-    hb_sample = HarfBuzzSampleEvidence(65, 65, "AA", True, True, (1, 1), (0, 1), (pos_vec, pos_vec), 1300.0, 1300.0, 0.0, 0.0)
-    hb_res = ShapingTestResult("AA", "c", True, True, ["A", "A"], [], 2, 2, 1300, 1300, 0, 0, samples=(hb_sample,), all_in_cmap=True, all_sequence_match=True)
-
-    cr_pair_s = ChromiumPairSampleEvidence(65, 65, "AA", 1300.0, 1300.0, 1300.0, 0.0, 0.0, True)
-    cr_res = ChromiumValidationResult(True, "cr", True, True, 1, 0.0, [], glyph_samples=(), pair_samples=(cr_pair_s,), fit_pairs_material_improvement=True, held_out_pairs_non_regression=True, rendered_canvas_valid=True)
-    ft_res = FormatValidationResult("TTF", "f.ttf", 100, art.sha256_hex, True, False, False, False, False, 1, 1000, True, True, True)
-
-    bundle = ConsumerEvidenceBundle(
-        schema_version="1.0.0",
-        model_canonical_hash=model.compute_canonical_hash(),
-        config_hash="a" * 64,
-        held_out_fingerprint=FidelityEvaluator._compute_composite_held_out_fingerprint([rec], [pair]),
-        held_out_raster_fingerprint=FidelityEvaluator._compute_records_fingerprint([rec]),
-        held_out_typography_fingerprint=FidelityEvaluator._compute_typography_fingerprint([pair]),
-        candidate_artifact_sha=art.sha256_hex,
-        fonttools=BoundFontToolsEvidence(candidate_artifact_sha=art.sha256_hex, result=ft_res),
-        freetype=BoundFreeTypeEvidence(candidate_artifact_sha=art.sha256_hex, result=fr_res),
-        harfbuzz=BoundHarfBuzzEvidence(candidate_artifact_sha=art.sha256_hex, result=hb_res),
-        chromium=BoundChromiumEvidence(candidate_artifact_sha=art.sha256_hex, result=cr_res),
-    )
-
-    report = FidelityEvaluator.evaluate(
-        model=model,
-        config=ObservationConfig(),
-        fit_records=[rec],
-        held_out_records=[rec],
-        held_out_pairs=[pair],
-        consumer_bundle=bundle,
-        raster_provider=lambda r: png_bytes,
-    )
-    assert report.consumer_gate.status == "FAIL"
-    assert report.consumer_gate.freetype_passed is False
 
 
 # =========================================================================
@@ -491,6 +497,7 @@ async def test_production_consumer_bundle_assembler_positive_fixture() -> None:
         assert bundle.chromium.result.is_available is True
         assert bundle.chromium.result.is_direct_loadable_chromium is True
         assert bundle.chromium.result.rendered_canvas_valid is True
+        assert len(bundle.chromium.result.glyph_samples) == 2
         assert len(bundle.chromium.result.pair_samples) == 1
         assert bundle.chromium.result.pair_samples[0].pair == "BA"
 
@@ -510,8 +517,121 @@ async def test_production_consumer_bundle_assembler_positive_fixture() -> None:
 
 
 # =========================================================================
-# 6. Sample Drift, Adapter & Boundary Tests
+# 6. Typography, Fingerprints & Edge Tests
 # =========================================================================
+
+def test_typography_fingerprint_rejects_character_codepoint_drift() -> None:
+    bad_pair = PairKerningObservation(65, 66, "Z", "B", 650, 600, 1250, 0, False, provenance="chromium:chromium:canvas_text_metrics")
+    with pytest.raises(ValueError, match="TYPOGRAPHY_CHAR_CODEPOINT_MISMATCH"):
+        FidelityEvaluator._compute_typography_fingerprint([bad_pair])
+
+
+def test_missing_typography_fingerprint_rejected_when_pairs_present() -> None:
+    art = CandidateArtifact.from_source(b"\x00\x01\x00\x00" + b"\x00" * 100, format_hint="TTF")
+    rec, png_bytes = _make_observation_record(code_point=65)
+    glyph = CalibratedGlyph(65, "A", 650.0, 50.0, 50.0, 750.0, -200.0, (50.0, 50.0, 550.0, 700.0), [_make_sample_contour()], observation_fingerprints=("a" * 64,))
+    model = CanonicalFontModel(
+        family_name="F", style_name="R", reference_id="ref", style_id="reg",
+        config_hash="a" * 64, browser_version="chromium", fit_observations_count=1,
+        calibration_fingerprint="b" * 64, glyphs={65: glyph},
+    )
+    pair = PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False, provenance="chromium:chromium:canvas_text_metrics")
+
+    ft_res = FormatValidationResult("TTF", "f.ttf", 100, art.sha256_hex, True, False, False, False, False, 1, 1000, True, True, True)
+    fr_sample = FreeTypeSampleEvidence(rec.cache_key, 65, "A", 256, rec.raster_sha256, 0.95, 0)
+    fr_res = RasterComparisonResult(65, "A", 256, 0.95, 0, samples=(fr_sample,), min_raster_iou=0.95)
+
+    pos_vec = HarfBuzzPositionVector(650.0, 0.0, 0.0, 0.0)
+    hb_sample = HarfBuzzSampleEvidence(65, 65, "AA", True, True, (1, 1), (0, 1), (pos_vec, pos_vec), 1300.0, 1300.0, 0.0, 0.0)
+    hb_res = ShapingTestResult("AA", "c", True, True, ["A", "A"], ["A", "A"], 2, 2, 1300, 1300, 0, 0, samples=(hb_sample,), all_in_cmap=True, all_sequence_match=True)
+
+    cr_glyph_s = ChromiumGlyphSampleEvidence(65, "A", 650.0, 650.0, 0.0)
+    cr_pair_s = ChromiumPairSampleEvidence(65, 65, "AA", 1300.0, 1300.0, 1300.0, 0.0, 0.0, True)
+    cr_res = ChromiumValidationResult(True, "cr", True, True, 1, 0.0, [], glyph_samples=(cr_glyph_s,), pair_samples=(cr_pair_s,), fit_pairs_material_improvement=True, held_out_pairs_non_regression=True, rendered_canvas_valid=True)
+
+    # Missing held_out_typography_fingerprint (None)
+    bundle = ConsumerEvidenceBundle(
+        schema_version="1.0.0",
+        model_canonical_hash=model.compute_canonical_hash(),
+        config_hash="a" * 64,
+        held_out_fingerprint=FidelityEvaluator._compute_composite_held_out_fingerprint([rec], [pair]),
+        held_out_raster_fingerprint=FidelityEvaluator._compute_records_fingerprint([rec]),
+        held_out_typography_fingerprint=None,
+        candidate_artifact_sha=art.sha256_hex,
+        fonttools=BoundFontToolsEvidence(candidate_artifact_sha=art.sha256_hex, result=ft_res),
+        freetype=BoundFreeTypeEvidence(candidate_artifact_sha=art.sha256_hex, result=fr_res),
+        harfbuzz=BoundHarfBuzzEvidence(candidate_artifact_sha=art.sha256_hex, result=hb_res),
+        chromium=BoundChromiumEvidence(candidate_artifact_sha=art.sha256_hex, result=cr_res),
+    )
+
+    report = FidelityEvaluator.evaluate(
+        model=model,
+        config=ObservationConfig(),
+        fit_records=[rec],
+        held_out_records=[rec],
+        held_out_pairs=[pair],
+        consumer_bundle=bundle,
+        raster_provider=lambda r: png_bytes,
+    )
+    assert report.overall_status == "FAIL"
+    assert report.consumer_gate.status == "FAIL"
+
+
+def test_public_test_session_adapter_absence() -> None:
+    """Verify TestChromiumEvidenceProducerAdapter is absent from fidelity public package exports."""
+    assert not hasattr(fidelity, "TestChromiumEvidenceProducerAdapter")
+    assert "TestChromiumEvidenceProducerAdapter" not in fidelity.__all__
+
+
+def test_freetype_sample_level_drift_rejected_in_evaluator() -> None:
+    art = CandidateArtifact.from_source(b"\x00\x01\x00\x00" + b"\x00" * 100, format_hint="TTF")
+    rec, png_bytes = _make_observation_record(code_point=65)
+    glyph = CalibratedGlyph(65, "A", 650.0, 50.0, 50.0, 750.0, -200.0, (50.0, 50.0, 550.0, 700.0), [_make_sample_contour()], observation_fingerprints=("a" * 64,))
+    model = CanonicalFontModel(
+        family_name="F", style_name="R", reference_id="ref", style_id="reg",
+        config_hash="a" * 64, browser_version="chromium", fit_observations_count=1,
+        calibration_fingerprint="b" * 64, glyphs={65: glyph},
+    )
+    pair = PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False, provenance="chromium:chromium:canvas_text_metrics")
+
+    bad_sample = FreeTypeSampleEvidence("drifted_key", 65, "A", 256, rec.raster_sha256, 0.95, 0)
+    fr_res = RasterComparisonResult(65, "A", 256, 0.95, 0, samples=(bad_sample,), min_raster_iou=0.95)
+
+    pos_vec = HarfBuzzPositionVector(650.0, 0.0, 0.0, 0.0)
+    hb_sample = HarfBuzzSampleEvidence(65, 65, "AA", True, True, (1, 1), (0, 1), (pos_vec, pos_vec), 1300.0, 1300.0, 0.0, 0.0)
+    hb_res = ShapingTestResult("AA", "c", True, True, ["A", "A"], [], 2, 2, 1300, 1300, 0, 0, samples=(hb_sample,), all_in_cmap=True, all_sequence_match=True)
+
+    cr_glyph_s = ChromiumGlyphSampleEvidence(65, "A", 650.0, 650.0, 0.0)
+    cr_pair_s = ChromiumPairSampleEvidence(65, 65, "AA", 1300.0, 1300.0, 1300.0, 0.0, 0.0, True)
+    cr_res = ChromiumValidationResult(True, "cr", True, True, 1, 0.0, [], glyph_samples=(cr_glyph_s,), pair_samples=(cr_pair_s,), fit_pairs_material_improvement=True, held_out_pairs_non_regression=True, rendered_canvas_valid=True)
+    ft_res = FormatValidationResult("TTF", "f.ttf", 100, art.sha256_hex, True, False, False, False, False, 1, 1000, True, True, True)
+
+    bundle = ConsumerEvidenceBundle(
+        schema_version="1.0.0",
+        model_canonical_hash=model.compute_canonical_hash(),
+        config_hash="a" * 64,
+        held_out_fingerprint=FidelityEvaluator._compute_composite_held_out_fingerprint([rec], [pair]),
+        held_out_raster_fingerprint=FidelityEvaluator._compute_records_fingerprint([rec]),
+        held_out_typography_fingerprint=FidelityEvaluator._compute_typography_fingerprint([pair]),
+        candidate_artifact_sha=art.sha256_hex,
+        fonttools=BoundFontToolsEvidence(candidate_artifact_sha=art.sha256_hex, result=ft_res),
+        freetype=BoundFreeTypeEvidence(candidate_artifact_sha=art.sha256_hex, result=fr_res),
+        harfbuzz=BoundHarfBuzzEvidence(candidate_artifact_sha=art.sha256_hex, result=hb_res),
+        chromium=BoundChromiumEvidence(candidate_artifact_sha=art.sha256_hex, result=cr_res),
+    )
+
+    report = FidelityEvaluator.evaluate(
+        model=model,
+        config=ObservationConfig(),
+        fit_records=[rec],
+        held_out_records=[rec],
+        held_out_pairs=[pair],
+        consumer_bundle=bundle,
+        raster_provider=lambda r: png_bytes,
+    )
+    assert report.consumer_gate.status == "FAIL"
+    assert report.consumer_gate.freetype_passed is False
+
 
 def test_harfbuzz_sample_level_drift_rejected_in_evaluator() -> None:
     art = CandidateArtifact.from_source(b"\x00\x01\x00\x00" + b"\x00" * 100, format_hint="TTF")
@@ -527,13 +647,13 @@ def test_harfbuzz_sample_level_drift_rejected_in_evaluator() -> None:
     fr_sample = FreeTypeSampleEvidence(rec.cache_key, 65, "A", 256, rec.raster_sha256, 0.95, 0)
     fr_res = RasterComparisonResult(65, "A", 256, 0.95, 0, samples=(fr_sample,), min_raster_iou=0.95)
 
-    # HarfBuzz sample with drifted text "AB" instead of "AA"
     pos_vec = HarfBuzzPositionVector(650.0, 0.0, 0.0, 0.0)
-    bad_hb_sample = HarfBuzzSampleEvidence(65, 65, "AB", True, True, (1, 1), (0, 1), (pos_vec, pos_vec), 1300.0, 1300.0, 0.0, 0.0)
-    hb_res = ShapingTestResult("AA", "c", True, True, ["A", "A"], [], 2, 2, 1300, 1300, 0, 0, samples=(bad_hb_sample,), all_in_cmap=True, all_sequence_match=True)
+    hb_sample = HarfBuzzSampleEvidence(65, 65, "AA", True, False, (1, 1), (0, 1), (pos_vec, pos_vec), 1300.0, 1300.0, 0.0, 0.0)
+    hb_res = ShapingTestResult("AA", "c", True, False, ["A", "A"], [], 2, 2, 1300, 1300, 0, 0, samples=(hb_sample,), all_in_cmap=True, all_sequence_match=False)
 
+    cr_glyph_s = ChromiumGlyphSampleEvidence(65, "A", 650.0, 650.0, 0.0)
     cr_pair_s = ChromiumPairSampleEvidence(65, 65, "AA", 1300.0, 1300.0, 1300.0, 0.0, 0.0, True)
-    cr_res = ChromiumValidationResult(True, "cr", True, True, 1, 0.0, [], glyph_samples=(), pair_samples=(cr_pair_s,), fit_pairs_material_improvement=True, held_out_pairs_non_regression=True, rendered_canvas_valid=True)
+    cr_res = ChromiumValidationResult(True, "cr", True, True, 1, 0.0, [], glyph_samples=(cr_glyph_s,), pair_samples=(cr_pair_s,), fit_pairs_material_improvement=True, held_out_pairs_non_regression=True, rendered_canvas_valid=True)
     ft_res = FormatValidationResult("TTF", "f.ttf", 100, art.sha256_hex, True, False, False, False, False, 1, 1000, True, True, True)
 
     bundle = ConsumerEvidenceBundle(
@@ -581,9 +701,9 @@ def test_chromium_sample_level_drift_rejected_in_evaluator() -> None:
     hb_sample = HarfBuzzSampleEvidence(65, 65, "AA", True, True, (1, 1), (0, 1), (pos_vec, pos_vec), 1300.0, 1300.0, 0.0, 0.0)
     hb_res = ShapingTestResult("AA", "c", True, True, ["A", "A"], [], 2, 2, 1300, 1300, 0, 0, samples=(hb_sample,), all_in_cmap=True, all_sequence_match=True)
 
-    # Chromium pair sample with non_regression=False
+    cr_glyph_s = ChromiumGlyphSampleEvidence(65, "A", 650.0, 650.0, 0.0)
     cr_bad_s = ChromiumPairSampleEvidence(65, 65, "AA", 1300.0, 1300.0, 1300.0, 0.0, 0.0, False)
-    cr_res = ChromiumValidationResult(True, "cr", True, True, 1, 0.0, [], glyph_samples=(), pair_samples=(cr_bad_s,), fit_pairs_material_improvement=False, held_out_pairs_non_regression=False, rendered_canvas_valid=True)
+    cr_res = ChromiumValidationResult(True, "cr", True, True, 1, 0.0, [], glyph_samples=(cr_glyph_s,), pair_samples=(cr_bad_s,), fit_pairs_material_improvement=False, held_out_pairs_non_regression=False, rendered_canvas_valid=True)
     ft_res = FormatValidationResult("TTF", "f.ttf", 100, art.sha256_hex, True, False, False, False, False, 1, 1000, True, True, True)
 
     bundle = ConsumerEvidenceBundle(
@@ -614,42 +734,52 @@ def test_chromium_sample_level_drift_rejected_in_evaluator() -> None:
 
 
 def test_zero_held_out_samples_fails_closed_in_producer() -> None:
-    art = CandidateArtifact.from_source(b"\x00\x01\x00\x00" + b"\x00" * 100, format_hint="TTF")
-    model = CanonicalFontModel(
-        family_name="F", style_name="R", reference_id="ref", style_id="reg",
-        config_hash="a" * 64, browser_version="chromium", fit_observations_count=1,
-        calibration_fingerprint="b" * 64,
-        glyphs={65: CalibratedGlyph(65, "A", 650.0, 50.0, 50.0, 750.0, -200.0, (50.0, 50.0, 550.0, 700.0), [_make_sample_contour()], observation_fingerprints=("a" * 64,))},
-    )
-    desc = CandidateArtifactDescriptor("f.ttf", "TTF", 104, art.sha256_hex, art.raw_bytes)
-    rec, _ = _make_observation_record(code_point=65)
-    pair = PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False, provenance="chromium:chromium:canvas_text_metrics")
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir)
+        f_file = tmp_path / "f.ttf"
+        font_bytes = b"\x00\x01\x00\x00" + b"\x00" * 100
+        f_file.write_bytes(font_bytes)
+        desc = CandidateArtifactDescriptor(f_file, "TTF", len(font_bytes), hashlib.sha256(font_bytes).hexdigest(), font_bytes)
 
-    with pytest.raises(ValueError, match="ZERO_HELD_OUT_RASTER_SAMPLES"):
-        asyncio.run(ProductionConsumerEvidenceProducer.produce_bundle(desc, model, ObservationConfig(), [], [pair], lambda r: b""))
+        model = CanonicalFontModel(
+            family_name="F", style_name="R", reference_id="ref", style_id="reg",
+            config_hash="a" * 64, browser_version="chromium", fit_observations_count=1,
+            calibration_fingerprint="b" * 64,
+            glyphs={65: CalibratedGlyph(65, "A", 650.0, 50.0, 50.0, 750.0, -200.0, (50.0, 50.0, 550.0, 700.0), [_make_sample_contour()], observation_fingerprints=("a" * 64,))},
+        )
+        rec, _ = _make_observation_record(code_point=65)
+        pair = PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False, provenance="chromium:chromium:canvas_text_metrics")
 
-    with pytest.raises(ValueError, match="ZERO_HELD_OUT_TYPOGRAPHY_SAMPLES"):
-        asyncio.run(ProductionConsumerEvidenceProducer.produce_bundle(desc, model, ObservationConfig(), [rec], [], lambda r: b""))
+        with pytest.raises(ValueError, match="ZERO_HELD_OUT_RASTER_SAMPLES"):
+            asyncio.run(ProductionConsumerEvidenceProducer.produce_bundle(desc, model, ObservationConfig(), [], [pair], lambda r: b""))
+
+        with pytest.raises(ValueError, match="ZERO_HELD_OUT_TYPOGRAPHY_SAMPLES"):
+            asyncio.run(ProductionConsumerEvidenceProducer.produce_bundle(desc, model, ObservationConfig(), [rec], [], lambda r: b""))
 
 
 def test_unknown_held_out_code_point_fails_closed_in_producer() -> None:
-    art = CandidateArtifact.from_source(b"\x00\x01\x00\x00" + b"\x00" * 100, format_hint="TTF")
-    model = CanonicalFontModel(
-        family_name="F", style_name="R", reference_id="ref", style_id="reg",
-        config_hash="a" * 64, browser_version="chromium", fit_observations_count=1,
-        calibration_fingerprint="b" * 64,
-        glyphs={65: CalibratedGlyph(65, "A", 650.0, 50.0, 50.0, 750.0, -200.0, (50.0, 50.0, 550.0, 700.0), [_make_sample_contour()], observation_fingerprints=("a" * 64,))},
-    )
-    desc = CandidateArtifactDescriptor("f.ttf", "TTF", 104, art.sha256_hex, art.raw_bytes)
-    rec_unknown, _ = _make_observation_record(code_point=999)
-    pair = PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False, provenance="chromium:chromium:canvas_text_metrics")
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir)
+        f_file = tmp_path / "f.ttf"
+        font_bytes = b"\x00\x01\x00\x00" + b"\x00" * 100
+        f_file.write_bytes(font_bytes)
+        desc = CandidateArtifactDescriptor(f_file, "TTF", len(font_bytes), hashlib.sha256(font_bytes).hexdigest(), font_bytes)
 
-    with pytest.raises(ValueError, match="UNKNOWN_HELD_OUT_CODE_POINT"):
-        asyncio.run(ProductionConsumerEvidenceProducer.produce_bundle(desc, model, ObservationConfig(), [rec_unknown], [pair], lambda r: b""))
+        model = CanonicalFontModel(
+            family_name="F", style_name="R", reference_id="ref", style_id="reg",
+            config_hash="a" * 64, browser_version="chromium", fit_observations_count=1,
+            calibration_fingerprint="b" * 64,
+            glyphs={65: CalibratedGlyph(65, "A", 650.0, 50.0, 50.0, 750.0, -200.0, (50.0, 50.0, 550.0, 700.0), [_make_sample_contour()], observation_fingerprints=("a" * 64,))},
+        )
+        rec_unknown, _ = _make_observation_record(code_point=999)
+        pair = PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False, provenance="chromium:chromium:canvas_text_metrics")
+
+        with pytest.raises(ValueError, match="UNKNOWN_HELD_OUT_CODE_POINT"):
+            asyncio.run(ProductionConsumerEvidenceProducer.produce_bundle(desc, model, ObservationConfig(), [rec_unknown], [pair], lambda r: b""))
 
 
 @pytest.mark.asyncio
-async def test_test_chromium_adapter_custom_session() -> None:
+async def test_test_chromium_custom_session_internal() -> None:
     has_chromium = False
     try:
         find_chromium_executable()
@@ -679,8 +809,12 @@ async def test_test_chromium_adapter_custom_session() -> None:
 
         session = ChromiumSession(timeout_seconds=10.0)
         try:
-            evidence = await TestChromiumEvidenceProducerAdapter.produce_with_session(
-                art, model, [rec], None, session
+            evidence = await ChromiumEvidenceProducer._produce_with_session_internal(
+                artifact=art,
+                model=model,
+                held_out_records=[rec],
+                held_out_pairs=None,
+                custom_session=session,
             )
             assert evidence.result.is_direct_loadable_chromium is True
         finally:

@@ -19,6 +19,7 @@ from fidelity.models import (
     BoundFontToolsEvidence,
     BoundFreeTypeEvidence,
     BoundHarfBuzzEvidence,
+    ChromiumGlyphSampleEvidence,
     ChromiumPairSampleEvidence,
     ConsumerEvidenceBundle,
     ConsumerGateResult,
@@ -227,7 +228,19 @@ def _make_valid_consumer_bundle(
             code_point=records[0].code_point, character=chr(records[0].code_point), render_size_px=records[0].resolution,
             raster_iou=0.95, pixel_delta_count=5, render_error=None, samples=samples, min_raster_iou=0.95,
         )
+        unique_cps = sorted(list({r.code_point for r in records}))
+        cr_glyph_samples = tuple(
+            ChromiumGlyphSampleEvidence(
+                code_point=cp,
+                character=chr(cp),
+                candidate_advance_upem=650.0 if cp == 65 else 600.0,
+                expected_advance_upem=650.0 if cp == 65 else 600.0,
+                advance_delta_upem=0.0,
+            )
+            for cp in unique_cps
+        )
     else:
+        cr_glyph_samples = ()
         raster_res = RasterComparisonResult(
             code_point=65, character="A", render_size_px=256,
             raster_iou=0.95, pixel_delta_count=5, render_error=None,
@@ -266,8 +279,10 @@ def _make_valid_consumer_bundle(
         chromium_res = ChromiumValidationResult(
             is_available=True, browser_version="chromium",
             is_direct_loadable_chromium=True, fallback_rejection_verified=True,
-            measured_glyph_count=2, mean_chromium_advance_error_upem=0.5,
+            measured_glyph_count=len(cr_glyph_samples) if cr_glyph_samples else 2,
+            mean_chromium_advance_error_upem=0.5,
             rendered_canvas_valid=True, error_message=None, held_out_pairs_non_regression=True,
+            glyph_samples=cr_glyph_samples,
             pair_samples=cr_pair_samples,
         )
     else:

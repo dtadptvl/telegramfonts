@@ -29,7 +29,6 @@ from fidelity.producers import (
     FreeTypeEvidenceProducer,
     HarfBuzzEvidenceProducer,
     ProductionConsumerEvidenceProducer,
-    TestChromiumEvidenceProducerAdapter,
 )
 
 __all__ = [
@@ -58,7 +57,6 @@ __all__ = [
     "MetricsGateResult",
     "ProductionConsumerEvidenceProducer",
     "ProductionProducerError",
-    "TestChromiumEvidenceProducerAdapter",
     "TopologyGateResult",
     "TypographyGateResult",
 ]

@@ -967,34 +967,13 @@ class ChromiumEvidenceProducer:
                 sess.close()
 
 
-class TestChromiumEvidenceProducerAdapter:
-    """Test-only adapter for running ChromiumEvidenceProducer with a caller-provided session."""
-
-    @classmethod
-    async def produce_with_session(
-        cls,
-        artifact: CandidateArtifact,
-        model: CanonicalFontModel,
-        held_out_records: Sequence[ObservationRecord],
-        held_out_pairs: Sequence[PairKerningObservation] | None,
-        session: ChromiumSession,
-    ) -> BoundChromiumEvidence:
-        return await ChromiumEvidenceProducer._produce_with_session_internal(
-            artifact=artifact,
-            model=model,
-            held_out_records=held_out_records,
-            held_out_pairs=held_out_pairs,
-            custom_session=session,
-        )
-
-
 class ProductionConsumerEvidenceProducer:
     """Authoritative builder executing all four consumers and producing a strictly bound ConsumerEvidenceBundle."""
 
     @classmethod
     async def produce_bundle(
         cls,
-        descriptor: CandidateArtifactDescriptor | CandidateArtifact,
+        descriptor: CandidateArtifactDescriptor,
         model: CanonicalFontModel,
         config: ObservationConfig,
         held_out_records: Sequence[ObservationRecord],
@@ -1005,15 +984,13 @@ class ProductionConsumerEvidenceProducer:
 
         Returns a complete four-consumer passing ConsumerEvidenceBundle or raises ProductionProducerError.
         """
-        # 1. Enforce descriptor attestation
-        if isinstance(descriptor, CandidateArtifactDescriptor):
-            artifact = CandidateArtifact.from_descriptor(descriptor)
-        elif isinstance(descriptor, CandidateArtifact):
-            artifact = descriptor
-        else:
+        # 1. Enforce descriptor attestation strictly before any other parameter/sample checks
+        if not isinstance(descriptor, CandidateArtifactDescriptor):
             raise TypeError(
                 f"ProductionConsumerEvidenceProducer requires a CandidateArtifactDescriptor, got {type(descriptor)}"
             )
+
+        artifact = CandidateArtifact.from_descriptor(descriptor)
 
         # 2. Strict pre-validation of inputs (no zero, unknown, or mismatched samples permitted)
         if not held_out_records:
@@ -1057,21 +1034,61 @@ class ProductionConsumerEvidenceProducer:
         hb_evidence = HarfBuzzEvidenceProducer.produce(artifact, model, sorted_pairs)
         cr_evidence = await ChromiumEvidenceProducer.produce(artifact, model, sorted_records, sorted_pairs)
 
-        # 4. Fail-closed production outcome check: if ANY consumer failed, do not return a usable PASS bundle
-        producer_failures: list[str] = []
-        if not ft_evidence.result.is_direct_loadable_fonttools or ft_evidence.result.validation_error:
-            producer_failures.append(f"FontTools failed: {ft_evidence.result.validation_error}")
-        if fr_evidence.result.render_error:
-            producer_failures.append(f"FreeType failed: {fr_evidence.result.render_error}")
-        if hb_evidence.result.error_message:
-            producer_failures.append(f"HarfBuzz failed: {hb_evidence.result.error_message}")
-        if not cr_evidence.result.is_available:
-            producer_failures.append(f"Chromium unavailable: {cr_evidence.result.error_message}")
-        elif cr_evidence.result.error_message or not cr_evidence.result.is_direct_loadable_chromium or not cr_evidence.result.held_out_pairs_non_regression:
-            producer_failures.append(f"Chromium failed: {cr_evidence.result.error_message or 'non-regression/load failed'}")
+        # 4. Fail-closed production outcome check: if ANY consumer failed quality/policy, do not return a usable PASS bundle
+        ft = ft_evidence.result
+        if (
+            not ft.is_direct_loadable_fonttools
+            or not ft.has_valid_cmap
+            or not ft.has_valid_metrics
+            or not ft.decompression_round_trip
+            or ft.glyph_count <= 0
+            or ft.units_per_em <= 0
+            or ft.validation_error is not None
+        ):
+            raise ProductionProducerError("CONSUMER_PRODUCER_FAILED: FontTools structural validation failed")
 
-        if producer_failures:
-            raise ProductionProducerError(f"CONSUMER_PRODUCER_FAILED: {'; '.join(producer_failures)}")
+        fr = fr_evidence.result
+        if (
+            fr.render_error is not None
+            or not fr.samples
+            or len(fr.samples) != len(held_out_records)
+            or any(s.render_error is not None or s.raster_iou < 0.85 for s in fr.samples)
+            or fr.min_raster_iou < 0.85
+        ):
+            raise ProductionProducerError("CONSUMER_PRODUCER_FAILED: FreeType raster rendering verification failed")
+
+        hb = hb_evidence.result
+        if (
+            hb.error_message is not None
+            or not hb.all_in_cmap
+            or not hb.all_sequence_match
+            or not hb.samples
+            or len(hb.samples) != len(held_out_pairs)
+            or any(
+                s.error_message is not None
+                or not s.in_candidate_cmap
+                or not s.glyph_sequence_match
+                or s.advance_delta_upem > 5.0
+                or s.max_position_delta_upem > 5.0
+                for s in hb.samples
+            )
+        ):
+            raise ProductionProducerError("CONSUMER_PRODUCER_FAILED: HarfBuzz shaping verification failed")
+
+        cr = cr_evidence.result
+        expected_unique_cps = sorted(list({r.code_point for r in held_out_records if r.code_point in model.glyphs}))
+        if (
+            not cr.is_available
+            or not cr.is_direct_loadable_chromium
+            or not cr.fallback_rejection_verified
+            or not cr.rendered_canvas_valid
+            or cr.error_message is not None
+            or not cr.held_out_pairs_non_regression
+            or len(cr.glyph_samples) != len(expected_unique_cps)
+            or len(cr.pair_samples) != len(held_out_pairs)
+            or any(not s.non_regression for s in cr.pair_samples)
+        ):
+            raise ProductionProducerError("CONSUMER_PRODUCER_FAILED: Chromium browser verification failed")
 
         # 5. Construct and validate bundle
         bundle = ConsumerEvidenceBundle(
@@ -1103,7 +1120,7 @@ class ProductionConsumerEvidenceProducer:
     @classmethod
     def produce_bundle_sync(
         cls,
-        descriptor: CandidateArtifactDescriptor | CandidateArtifact,
+        descriptor: CandidateArtifactDescriptor,
         model: CanonicalFontModel,
         config: ObservationConfig,
         held_out_records: Sequence[ObservationRecord],
