@@ -946,10 +946,11 @@ class ChromiumEvidenceProducer:
             )
 
         except Exception as exc:
+            was_connected = getattr(sess, "ws", None) is not None and sess._is_connected()
             return BoundChromiumEvidence(
                 candidate_artifact_sha=artifact.sha256_hex,
                 result=ChromiumValidationResult(
-                    is_available=True,
+                    is_available=was_connected,
                     browser_version=sess.browser_version or "chromium",
                     is_direct_loadable_chromium=False,
                     fallback_rejection_verified=False,
@@ -961,7 +962,7 @@ class ChromiumEvidenceProducer:
                     fit_pairs_material_improvement=False,
                     held_out_pairs_non_regression=False,
                     rendered_canvas_valid=False,
-                    error_message=f"CHROMIUM_EXECUTION_EXCEPTION: {exc}",
+                    error_message=f"CHROMIUM_EXECUTION_EXCEPTION: {type(exc).__name__}" if was_connected else f"CHROMIUM_NOT_AVAILABLE: {type(exc).__name__}",
                 ),
             )
         finally:

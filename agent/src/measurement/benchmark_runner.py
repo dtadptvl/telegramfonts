@@ -132,7 +132,12 @@ class GroundTruthBenchmarkRunner:
                 font_family=font_family_name,
             )
 
-            discovered_cps = store.get_coverage(reference_id, style_id)
+            discovered_cps = store.get_coverage(
+                reference_id,
+                style_id,
+                browser_version=session.browser_version,
+                config_hash=config.compute_hash(),
+            )
 
             # Evaluate metrics accuracy against Ground Truth
             adv_deltas: list[float] = []

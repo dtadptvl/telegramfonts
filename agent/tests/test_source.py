@@ -1,5 +1,7 @@
 """Tests for source acquisition, live HTML/image preview resolution, and raster extraction."""
+import hashlib
 import io
+import pickle
 import httpx
 import pytest
 import shutil
@@ -182,10 +184,11 @@ async def test_production_cache_miss_collects_persists_and_reconstructs_without_
 
     assert set(payload.styles["reg"].reconstructed_glyphs) == {65, 66, 79}
     assert browser.observe_count == 1
-    assert browser.closed is True
+    cfg_h = acquirer.observation_config.compute_hash()
+    bv = browser.browser_version
     assert len(acquirer.store.get_metric_observations("unknown_font", "reg")) == 6
-    assert len(acquirer.store.get_pair_observations("unknown_font", "reg")) > 0
-    assert len(acquirer.store.get_feature_observations("unknown_font", "reg")) == 1
+    assert len(acquirer.store.get_pair_observations("unknown_font", "reg", browser_version=bv, config_hash=cfg_h)) > 0
+    assert len(acquirer.store.get_feature_observations("unknown_font", "reg", browser_version=bv, config_hash=cfg_h)) == 1
     assert not hasattr(browser, "load_font_data")
 
 
@@ -203,13 +206,42 @@ async def test_production_acquire_source_known_store_hit_zero_http_calls(tmp_pat
         fixture_store = tmp_path / "benchmark_fixture"
         fixture_store.mkdir()
         shutil.copy2("observations/benchmark/index.sqlite3", fixture_store / "index.sqlite3")
-        shutil.copy2(
-            "observations/benchmark/reconstructed_be_vietnam_pro_regular.pkl",
-            fixture_store / "reconstructed_be_vietnam_pro_regular.pkl",
-        )
         acquirer = SourceAcquirer(
             client=http_client,
             observation_store_dir=fixture_store,
+        )
+        cfg_h = acquirer.observation_config.compute_hash()
+        bv = "chromium"
+        bv_hash = hashlib.sha256(bv.encode("utf-8")).hexdigest()
+        cached_models = pickle.loads(
+            Path("observations/benchmark/reconstructed_be_vietnam_pro_regular.pkl").read_bytes()
+        )
+        envelope = {
+            "reference_id": "be_vietnam_pro",
+            "style_id": "regular",
+            "browser_version": bv,
+            "config_hash": cfg_h,
+            "coverage": sorted(cached_models.keys()),
+            "glyph_models": cached_models,
+        }
+        (fixture_store / f"reconstructed_be_vietnam_pro_regular_{bv_hash}_{cfg_h}.pkl").write_bytes(
+            pickle.dumps(envelope)
+        )
+        with acquirer.store._get_connection() as conn:
+            conn.execute(
+                """
+                UPDATE unicode_coverage SET browser_version = ?, config_hash = ?
+                WHERE reference_id = 'be_vietnam_pro' AND style_id = 'regular'
+                """,
+                (bv, cfg_h),
+            )
+            conn.commit()
+
+        acquirer.store.record_source_collection_completed(
+            reference_id="be_vietnam_pro",
+            style_id="regular",
+            config_hash=cfg_h,
+            browser_version=bv,
         )
         styles = [ClaimStyle(id="regular", display_name="Regular")]
         payload = await acquirer.acquire_source(

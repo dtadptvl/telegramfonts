@@ -301,7 +301,13 @@ def test_representative_subset_physical_smoke():
         pytest.skip("Benchmark observation raw rasters not available")
 
     store = ObservationStore(store_dir)
-    obs_sample = store.get_glyph_observations("be_vietnam_pro", "regular", ord("A"))
+    manifest = store.get_latest_manifest()
+    bv = manifest.get("chromium_version", "") if manifest else ""
+    cfg_h = manifest.get("config_hash", "") if manifest else ""
+    if not bv or not cfg_h:
+        pytest.skip("Benchmark manifest missing exact identity")
+
+    obs_sample = store.get_glyph_observations("be_vietnam_pro", "regular", ord("A"), browser_version=bv, config_hash=cfg_h)
     if not obs_sample or not any(b for _, b in obs_sample):
         pytest.skip("Benchmark observation raw rasters not available")
 
@@ -312,7 +318,7 @@ def test_representative_subset_physical_smoke():
     test_chars = ["A", "B", "8", "@", "%", "g", "m", "ơ", "ư", "ắ", "đ", "Đ"]
     for char in test_chars:
         cp = ord(char)
-        obs = store.get_glyph_observations("be_vietnam_pro", "regular", cp)
+        obs = store.get_glyph_observations("be_vietnam_pro", "regular", cp, browser_version=bv, config_hash=cfg_h)
         if not obs:
             continue
 

@@ -1,4 +1,4 @@
-"""Fidelity evaluation, quality gates, and canonical verification models (Stage 9A / 9B)."""
+"""Fidelity evaluation, quality gates, and canonical verification models (Stage 9A / 9B / 9C)."""
 from fidelity.evaluator import FidelityEvaluator, validate_consumer_gate
 from fidelity.models import (
     BoundChromiumEvidence,
@@ -20,6 +20,13 @@ from fidelity.models import (
     ProductionProducerError,
     TopologyGateResult,
     TypographyGateResult,
+)
+from fidelity.pipeline import (
+    LocalFidelityIntegrationPipeline,
+    LocalFidelityPipelineResult,
+    ObservationStoreSnapshot,
+    PartitionedEvidence,
+    partition_snapshot,
 )
 from fidelity.producers import (
     CandidateArtifact,
@@ -54,10 +61,15 @@ __all__ = [
     "HarfBuzzEvidenceProducer",
     "HarfBuzzPositionVector",
     "HarfBuzzSampleEvidence",
+    "LocalFidelityIntegrationPipeline",
+    "LocalFidelityPipelineResult",
     "MetricsGateResult",
+    "ObservationStoreSnapshot",
+    "PartitionedEvidence",
     "ProductionConsumerEvidenceProducer",
     "ProductionProducerError",
     "TopologyGateResult",
     "TypographyGateResult",
+    "partition_snapshot",
     "validate_consumer_gate",
 ]

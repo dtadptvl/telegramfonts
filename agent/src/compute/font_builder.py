@@ -26,12 +26,12 @@ class FontBuilderService:
     """Production MAX font builder service delegating exclusively to MaxCandidateFontBuilder."""
 
     def __init__(self, observation_store_dir: Path | str | None = None) -> None:
-        if observation_store_dir:
+        if observation_store_dir is not None:
             self.store_dir = Path(observation_store_dir)
+            self.store = ObservationStore(self.store_dir)
         else:
-            self.store_dir = Path("observations/runtime")
-
-        self.store = ObservationStore(self.store_dir)
+            self.store_dir = None
+            self.store = None
 
     def build_font(
         self,
@@ -54,18 +54,38 @@ class FontBuilderService:
         glyph_models: dict[int, ReconstructedGlyph] = dict(style_source.reconstructed_glyphs)
 
         typography = None
-        if self.store:
-            family_key = style_source.observation_reference_id or sanitized_family.lower().replace(" ", "_").replace("-", "_")
-            style_key = style_source.observation_style_id or sanitized_style.lower().replace(" ", "_").replace("-", "_")
-            try:
-                inferencer = EvidenceKerningInferencer(
-                    family_name=sanitized_family,
-                    style_name=sanitized_style,
-                    units_per_em=1000,
+        if self.store is not None:
+            if not style_source.observation_reference_id or not style_source.observation_browser_version or not style_source.observation_config_hash:
+                raise ValueError(
+                    f"INCOMPLETE_OBSERVATION_IDENTITY_FOR_{style_source.style_id}: "
+                    "when observation store is attached, style_source must provide explicit non-empty "
+                    "observation_reference_id, observation_browser_version, and observation_config_hash"
                 )
-                typography = inferencer.infer_from_store(self.store, family_key, style_key)
-            except Exception:
-                typography = None
+
+            family_key = style_source.observation_reference_id
+            style_key = style_source.observation_style_id or style_source.style_id
+            browser_ver = style_source.observation_browser_version
+            cfg_h = style_source.observation_config_hash
+
+            if not self.store.is_source_collection_completed(family_key, style_key, cfg_h, browser_ver):
+                raise ValueError(
+                    f"UNCOMPLETED_SOURCE_COLLECTION_FOR_{style_source.style_id}: "
+                    f"collection marker for ({family_key}, {style_key}, {browser_ver}, {cfg_h}) is not completed in store"
+                )
+
+            inferencer = EvidenceKerningInferencer(
+                family_name=sanitized_family,
+                style_name=sanitized_style,
+                units_per_em=1000,
+            )
+            typography = inferencer.infer_from_store(
+                self.store,
+                reference_id=family_key,
+                style_id=style_key,
+                browser_version=browser_ver,
+                config_hash=cfg_h,
+                require_provenance=True,
+            )
 
         builder = MaxCandidateFontBuilder(
             family_name=sanitized_family,

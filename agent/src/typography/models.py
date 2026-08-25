@@ -45,8 +45,22 @@ class PairKerningObservation:
     measured_pair_advance_upem: float
     inferred_kerning_upem: int
     is_kerning_applied: bool
+    reference_id: str
+    style_id: str
+    browser_version: str
+    config_hash: str
     confidence: float = 1.0
     provenance: str = "untrusted"
+
+    def __post_init__(self) -> None:
+        if not self.reference_id or not isinstance(self.reference_id, str):
+            raise ValueError("PAIR_IDENTITY_REQUIRED: reference_id must be a non-empty string")
+        if not self.style_id or not isinstance(self.style_id, str):
+            raise ValueError("PAIR_IDENTITY_REQUIRED: style_id must be a non-empty string")
+        if not self.browser_version or not isinstance(self.browser_version, str):
+            raise ValueError("PAIR_IDENTITY_REQUIRED: browser_version must be a non-empty string")
+        if not self.config_hash or not isinstance(self.config_hash, str) or len(self.config_hash) != 64 or not all(c in "0123456789abcdefABCDEF" for c in self.config_hash):
+            raise ValueError(f"PAIR_IDENTITY_REQUIRED: config_hash must be a 64-char hexadecimal SHA256 digest, got: '{self.config_hash}'")
 
     @property
     def raw_delta_upem(self) -> float:

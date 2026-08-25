@@ -121,7 +121,7 @@ class JobRunner:
             cache_dir=self.scratch_manager.root / "source_cache",
         )
         self.font_builder = font_builder or FontBuilderService(
-            observation_store_dir=self.source_acquirer.store_dir
+            observation_store_dir=getattr(self.source_acquirer, "store_dir", None)
         )
         self.packager = packager or PackagerService()
         self.archive = archive if archive is not None else FinalFontArchive.from_settings(settings)

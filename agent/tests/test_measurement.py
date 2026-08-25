@@ -112,8 +112,8 @@ def test_observation_store_persistence_and_resume(tmp_path: Path):
         assert row["chromium_version"] == "Chrome/133.0.0.0"
 
     # Save Unicode coverage
-    store.save_coverage("ref1", "regular", [65, 66, 67])
-    assert store.get_coverage("ref1", "regular") == [65, 66, 67]
+    store.save_coverage("ref1", "regular", [65, 66, 67], browser_version="Chrome/133.0.0.0", config_hash=config.compute_hash())
+    assert store.get_coverage("ref1", "regular", browser_version="Chrome/133.0.0.0", config_hash=config.compute_hash()) == [65, 66, 67]
 
     # Create dummy PNG raster
     img = Image.new("RGBA", (128, 128), color=(255, 255, 255, 255))

@@ -67,6 +67,43 @@ from reconstruction.models import (
 )
 from typography.models import PairKerningObservation, TypographyDataset
 
+def _make_pair_observation(
+    left_cp: int = 65,
+    right_cp: int = 65,
+    left_char: str = "A",
+    right_char: str = "A",
+    left_advance_upem: float = 650.0,
+    right_advance_upem: float = 650.0,
+    measured_pair_advance_upem: float = 1300.0,
+    inferred_kerning_upem: int = 0,
+    is_kerning_applied: bool = False,
+    reference_id: str = "test_font",
+    style_id: str = "regular",
+    browser_version: str = "chromium",
+    config_hash: str | None = None,
+    provenance: str = "chromium:chromium:canvas_text_metrics",
+    confidence: float = 1.0,
+) -> PairKerningObservation:
+    cfg = config_hash or ObservationConfig(resolutions=(128, 256), base_subpixel_phases=((0.0, 0.0),), expanded_subpixel_phases=((0.0, 0.0),)).compute_hash()
+    return PairKerningObservation(
+        left_cp=left_cp,
+        right_cp=right_cp,
+        left_char=left_char,
+        right_char=right_char,
+        left_advance_upem=left_advance_upem,
+        right_advance_upem=right_advance_upem,
+        measured_pair_advance_upem=measured_pair_advance_upem,
+        inferred_kerning_upem=inferred_kerning_upem,
+        is_kerning_applied=is_kerning_applied,
+        reference_id=reference_id,
+        style_id=style_id,
+        browser_version=browser_version,
+        config_hash=cfg,
+        confidence=confidence,
+        provenance=provenance,
+    )
+
+
 
 def _generate_png_bytes(
     resolution: int,
@@ -225,7 +262,7 @@ def test_architect_reproduction_1_harfbuzz_zero_positions_fails_consumer_gate() 
         config_hash=cfg_hash, browser_version="chromium", fit_observations_count=1,
         calibration_fingerprint="b" * 64, glyphs={65: glyph},
     )
-    pair = PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False, provenance="chromium:chromium:canvas_text_metrics")
+    pair = _make_pair_observation()
 
     ft_res = FormatValidationResult("TTF", "f.ttf", 100, art.sha256_hex, True, False, False, False, False, 1, 1000, True, True, True)
     fr_sample = FreeTypeSampleEvidence(rec.cache_key, 65, "A", 256, rec.raster_sha256, 0.95, 0)
@@ -285,7 +322,7 @@ def test_architect_reproduction_2_chromium_pair_candidate_advance_drift_fails_ga
         config_hash=cfg_hash, browser_version="chromium", fit_observations_count=1,
         calibration_fingerprint="b" * 64, glyphs={65: glyph},
     )
-    pair = PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False, provenance="chromium:chromium:canvas_text_metrics")
+    pair = _make_pair_observation()
 
     ft_res = FormatValidationResult("TTF", "f.ttf", 100, art.sha256_hex, True, False, False, False, False, 1, 1000, True, True, True)
     fr_sample = FreeTypeSampleEvidence(rec.cache_key, 65, "A", 256, rec.raster_sha256, 0.95, 0)
@@ -345,7 +382,7 @@ def test_architect_reproduction_3_freetype_aggregate_mismatch_fails_consumer_gat
         config_hash=cfg_hash, browser_version="chromium", fit_observations_count=1,
         calibration_fingerprint="b" * 64, glyphs={65: glyph},
     )
-    pair = PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False, provenance="chromium:chromium:canvas_text_metrics")
+    pair = _make_pair_observation()
 
     ft_res = FormatValidationResult("TTF", "f.ttf", 100, art.sha256_hex, True, False, False, False, False, 1, 1000, True, True, True)
 
@@ -405,7 +442,7 @@ def test_architect_reproduction_4_raw_freetype_error_sentinel_sanitized() -> Non
             config_hash=cfg_hash, browser_version="chromium", fit_observations_count=1,
             calibration_fingerprint="b" * 64, glyphs={65: glyph},
         )
-        pair = PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False, provenance="chromium:chromium:canvas_text_metrics")
+        pair = _make_pair_observation()
 
         ft_res = FormatValidationResult("TTF", str(file_a), len(font_bytes), desc.expected_sha256_hex, True, False, False, False, False, 1, 1000, True, True, True)
         ft_evidence = BoundFontToolsEvidence(desc.expected_sha256_hex, ft_res)
@@ -491,7 +528,7 @@ def test_missing_component_fingerprints_fails_consumer_gate() -> None:
         config_hash=cfg_hash, browser_version="chromium", fit_observations_count=1,
         calibration_fingerprint="b" * 64, glyphs={65: glyph},
     )
-    pair = PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False, provenance="chromium:chromium:canvas_text_metrics")
+    pair = _make_pair_observation()
 
     ft_res = FormatValidationResult("TTF", "f.ttf", 100, art.sha256_hex, True, False, False, False, False, 1, 1000, True, True, True)
     fr_sample = FreeTypeSampleEvidence(rec.cache_key, 65, "A", 256, rec.raster_sha256, 0.95, 0)
@@ -589,7 +626,7 @@ def test_zero_sample_bundle_fails_consumer_gate() -> None:
         config_hash=cfg_hash, browser_version="chromium", fit_observations_count=1,
         calibration_fingerprint="b" * 64, glyphs={65: glyph},
     )
-    pair = PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False, provenance="chromium:chromium:canvas_text_metrics")
+    pair = _make_pair_observation()
 
     # Aggregate fields claim PASS, but samples are empty tuple ()
     ft_res = FormatValidationResult("TTF", "f.ttf", 100, art.sha256_hex, True, False, False, False, False, 1, 1000, True, True, True)
@@ -661,8 +698,16 @@ async def test_production_consumer_bundle_assembler_positive_fixture() -> None:
         glyph_A = CalibratedGlyph(65, "A", 650.0, 50.0, 50.0, 750.0, -200.0, (50, 50, 550, 700), [contour_A], observation_fingerprints=calibrated_map[65].observation_fingerprints)
         glyph_B = CalibratedGlyph(66, "B", 600.0, 40.0, 40.0, 750.0, -200.0, (40, 50, 560, 700), [contour_B], observation_fingerprints=calibrated_map[66].observation_fingerprints)
 
-        fit_pair = PairKerningObservation(65, 66, "A", "B", 650.0, 600.0, 1230.0, -20, True, provenance="chromium:chromium:canvas_text_metrics")
-        held_out_pair = PairKerningObservation(66, 65, "B", "A", 600.0, 650.0, 1240.0, -10, True, provenance="chromium:chromium:canvas_text_metrics")
+        fit_pair = PairKerningObservation(
+            65, 66, "A", "B", 650.0, 600.0, 1230.0, -20, True,
+            provenance="chromium:chromium:canvas_text_metrics",
+            reference_id="test_font", style_id="regular", browser_version="chromium", config_hash=cfg_hash,
+        )
+        held_out_pair = PairKerningObservation(
+            66, 65, "B", "A", 600.0, 650.0, 1240.0, -10, True,
+            provenance="chromium:chromium:canvas_text_metrics",
+            reference_id="test_font", style_id="regular", browser_version="chromium", config_hash=cfg_hash,
+        )
 
         model = CanonicalFontModel(
             schema_version="1.0.0",
@@ -763,8 +808,8 @@ async def test_production_bundle_positive_invariant_passes_shared_consumer_gate_
         glyph_A = CalibratedGlyph(65, "A", 650.0, 50.0, 50.0, 750.0, -200.0, (50, 50, 550, 700), [contour_A], observation_fingerprints=calibrated_map[65].observation_fingerprints)
         glyph_B = CalibratedGlyph(66, "B", 600.0, 40.0, 40.0, 750.0, -200.0, (40, 50, 560, 700), [contour_B], observation_fingerprints=calibrated_map[66].observation_fingerprints)
 
-        fit_pair = PairKerningObservation(65, 66, "A", "B", 650.0, 600.0, 1230.0, -20, True, provenance="chromium:chromium:canvas_text_metrics")
-        held_out_pair = PairKerningObservation(66, 65, "B", "A", 600.0, 650.0, 1240.0, -10, True, provenance="chromium:chromium:canvas_text_metrics")
+        fit_pair = _make_pair_observation(65, 66, "A", "B", 650.0, 600.0, 1230.0, -20, True, provenance="chromium:chromium:canvas_text_metrics", reference_id="test_font", style_id="regular", browser_version="chromium", config_hash=cfg_hash)
+        held_out_pair = _make_pair_observation(66, 65, "B", "A", 600.0, 650.0, 1240.0, -10, True, provenance="chromium:chromium:canvas_text_metrics", reference_id="test_font", style_id="regular", browser_version="chromium", config_hash=cfg_hash)
 
         model = CanonicalFontModel(
             schema_version="1.0.0",
@@ -835,7 +880,7 @@ async def test_production_bundle_positive_invariant_passes_shared_consumer_gate_
 # =========================================================================
 
 def test_typography_fingerprint_rejects_character_codepoint_drift() -> None:
-    bad_pair = PairKerningObservation(65, 66, "Z", "B", 650, 600, 1250, 0, False, provenance="chromium:chromium:canvas_text_metrics")
+    bad_pair = _make_pair_observation(left_cp=65, right_cp=66, left_char="Z", right_char="B", left_advance_upem=650, right_advance_upem=600, measured_pair_advance_upem=1250)
     with pytest.raises(ValueError, match="TYPOGRAPHY_CHAR_CODEPOINT_MISMATCH"):
         FidelityEvaluator._compute_typography_fingerprint([bad_pair])
 
@@ -857,7 +902,7 @@ def test_freetype_sample_level_drift_rejected_in_evaluator() -> None:
         config_hash=cfg_hash, browser_version="chromium", fit_observations_count=1,
         calibration_fingerprint="b" * 64, glyphs={65: glyph},
     )
-    pair = PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False, provenance="chromium:chromium:canvas_text_metrics")
+    pair = _make_pair_observation()
 
     bad_sample = FreeTypeSampleEvidence("drifted_key", 65, "A", 256, rec.raster_sha256, 0.95, 0)
     fr_res = RasterComparisonResult(65, "A", 256, 0.95, 0, samples=(bad_sample,), min_raster_iou=0.95)
@@ -909,7 +954,7 @@ def test_harfbuzz_sample_level_drift_rejected_in_evaluator() -> None:
         config_hash=cfg_hash, browser_version="chromium", fit_observations_count=1,
         calibration_fingerprint="b" * 64, glyphs={65: glyph},
     )
-    pair = PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False, provenance="chromium:chromium:canvas_text_metrics")
+    pair = _make_pair_observation()
 
     fr_sample = FreeTypeSampleEvidence(rec.cache_key, 65, "A", 256, rec.raster_sha256, 0.95, 0)
     fr_res = RasterComparisonResult(65, "A", 256, 0.95, 0, samples=(fr_sample,), min_raster_iou=0.95)
@@ -961,7 +1006,7 @@ def test_chromium_sample_level_drift_rejected_in_evaluator() -> None:
         config_hash=cfg_hash, browser_version="chromium", fit_observations_count=1,
         calibration_fingerprint="b" * 64, glyphs={65: glyph},
     )
-    pair = PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False, provenance="chromium:chromium:canvas_text_metrics")
+    pair = _make_pair_observation()
 
     fr_sample = FreeTypeSampleEvidence(rec.cache_key, 65, "A", 256, rec.raster_sha256, 0.95, 0)
     fr_res = RasterComparisonResult(65, "A", 256, 0.95, 0, samples=(fr_sample,), min_raster_iou=0.95)
@@ -1017,7 +1062,7 @@ def test_zero_held_out_samples_fails_closed_in_producer() -> None:
             glyphs={65: CalibratedGlyph(65, "A", 650.0, 50.0, 50.0, 750.0, -200.0, (50.0, 50.0, 550.0, 700.0), [_make_sample_contour()], observation_fingerprints=("a" * 64,))},
         )
         rec, _ = _make_observation_record(code_point=65)
-        pair = PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False, provenance="chromium:chromium:canvas_text_metrics")
+        pair = _make_pair_observation()
 
         with pytest.raises(ValueError, match="ZERO_HELD_OUT_RASTER_SAMPLES"):
             asyncio.run(ProductionConsumerEvidenceProducer.produce_bundle(desc, model, ObservationConfig(), [], [pair], lambda r: b""))
@@ -1041,7 +1086,7 @@ def test_unknown_held_out_code_point_fails_closed_in_producer() -> None:
             glyphs={65: CalibratedGlyph(65, "A", 650.0, 50.0, 50.0, 750.0, -200.0, (50.0, 50.0, 550.0, 700.0), [_make_sample_contour()], observation_fingerprints=("a" * 64,))},
         )
         rec_unknown, _ = _make_observation_record(code_point=999)
-        pair = PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False, provenance="chromium:chromium:canvas_text_metrics")
+        pair = _make_pair_observation()
 
         with pytest.raises(ValueError, match="UNKNOWN_HELD_OUT_CODE_POINT"):
             asyncio.run(ProductionConsumerEvidenceProducer.produce_bundle(desc, model, ObservationConfig(), [rec_unknown], [pair], lambda r: b""))

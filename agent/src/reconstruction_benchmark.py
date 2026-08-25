@@ -52,9 +52,13 @@ def run_benchmark(
     ttf_path: str | Path = "agent/benchmark_data/ground_truth/BeVietnamPro-Regular.ttf",
     reference_id: str = "be_vietnam_pro",
     style_id: str = "regular",
+    browser_version: str = "",
+    config_hash: str = "",
     code_points: list[int] | None = None,
 ) -> dict[str, Any]:
     """Execute comparative benchmark between Baseline and MAX Pipeline B."""
+    if not browser_version or not config_hash:
+        raise ValueError("EXACT_IDENTITY_REQUIRED: browser_version and config_hash are required for benchmark execution")
     store = ObservationStore(store_dir)
     evaluator = GroundTruthGeometryEvaluator(ttf_path)
 
@@ -77,7 +81,9 @@ def run_benchmark(
 
     for cp in test_cps:
         char = chr(cp)
-        observations = store.get_glyph_observations(reference_id, style_id, cp)
+        observations = store.get_glyph_observations(
+            reference_id, style_id, cp, browser_version=browser_version, config_hash=config_hash
+        )
         if not observations:
             logger.warning("No observations found in store for U+%04X ('%s')", cp, char)
             continue
@@ -175,6 +181,16 @@ def main() -> int:
         help="Path to isolated ground-truth TTF font binary",
     )
     parser.add_argument(
+        "--browser-version",
+        default="",
+        help="Chromium browser version (exact identity)",
+    )
+    parser.add_argument(
+        "--config-hash",
+        default="",
+        help="Observation config hash (exact identity)",
+    )
+    parser.add_argument(
         "--json-out",
         default="scratch/reconstruction_benchmark_report.json",
         help="Path to write JSON benchmark report",
@@ -182,11 +198,32 @@ def main() -> int:
 
     args = parser.parse_args()
 
+    browser_ver = args.browser_version
+    cfg_hash = args.config_hash
+    if not browser_ver or not cfg_hash:
+        try:
+            st = ObservationStore(args.store_dir)
+            manifest = st.get_latest_manifest()
+            if manifest:
+                browser_ver = browser_ver or manifest.get("chromium_version", "")
+                cfg_hash = cfg_hash or manifest.get("config_hash", "")
+        except Exception:
+            pass
+
+    if not browser_ver or not cfg_hash:
+        print("ERROR: --browser-version and --config-hash must be supplied or present in store manifest")
+        return 1
+
     print("=" * 80)
     print("  MAX Pipeline B: Continuous SDF/Topology + Cubic Bézier Reconstruction")
     print("=" * 80)
 
-    report = run_benchmark(store_dir=args.store_dir, ttf_path=args.ttf_path)
+    report = run_benchmark(
+        store_dir=args.store_dir,
+        ttf_path=args.ttf_path,
+        browser_version=browser_ver,
+        config_hash=cfg_hash,
+    )
 
     base = report["baseline_summary"]
     max_b = report["max_pipeline_b_summary"]

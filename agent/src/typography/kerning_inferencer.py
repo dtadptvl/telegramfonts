@@ -17,6 +17,22 @@ from typography.models import (
 logger = logging.getLogger("telegramfonts.agent.typography.inferencer")
 
 
+def _validate_exact_identity(reference_id: str, style_id: str, browser_version: str, config_hash: str) -> None:
+    """Validate that identity components are non-empty and config_hash is valid 64-character hex."""
+    if not isinstance(reference_id, str) or not reference_id.strip():
+        raise ValueError("INFERENCER_ERROR: Missing or empty reference_id")
+    if not isinstance(style_id, str) or not style_id.strip():
+        raise ValueError("INFERENCER_ERROR: Missing or empty style_id")
+    if not isinstance(browser_version, str) or not browser_version.strip():
+        raise ValueError("INFERENCER_ERROR: Missing or empty browser_version")
+    if (
+        not isinstance(config_hash, str)
+        or len(config_hash) != 64
+        or not all(c in "0123456789abcdefABCDEF" for c in config_hash)
+    ):
+        raise ValueError(f"INFERENCER_ERROR: Missing or invalid 64-character hex config_hash: '{config_hash}'")
+
+
 class EvidenceKerningInferencer:
     """Infers pairwise character kerning adjustments strictly from observable measurements."""
 
@@ -37,10 +53,19 @@ class EvidenceKerningInferencer:
         store: Any,
         reference_id: str,
         style_id: str,
+        browser_version: str,
+        config_hash: str,
         require_provenance: bool = True,
     ) -> TypographyDataset:
         """Infer canonical typography dataset strictly from persistent observation store by recomputing adjustments from raw measurements."""
-        raw_rows = store.get_pair_observations(reference_id, style_id)
+        _validate_exact_identity(reference_id, style_id, browser_version, config_hash)
+
+        raw_rows = store.get_pair_observations(
+            reference_id=reference_id,
+            style_id=style_id,
+            browser_version=browser_version,
+            config_hash=config_hash,
+        )
         observations: list[PairKerningObservation] = []
         kerning_pairs: dict[tuple[int, int], int] = {}
         provenances: set[str] = set()
@@ -72,6 +97,18 @@ class EvidenceKerningInferencer:
             inferred_kern = int(round(raw_delta))
             is_applied = abs(raw_delta) >= self.threshold_upem and inferred_kern != 0
 
+            row_ref = str(row.get("reference_id") or "")
+            row_style = str(row.get("style_id") or "")
+            row_browser = str(row.get("browser_version") or "")
+            row_cfg = str(row.get("config_hash") or "")
+
+            if row_ref != reference_id or row_style != style_id or row_browser != browser_version or row_cfg != config_hash:
+                raise ValueError(
+                    f"INFERENCER_ERROR: Pair row ({left_cp}, {right_cp}) identity mismatch: "
+                    f"expected ({reference_id}, {style_id}, {browser_version}, {config_hash}) but got "
+                    f"({row_ref}, {row_style}, {row_browser}, {row_cfg})"
+                )
+
             obs = PairKerningObservation(
                 left_cp=left_cp,
                 right_cp=right_cp,
@@ -82,6 +119,10 @@ class EvidenceKerningInferencer:
                 measured_pair_advance_upem=round(pair_adv, 2),
                 inferred_kerning_upem=inferred_kern if is_applied else 0,
                 is_kerning_applied=is_applied,
+                reference_id=reference_id,
+                style_id=style_id,
+                browser_version=browser_version,
+                config_hash=config_hash,
                 confidence=float(row.get("confidence", 1.0)),
                 provenance=prov,
             )
@@ -91,7 +132,12 @@ class EvidenceKerningInferencer:
                 kerning_pairs[(left_cp, right_cp)] = inferred_kern
 
         if require_provenance:
-            expected_fit_pairs = set(BOUNDED_FIT_PAIRS)
+            cov = store.get_coverage(reference_id, style_id, browser_version=browser_version, config_hash=config_hash)
+            cov_set = set(cov) if cov else set()
+            if cov_set:
+                expected_fit_pairs = {p for p in BOUNDED_FIT_PAIRS if p[0] in cov_set and p[1] in cov_set}
+            else:
+                expected_fit_pairs = set(BOUNDED_FIT_PAIRS)
             missing = expected_fit_pairs - valid_pairs_seen
             if missing:
                 raise ValueError(
@@ -136,10 +182,15 @@ class EvidenceKerningInferencer:
         self,
         session: ChromiumSession,
         font_family: str,
+        reference_id: str,
+        style_id: str,
+        browser_version: str,
+        config_hash: str,
         candidate_pairs: Iterable[tuple[int, int]] | None = None,
         font_size_px: float = 200.0,
     ) -> TypographyDataset:
         """Probe bounded pair set in active Chromium session and infer kerning adjustments."""
+        _validate_exact_identity(reference_id, style_id, browser_version, config_hash)
         pairs = list(candidate_pairs if candidate_pairs is not None else BOUNDED_FIT_PAIRS)
         cps = sorted(set(cp for pair in pairs for cp in pair if cp > 0))
         
@@ -212,7 +263,12 @@ class EvidenceKerningInferencer:
                 measured_pair_advance_upem=round(pair_adv, 2),
                 inferred_kerning_upem=inferred_kern if is_applied else 0,
                 is_kerning_applied=is_applied,
+                reference_id=reference_id,
+                style_id=style_id,
+                browser_version=browser_version,
+                config_hash=config_hash,
                 confidence=1.0,
+                provenance=f"chromium:{browser_version}:canvas_text_metrics",
             )
             observations.append(obs)
 
@@ -243,8 +299,14 @@ class EvidenceKerningInferencer:
     def infer_from_direct_measurements(
         self,
         measurements: list[tuple[int, int, float, float, float]],
+        reference_id: str,
+        style_id: str,
+        browser_version: str,
+        config_hash: str,
+        provenance: str = "direct_measurement",
     ) -> TypographyDataset:
         """Infer kerning from a list of (left_cp, right_cp, left_adv, right_adv, pair_adv) measurements."""
+        _validate_exact_identity(reference_id, style_id, browser_version, config_hash)
         observations: list[PairKerningObservation] = []
         kerning_pairs: dict[tuple[int, int], int] = {}
 
@@ -265,7 +327,12 @@ class EvidenceKerningInferencer:
                 measured_pair_advance_upem=round(pair_adv, 2),
                 inferred_kerning_upem=inferred_kern if is_applied else 0,
                 is_kerning_applied=is_applied,
+                reference_id=reference_id,
+                style_id=style_id,
+                browser_version=browser_version,
+                config_hash=config_hash,
                 confidence=1.0,
+                provenance=provenance,
             )
             observations.append(obs)
 

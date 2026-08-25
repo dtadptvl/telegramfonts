@@ -4,8 +4,9 @@ import sys
 from pathlib import Path
 import pytest
 
-# Add agent/src to sys.path
+# Add agent/src and repo root to sys.path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from config import Settings
 

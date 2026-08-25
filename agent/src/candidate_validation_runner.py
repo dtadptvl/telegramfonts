@@ -16,6 +16,7 @@ from typing import Any
 
 from measurement.benchmark_runner import get_peak_rss_mb
 from measurement.browser_session import ChromiumSession
+from measurement.models import ObservationConfig
 from measurement.store import ObservationStore
 from reconstruction.candidate_builder import MaxCandidateFontBuilder
 from reconstruction.candidate_validator import MaxCandidateHeldOutValidator
@@ -55,6 +56,8 @@ def run_candidate_pipeline(
     json_out: str | Path = "ops/max_candidate_validation_report.json",
     reference_id: str = "be_vietnam_pro",
     style_id: str = "regular",
+    browser_version: str | None = None,
+    config_hash: str | None = None,
 ) -> dict[str, Any]:
     """Execute end-to-end MAX candidate font build and held-out multi-consumer validation."""
     start_time = time.perf_counter()
@@ -63,10 +66,24 @@ def run_candidate_pipeline(
     solver = MaxReconstructionSolver(ReconstructionConfig(grid_resolution=512, fitting_tolerance_upem=1.5))
     truth_file = Path(truth_path)
 
+    if not browser_version or not config_hash:
+        raise ValueError(
+            f"INCOMPLETE_EXACT_IDENTITY: run_candidate_pipeline requires explicit non-empty "
+            f"browser_version and config_hash for reference '{reference_id}' / style '{style_id}'"
+        )
+
+    if not store.is_source_collection_completed(reference_id, style_id, config_hash, browser_version):
+        raise ValueError(
+            f"UNCOMPLETED_SOURCE_COLLECTION: exact collection marker for "
+            f"({reference_id}, {style_id}, {browser_version}, {config_hash}) is not completed in store"
+        )
+
     logger.info("Reconstructing cubic master glyphs from cached observations...")
     reconstructed_glyphs = []
     for cp in REPRESENTATIVE_CODE_POINTS:
-        obs = store.get_glyph_observations(reference_id, style_id, cp)
+        obs = store.get_glyph_observations(
+            reference_id, style_id, cp, browser_version=browser_version, config_hash=config_hash
+        )
         if obs:
             glyph = solver.reconstruct_glyph(obs)
             reconstructed_glyphs.append(glyph)
@@ -77,16 +94,21 @@ def run_candidate_pipeline(
         style_name="Regular",
         units_per_em=1000,
     )
-    if store.has_pair_observations(reference_id, style_id):
-        typography_dataset = inferencer.infer_from_store(store, reference_id, style_id)
-        logger.info(
-            "Loaded %d active kerning pairs (from %d probed pairs) from store",
-            typography_dataset.active_kerning_pairs_count,
-            typography_dataset.total_pairs_probed,
-        )
-    else:
-        typography_dataset = None
-        logger.info("No cached pair observations found in store for %s/%s", reference_id, style_id)
+    typography_dataset = inferencer.infer_from_store(
+        store,
+        reference_id=reference_id,
+        style_id=style_id,
+        browser_version=browser_version,
+        config_hash=config_hash,
+        require_provenance=True,
+    )
+    logger.info(
+        "Loaded %d active kerning pairs (from %d probed pairs) from store for exact identity (%s, %s)",
+        typography_dataset.active_kerning_pairs_count,
+        typography_dataset.total_pairs_probed,
+        browser_version,
+        config_hash,
+    )
 
     logger.info("Building candidate font binaries with OpenType GPOS (OTF, TTF)...")
     builder = MaxCandidateFontBuilder(
@@ -210,6 +232,10 @@ def main() -> int:
     parser.add_argument("--truth-path", default="agent/benchmark_data/ground_truth/BeVietnamPro-Regular.ttf")
     parser.add_argument("--output-dir", default="build/candidate_fonts")
     parser.add_argument("--json-out", default="ops/max_candidate_validation_report.json")
+    parser.add_argument("--reference-id", required=True, help="Exact reference family ID (e.g. be_vietnam_pro)")
+    parser.add_argument("--style-id", required=True, help="Exact style ID (e.g. regular)")
+    parser.add_argument("--browser-version", required=True, help="Exact observed browser version")
+    parser.add_argument("--config-hash", required=True, help="Exact observation config hash")
     args = parser.parse_args()
 
     run_candidate_pipeline(
@@ -217,6 +243,10 @@ def main() -> int:
         truth_path=args.truth_path,
         output_dir=args.output_dir,
         json_out=args.json_out,
+        reference_id=args.reference_id,
+        style_id=args.style_id,
+        browser_version=args.browser_version,
+        config_hash=args.config_hash,
     )
     return 0
 

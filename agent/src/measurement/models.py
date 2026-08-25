@@ -22,6 +22,7 @@ class ObservationConfig:
         (0.0, 0.5),
         (0.0, 0.75),
     )
+    held_out_subpixel_phases: tuple[tuple[float, float], ...] = ((0.25, 0.25),)
     adaptive_expansion_threshold: float = 0.05
     font_size_px: float = 200.0
     metric_sizes_px: tuple[float, ...] = (32.0, 64.0, 128.0, 200.0)
@@ -49,6 +50,7 @@ class ObservationConfig:
             "resolutions": list(self.resolutions),
             "base_subpixel_phases": [list(p) for p in self.base_subpixel_phases],
             "expanded_subpixel_phases": [list(p) for p in self.expanded_subpixel_phases],
+            "held_out_subpixel_phases": [list(p) for p in self.held_out_subpixel_phases],
             "adaptive_expansion_threshold": self.adaptive_expansion_threshold,
             "font_size_px": self.font_size_px,
             "metric_sizes_px": list(self.metric_sizes_px),
@@ -90,6 +92,8 @@ class OpenTypeFeatureObservation:
 
     reference_id: str
     style_id: str
+    browser_version: str
+    config_hash: str
     feature_tag: str
     sample_text: str
     enabled_advance_upem: float
@@ -101,7 +105,7 @@ class OpenTypeFeatureObservation:
     created_at: str
 
 
-@dataclass
+@dataclass(frozen=True)
 class DirectMetrics:
     """Direct glyph metrics measured from browser CanvasRenderingContext2D / DOM APIs."""
 
@@ -183,8 +187,12 @@ class DirectMetrics:
             confidence=confidence,
         )
 
+    def to_dict(self) -> dict[str, Any]:
+        """Convert DirectMetrics to dictionary representation."""
+        return asdict(self)
 
-@dataclass
+
+@dataclass(frozen=True)
 class ObservationRecord:
     """Immutable persistent observation record for a single glyph at a specific resolution & subpixel phase."""
 
@@ -242,6 +250,12 @@ class ObservationRecord:
             config_hash=self.config_hash,
         )
         return self.cache_key == expected
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert ObservationRecord to dictionary representation with canonical metric fields."""
+        d = asdict(self)
+        d["metrics"] = self.metrics.to_dict()
+        return d
 
 
 @dataclass

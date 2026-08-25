@@ -32,11 +32,29 @@ async def run_worker(
     lease_token: str,
     order_id: str,
     scratch_base: Path,
+    browser_version: str,
+    config_hash: str,
     stop_after_glyph: int | None = None,
+    settings: Settings | None = None,
+    store_dir: Path | str | None = None,
+    hold_after_glyph: bool = True,
 ) -> dict[str, Any]:
-    settings = Settings()
+    if not browser_version or not config_hash:
+        raise ValueError("INCOMPLETE_EXACT_IDENTITY: browser_version and config_hash are required")
+    if settings is None:
+        try:
+            settings = Settings()
+        except Exception:
+            settings = Settings(
+                CF_ACCOUNT_ID="mock_acc",
+                CF_QUEUE_ID="mock_qid",
+                CF_QUEUES_TOKEN="mock_tok",
+                EDGE_BASE_URL="http://127.0.0.1:8787",
+                A23_NODE_SECRET="mock_secret",
+            )
     w_client = WorkerJobClient(settings)
-    store = ObservationStore(str(Path(__file__).parent.parent / "observations" / "benchmark"))
+    base_store = Path(store_dir) if store_dir else Path(__file__).parent.parent / "observations" / "benchmark"
+    store = ObservationStore(str(base_store))
     solver = MaxReconstructionSolver(ReconstructionConfig())
     builder = MaxCandidateFontBuilder("Be Vietnam Pro", "Regular", 1000)
     inferencer = EvidenceKerningInferencer("Be Vietnam Pro", "Regular", 1000)
@@ -48,13 +66,35 @@ async def run_worker(
     glyphs_cache_dir = job_scratch / "reconstructed_glyph_state"
     glyphs_cache_dir.mkdir(parents=True, exist_ok=True)
 
+    target_ref = "be_vietnam_pro"
+    target_style = "regular"
+
     completed_cps: list[int] = []
     if checkpoint_file.exists():
         try:
             with open(checkpoint_file, "r", encoding="utf-8") as f:
                 cp_data = json.load(f)
-                completed_cps = cp_data.get("completed_cps", [])
-                print(f"RESUMING_CHECKPOINT: found {len(completed_cps)} already completed code points", flush=True)
+                chk_ref = cp_data.get("reference_id")
+                chk_style = cp_data.get("style_id")
+                chk_bv = cp_data.get("browser_version")
+                chk_cfg = cp_data.get("config_hash")
+                if (chk_ref == target_ref and
+                    chk_style == target_style and
+                    chk_bv == browser_version and
+                    chk_cfg == config_hash):
+                    completed_cps = cp_data.get("completed_cps", [])
+                    print(f"RESUMING_CHECKPOINT: found {len(completed_cps)} already completed code points for exact identity", flush=True)
+                else:
+                    print(
+                        f"REJECTED_CHECKPOINT_IDENTITY_MISMATCH: checkpoint ({chk_ref}, {chk_style}, {chk_bv}, {chk_cfg}) != active ({target_ref}, {target_style}, {browser_version}, {config_hash})",
+                        flush=True,
+                    )
+                    # Clean/unlink foreign glyph pickles from mismatched checkpoint
+                    for f_pkl in glyphs_cache_dir.glob("glyph_*.pkl"):
+                        try:
+                            f_pkl.unlink()
+                        except Exception:
+                            pass
         except Exception as e:
             print(f"CHECKPOINT_READ_ERROR: {e}", flush=True)
 
@@ -71,15 +111,18 @@ async def run_worker(
             try:
                 with open(glyph_file, "rb") as gf:
                     persisted_glyph = pickle.load(gf)
-                reconstructed_glyphs.append(persisted_glyph)
-                loaded_from_checkpoint_count += 1
-                print(f"LOADED_FROM_CHECKPOINT_GLYPH_{i+1}_{cp}_PID_{os.getpid()}", flush=True)
-                continue
+                if isinstance(persisted_glyph, ReconstructedGlyph) and persisted_glyph.code_point == cp:
+                    reconstructed_glyphs.append(persisted_glyph)
+                    loaded_from_checkpoint_count += 1
+                    print(f"LOADED_FROM_CHECKPOINT_GLYPH_{i+1}_{cp}_PID_{os.getpid()}", flush=True)
+                    continue
+                else:
+                    print(f"REJECTED_INVALID_GLYPH_PICKLE_{cp}: type={type(persisted_glyph)}", flush=True)
             except Exception as e:
                 print(f"FAILED_TO_LOAD_GLYPH_{cp}: {e}, recomputing...", flush=True)
 
         # Genuinely compute glyph with solver
-        obs = store.get_glyph_observations("be_vietnam_pro", "regular", cp)
+        obs = store.get_glyph_observations("be_vietnam_pro", "regular", cp, browser_version=browser_version, config_hash=config_hash)
         if not obs:
             continue
 
@@ -95,20 +138,47 @@ async def run_worker(
             pickle.dump(glyph, gf)
 
         with open(checkpoint_file, "w", encoding="utf-8") as f:
-            json.dump({"completed_cps": completed_cps, "last_updated": time.time()}, f)
+            json.dump({
+                "completed_cps": completed_cps,
+                "browser_version": browser_version,
+                "config_hash": config_hash,
+                "reference_id": "be_vietnam_pro",
+                "style_id": "regular",
+                "last_updated": time.time(),
+            }, f)
 
         print(f"PROGRESS_GLYPH_{i+1}_{cp}_PID_{os.getpid()}", flush=True)
 
         if stop_after_glyph is not None and (i + 1) >= stop_after_glyph:
             print(f"DURABLE_PROGRESS_COMMITTED_GLYPH_{i+1}_PID_{os.getpid()}", flush=True)
-            # Active compute loop waiting to be killed
-            while True:
-                time.sleep(1)
+            if hold_after_glyph:
+                while True:
+                    time.sleep(1)
+            else:
+                return {
+                    "checkpoint_file": str(checkpoint_file),
+                    "completed_cps": completed_cps,
+                    "loaded_from_checkpoint_count": loaded_from_checkpoint_count,
+                    "newly_computed_count": newly_computed_count,
+                }
 
     # All glyphs assembled -> build font binaries
     build_dir = job_scratch / "build"
     build_dir.mkdir(parents=True, exist_ok=True)
-    typo = inferencer.infer_from_store(store, "be_vietnam_pro", "regular")
+
+    if not store.is_source_collection_completed("be_vietnam_pro", "regular", config_hash, browser_version):
+        raise ValueError(
+            f"UNCOMPLETED_STORE_COLLECTION: be_vietnam_pro:regular:{browser_version}:{config_hash} is not completed in store"
+        )
+
+    typo = inferencer.infer_from_store(
+        store,
+        reference_id="be_vietnam_pro",
+        style_id="regular",
+        browser_version=browser_version,
+        config_hash=config_hash,
+        require_provenance=True,
+    )
     build_result = builder.build_candidate_family(reconstructed_glyphs, build_dir, typography=typo)
 
     files = [
@@ -163,6 +233,8 @@ if __name__ == "__main__":
     parser.add_argument("--job-id", required=True)
     parser.add_argument("--lease-token", required=True)
     parser.add_argument("--order-id", required=True)
+    parser.add_argument("--browser-version", required=True)
+    parser.add_argument("--config-hash", required=True)
     parser.add_argument("--scratch-dir", default="scratch/a23_max_jobs")
     parser.add_argument("--stop-after-glyph", type=int, default=None)
     args = parser.parse_args()
@@ -172,5 +244,7 @@ if __name__ == "__main__":
         lease_token=args.lease_token,
         order_id=args.order_id,
         scratch_base=Path(args.scratch_dir),
+        browser_version=args.browser_version,
+        config_hash=args.config_hash,
         stop_after_glyph=args.stop_after_glyph,
     ))

@@ -60,6 +60,8 @@ def _make_glyph(code_point: int, character: str, advance_width: float = 736.0, l
 
 def test_inferencer_direct_measurements():
     """Verify EvidenceKerningInferencer calculates kerning adjustments strictly from observable measurements."""
+    from measurement.models import ObservationConfig
+    cfg_hash = ObservationConfig().compute_hash()
     inferencer = EvidenceKerningInferencer(family_name="TestFont", style_name="Regular", threshold_upem=0.5)
 
     # Observable pair measurements: (left_cp, right_cp, left_adv, right_adv, pair_adv)
@@ -71,7 +73,13 @@ def test_inferencer_direct_measurements():
         (79, 79, 826.0, 826.0, 1652.0),  # OO: 1652 - (826 + 826) = 0
     ]
 
-    dataset = inferencer.infer_from_direct_measurements(measurements)
+    dataset = inferencer.infer_from_direct_measurements(
+        measurements,
+        reference_id="test_font",
+        style_id="regular",
+        browser_version="chromium",
+        config_hash=cfg_hash,
+    )
 
     assert dataset.total_pairs_probed == 5
     assert dataset.active_kerning_pairs_count == 3
@@ -83,13 +91,21 @@ def test_inferencer_direct_measurements():
 
 def test_no_adjustment_without_evidence():
     """Verify pairs without measurable differential advance do not emit false adjustments."""
+    from measurement.models import ObservationConfig
+    cfg_hash = ObservationConfig().compute_hash()
     inferencer = EvidenceKerningInferencer(threshold_upem=1.0)
     measurements = [
         (65, 66, 736.0, 674.0, 1410.0),  # AB: delta = 0
         (66, 65, 674.0, 736.0, 1410.0),  # BA: delta = 0
         (65, 65, 736.0, 736.0, 1472.2),  # AA: delta = +0.2 (< 1.0 threshold)
     ]
-    dataset = inferencer.infer_from_direct_measurements(measurements)
+    dataset = inferencer.infer_from_direct_measurements(
+        measurements,
+        reference_id="test_font",
+        style_id="regular",
+        browser_version="chromium",
+        config_hash=cfg_hash,
+    )
     assert dataset.active_kerning_pairs_count == 0
     assert len(dataset.kerning_pairs) == 0
 
@@ -238,10 +254,12 @@ def test_bounded_pair_set_not_n_squared():
 def test_no_truth_binary_leakage_in_runner_and_inferencer(tmp_path):
     """Verify inferencer and candidate builder never inspect reference font binary."""
     from measurement.store import ObservationStore
+    from measurement.models import ObservationConfig
 
     store = ObservationStore(tmp_path / "obs_store")
     # Save observable measurements into store (pure numeric data)
     valid_prov = "chromium:Chrome/151.0.7922.140:canvas_text_metrics"
+    cfg_hash = ObservationConfig().compute_hash()
     store.save_pair_observation(
         reference_id="test_font",
         style_id="regular",
@@ -255,10 +273,19 @@ def test_no_truth_binary_leakage_in_runner_and_inferencer(tmp_path):
         inferred_kerning_upem=0,  # Store 0: inferencer MUST derive -40 dynamically from raw advances!
         confidence=1.0,
         provenance=valid_prov,
+        browser_version="chromium",
+        config_hash=cfg_hash,
     )
 
     inferencer = EvidenceKerningInferencer(family_name="TestFont MAX", style_name="Regular")
-    dataset = inferencer.infer_from_store(store, "test_font", "regular", require_provenance=False)
+    dataset = inferencer.infer_from_store(
+        store,
+        reference_id="test_font",
+        style_id="regular",
+        browser_version="chromium",
+        config_hash=cfg_hash,
+        require_provenance=False,
+    )
 
     assert dataset.total_pairs_probed == 1
     assert dataset.active_kerning_pairs_count == 1
@@ -270,8 +297,10 @@ def test_no_truth_binary_leakage_in_runner_and_inferencer(tmp_path):
 def test_infer_from_store_rejects_untrusted_or_legacy_provenance(tmp_path):
     """Verify infer_from_store fails closed when encountering legacy or untrusted provenance."""
     from measurement.store import ObservationStore
+    from measurement.models import ObservationConfig
 
     store = ObservationStore(tmp_path / "obs_store_untrusted")
+    cfg_hash = ObservationConfig().compute_hash()
     store.save_pair_observation(
         reference_id="font_a",
         style_id="reg",
@@ -285,19 +314,29 @@ def test_infer_from_store_rejects_untrusted_or_legacy_provenance(tmp_path):
         inferred_kerning_upem=-40,
         confidence=0.95,
         provenance="legacy_untrusted_assertion",
+        browser_version="chromium",
+        config_hash=cfg_hash,
     )
 
     inferencer = EvidenceKerningInferencer(family_name="TestFont MAX", style_name="Regular")
     with pytest.raises(ValueError, match="untrusted or missing Chromium provenance"):
-        inferencer.infer_from_store(store, "font_a", "reg")
+        inferencer.infer_from_store(
+            store,
+            reference_id="font_a",
+            style_id="reg",
+            browser_version="chromium",
+            config_hash=cfg_hash,
+        )
 
 
 def test_infer_from_store_derives_adjustments_dynamically_from_raw_advances(tmp_path):
     """Verify infer_from_store recomputes adjustments from raw advances and verifies authentic browser provenance."""
     from measurement.store import ObservationStore
+    from measurement.models import ObservationConfig
 
     store = ObservationStore(tmp_path / "obs_store")
     valid_prov = "chromium:Chrome/151.0.7922.140:canvas_text_metrics"
+    cfg_hash = ObservationConfig().compute_hash()
 
     # Save all 12 bounded fit pairs with authentic Chromium provenance and bogus/inverted stored answers
     for l, r in BOUNDED_FIT_PAIRS:
@@ -319,10 +358,18 @@ def test_infer_from_store_derives_adjustments_dynamically_from_raw_advances(tmp_
             inferred_kerning_upem=999,  # Bogus stored answer to ensure it is ignored
             confidence=1.0,
             provenance=valid_prov,
+            browser_version="chromium",
+            config_hash=cfg_hash,
         )
 
     inferencer = EvidenceKerningInferencer(family_name="TestFont MAX", style_name="Regular")
-    dataset = inferencer.infer_from_store(store, "font_a", "reg")
+    dataset = inferencer.infer_from_store(
+        store,
+        reference_id="font_a",
+        style_id="reg",
+        browser_version="chromium",
+        config_hash=cfg_hash,
+    )
 
     # Dynamic derivation must ignore 999 and derive -40 and -10 strictly from raw advances!
     assert dataset.get_kerning(65, 79) == -40
@@ -475,10 +522,11 @@ async def test_observation_collector_pair_acquisition_with_provenance(tmp_path):
         font_family="ObservedFont",
         pairs=[(65, 79), (66, 79)],
     )
+    real_bv = session.browser_version
     await session.aclose()
 
     assert captured == 2
-    rows = store.get_pair_observations("test_ref", "regular")
+    rows = store.get_pair_observations("test_ref", "regular", browser_version=real_bv, config_hash=collector.config.compute_hash())
     assert len(rows) == 2
     for r in rows:
         assert "chromium:" in r["provenance"]
@@ -486,3 +534,184 @@ async def test_observation_collector_pair_acquisition_with_provenance(tmp_path):
 
 
 
+
+
+def test_infer_from_store_rejects_mixed_browser_and_config_environments(tmp_path):
+    """Verify two distinct environments stored for the same font family/style never mix in infer_from_store."""
+    from measurement.store import ObservationStore
+    store = ObservationStore(tmp_path / "multi_env_store")
+
+    valid_prov_a = "chromium:Chrome/120.0.0.0:canvas_text_metrics"
+    valid_prov_b = "chromium:Chrome/121.0.0.0:canvas_text_metrics"
+    cfg_a = "a" * 64
+    cfg_b = "b" * 64
+
+    # Env A: pair (65, 79) with delta = -40
+    store.save_pair_observation(
+        reference_id="test_family",
+        style_id="regular",
+        left_cp=65,
+        right_cp=79,
+        left_char="A",
+        right_char="O",
+        left_advance_upem=736.0,
+        right_advance_upem=826.0,
+        pair_advance_upem=1522.0,  # 1522 - 1562 = -40
+        inferred_kerning_upem=-40,
+        confidence=1.0,
+        provenance=valid_prov_a,
+        browser_version="Chrome/120.0.0.0",
+        config_hash=cfg_a,
+    )
+
+    # Env B: pair (65, 79) with delta = -15
+    store.save_pair_observation(
+        reference_id="test_family",
+        style_id="regular",
+        left_cp=65,
+        right_cp=79,
+        left_char="A",
+        right_char="O",
+        left_advance_upem=736.0,
+        right_advance_upem=826.0,
+        pair_advance_upem=1547.0,  # 1547 - 1562 = -15
+        inferred_kerning_upem=-15,
+        confidence=1.0,
+        provenance=valid_prov_b,
+        browser_version="Chrome/121.0.0.0",
+        config_hash=cfg_b,
+    )
+
+    inferencer = EvidenceKerningInferencer("TestFont", "Regular")
+
+    # 1. Query Env A
+    dataset_a = inferencer.infer_from_store(
+        store=store,
+        reference_id="test_family",
+        style_id="regular",
+        browser_version="Chrome/120.0.0.0",
+        config_hash=cfg_a,
+        require_provenance=False,
+    )
+    assert dataset_a.total_pairs_probed == 1
+    assert dataset_a.get_kerning(65, 79) == -40
+    assert dataset_a.observations[0].browser_version == "Chrome/120.0.0.0"
+    assert dataset_a.observations[0].config_hash == cfg_a
+
+    # 2. Query Env B
+    dataset_b = inferencer.infer_from_store(
+        store=store,
+        reference_id="test_family",
+        style_id="regular",
+        browser_version="Chrome/121.0.0.0",
+        config_hash=cfg_b,
+        require_provenance=False,
+    )
+    assert dataset_b.total_pairs_probed == 1
+    assert dataset_b.get_kerning(65, 79) == -15
+    assert dataset_b.observations[0].browser_version == "Chrome/121.0.0.0"
+    assert dataset_b.observations[0].config_hash == cfg_b
+
+
+def test_inferencer_methods_reject_missing_or_invalid_identity(tmp_path):
+    """Verify every inferencer method rejects missing, empty, or malformed identity."""
+    from measurement.store import ObservationStore
+    store = ObservationStore(tmp_path / "id_check_store")
+    inferencer = EvidenceKerningInferencer("TestFont", "Regular")
+    valid_cfg = "c" * 64
+
+    # 1. infer_from_store with empty/invalid fields
+    with pytest.raises(ValueError, match="Missing or empty reference_id"):
+        inferencer.infer_from_store(store, reference_id="", style_id="reg", browser_version="chromium", config_hash=valid_cfg)
+
+    with pytest.raises(ValueError, match="Missing or empty style_id"):
+        inferencer.infer_from_store(store, reference_id="ref", style_id="", browser_version="chromium", config_hash=valid_cfg)
+
+    with pytest.raises(ValueError, match="Missing or empty browser_version"):
+        inferencer.infer_from_store(store, reference_id="ref", style_id="reg", browser_version="", config_hash=valid_cfg)
+
+    with pytest.raises(ValueError, match="Missing or invalid 64-character hex config_hash"):
+        inferencer.infer_from_store(store, reference_id="ref", style_id="reg", browser_version="chromium", config_hash="bad_hash")
+
+    # 2. infer_from_direct_measurements with empty/invalid fields
+    measurements = [(65, 79, 736.0, 826.0, 1522.0)]
+    with pytest.raises(ValueError, match="Missing or empty reference_id"):
+        inferencer.infer_from_direct_measurements(measurements, reference_id="", style_id="reg", browser_version="chromium", config_hash=valid_cfg)
+
+    with pytest.raises(ValueError, match="Missing or invalid 64-character hex config_hash"):
+        inferencer.infer_from_direct_measurements(measurements, reference_id="ref", style_id="reg", browser_version="chromium", config_hash="short")
+
+    # 3. infer_from_browser_session with empty/invalid fields
+    import asyncio
+    class DummySession:
+        pass
+
+    with pytest.raises(ValueError, match="Missing or empty reference_id"):
+        asyncio.run(inferencer.infer_from_browser_session(
+            session=DummySession(),
+            font_family="Font",
+            reference_id="",
+            style_id="reg",
+            browser_version="chromium",
+            config_hash=valid_cfg,
+        ))
+
+
+@pytest.mark.asyncio
+async def test_browser_and_direct_paths_create_only_exactly_bound_observations():
+    """Verify direct and browser inference paths create PairKerningObservation instances with exact bound identity."""
+    inferencer = EvidenceKerningInferencer("TestFont", "Regular")
+    ref_id = "test_bound_ref"
+    st_id = "test_bound_style"
+    br_ver = "Chromium/128.0.0.0"
+    cfg = "d" * 64
+
+    # 1. Direct measurements path
+    measurements = [(65, 79, 736.0, 826.0, 1522.0), (66, 79, 674.0, 826.0, 1490.0)]
+    dataset_direct = inferencer.infer_from_direct_measurements(
+        measurements,
+        reference_id=ref_id,
+        style_id=st_id,
+        browser_version=br_ver,
+        config_hash=cfg,
+    )
+    for obs in dataset_direct.observations:
+        assert obs.reference_id == ref_id
+        assert obs.style_id == st_id
+        assert obs.browser_version == br_ver
+        assert obs.config_hash == cfg
+        assert obs.provenance == "direct_measurement"
+
+    # 2. Browser session path with test double
+    class MockBrowserSession:
+        async def evaluate_script(self, script: str):
+            return [
+                {
+                    "left_cp": 65,
+                    "right_cp": 79,
+                    "left_char": "A",
+                    "right_char": "O",
+                    "left_adv": 736.0,
+                    "right_adv": 826.0,
+                    "pair_adv": 1522.0,
+                    "raw_delta": -40.0,
+                }
+            ]
+
+    dataset_browser = await inferencer.infer_from_browser_session(
+        session=MockBrowserSession(),
+        font_family="TestFont",
+        reference_id=ref_id,
+        style_id=st_id,
+        browser_version=br_ver,
+        config_hash=cfg,
+        candidate_pairs=[(65, 79)],
+    )
+    assert len(dataset_browser.observations) == 1
+    obs_b = dataset_browser.observations[0]
+    assert obs_b.reference_id == ref_id
+    assert obs_b.style_id == st_id
+    assert obs_b.browser_version == br_ver
+    assert obs_b.config_hash == cfg
+    assert obs_b.inferred_kerning_upem == -40
+    assert obs_b.provenance == f"chromium:{br_ver}:canvas_text_metrics"

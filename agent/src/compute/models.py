@@ -30,6 +30,8 @@ class StyleSourceData:
     reconstructed_glyphs: dict[int, Any] = field(default_factory=dict)
     observation_reference_id: str | None = None
     observation_style_id: str | None = None
+    observation_browser_version: str | None = None
+    observation_config_hash: str | None = None
 
 
 @dataclass(frozen=True)

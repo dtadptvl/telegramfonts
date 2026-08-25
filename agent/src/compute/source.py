@@ -372,10 +372,13 @@ class SourceAcquirer:
             )
         }
         observation_config_hash = self.observation_config.compute_hash()
+        active_browser_ver = str(manifest.get("chromium_version", "")).strip() or "unspecified_browser"
         style_observation_identities: list[tuple[str, str]] = []
         for style in styles:
             style_key = style.id.lower().replace(" ", "_").replace("-", "_")
-            coverage = self.store.get_coverage(family_key, style_key)
+            coverage = self.store.get_coverage(
+                family_key, style_key, browser_version=active_browser_ver, config_hash=observation_config_hash
+            )
             if not coverage:
                 return None
             style_identity_payload = {
@@ -498,17 +501,27 @@ class SourceAcquirer:
                     is_bold = "bold" in s_lower or "black" in s_lower
                     is_italic = "italic" in s_lower or "oblique" in s_lower
                     style_key = s.id.lower().replace(" ", "_").replace("-", "_")
-                    coverage = self.store.get_coverage(family_key, style_key)
-                    collection_key = hashlib.sha256(
-                        f"{source_url.strip()}\0{s.id}\0{s.display_name}\0{self.observation_config.compute_hash()}".encode("utf-8")
-                    ).hexdigest()
+                    active_cfg_hash = self.observation_config.compute_hash()
+                    matching = [
+                        (b, c)
+                        for b, c in self.store.get_completed_collection_identities(family_key, style_key)
+                        if c == active_cfg_hash and self.store.is_source_collection_completed(family_key, style_key, c, b)
+                    ]
+                    has_completed_cache = False
+                    if len(matching) == 1:
+                        cand_bv, cand_cfg = matching[0]
+                        cov = self.store.get_coverage(
+                            family_key, style_key, browser_version=cand_bv, config_hash=cand_cfg
+                        )
+                        if cov:
+                            has_completed_cache = True
+                            coverage = cov
+                            active_browser_ver = cand_bv
+                            active_cfg_hash = cand_cfg
 
-                    collection_complete = self.store.is_source_collection_complete(collection_key)
-                    collection_started = self.store.is_source_collection_started(collection_key)
-                    if not coverage or (collection_started and not collection_complete):
-                        if collection_complete:
-                            raise ValueError(f"COMPLETED_MAX_COLLECTION_HAS_NO_COVERAGE_{family_key}_{style_key}")
-                        self.store.mark_source_collection_started(collection_key)
+                    if not has_completed_cache:
+                        attempt_key = f"{source_url.strip()}\0{s.id}\0{s.display_name}\0{active_cfg_hash}"
+                        self.store.mark_source_collection_started(attempt_key)
                         if browser_session is None:
                             browser_session = self.browser_session_factory()
                             collector = ObservationCollector(
@@ -530,37 +543,73 @@ class SourceAcquirer:
                         await collector.collect_feature_observations(
                             family_key, style_key, selected_font
                         )
-                        coverage = self.store.get_coverage(family_key, style_key)
+                        active_browser_ver = browser_session.browser_version
+                        active_cfg_hash = self.observation_config.compute_hash()
+                        coverage = self.store.get_coverage(
+                            family_key, style_key, browser_version=active_browser_ver, config_hash=active_cfg_hash
+                        )
                         if not coverage:
                             raise ValueError(f"NO_OBSERVABLE_GLYPHS_FOR_{family_key}_{style_key}")
-                        self.store.mark_source_collection_complete(
-                            collection_key,
-                            source_url.strip(),
-                            family_key,
-                            style_key,
-                            self.observation_config.compute_hash(),
-                            browser_session.browser_version,
-                        )
+                        collector.finalize_source_collection(family_key, style_key, source_url=source_url.strip())
                         collected_any = True
+                    else:
+                        active_browser_ver, active_cfg_hash = matching[0]
 
-                    cache_key = (family_key, style_key)
+                    cache_key = (family_key, style_key, active_browser_ver, active_cfg_hash)
                     if collected_any:
                         _RECONSTRUCTED_GLYPH_CACHE.pop(cache_key, None)
                     if cache_key in _RECONSTRUCTED_GLYPH_CACHE:
                         glyph_models = _RECONSTRUCTED_GLYPH_CACHE[cache_key]
                     else:
                         glyph_models = {}
-                        disk_cache_file = self.store_dir / f"reconstructed_{family_key}_{style_key}.pkl"
+                        safe_fam = re.sub(r"[^a-zA-Z0-9_-]", "_", family_key)
+                        safe_style = re.sub(r"[^a-zA-Z0-9_-]", "_", style_key)
+                        bv_hash = hashlib.sha256(active_browser_ver.encode("utf-8")).hexdigest()
+                        cache_filename = f"reconstructed_{safe_fam}_{safe_style}_{bv_hash}_{active_cfg_hash}.pkl"
+                        disk_cache_file = (self.store_dir / cache_filename).resolve()
+                        if not disk_cache_file.is_relative_to(self.store_dir.resolve()):
+                            raise ValueError(f"Reconstruction disk cache path escaped store directory: {cache_filename}")
                         if disk_cache_file.exists() and not collected_any:
                             try:
-                                glyph_models = pickle.loads(disk_cache_file.read_bytes())
+                                raw_cached = pickle.loads(disk_cache_file.read_bytes())
+                                if isinstance(raw_cached, dict) and "glyph_models" in raw_cached:
+                                    if (raw_cached.get("reference_id") == family_key and
+                                        raw_cached.get("style_id") == style_key and
+                                        raw_cached.get("browser_version") == active_browser_ver and
+                                        raw_cached.get("config_hash") == active_cfg_hash and
+                                        set(raw_cached.get("coverage", [])) == set(coverage) and
+                                        isinstance(raw_cached.get("glyph_models"), dict) and
+                                        set(raw_cached["glyph_models"].keys()) == set(coverage) and
+                                        all(isinstance(g, ReconstructedGlyph) for g in raw_cached["glyph_models"].values())):
+                                        glyph_models = raw_cached["glyph_models"]
+                                    # Typed-envelope-only: any missing/wrong identity metadata rejects
+                                    # before glyph reuse; recomputation below remains fail-closed.
                             except Exception:
                                 glyph_models = {}
                         if not glyph_models:
                             for cp in coverage:
-                                observations = self.store.get_glyph_observations(family_key, style_key, cp)
+                                observations = self.store.get_glyph_observations(
+                                    family_key,
+                                    style_key,
+                                    cp,
+                                    browser_version=active_browser_ver,
+                                    config_hash=active_cfg_hash,
+                                )
                                 if observations:
                                     glyph_models[cp] = self.solver.reconstruct_glyph(observations)
+                            if glyph_models and set(glyph_models.keys()) == set(coverage):
+                                envelope = {
+                                    "reference_id": family_key,
+                                    "style_id": style_key,
+                                    "browser_version": active_browser_ver,
+                                    "config_hash": active_cfg_hash,
+                                    "coverage": sorted(coverage),
+                                    "glyph_models": glyph_models,
+                                }
+                                try:
+                                    disk_cache_file.write_bytes(pickle.dumps(envelope))
+                                except Exception:
+                                    pass
                         _RECONSTRUCTED_GLYPH_CACHE[cache_key] = glyph_models
 
                     if not glyph_models:
@@ -573,6 +622,8 @@ class SourceAcquirer:
                         reconstructed_glyphs=glyph_models,
                         observation_reference_id=family_key,
                         observation_style_id=style_key,
+                        observation_browser_version=active_browser_ver,
+                        observation_config_hash=active_cfg_hash,
                     )
             finally:
                 if browser_session is not None:
@@ -689,6 +740,9 @@ class SourceAcquirer:
                         contours=reconstructed_contours,
                     )
 
+            family_key = family_name.lower().replace(" ", "_").replace("-", "_")
+            style_key = s.id.lower().replace(" ", "_").replace("-", "_")
+            browser_ver = "chromium"
             style_data_map[s.id] = StyleSourceData(
                 style_id=s.id,
                 style_name=s.display_name,
