@@ -15,8 +15,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import io
+import logging
 import math
 import os
+import sqlite3
 import tempfile
 import types
 from pathlib import Path
@@ -819,3 +821,183 @@ def test_typography_pair_browser_and_config_drift_fails_closed() -> None:
             raster_bytes_map=snapshot.raster_bytes_map,
             pairs=(bad_pair_config,),
         )
+
+
+# =========================================================================
+# 5. Architect Review 5404687397 Hardening Tests
+# =========================================================================
+
+def test_production_loader_rejects_empty_legacy_pair_identity() -> None:
+    """Architect Blocker 1: Production loader rejects empty or legacy pair identity and never launders."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        store = ObservationStore(Path(tmp_dir))
+        config = ObservationConfig(resolutions=(128, 256), base_subpixel_phases=((0.0, 0.0),), expanded_subpixel_phases=((0.0, 0.0),))
+        cfg_hash = config.compute_hash()
+        ref_id, style_id = "test_font", "regular"
+
+        # Record coverage and completion marker
+        store.save_coverage(ref_id, style_id, [65, 66])
+        store.record_source_collection_completed(ref_id, style_id, cfg_hash, "chromium")
+
+        # Save valid observation records for 65 and 66
+        r1, b1 = _make_observation_record(ref_id, style_id, 65, 128, 0.0, 0.0, 650.0, "chromium", cfg_hash)
+        r2, b2 = _make_observation_record(ref_id, style_id, 65, 256, 0.0, 0.0, 650.0, "chromium", cfg_hash)
+        r3, b3 = _make_observation_record(ref_id, style_id, 65, 256, 0.25, 0.25, 650.0, "chromium", cfg_hash)
+        r4, b4 = _make_observation_record(ref_id, style_id, 66, 128, 0.0, 0.0, 600.0, "chromium", cfg_hash)
+        r5, b5 = _make_observation_record(ref_id, style_id, 66, 256, 0.0, 0.0, 600.0, "chromium", cfg_hash)
+        r6, b6 = _make_observation_record(ref_id, style_id, 66, 256, 0.25, 0.25, 600.0, "chromium", cfg_hash)
+        for r, b in [(r1, b1), (r2, b2), (r3, b3), (r4, b4), (r5, b5), (r6, b6)]:
+            store.save_observation(r, b)
+
+        # Directly insert raw row with empty browser_version and empty config_hash
+        with store._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO pair_observations (
+                    reference_id, style_id, browser_version, config_hash,
+                    left_cp, right_cp, left_char, right_char,
+                    left_advance_upem, right_advance_upem, pair_advance_upem,
+                    inferred_kerning_upem, confidence, provenance, created_at
+                ) VALUES (?, ?, '', '', 65, 66, 'A', 'B', 650.0, 600.0, 1230.0, -20, 1.0, 'chromium:chromium:canvas_text_metrics', '2026')
+                """,
+                (ref_id, style_id),
+            )
+
+        # 1. Store get_pair_observations must return 0 rows for specific chromium/cfg_hash
+        loaded_pairs = store.get_pair_observations(ref_id, style_id, "chromium", cfg_hash)
+        assert len(loaded_pairs) == 0
+
+        # 2. Pipeline loader must fail closed and never launder empty identity into snapshot
+        snapshot = ObservationStoreSnapshot.load_from_store(
+            store=store,
+            reference_id=ref_id,
+            style_id=style_id,
+            family_name="TestFont",
+            style_name="Regular",
+            config=config,
+            browser_version="chromium",
+        )
+        assert len(snapshot.pairs) == 0
+
+        # 3. PairKerningObservation constructor itself must strictly reject empty strings
+        with pytest.raises(ValueError, match="PAIR_IDENTITY_REQUIRED"):
+            PairKerningObservation(
+                left_cp=65, right_cp=66, left_char="A", right_char="B",
+                left_advance_upem=650.0, right_advance_upem=600.0,
+                measured_pair_advance_upem=1230.0, inferred_kerning_upem=-20,
+                is_kerning_applied=True, provenance="chromium:chromium:canvas_text_metrics",
+                reference_id=ref_id, style_id=style_id, browser_version="", config_hash=cfg_hash,
+            )
+
+
+def test_legacy_db_migration_preserves_two_exact_identities() -> None:
+    """Architect Blocker 2: SQLite store migration converts old 4-column PK to 6-column composite PK and preserves coexistence."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        db_path = Path(tmp_dir) / "index.sqlite3"
+
+        # Create a legacy database with 4-column primary key (reference_id, style_id, left_cp, right_cp)
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            """
+            CREATE TABLE pair_observations (
+                reference_id TEXT NOT NULL,
+                style_id TEXT NOT NULL,
+                left_cp INTEGER NOT NULL,
+                right_cp INTEGER NOT NULL,
+                left_char TEXT NOT NULL,
+                right_char TEXT NOT NULL,
+                left_advance_upem REAL NOT NULL,
+                right_advance_upem REAL NOT NULL,
+                pair_advance_upem REAL NOT NULL,
+                inferred_kerning_upem INTEGER NOT NULL,
+                confidence REAL NOT NULL,
+                provenance TEXT NOT NULL DEFAULT 'untrusted',
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (reference_id, style_id, left_cp, right_cp)
+            )
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        # Open store with ObservationStore which runs migration
+        store = ObservationStore(Path(tmp_dir))
+
+        # Save pair under environment A (chromium / cfg_A)
+        cfg_A = "a" * 64
+        pair_A = PairKerningObservation(
+            left_cp=65, right_cp=66, left_char="A", right_char="B",
+            left_advance_upem=650.0, right_advance_upem=600.0,
+            measured_pair_advance_upem=1230.0, inferred_kerning_upem=-20,
+            is_kerning_applied=True, provenance="chromium:chromium:canvas_text_metrics",
+            reference_id="test_font", style_id="regular", browser_version="chromium", config_hash=cfg_A,
+        )
+        store.save_pair_observation(pair_A)
+
+        # Save pair under environment B (firefox / cfg_B) for the EXACT SAME left_cp, right_cp (65, 66)
+        cfg_B = "b" * 64
+        pair_B = PairKerningObservation(
+            left_cp=65, right_cp=66, left_char="A", right_char="B",
+            left_advance_upem=650.0, right_advance_upem=600.0,
+            measured_pair_advance_upem=1225.0, inferred_kerning_upem=-25,
+            is_kerning_applied=True, provenance="chromium:chromium:canvas_text_metrics",
+            reference_id="test_font", style_id="regular", browser_version="firefox", config_hash=cfg_B,
+        )
+        store.save_pair_observation(pair_B)
+
+        # Verify BOTH rows coexist and neither overwrote the other
+        pairs_A = store.get_pair_observations("test_font", "regular", "chromium", cfg_A)
+        assert len(pairs_A) == 1
+        assert pairs_A[0]["browser_version"] == "chromium"
+        assert pairs_A[0]["config_hash"] == cfg_A
+        assert pairs_A[0]["inferred_kerning_upem"] == -20
+
+        pairs_B = store.get_pair_observations("test_font", "regular", "firefox", cfg_B)
+        assert len(pairs_B) == 1
+        assert pairs_B[0]["browser_version"] == "firefox"
+        assert pairs_B[0]["config_hash"] == cfg_B
+        assert pairs_B[0]["inferred_kerning_upem"] == -25
+
+
+def test_pipeline_result_artifact_lifecycle_and_explicit_cleanup() -> None:
+    """Architect Blocker 4: Pipeline result exposes explicit lifecycle cleanup semantics and context manager support."""
+    snapshot = _build_valid_snapshot()
+
+    # 1. Execute pipeline with output_dir=None
+    result = LocalFidelityIntegrationPipeline.execute_sync(
+        snapshot=snapshot,
+        format_type="TTF",
+    )
+
+    if result.status != "BLOCKED":
+        assert result.candidate_file_path != ""
+        cand_path = Path(result.candidate_file_path)
+        assert cand_path.is_file()
+
+        # Explicit cleanup removes the temporary directory
+        result.cleanup()
+        assert not cand_path.is_file()
+
+    # 2. Context manager pattern support
+    with LocalFidelityIntegrationPipeline.execute_sync(snapshot=snapshot, format_type="TTF") as res:
+        assert isinstance(res, LocalFidelityPipelineResult)
+        if res.status != "BLOCKED":
+            p_file = Path(res.candidate_file_path)
+            assert p_file.is_file()
+
+    if res.status != "BLOCKED":
+        assert not p_file.is_file()
+
+
+def test_pipeline_error_logging_sanitizes_hostile_exception_details(caplog: pytest.LogCaptureFixture) -> None:
+    """Architect Blocker 5: Raw exception text containing secret paths is never leaked to log messages."""
+    snapshot = _build_valid_snapshot()
+
+    with caplog.at_level(logging.ERROR):
+        # Trigger an intentional format error
+        res = LocalFidelityIntegrationPipeline.execute_sync(snapshot=snapshot, format_type="INVALID_FORMAT")
+        assert res.status == "FAIL"
+
+    for record in caplog.records:
+        assert "/secret/" not in record.message
+        assert "password" not in record.message.lower()

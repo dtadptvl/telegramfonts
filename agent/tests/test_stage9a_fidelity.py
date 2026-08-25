@@ -59,6 +59,43 @@ from reconstruction.models import (
 )
 from typography.models import PairKerningObservation, TypographyDataset
 
+def _make_pair_observation(
+    left_cp: int = 65,
+    right_cp: int = 65,
+    left_char: str = "A",
+    right_char: str = "A",
+    left_advance_upem: float = 650.0,
+    right_advance_upem: float = 650.0,
+    measured_pair_advance_upem: float = 1300.0,
+    inferred_kerning_upem: int = 0,
+    is_kerning_applied: bool = False,
+    reference_id: str = "test_font",
+    style_id: str = "regular",
+    browser_version: str = "chromium",
+    config_hash: str | None = None,
+    provenance: str = "chromium:chromium:canvas_text_metrics",
+    confidence: float = 1.0,
+) -> PairKerningObservation:
+    cfg = config_hash or ObservationConfig(resolutions=(128, 256), base_subpixel_phases=((0.0, 0.0),), expanded_subpixel_phases=((0.0, 0.0),)).compute_hash()
+    return PairKerningObservation(
+        left_cp=left_cp,
+        right_cp=right_cp,
+        left_char=left_char,
+        right_char=right_char,
+        left_advance_upem=left_advance_upem,
+        right_advance_upem=right_advance_upem,
+        measured_pair_advance_upem=measured_pair_advance_upem,
+        inferred_kerning_upem=inferred_kerning_upem,
+        is_kerning_applied=is_kerning_applied,
+        reference_id=reference_id,
+        style_id=style_id,
+        browser_version=browser_version,
+        config_hash=cfg,
+        confidence=confidence,
+        provenance=provenance,
+    )
+
+
 
 def _generate_png_bytes(
     resolution: int,
@@ -679,7 +716,7 @@ def test_incomplete_chromium_gate_fails_closed() -> None:
 
     rep1 = FidelityEvaluator.evaluate(
         model=model, config=config, fit_records=fit_records, held_out_records=[r_held],
-        held_out_pairs=[PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False, provenance="chromium:chromium:canvas_text_metrics")],
+        held_out_pairs=[_make_pair_observation()],
         consumer_bundle=bundle1, raster_provider=lambda r: b_held,
     )
     assert rep1.overall_status == "FAIL"
@@ -701,7 +738,7 @@ def test_incomplete_chromium_gate_fails_closed() -> None:
 
     rep2 = FidelityEvaluator.evaluate(
         model=model, config=config, fit_records=fit_records, held_out_records=[r_held],
-        held_out_pairs=[PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False, provenance="chromium:chromium:canvas_text_metrics")],
+        held_out_pairs=[_make_pair_observation()],
         consumer_bundle=bundle2, raster_provider=lambda r: b_held,
     )
     assert rep2.overall_status == "FAIL"
@@ -722,7 +759,7 @@ def test_incomplete_chromium_gate_fails_closed() -> None:
 
     rep3 = FidelityEvaluator.evaluate(
         model=model, config=config, fit_records=fit_records, held_out_records=[r_held],
-        held_out_pairs=[PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False, provenance="chromium:chromium:canvas_text_metrics")],
+        held_out_pairs=[_make_pair_observation()],
         consumer_bundle=bundle3, raster_provider=lambda r: b_held,
     )
     assert rep3.overall_status == "FAIL"
@@ -751,7 +788,7 @@ def test_real_typography_provenance_and_browser_drift() -> None:
         calibration_fingerprint=calib_fp, glyphs={65: glyph},
     )
 
-    valid_pair = PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False, provenance="chromium:chromium:canvas_text_metrics")
+    valid_pair = _make_pair_observation()
 
     bundle = _make_valid_consumer_bundle(
         model_hash=model.compute_canonical_hash(),
@@ -762,7 +799,7 @@ def test_real_typography_provenance_and_browser_drift() -> None:
     )
 
     # 1. Synthetic label -> FAIL
-    synthetic_pair = PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False, provenance="synthetic_label")
+    synthetic_pair = _make_pair_observation(provenance="synthetic_label")
     rep1 = FidelityEvaluator.evaluate(
         model=model, config=config, fit_records=fit_records, held_out_records=[r_held],
         held_out_pairs=[synthetic_pair], consumer_bundle=bundle, raster_provider=lambda r: b_held,
@@ -771,7 +808,7 @@ def test_real_typography_provenance_and_browser_drift() -> None:
     assert any("UNTRUSTED_TYPOGRAPHY" in r for r in rep1.failure_reasons)
 
     # 2. Browser version drift in provenance -> FAIL
-    drift_pair = PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False, provenance="chromium:drifted_version:canvas_text_metrics")
+    drift_pair = _make_pair_observation(provenance="chromium:drifted_version:canvas_text_metrics")
     rep2 = FidelityEvaluator.evaluate(
         model=model, config=config, fit_records=fit_records, held_out_records=[r_held],
         held_out_pairs=[drift_pair], consumer_bundle=bundle, raster_provider=lambda r: b_held,
@@ -780,7 +817,7 @@ def test_real_typography_provenance_and_browser_drift() -> None:
     assert any("UNTRUSTED_TYPOGRAPHY" in r for r in rep2.failure_reasons)
 
     # 3. Matching real production provenance -> PASS
-    valid_pair = PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False, provenance="chromium:chromium:canvas_text_metrics")
+    valid_pair = _make_pair_observation()
     rep3 = FidelityEvaluator.evaluate(
         model=model, config=config, fit_records=fit_records, held_out_records=[r_held],
         held_out_pairs=[valid_pair], consumer_bundle=bundle, raster_provider=lambda r: b_held,
@@ -815,7 +852,7 @@ def test_consumer_gate_mandatory_and_bypass_fails_closed() -> None:
     # 1. Missing bundle -> FAIL
     rep1 = FidelityEvaluator.evaluate(
         model=model, config=config, fit_records=fit_records, held_out_records=[r_held],
-        held_out_pairs=[PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False, provenance="chromium:chromium:canvas_text_metrics")],
+        held_out_pairs=[_make_pair_observation()],
         consumer_bundle=None, raster_provider=lambda r: b_held,
     )
     assert rep1.overall_status == "FAIL"
@@ -826,7 +863,7 @@ def test_consumer_gate_mandatory_and_bypass_fails_closed() -> None:
     stale_bundle = _make_valid_consumer_bundle(model_hash="e" * 64, config_hash=cfg_hash, held_out_fp=held_fp)
     rep2 = FidelityEvaluator.evaluate(
         model=model, config=config, fit_records=fit_records, held_out_records=[r_held],
-        held_out_pairs=[PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False, provenance="chromium:chromium:canvas_text_metrics")],
+        held_out_pairs=[_make_pair_observation()],
         consumer_bundle=stale_bundle, raster_provider=lambda r: b_held,
     )
     assert rep2.overall_status == "FAIL"
@@ -845,7 +882,7 @@ def test_consumer_gate_mandatory_and_bypass_fails_closed() -> None:
     )
     rep3 = FidelityEvaluator.evaluate(
         model=model, config=config, fit_records=fit_records, held_out_records=[r_held],
-        held_out_pairs=[PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False, provenance="chromium:chromium:canvas_text_metrics")],
+        held_out_pairs=[_make_pair_observation()],
         consumer_bundle=bad_bundle, raster_provider=lambda r: b_held,
     )
     assert rep3.overall_status == "FAIL"
@@ -882,7 +919,7 @@ def test_fit_evidence_fingerprint_binding_fails_closed() -> None:
 
     report = FidelityEvaluator.evaluate(
         model=model, config=config, fit_records=fit_records, held_out_records=[r_held],
-        held_out_pairs=[PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False, provenance="chromium:chromium:canvas_text_metrics")],
+        held_out_pairs=[_make_pair_observation()],
         consumer_bundle=bundle, raster_provider=lambda r: b_held,
     )
     assert report.overall_status == "FAIL"
@@ -916,7 +953,7 @@ def test_policy_hash_and_max_chamfer_gating() -> None:
         config_hash=cfg_hash,
         held_out_fp=FidelityEvaluator._compute_records_fingerprint([r_held]),
     )
-    held_pair = PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False, provenance="chromium:chromium:canvas_text_metrics")
+    held_pair = _make_pair_observation()
 
     pol1 = FidelityThresholds(max_chamfer_distance_upem=30.0)
     pol2 = FidelityThresholds(max_chamfer_distance_upem=0.001)
@@ -966,7 +1003,7 @@ def test_fidelity_rejects_corrupt_and_mismatched_raster_bytes() -> None:
         config_hash=cfg_hash,
         held_out_fp=FidelityEvaluator._compute_records_fingerprint([r_held]),
     )
-    held_pair = PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False, provenance="chromium:chromium:canvas_text_metrics")
+    held_pair = _make_pair_observation()
 
     corrupt_bytes = b"X" * len(b_held)
 
@@ -1007,7 +1044,7 @@ def test_fidelity_rejects_same_raster_sha_under_different_cache_keys() -> None:
         config_hash=cfg_hash,
         held_out_fp=FidelityEvaluator._compute_records_fingerprint([r_held]),
     )
-    held_pair = PairKerningObservation(65, 65, "A", "A", 650, 650, 1300, 0, False, provenance="chromium:chromium:canvas_text_metrics")
+    held_pair = _make_pair_observation()
 
     report = FidelityEvaluator.evaluate(
         model=model, config=config, fit_records=fit_records, held_out_records=[r_held],
@@ -1081,17 +1118,19 @@ def test_fidelity_report_e2e_positive_fixture() -> None:
             observation_fingerprints=calibrated_map[66].observation_fingerprints,
         )
 
-        fit_pair = PairKerningObservation(
+        fit_pair = _make_pair_observation(
             left_cp=65, right_cp=66, left_char="A", right_char="B",
             left_advance_upem=650.0, right_advance_upem=600.0,
             measured_pair_advance_upem=1230.0, inferred_kerning_upem=-20,
             is_kerning_applied=True, provenance="chromium:chromium:canvas_text_metrics",
+            reference_id="test_font", style_id="regular", browser_version="chromium", config_hash=cfg_hash,
         )
-        held_out_pair = PairKerningObservation(
+        held_out_pair = _make_pair_observation(
             left_cp=66, right_cp=65, left_char="B", right_char="A",
             left_advance_upem=600.0, right_advance_upem=650.0,
             measured_pair_advance_upem=1240.0, inferred_kerning_upem=-10,
             is_kerning_applied=True, provenance="chromium:chromium:canvas_text_metrics",
+            reference_id="test_font", style_id="regular", browser_version="chromium", config_hash=cfg_hash,
         )
 
         calib_fp = ObservationCalibrator.compute_calibration_fingerprint(fit_records, config=config, units_per_em=1000)

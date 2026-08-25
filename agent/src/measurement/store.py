@@ -112,46 +112,101 @@ class ObservationStore:
                 )
                 """
             )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS pair_observations (
-                    reference_id TEXT NOT NULL,
-                    style_id TEXT NOT NULL,
-                    browser_version TEXT NOT NULL,
-                    config_hash TEXT NOT NULL,
-                    left_cp INTEGER NOT NULL,
-                    right_cp INTEGER NOT NULL,
-                    left_char TEXT NOT NULL,
-                    right_char TEXT NOT NULL,
-                    left_advance_upem REAL NOT NULL,
-                    right_advance_upem REAL NOT NULL,
-                    pair_advance_upem REAL NOT NULL,
-                    inferred_kerning_upem INTEGER NOT NULL,
-                    confidence REAL NOT NULL,
-                    provenance TEXT NOT NULL DEFAULT 'untrusted',
-                    created_at TEXT NOT NULL,
-                    PRIMARY KEY (reference_id, style_id, browser_version, config_hash, left_cp, right_cp)
-                )
-                """
-            )
-            try:
+            # Create or migrate pair_observations table to 6-column composite primary key
+            cur = conn.execute("PRAGMA table_info(pair_observations)")
+            columns = {row[1]: row for row in cur.fetchall()}
+            if not columns:
                 conn.execute(
-                    "ALTER TABLE pair_observations ADD COLUMN provenance TEXT NOT NULL DEFAULT 'untrusted'"
+                    """
+                    CREATE TABLE pair_observations (
+                        reference_id TEXT NOT NULL,
+                        style_id TEXT NOT NULL,
+                        browser_version TEXT NOT NULL,
+                        config_hash TEXT NOT NULL,
+                        left_cp INTEGER NOT NULL,
+                        right_cp INTEGER NOT NULL,
+                        left_char TEXT NOT NULL,
+                        right_char TEXT NOT NULL,
+                        left_advance_upem REAL NOT NULL,
+                        right_advance_upem REAL NOT NULL,
+                        pair_advance_upem REAL NOT NULL,
+                        inferred_kerning_upem INTEGER NOT NULL,
+                        confidence REAL NOT NULL,
+                        provenance TEXT NOT NULL DEFAULT 'untrusted',
+                        created_at TEXT NOT NULL,
+                        PRIMARY KEY (reference_id, style_id, browser_version, config_hash, left_cp, right_cp)
+                    )
+                    """
                 )
-            except sqlite3.OperationalError:
-                pass
-            try:
-                conn.execute(
-                    "ALTER TABLE pair_observations ADD COLUMN browser_version TEXT NOT NULL DEFAULT ''"
+            else:
+                bv_info = columns.get("browser_version")
+                cfg_info = columns.get("config_hash")
+                needs_pk_migration = not (
+                    bv_info is not None and bv_info[5] > 0 and
+                    cfg_info is not None and cfg_info[5] > 0
                 )
-            except sqlite3.OperationalError:
-                pass
-            try:
-                conn.execute(
-                    "ALTER TABLE pair_observations ADD COLUMN config_hash TEXT NOT NULL DEFAULT ''"
-                )
-            except sqlite3.OperationalError:
-                pass
+                if needs_pk_migration:
+                    if not bv_info:
+                        try:
+                            conn.execute("ALTER TABLE pair_observations ADD COLUMN browser_version TEXT NOT NULL DEFAULT ''")
+                        except sqlite3.OperationalError:
+                            pass
+                    if not cfg_info:
+                        try:
+                            conn.execute("ALTER TABLE pair_observations ADD COLUMN config_hash TEXT NOT NULL DEFAULT ''")
+                        except sqlite3.OperationalError:
+                            pass
+                    if "provenance" not in columns:
+                        try:
+                            conn.execute("ALTER TABLE pair_observations ADD COLUMN provenance TEXT NOT NULL DEFAULT 'untrusted'")
+                        except sqlite3.OperationalError:
+                            pass
+
+                    conn.execute(
+                        """
+                        CREATE TABLE pair_observations_new (
+                            reference_id TEXT NOT NULL,
+                            style_id TEXT NOT NULL,
+                            browser_version TEXT NOT NULL,
+                            config_hash TEXT NOT NULL,
+                            left_cp INTEGER NOT NULL,
+                            right_cp INTEGER NOT NULL,
+                            left_char TEXT NOT NULL,
+                            right_char TEXT NOT NULL,
+                            left_advance_upem REAL NOT NULL,
+                            right_advance_upem REAL NOT NULL,
+                            pair_advance_upem REAL NOT NULL,
+                            inferred_kerning_upem INTEGER NOT NULL,
+                            confidence REAL NOT NULL,
+                            provenance TEXT NOT NULL DEFAULT 'untrusted',
+                            created_at TEXT NOT NULL,
+                            PRIMARY KEY (reference_id, style_id, browser_version, config_hash, left_cp, right_cp)
+                        )
+                        """
+                    )
+                    conn.execute(
+                        """
+                        INSERT OR IGNORE INTO pair_observations_new (
+                            reference_id, style_id, browser_version, config_hash,
+                            left_cp, right_cp, left_char, right_char,
+                            left_advance_upem, right_advance_upem, pair_advance_upem,
+                            inferred_kerning_upem, confidence, provenance, created_at
+                        )
+                        SELECT
+                            reference_id, style_id,
+                            COALESCE(browser_version, ''),
+                            COALESCE(config_hash, ''),
+                            left_cp, right_cp, left_char, right_char,
+                            left_advance_upem, right_advance_upem, pair_advance_upem,
+                            inferred_kerning_upem, confidence,
+                            COALESCE(provenance, 'untrusted'),
+                            created_at
+                        FROM pair_observations
+                        """
+                    )
+                    conn.execute("DROP TABLE pair_observations")
+                    conn.execute("ALTER TABLE pair_observations_new RENAME TO pair_observations")
+
             try:
                 conn.execute(
                     "ALTER TABLE observations ADD COLUMN browser_version TEXT NOT NULL DEFAULT ''"
@@ -630,15 +685,15 @@ class ObservationStore:
 
     def save_pair_observation(
         self,
-        reference_id: str,
-        style_id: str,
-        left_cp: int,
-        right_cp: int,
-        left_char: str,
-        right_char: str,
-        left_advance_upem: float,
-        right_advance_upem: float,
-        pair_advance_upem: float,
+        reference_id: str | Any,
+        style_id: str | None = None,
+        left_cp: int | None = None,
+        right_cp: int | None = None,
+        left_char: str | None = None,
+        right_char: str | None = None,
+        left_advance_upem: float | None = None,
+        right_advance_upem: float | None = None,
+        pair_advance_upem: float | None = None,
         inferred_kerning_upem: int = 0,
         confidence: float = 1.0,
         provenance: str = "untrusted",
@@ -647,11 +702,44 @@ class ObservationStore:
         config_hash: str = "",
     ) -> None:
         """Persist an observable pair advance measurement into index."""
-        if not reference_id or not style_id or not browser_version or not config_hash:
+        if hasattr(reference_id, "reference_id") and hasattr(reference_id, "style_id"):
+            pair_obj = reference_id
+            ref = pair_obj.reference_id
+            style = pair_obj.style_id
+            l_cp = pair_obj.left_cp
+            r_cp = pair_obj.right_cp
+            l_char = pair_obj.left_char
+            r_char = pair_obj.right_char
+            l_adv = pair_obj.left_advance_upem
+            r_adv = pair_obj.right_advance_upem
+            p_adv = pair_obj.measured_pair_advance_upem
+            inf_kern = pair_obj.inferred_kerning_upem
+            conf = pair_obj.confidence
+            prov = pair_obj.provenance
+            ts = created_at or datetime.datetime.now(datetime.timezone.utc).isoformat()
+            bv = pair_obj.browser_version
+            cfg = pair_obj.config_hash
+        else:
+            ref = str(reference_id)
+            style = str(style_id or "")
+            l_cp = int(left_cp) if left_cp is not None else 0
+            r_cp = int(right_cp) if right_cp is not None else 0
+            l_char = str(left_char or "")
+            r_char = str(right_char or "")
+            l_adv = float(left_advance_upem or 0.0)
+            r_adv = float(right_advance_upem or 0.0)
+            p_adv = float(pair_advance_upem or 0.0)
+            inf_kern = int(inferred_kerning_upem)
+            conf = float(confidence)
+            prov = str(provenance)
+            ts = created_at or datetime.datetime.now(datetime.timezone.utc).isoformat()
+            bv = str(browser_version)
+            cfg = str(config_hash)
+
+        if not ref or not style or not bv or not cfg:
             raise ValueError(
                 "PAIR_IDENTITY_REQUIRED: reference_id, style_id, browser_version, and config_hash must be non-empty strings"
             )
-        ts = created_at or datetime.datetime.now(datetime.timezone.utc).isoformat()
         with self._get_connection() as conn:
             conn.execute(
                 """
@@ -663,20 +751,20 @@ class ObservationStore:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    reference_id,
-                    style_id,
-                    browser_version,
-                    config_hash,
-                    left_cp,
-                    right_cp,
-                    left_char,
-                    right_char,
-                    left_advance_upem,
-                    right_advance_upem,
-                    pair_advance_upem,
-                    inferred_kerning_upem,
-                    confidence,
-                    provenance,
+                    ref,
+                    style,
+                    bv,
+                    cfg,
+                    l_cp,
+                    r_cp,
+                    l_char,
+                    r_char,
+                    l_adv,
+                    r_adv,
+                    p_adv,
+                    inf_kern,
+                    conf,
+                    prov,
                     ts,
                 ),
             )

@@ -72,6 +72,17 @@ class EvidenceKerningInferencer:
             inferred_kern = int(round(raw_delta))
             is_applied = abs(raw_delta) >= self.threshold_upem and inferred_kern != 0
 
+            row_ref = str(row.get("reference_id") or "")
+            row_style = str(row.get("style_id") or "")
+            row_browser = str(row.get("browser_version") or "")
+            row_cfg = str(row.get("config_hash") or "")
+
+            if not row_ref or not row_style or not row_browser or not row_cfg:
+                raise ValueError(
+                    f"INFERENCER_ERROR: Pair row ({left_cp}, {right_cp}) lacks non-empty identity: "
+                    f"ref='{row_ref}', style='{row_style}', browser='{row_browser}', config='{row_cfg}'"
+                )
+
             obs = PairKerningObservation(
                 left_cp=left_cp,
                 right_cp=right_cp,
@@ -82,12 +93,12 @@ class EvidenceKerningInferencer:
                 measured_pair_advance_upem=round(pair_adv, 2),
                 inferred_kerning_upem=inferred_kern if is_applied else 0,
                 is_kerning_applied=is_applied,
+                reference_id=row_ref,
+                style_id=row_style,
+                browser_version=row_browser,
+                config_hash=row_cfg,
                 confidence=float(row.get("confidence", 1.0)),
                 provenance=prov,
-                reference_id=str(row.get("reference_id") or reference_id),
-                style_id=str(row.get("style_id") or style_id),
-                browser_version=str(row.get("browser_version") or "chromium"),
-                config_hash=str(row.get("config_hash") or ""),
             )
             observations.append(obs)
 
@@ -247,10 +258,16 @@ class EvidenceKerningInferencer:
     def infer_from_direct_measurements(
         self,
         measurements: list[tuple[int, int, float, float, float]],
+        reference_id: str = "direct_reference",
+        style_id: str = "regular",
+        browser_version: str = "chromium",
+        config_hash: str = "",
     ) -> TypographyDataset:
         """Infer kerning from a list of (left_cp, right_cp, left_adv, right_adv, pair_adv) measurements."""
         observations: list[PairKerningObservation] = []
         kerning_pairs: dict[tuple[int, int], int] = {}
+        from measurement.models import ObservationConfig
+        cfg = config_hash or ObservationConfig().compute_hash()
 
         for left_cp, right_cp, left_adv, right_adv, pair_adv in measurements:
             left_char = chr(left_cp) if left_cp > 0 else "?"
@@ -269,6 +286,10 @@ class EvidenceKerningInferencer:
                 measured_pair_advance_upem=round(pair_adv, 2),
                 inferred_kerning_upem=inferred_kern if is_applied else 0,
                 is_kerning_applied=is_applied,
+                reference_id=reference_id,
+                style_id=style_id,
+                browser_version=browser_version,
+                config_hash=cfg,
                 confidence=1.0,
             )
             observations.append(obs)

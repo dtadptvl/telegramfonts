@@ -226,23 +226,26 @@ class ObservationStoreSnapshot:
         config: ObservationConfig,
         browser_version: str,
     ) -> ObservationStoreSnapshot:
-        """Atomically load an immutable snapshot from ObservationStore SQLite index and disk rasters."""
+        """Atomically load an immutable snapshot from ObservationStore in a single isolated SQLite transaction."""
         cfg_hash = config.compute_hash()
 
         with store._get_connection() as conn:
-            # 1. Require completed and verified source collection marker
-            if not store.is_source_collection_completed(
-                reference_id=reference_id,
-                style_id=style_id,
-                config_hash=cfg_hash,
-                browser_version=browser_version,
-            ):
+            # 1. Establish single isolated transaction
+            conn.execute("BEGIN DEFERRED")
+
+            # 2. Require completed and verified source collection marker on the same transaction
+            col_key = f"{reference_id}:{style_id}:{browser_version}:{cfg_hash}"
+            marker_row = conn.execute(
+                "SELECT 1 FROM source_collections WHERE collection_key = ? LIMIT 1",
+                (col_key,),
+            ).fetchone()
+            if not marker_row:
                 raise ValueError(
                     f"STORE_LOAD_ERROR: Incomplete or unverified source collection for {reference_id}/{style_id} "
                     f"matching browser '{browser_version}' and config '{cfg_hash}'"
                 )
 
-            # 2. Query Unicode coverage
+            # 3. Query Unicode coverage on same transaction
             cov_rows = conn.execute(
                 """
                 SELECT code_point FROM unicode_coverage
@@ -257,7 +260,7 @@ class ObservationStoreSnapshot:
                     f"STORE_LOAD_ERROR: No Unicode coverage found for {reference_id}/{style_id}"
                 )
 
-            # 3. Query all matching observation records
+            # 4. Query all matching observation records on same transaction
             obs_rows = conn.execute(
                 """
                 SELECT * FROM observations
@@ -278,7 +281,7 @@ class ObservationStoreSnapshot:
                     f"STORE_LOAD_ERROR: Declared coverage ({len(coverage_cps)} glyphs) does not match observed glyphs ({len(observed_cps)} glyphs)"
                 )
 
-            # 3. Read rasters from disk within store boundary
+            # 5. Read rasters from disk within store boundary
             records: list[ObservationRecord] = []
             raster_map: dict[str, bytes] = {}
 
@@ -341,13 +344,11 @@ class ObservationStoreSnapshot:
                     )
                 raster_map[rec.cache_key] = png_bytes
 
-            # 4. Query pair observations matching snapshot identity
+            # 6. Query pair observations strictly matching snapshot identity on same transaction
             pair_rows = conn.execute(
                 """
                 SELECT * FROM pair_observations
-                WHERE reference_id = ? AND style_id = ?
-                  AND (browser_version = ? OR browser_version = '')
-                  AND (config_hash = ? OR config_hash = '')
+                WHERE reference_id = ? AND style_id = ? AND browser_version = ? AND config_hash = ?
                 ORDER BY left_cp ASC, right_cp ASC
                 """,
                 (reference_id, style_id, browser_version, cfg_hash),
@@ -356,6 +357,17 @@ class ObservationStoreSnapshot:
             pairs: list[PairKerningObservation] = []
             for p_row in pair_rows:
                 p_dict = dict(p_row)
+                row_ref = str(p_dict.get("reference_id") or "")
+                row_style = str(p_dict.get("style_id") or "")
+                row_browser = str(p_dict.get("browser_version") or "")
+                row_cfg = str(p_dict.get("config_hash") or "")
+
+                if not row_ref or not row_style or not row_browser or not row_cfg:
+                    raise ValueError(
+                        f"STORE_LOAD_ERROR: Pair row ({p_dict.get('left_cp')}, {p_dict.get('right_cp')}) lacks non-empty identity: "
+                        f"ref='{row_ref}', style='{row_style}', browser='{row_browser}', config='{row_cfg}'"
+                    )
+
                 pair_obs = PairKerningObservation(
                     left_cp=int(p_dict["left_cp"]),
                     right_cp=int(p_dict["right_cp"]),
@@ -366,12 +378,12 @@ class ObservationStoreSnapshot:
                     measured_pair_advance_upem=float(p_dict["pair_advance_upem"]),
                     inferred_kerning_upem=int(p_dict["inferred_kerning_upem"]),
                     is_kerning_applied=(int(p_dict["inferred_kerning_upem"]) != 0),
+                    reference_id=row_ref,
+                    style_id=row_style,
+                    browser_version=row_browser,
+                    config_hash=row_cfg,
                     confidence=float(p_dict.get("confidence", 1.0)),
                     provenance=str(p_dict.get("provenance", "untrusted")),
-                    reference_id=reference_id,
-                    style_id=style_id,
-                    browser_version=browser_version,
-                    config_hash=cfg_hash,
                 )
                 pairs.append(pair_obs)
 
@@ -523,6 +535,22 @@ class LocalFidelityPipelineResult:
     candidate_file_path: str
     report: FidelityReport | None = None
     failure_reasons: tuple[str, ...] = field(default_factory=tuple)
+    _temp_dir: Any = field(default=None, repr=False, compare=False)
+
+    def cleanup(self) -> None:
+        """Explicitly cleanup managed temporary directory if owned by this pipeline result."""
+        if self._temp_dir is not None:
+            if hasattr(self._temp_dir, "cleanup"):
+                self._temp_dir.cleanup()
+            elif isinstance(self._temp_dir, (str, Path)):
+                import shutil
+                shutil.rmtree(str(self._temp_dir), ignore_errors=True)
+
+    def __enter__(self) -> LocalFidelityPipelineResult:
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.cleanup()
 
 
 class LocalFidelityIntegrationPipeline:
@@ -578,7 +606,7 @@ class LocalFidelityIntegrationPipeline:
         try:
             partition = partition_snapshot(snapshot)
         except Exception as exc:
-            logger.error("Snapshot partitioning failed: %s", exc)
+            logger.error("Snapshot partitioning failed: %s", type(exc).__name__)
             return LocalFidelityPipelineResult(
                 is_publishable=False,
                 status="FAIL",
@@ -679,7 +707,7 @@ class LocalFidelityIntegrationPipeline:
             model_hash = model.compute_canonical_hash()
 
         except Exception as exc:
-            logger.error("Model fitting failed: %s", exc)
+            logger.error("Model fitting failed: %s", type(exc).__name__)
             return LocalFidelityPipelineResult(
                 is_publishable=False,
                 status="FAIL",
@@ -695,12 +723,14 @@ class LocalFidelityIntegrationPipeline:
             )
 
         # 3. Candidate Font Building & Artifact Attestation
+        temp_dir_obj: Any = None
         try:
             if output_dir is not None:
                 work_dir = Path(output_dir)
                 work_dir.mkdir(parents=True, exist_ok=True)
             else:
-                work_dir = Path(tempfile.mkdtemp(prefix="telefont_candidate_"))
+                temp_dir_obj = tempfile.TemporaryDirectory(prefix="telefont_candidate_")
+                work_dir = Path(temp_dir_obj.name)
 
             builder = MaxCandidateFontBuilder(
                 family_name=snapshot.family_name,
@@ -738,6 +768,8 @@ class LocalFidelityIntegrationPipeline:
 
         except Exception as exc:
             logger.error("Candidate font build/attestation failed: %s", type(exc).__name__)
+            if temp_dir_obj is not None:
+                temp_dir_obj.cleanup()
             return LocalFidelityPipelineResult(
                 is_publishable=False,
                 status="FAIL",
@@ -796,10 +828,13 @@ class LocalFidelityIntegrationPipeline:
                 candidate_file_path=cand_path,
                 report=report,
                 failure_reasons=sanitized_reasons,
+                _temp_dir=temp_dir_obj,
             )
 
         except Exception as exc:
-            logger.error("Consumer evidence production or fidelity evaluation failed: %s", exc)
+            logger.error("Consumer evidence production or fidelity evaluation failed: %s", type(exc).__name__)
+            if temp_dir_obj is not None:
+                temp_dir_obj.cleanup()
             return LocalFidelityPipelineResult(
                 is_publishable=False,
                 status="FAIL",
