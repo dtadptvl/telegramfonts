@@ -397,6 +397,27 @@ class ObservationStore:
                 )
                 """
             )
+            # Idempotent migration for legacy production databases: the
+            # capability columns were added after source_collections existed
+            # in production. Detect the legacy shape and add both NOT NULL
+            # default-empty columns without deleting or rewriting rows.
+            # Legacy rows stay direct-browser/no-capability records; provider
+            # capability is never inferred for them.
+            existing_cols = {
+                str(row["name"])
+                for row in conn.execute("PRAGMA table_info(source_collections)").fetchall()
+            }
+            if "capability_json" not in existing_cols:
+                conn.execute(
+                    "ALTER TABLE source_collections "
+                    "ADD COLUMN capability_json TEXT NOT NULL DEFAULT ''"
+                )
+            if "capability_hash" not in existing_cols:
+                conn.execute(
+                    "ALTER TABLE source_collections "
+                    "ADD COLUMN capability_hash TEXT NOT NULL DEFAULT ''"
+                )
+            conn.commit()
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS source_collection_attempts (

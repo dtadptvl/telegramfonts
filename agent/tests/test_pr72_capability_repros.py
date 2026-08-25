@@ -196,6 +196,90 @@ def test_CAPABILITY_IDENTITY_cross_provider_and_tamper_fail_closed(tmp_path: Pat
         )
 
 
+def test_LEGACY_SCHEMA_MIGRATION_retains_rows_and_no_capability_inference(tmp_path: Path):
+    """Legacy production source_collections migrate in place: rows retained,
+    legacy completions load as direct-browser/no-capability, sealed rows
+    round-trip, and re-initialization is a no-op."""
+    import sqlite3
+
+    db_dir = tmp_path / "legacy_store"
+    db_dir.mkdir()
+    db_path = db_dir / "index.sqlite3"
+    cfg_h = ISSUE71_CONFIG.compute_hash()
+    legacy_key = "legacy_fam:regular:chromium_legacy_v1:" + cfg_h
+
+    # Exact legacy production shape: no capability columns, one completion row.
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        """
+        CREATE TABLE source_collections (
+            collection_key TEXT PRIMARY KEY,
+            source_url TEXT NOT NULL,
+            reference_id TEXT NOT NULL,
+            style_id TEXT NOT NULL,
+            config_hash TEXT NOT NULL,
+            browser_version TEXT NOT NULL,
+            completed_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO source_collections VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            legacy_key,
+            "https://www.myfonts.com/collections/legacy-fam",
+            "legacy_fam", "regular", cfg_h, "chromium_legacy_v1",
+            "2026-08-25T00:00:00+00:00",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    # Current ObservationStore initialization migrates in place.
+    store = ObservationStore(db_dir)
+
+    # Legacy completion data retained, loading as no-capability.
+    assert store.is_source_collection_completed(
+        "legacy_fam", "regular", config_hash=cfg_h, browser_version="chromium_legacy_v1"
+    )
+    cap_json, cap_hash = store.get_source_collection_capability(
+        "legacy_fam", "regular", browser_version="chromium_legacy_v1", config_hash=cfg_h,
+    )
+    assert cap_json == "" and cap_hash == ""  # never inferred for legacy rows
+
+    # New sealed capability rows round-trip under the migrated schema.
+    store.record_source_collection_completed(
+        "legacy_fam", "bold", cfg_h, "chromium_legacy_v1",
+        source_url="https://www.myfonts.com/collections/legacy-fam",
+        capability_json=CAPABILITY.to_json(),
+        capability_hash=CAPABILITY.compute_hash(),
+    )
+    sealed_json, sealed_hash = store.get_source_collection_capability(
+        "legacy_fam", "bold", browser_version="chromium_legacy_v1", config_hash=cfg_h,
+    )
+    assert sealed_json == CAPABILITY.to_json()
+    assert sealed_hash == CAPABILITY.compute_hash()
+    assert ProviderRasterCapability.from_json(sealed_json) == CAPABILITY
+
+    # Second initialization is a no-op: rows intact, columns not duplicated.
+    store2 = ObservationStore(db_dir)
+    assert store2.is_source_collection_completed(
+        "legacy_fam", "regular", config_hash=cfg_h, browser_version="chromium_legacy_v1"
+    )
+    assert store2.is_source_collection_completed(
+        "legacy_fam", "bold", config_hash=cfg_h, browser_version="chromium_legacy_v1"
+    )
+    conn2 = sqlite3.connect(str(db_path))
+    cols = [str(r[1]) for r in conn2.execute("PRAGMA table_info(source_collections)").fetchall()]
+    conn2.close()
+    assert cols.count("capability_json") == 1
+    assert cols.count("capability_hash") == 1
+    assert cols[:7] == [
+        "collection_key", "source_url", "reference_id", "style_id",
+        "config_hash", "browser_version", "completed_at",
+    ]
+
+
 def test_CAPABILITY_IDENTITY_direct_browser_rejects_sealed_capability(tmp_path: Path):
     """Direct-browser collections carry no descriptor; expecting one fails
     closed (no capability laundering into the phase-held-out path)."""
