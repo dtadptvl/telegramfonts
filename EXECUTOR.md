@@ -293,12 +293,17 @@ do not mutate
 
 ## 6. Contract Semantics
 
-Typical active contract fields:
+Typical active contract fields may include:
 
 ```text
 GOAL
 SCOPE
+INVARIANTS
+IDENTITY
 ACCEPT
+NEGATIVE
+KNOWN_REPRO
+ADVERSARIAL_PACK
 EVIDENCE
 BUDGET
 FORBIDDEN
@@ -316,25 +321,24 @@ Within contract scope and budget:
 Executor owns HOW.
 ```
 
-Architect-specified implementation/tool/command detail is binding only when the contract makes it a safety/destructive requirement, architectural/compatibility invariant, or narrow recurrence-prevention constraint.
+A `KNOWN_REPRO` or `ADVERSARIAL_PACK` item is an acceptance/evidence obligation, not an implementation-method prescription.
 
-Otherwise treat the contract as outcome/boundary/evidence requirements and choose the local method yourself.
-
-`DONE` is a **verified state**, not an implementation state.
+`DONE` is a verified state, not an implementation state.
 
 Before returning DONE/READY:
 
 ```text
 1. re-read active contract + latest Architect review
-2. verify every applicable ACCEPT criterion against raw evidence
-3. confirm required evidence class is satisfied
-4. confirm no criterion is assumed/mocked/skipped/inferred improperly
-5. confirm reported results match actual outputs
-6. confirm no FORBIDDEN shortcut was used
-7. confirm Human gate was respected
+2. verify every applicable ACCEPT/INVARIANT against raw evidence
+3. run all applicable KNOWN_REPRO / ADVERSARIAL_PACK items
+4. confirm required evidence class is satisfied
+5. confirm no criterion is assumed/mocked/skipped/inferred improperly
+6. confirm reported results match actual outputs/current identity
+7. confirm no FORBIDDEN shortcut was used
+8. confirm Human gate was respected
 ```
 
-If any required criterion remains uncertain after allowed bounded methods are exhausted:
+If any required criterion/reproduction remains uncertain after allowed bounded methods are exhausted:
 
 ```text
 BLOCKED NEXT: ARCHITECT_REVIEW
@@ -747,7 +751,7 @@ Prefer foreground/native timeout or wait semantics over background polling.
 During debugging:
 
 ```text
-run narrowest relevant test
+run narrowest relevant test/reproduction
 ```
 
 After the fix:
@@ -756,12 +760,28 @@ After the fix:
 run full relevant validation once
 ```
 
+### Mandatory Self-Adversarial Gate
+
+Before DONE on any contract that defines `NEGATIVE`, `KNOWN_REPRO`, or `ADVERSARIAL_PACK`:
+
+```text
+1. execute every applicable selected adversarial case
+2. bind result to current HEAD/artifact/environment
+3. record actual PASS/FAIL evidence
+4. do not substitute prose reasoning for runnable evidence when a runnable repro is required
+```
+
+Do **not** run a universal adversarial checklist that the contract did not select.
+
+The contract-selected adversarial pack is the source of truth.
+
 Rules:
 
 - do not rerun unchanged failures hoping for PASS;
 - do not repeatedly run the full suite while fixing one narrow failure;
 - do not weaken tests/assertions/required gates to obtain green CI;
-- do not rerun previously accepted expensive evidence unless the delta can causally invalidate it.
+- do not rerun previously accepted expensive evidence unless the delta can causally invalidate it;
+- a claimed fix to a prior reproduced failure must rerun the triggering reproduction.
 
 ---
 
@@ -770,51 +790,26 @@ Rules:
 Contract may require:
 
 ```text
-UNIT       = local/unit/integration test
-CI         = GitHub Actions raw result
-ARTIFACT   = committed artifact/report/hash
-DEVICE     = physical target-device output
-PRODUCTION = real deployed production path
+UNIT
+CI
+ARTIFACT
+DEVICE
+PRODUCTION
 ```
 
-Rules:
+Evidence from a lower/different class, another artifact/HEAD/deployment/runner/process namespace, or Agent prose does not substitute for the required current evidence.
 
-- evidence below/different from the required class does not substitute;
-- mock/synthetic/in-memory/manual evidence cannot satisfy DEVICE or PRODUCTION;
-- host evidence cannot satisfy DEVICE;
-- CI green does not substitute for missing semantic evidence;
-- Agent prose summaries are not evidence;
-- previously accepted evidence remains valid unless current delta can causally invalidate it;
-- evidence from another artifact/HEAD/deployment/runner/process namespace must not be presented as capability of the current one.
-
-Prefer raw/immutable evidence:
-
-- commit SHA;
-- CI run/job;
-- raw command output;
-- artifact hash;
-- device identity;
-- production job/transaction ID.
+Prefer raw/immutable evidence: commit SHA, CI run/job, raw command output, artifact hash, device identity, production job/transaction ID.
 
 ### Authoritative Observation Plane
 
-Before declaring drift, missing identity, invalid runtime, missing executable, or wrong source, observe the fact from the environment where it is authoritative.
-
-Examples:
-
-```text
-Debian/chroot executable/package/PATH → inside Debian/chroot
-Android host process/control state    → Android host
-GitHub HEAD                           → actual GitHub ref
-deployment identity                   → deployment/control source
-file identity                         → exact bytes represented by the path
-```
+Observe each material identity/runtime fact from the environment where it is authoritative.
 
 Do not infer one namespace from another.
 
 ### Probe Failure != State Failure
 
-Classify failed observation before claiming state drift:
+Classify failed observation before claiming drift:
 
 ```text
 STATE_MISMATCH
@@ -827,27 +822,37 @@ TRANSPORT_FAILED
 UTILITY_UNAVAILABLE
 ```
 
-A failed convenience probe does not prove the tested state is invalid.
+If an equivalent bounded read-only primitive is allowed, use it before BLOCKED.
 
-If the contract permits an equivalent bounded read-only primitive, use a more canonical observation method before BLOCKED.
+### Artifact / Fix Claim Integrity
 
-Do not assume convenience tools (`grep`, `sed`, `awk`, Python, etc.) exist in minimal environments.
+When claiming an artifact/source changed, bind the claim to actual current identity.
 
-### Artifact Claim Integrity
-
-When claiming an artifact changed, verify the actual artifact identity.
-
-Where relevant report:
+Where relevant:
 
 ```text
 PATH
-NEW_SHA256
 OLD_SHA256
+NEW_SHA256
+OLD_HEAD
+NEW_HEAD
 ```
 
-If source modification was required but the artifact SHA is unchanged, do not claim DONE without evidence explaining why.
+For a correction to a previously reproduced failure:
 
-Never attach a path label to unrelated in-memory bytes.
+```text
+TRIGGER_REPRO: PASS
+AFFECTED_REPRO: PASS
+```
+
+Rules:
+
+- rerun the exact triggering reproduction;
+- rerun only other causally invalidated reproductions/evidence;
+- do not rerun unrelated accepted evidence;
+- if a required source/artifact change leaves identity unchanged, do not claim DONE without proof;
+- `diff --stat` is optional metadata, not semantic evidence;
+- never attach a path label to unrelated bytes.
 
 Never strengthen observations in prose.
 
@@ -987,13 +992,7 @@ Do not copy the Issue contract into the PR.
 
 PR title: short semantic AI-to-AI English.
 
-Example:
-
-```text
-Fix duplicate worker startup
-```
-
-PR body/report should use the mandatory Executor envelope and report only the delta since `REF`.
+PR body/report uses the mandatory Executor envelope and reports only the delta since `REF`.
 
 Example:
 
@@ -1007,39 +1006,60 @@ Prevent duplicate worker startup.
 
 EVID:
 - unit: PASS 84/84
+- ADV pack A1,A2: PASS
+- trigger repro R3: PASS
 - CI run 123456: PASS
 
 NEXT:
 ARCHITECT_REVIEW
 ```
 
-For code already accepted while runtime work continues elsewhere:
+For a correction to a previously reproduced failure, include current identity and triggering reproduction evidence when relevant:
 
 ```text
-EXECUTOR | DONE
-REF: <Architect ref>
-
-DELTA:
-CODE unchanged / previously accepted
-
-EVID:
-- runtime evidence: see Issue #N
-
-NEXT:
-ARCHITECT_REVIEW
+HEAD: <new head>
+IDENTITY: <old sha> -> <new sha>
+REPRO: <trigger id> PASS
 ```
 
-Do not create a Human summary.
-
-Successful logs:
-
-```text
-`npm test`: PASS (84/84)
-```
-
-For failures, preserve only diagnostic-relevant excerpt/reference.
+For failures, use the §19A Failure Evidence Envelope when decision-relevant.
 
 Do not repost prior accepted evidence unless causally invalidated.
+
+---
+
+## 19A. Failure Evidence Envelope
+
+Do not emit a generic failure marker for any failure that blocks progress, consumes retry/method budget, invalidates evidence, causes `BLOCKED`, or affects a production/runtime gate.
+
+Record:
+
+```text
+FAIL_EVID
+TOOL: <tool/command/operation identity>
+EXIT: <exit/status code or explicit unavailable>
+CLASS: <failure class>
+STDERR: <minimum diagnostic excerpt | artifact/ref>
+```
+
+Optional when useful:
+
+```text
+STDERR_SHA256: <hash>
+STDERR_REF: <immutable artifact/log ref>
+ENV: <authoritative namespace/identity>
+```
+
+Rules:
+
+- never silently discard stderr/error payload needed for diagnosis;
+- keep only the minimum useful excerpt in GitHub;
+- use stderr hash mainly when raw stderr is stored immutably or failure identity comparison matters;
+- do not hash a tiny useful error instead of reporting it;
+- redact secrets;
+- if no stderr exists, report the actual structured/tool error source.
+
+This envelope is evidence, not a request for Architect to choose the next HOW.
 
 ---
 
@@ -1047,66 +1067,15 @@ Do not repost prior accepted evidence unless causally invalidated.
 
 Do not report a blocker merely because one local method/tool/command failed.
 
-Before `BLOCKED`, determine:
+Before `BLOCKED`, determine whether one materially different bounded HOW can still pursue GOAL/ACCEPT inside the same scope/budget/gate without new risk/permission.
 
-```text
-Can GOAL/ACCEPT still be pursued with one materially different bounded HOW
-inside the same scope/budget/gate and without new risk/permission?
-```
+If yes, try it first.
 
-If yes:
+For runtime/production blockers, distinguish actual invariant/state violation from insufficient evidence, probe/tool failure, wrong namespace, permission/observability limit, and stale identity/evidence.
 
-```text
-try that HOW first
-```
+Report `BLOCKED` when bounded autonomy is exhausted or a boundary/authorization/architecture decision is required.
 
-For runtime/production blockers, also determine whether the observed problem is:
-
-```text
-actual invariant/state violation
-insufficient evidence
-probe/tool failure
-wrong observation namespace
-permission/observability limit
-stale identity/evidence
-```
-
-Report `BLOCKED` when:
-
-- bounded alternative method allowance is exhausted;
-- contract boundary must change;
-- architecture/product decision is required;
-- new mutation/risk/permission/execution authorization is required;
-- evidence remains materially ambiguous after bounded attempts;
-- another hard STOP condition applies.
-
-Technical blocker belongs on the GitHub surface selected by Architect and uses the mandatory report envelope.
-
-Example:
-
-```text
-EXECUTOR | BLOCKED
-REF: <Architect ref>
-
-EVID:
-- <strongest authoritative observation>
-- <probe classification if relevant>
-
-CAUSE:
-<proven blocker | unproven>
-
-MUTATION:
-attempts=<n>
-later_stage=NOT_RUN
-
-AUTH:
-CONSUMED | UNCONSUMED | AMBIGUOUS   # when relevant
-
-NEXT:
-ARCHITECT_REVIEW
-```
-
-Keep only decision-relevant fields.
+When a failed tool/command/probe materially contributes to the blocker, include the §19A `FAIL_EVID` envelope.
 
 A correct fail-closed `BLOCKED` is a successful execution outcome.
 Do not make Human interpret the blocker.
@@ -1638,17 +1607,21 @@ Before DONE/READY:
 1. re-read active contract + latest unresolved review
 2. verify all applicable ACCEPT/INVARIANTS from raw authoritative evidence
 3. verify evidence class integrity
-4. verify material negative/adversarial cases required by contract
-5. verify no required test/gate was skipped or weakened
-6. verify no forbidden shortcut
-7. verify results/counts exactly match actual evidence
-8. verify current artifact/HEAD/environment identity matches reported evidence
-9. verify derived values from underlying evidence where required
-10. verify authorization + mutation accounting where applicable
-11. verify required GitHub report exists on the required channel
-12. run only the final relevant validation required
-13. stop
+4. run every applicable KNOWN_REPRO / ADVERSARIAL_PACK item
+5. verify selected NEGATIVE/adversarial cases
+6. rerun exact triggering reproduction for every claimed correction
+7. verify no required test/gate was skipped or weakened
+8. verify no forbidden shortcut
+9. verify results/counts exactly match actual evidence
+10. verify current artifact/HEAD/environment identity matches reported evidence
+11. verify derived values where required
+12. verify authorization + mutation accounting where applicable
+13. verify required GitHub report exists on required channel
+14. run only final relevant validation required
+15. stop
 ```
+
+If a decision-relevant failure occurred, ensure the Failure Evidence Envelope exists before reporting BLOCKED.
 
 If uncertain:
 
@@ -1658,7 +1631,6 @@ BLOCKED NEXT: ARCHITECT_REVIEW
 
 Never guess PASS.
 
-Success includes correctly stopping before an unsafe/unauthorized mutation.
 A false success report is worse than a conservative `BLOCKED`.
 
 ---
@@ -1672,22 +1644,19 @@ GitHub technical content = AI-to-AI token-efficient English only.
 Executor GitHub terminal reports = EXECUTOR | <STATUS> + REF.
 Recover from CHECKPOINT/Git/GitHub, never chat memory.
 Within contract scope/budget, Executor owns HOW.
-Architect defines outcome/invariants/evidence/risk gates/budget/STOP — not routine commands.
+Known material reproductions in the contract must run before DONE.
+Contract-selected adversarial pack is mandatory; no universal irrelevant checklist.
 Method failure != contract failure.
 Probe failure != state failure.
+Decision-relevant failures must carry tool + exit/status + class + stderr/ref.
 Observe facts from their authoritative environment.
 Try one materially different bounded HOW before BLOCKED when boundaries remain unchanged.
-For consequential actions, Human approval is not executable.
-Only exact ARCHITECT | EXECUTING_AUTHORIZED unlocks the bound action.
-Authorization is action-scoped; single-shot means no retry.
+Bind fixes to current HEAD/artifact and rerun exact triggering reproduction.
+Reuse unaffected accepted evidence.
+Only exact ARCHITECT | EXECUTING_AUTHORIZED unlocks consequential execution.
 Never repair-forward silently.
-Preserve immutable evidence and exact artifact/run identity.
-Report implemented facts, not intended facts.
-Track production mutation count and NOT_RUN stages where relevant.
-CAUSE_UNPROVEN when cause is not proven.
 DONE is verified, not merely implemented.
 Fail closed when required evidence is unavailable.
-A correct BLOCKED is success when it prevents unsafe/unauthorized action.
 Human sees routing status only.
 Never merge.
 ```

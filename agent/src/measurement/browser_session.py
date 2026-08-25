@@ -41,6 +41,9 @@ _PROXY_ENV_NAMES = (
     "https_proxy",
     "all_proxy",
 )
+_SAFE_BROWSER_VERSION = re.compile(r"^(?:Chromium|Chrome)/[A-Za-z0-9._-]{1,80}$")
+_HANDSHAKE_PROFILE = "minimal-direct"
+_WEBSOCKETS_VERSION_CLASSES = frozenset({"13-16", "17-plus", "unknown"})
 
 
 @dataclass(frozen=True)
@@ -105,6 +108,9 @@ class ChromiumSessionDiagnostics:
     stdout: ChromiumStreamEvidence | None
     stderr: ChromiumStreamEvidence | None
     cleanup: ChromiumCleanup
+    browser_version: str | None = None
+    handshake_profile: str | None = None
+    websockets_version_class: str | None = None
 
 
 class ChromiumSessionError(RuntimeError):
@@ -213,6 +219,24 @@ def _sanitize_text(value: str) -> str:
     text = re.sub(r"(?:[A-Za-z]:[\\/]|/)[^\r\n\"'<>|,;]+", "<path>", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text[:_DIAGNOSTIC_MESSAGE_CHARS]
+
+
+def _safe_browser_version(value: object) -> str | None:
+    text = str(value).strip()
+    return text if _SAFE_BROWSER_VERSION.fullmatch(text) else None
+
+
+def _websockets_version_class() -> str:
+    version = str(getattr(websockets, "__version__", ""))
+    match = re.fullmatch(r"(\d+)(?:\.\d+){0,2}", version)
+    if match is None:
+        return "unknown"
+    major = int(match.group(1))
+    if 13 <= major <= 16:
+        return "13-16"
+    if major >= 17:
+        return "17-plus"
+    return "unknown"
 
 
 def _exception_info(exc: BaseException) -> ChromiumExceptionInfo:
@@ -346,6 +370,8 @@ class ChromiumSession:
         self.last_diagnostic: ChromiumSessionDiagnostics | None = None
         self._process_created = False
         self.browser_version: str = "unknown"
+        self.handshake_profile = _HANDSHAKE_PROFILE
+        self.websockets_version_class = _websockets_version_class()
         self._loaded_fonts: set[str] = set()
         self._loaded_font_blobs: dict[str, bytes] = {}
 
@@ -420,51 +446,55 @@ class ChromiumSession:
             stage = "http_discovery"
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
             http_url = f"http://127.0.0.1:{target_port}"
-            page_ws_url: str | None = None
             loop = asyncio.get_running_loop()
-            discovery_deadline = loop.time() + max(0.0, float(self.timeout_seconds))
+            startup_deadline = loop.time() + max(0.0, float(self.timeout_seconds))
 
-            async def fetch_discovery_json(url: str) -> Any:
-                remaining = discovery_deadline - loop.time()
+            async def fetch_discovery_json(url: str, method: str = "GET") -> Any:
+                remaining = startup_deadline - loop.time()
                 if remaining <= 0:
                     raise TimeoutError("CHROMIUM_CDP_DISCOVERY_DEADLINE_EXPIRED")
-                async with asyncio.timeout_at(discovery_deadline):
+                async with asyncio.timeout_at(startup_deadline):
                     return await asyncio.to_thread(
                         self._fetch_json,
                         opener,
                         url,
                         timeout_seconds=remaining,
+                        method=method,
                     )
 
-            while loop.time() < discovery_deadline:
+            version_discovered = False
+            while loop.time() < startup_deadline:
                 if self.process.poll() is not None:
                     raise RuntimeError("CHROMIUM_PROCESS_EXITED_DURING_CDP_DISCOVERY")
                 try:
                     vdata = await fetch_discovery_json(f"{http_url}/json/version")
+                    if not isinstance(vdata, dict):
+                        raise RuntimeError("CHROMIUM_VERSION_RESPONSE_REJECTED")
                     self.browser_version = str(vdata.get("Browser", "Chromium/unknown"))
-                    pages = await fetch_discovery_json(f"{http_url}/json/list")
-                    if pages and isinstance(pages, list):
-                        page_ws_url = pages[0].get("webSocketDebuggerUrl")
-                        if page_ws_url:
-                            break
+                    version_discovered = True
+                    break
                 except Exception as exc:
                     last_discovery_error = exc
-                remaining = discovery_deadline - loop.time()
+                remaining = startup_deadline - loop.time()
                 if remaining <= 0:
                     break
                 await asyncio.sleep(min(0.1, remaining))
 
-            if not page_ws_url:
+            if not version_discovered:
                 if last_discovery_error is not None:
                     raise RuntimeError("CHROMIUM_CDP_DISCOVERY_TIMEOUT") from last_discovery_error
                 raise RuntimeError("CHROMIUM_CDP_DISCOVERY_TIMEOUT")
 
+            page_target = await fetch_discovery_json(
+                f"{http_url}/json/new?about:blank", method="PUT"
+            )
             stage = "endpoint_validation"
+            page_ws_url = self._page_target_endpoint(page_target)
             self.endpoint = self._validate_endpoint(page_ws_url, target_port)
             self.ws_url = page_ws_url
 
             stage = "websocket_handshake"
-            self.ws = await self._connect_websocket(page_ws_url)
+            self.ws = await self._connect_websocket(page_ws_url, startup_deadline)
             self.read_task = asyncio.create_task(self._reader_loop())
 
             stage = "cdp_initialization"
@@ -505,10 +535,24 @@ class ChromiumSession:
         opener: urllib.request.OpenerDirector,
         url: str,
         timeout_seconds: float = 1.0,
+        method: str = "GET",
     ) -> Any:
-        request = urllib.request.Request(url)
+        request = urllib.request.Request(url, method=method)
         with opener.open(request, timeout=timeout_seconds) as response:
             return json.loads(response.read().decode("utf-8"))
+
+    @staticmethod
+    def _page_target_endpoint(target: Any) -> str:
+        if not isinstance(target, dict):
+            raise RuntimeError("CDP_PAGE_TARGET_RESPONSE_REJECTED")
+        if target.get("type") != "page":
+            raise RuntimeError("CDP_PAGE_TARGET_TYPE_REJECTED")
+        if target.get("url") != "about:blank":
+            raise RuntimeError("CDP_PAGE_TARGET_URL_REJECTED")
+        websocket_url = target.get("webSocketDebuggerUrl")
+        if not isinstance(websocket_url, str) or not websocket_url:
+            raise RuntimeError("CDP_PAGE_TARGET_WEBSOCKET_REJECTED")
+        return websocket_url
 
     @staticmethod
     def _validate_endpoint(url: str, selected_port: int) -> ChromiumEndpoint:
@@ -536,16 +580,35 @@ class ChromiumSession:
             path_prefix="/devtools/page/",
         )
 
-    async def _connect_websocket(self, url: str) -> Any:
+    async def _connect_websocket(self, url: str, deadline: float | None = None) -> Any:
         kwargs: dict[str, Any] = {"max_size": 20 * 1024 * 1024}
         try:
             parameters = inspect.signature(websockets.connect).parameters
         except (TypeError, ValueError):
             parameters = {}
-        if "proxy" in parameters:
-            kwargs["proxy"] = None
-        with _without_proxy_environment():
-            return await websockets.connect(url, **kwargs)
+        for name, value in (
+            ("proxy", None),
+            ("compression", None),
+            ("origin", None),
+            ("user_agent_header", None),
+        ):
+            if name in parameters:
+                kwargs[name] = value
+
+        async def connect() -> Any:
+            with _without_proxy_environment():
+                return await websockets.connect(url, **kwargs)
+
+        if deadline is None:
+            return await connect()
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            raise TimeoutError("CHROMIUM_WEBSOCKET_DEADLINE_EXPIRED")
+        try:
+            async with asyncio.timeout_at(deadline):
+                return await connect()
+        except asyncio.TimeoutError as exc:
+            raise TimeoutError("CHROMIUM_WEBSOCKET_DEADLINE_EXPIRED") from exc
 
     def _process_state(self) -> str:
         if self.process is None:
@@ -573,6 +636,11 @@ class ChromiumSession:
             stdout=self._stdout_capture.evidence() if self._stdout_capture else None,
             stderr=self._stderr_capture.evidence() if self._stderr_capture else None,
             cleanup=cleanup,
+            browser_version=_safe_browser_version(self.browser_version),
+            handshake_profile=self.handshake_profile,
+            websockets_version_class=self.websockets_version_class
+            if self.websockets_version_class in _WEBSOCKETS_VERSION_CLASSES
+            else "unknown",
         )
 
     @staticmethod

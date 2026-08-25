@@ -57,6 +57,9 @@ def _diagnostics(*, process_created: bool, cleanup: ChromiumCleanup) -> Chromium
             "stderr Authorization: Bearer secret-token",
         ),
         cleanup=cleanup,
+        browser_version="Chromium/151.0.7922.173",
+        handshake_profile="minimal-direct",
+        websockets_version_class="17-plus",
     )
 
 
@@ -123,6 +126,10 @@ async def test_post_spawn_diagnostics_are_serialized_without_raw_values(monkeypa
         "port": 9222,
         "path_prefix": "/devtools/page/",
     }
+    assert report["browser_version"] == "Chromium/151.0.7922.173"
+    assert report["diagnostics"]["browser_version"] == "Chromium/151.0.7922.173"
+    assert report["diagnostics"]["handshake_profile"] == "minimal-direct"
+    assert report["diagnostics"]["websockets_version_class"] == "17-plus"
     encoded = json.dumps(report)
     for forbidden in ("secret-token", "opaque-target", "source.invalid", "/tmp/private-profile"):
         assert forbidden not in encoded

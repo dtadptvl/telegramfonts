@@ -28,6 +28,8 @@ _SAFE_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_BROWSER_VERSION = re.compile(
     r"^(?:Chromium|Chrome)/[0-9]{1,9}(?:\.[0-9]{1,9}){1,3}$"
 )
+_SAFE_HANDSHAKE_PROFILES = frozenset({"minimal-direct"})
+_SAFE_WEBSOCKETS_VERSION_CLASSES = frozenset({"13-16", "17-plus", "unknown"})
 _LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 
@@ -162,6 +164,19 @@ def _diagnostic_payload(
         "process_state": _safe_process_state(diagnostics.process_state),
         "process_created": bool(getattr(diagnostics, "process_created", False)),
         "endpoint": _endpoint_payload(diagnostics.endpoint),
+        "browser_version": browser_session._safe_browser_version(
+            getattr(diagnostics, "browser_version", None)
+        ),
+        "handshake_profile": (
+            diagnostics.handshake_profile
+            if diagnostics.handshake_profile in _SAFE_HANDSHAKE_PROFILES
+            else None
+        ),
+        "websockets_version_class": (
+            diagnostics.websockets_version_class
+            if diagnostics.websockets_version_class in _SAFE_WEBSOCKETS_VERSION_CLASSES
+            else None
+        ),
         "stdout": _stream_payload(diagnostics.stdout),
         "stderr": _stream_payload(diagnostics.stderr),
         "cleanup": _cleanup_payload(effective_cleanup),
@@ -359,6 +374,11 @@ async def run_readiness(
     )
     if typed_diagnostics is not None:
         report["diagnostics"] = _diagnostic_payload(typed_diagnostics, cleanup)
+        preserved_browser_version = _safe_browser_version(
+            getattr(typed_diagnostics, "browser_version", None)
+        )
+        if preserved_browser_version is not None:
+            report["browser_version"] = preserved_browser_version
         report["stage"] = _safe_stage(typed_diagnostics.stage)
         report["process_state"] = _safe_process_state(typed_diagnostics.process_state)
         report["process_creation_proven"] = bool(
