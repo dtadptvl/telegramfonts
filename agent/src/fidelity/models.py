@@ -59,6 +59,59 @@ class FidelityThresholds:
 
 
 @dataclass(frozen=True)
+class FreeTypeSampleEvidence:
+    """Per-sample FreeType raster rendering verification."""
+
+    cache_key: str
+    code_point: int
+    character: str
+    resolution: int
+    raster_sha256: str
+    raster_iou: float
+    pixel_delta_count: int
+    render_error: str | None = None
+
+
+@dataclass(frozen=True)
+class HarfBuzzSampleEvidence:
+    """Per-sample HarfBuzz text shaping verification."""
+
+    text: str
+    in_candidate_cmap: bool
+    glyph_sequence_match: bool
+    glyph_ids: tuple[int, ...]
+    candidate_total_advance_upem: float
+    expected_total_advance_upem: float
+    advance_delta_upem: float
+    max_position_delta_upem: float
+    error_message: str | None = None
+
+
+@dataclass(frozen=True)
+class ChromiumGlyphSampleEvidence:
+    """Per-glyph Chromium Canvas 2D direct measurement verification."""
+
+    code_point: int
+    character: str
+    candidate_advance_upem: float
+    expected_advance_upem: float
+    advance_delta_upem: float
+
+
+@dataclass(frozen=True)
+class ChromiumPairSampleEvidence:
+    """Per-pair Chromium Canvas 2D measurement and GPOS delta evaluation."""
+
+    pair: str
+    baseline_single_sum_upem: float
+    candidate_pair_advance_upem: float
+    expected_pair_advance_upem: float
+    gpos_applied_adjustment_upem: float
+    advance_delta_upem: float
+    non_regression: bool
+
+
+@dataclass(frozen=True)
 class BoundFontToolsEvidence:
     """FontTools format/table validation evidence bound to candidate artifact SHA-256."""
 
@@ -123,12 +176,16 @@ class ConsumerEvidenceBundle:
     freetype: BoundFreeTypeEvidence
     harfbuzz: BoundHarfBuzzEvidence
     chromium: BoundChromiumEvidence
+    held_out_raster_fingerprint: str = ""
+    held_out_typography_fingerprint: str = ""
 
     def validate_bindings(
         self,
         expected_model_hash: str,
         expected_config_hash: str,
         expected_held_out_fingerprint: str,
+        expected_raster_fingerprint: str | None = None,
+        expected_typography_fingerprint: str | None = None,
     ) -> list[str]:
         """Validate that the bundle is bound to the exact evaluated model, config, and held-out set."""
         errors: list[str] = []
@@ -140,6 +197,22 @@ class ConsumerEvidenceBundle:
             errors.append(f"BUNDLE_CONFIG_HASH_MISMATCH: {self.config_hash} != {expected_config_hash}")
         if self.held_out_fingerprint != expected_held_out_fingerprint:
             errors.append(f"BUNDLE_HELD_OUT_FP_MISMATCH: {self.held_out_fingerprint} != {expected_held_out_fingerprint}")
+        if (
+            expected_raster_fingerprint
+            and self.held_out_raster_fingerprint
+            and self.held_out_raster_fingerprint != expected_raster_fingerprint
+        ):
+            errors.append(
+                f"BUNDLE_RASTER_FP_MISMATCH: {self.held_out_raster_fingerprint} != {expected_raster_fingerprint}"
+            )
+        if (
+            expected_typography_fingerprint
+            and self.held_out_typography_fingerprint
+            and self.held_out_typography_fingerprint != expected_typography_fingerprint
+        ):
+            errors.append(
+                f"BUNDLE_TYPOGRAPHY_FP_MISMATCH: {self.held_out_typography_fingerprint} != {expected_typography_fingerprint}"
+            )
         if (
             not self.candidate_artifact_sha
             or len(self.candidate_artifact_sha) != 64
@@ -183,6 +256,8 @@ class ConsumerEvidenceBundle:
             "model_canonical_hash": self.model_canonical_hash,
             "config_hash": self.config_hash,
             "held_out_fingerprint": self.held_out_fingerprint,
+            "held_out_raster_fingerprint": self.held_out_raster_fingerprint,
+            "held_out_typography_fingerprint": self.held_out_typography_fingerprint,
             "candidate_artifact_sha": self.candidate_artifact_sha,
             "fonttools": _strip_host_paths(asdict(self.fonttools)),
             "freetype": _strip_host_paths(asdict(self.freetype)),

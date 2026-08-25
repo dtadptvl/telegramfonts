@@ -13,7 +13,7 @@ import io
 import json
 import logging
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
@@ -28,7 +28,11 @@ from fidelity.models import (
     BoundFontToolsEvidence,
     BoundFreeTypeEvidence,
     BoundHarfBuzzEvidence,
+    ChromiumGlyphSampleEvidence,
+    ChromiumPairSampleEvidence,
     ConsumerEvidenceBundle,
+    FreeTypeSampleEvidence,
+    HarfBuzzSampleEvidence,
 )
 from measurement.browser_session import ChromiumSession, find_chromium_executable
 from measurement.calibration import CalibrationTransform
@@ -49,6 +53,25 @@ REQUIRED_COMMON_TABLES = {"head", "hhea", "maxp", "name", "OS/2", "cmap", "post"
 
 
 @dataclass(frozen=True)
+class CandidateArtifactDescriptor:
+    """Explicit candidate artifact descriptor with builder-attested metadata for anti-drift verification."""
+
+    file_path: Path | str
+    expected_format: str  # "OTF" | "TTF"
+    expected_size_bytes: int
+    expected_sha256_hex: str
+    raw_bytes: bytes | None = None
+
+    def validate(self) -> None:
+        if not self.expected_format or self.expected_format.upper() not in ("OTF", "TTF"):
+            raise ValueError(f"UNSUPPORTED_EXPECTED_FORMAT: '{self.expected_format}'")
+        if self.expected_size_bytes <= 0:
+            raise ValueError(f"INVALID_EXPECTED_SIZE: {self.expected_size_bytes}")
+        if not self.expected_sha256_hex or len(self.expected_sha256_hex) != 64:
+            raise ValueError(f"INVALID_EXPECTED_SHA256: '{self.expected_sha256_hex}'")
+
+
+@dataclass(frozen=True)
 class CandidateArtifact:
     """Verified immutable candidate font artifact in memory and on filesystem."""
 
@@ -59,13 +82,60 @@ class CandidateArtifact:
     raw_bytes: bytes
 
     @classmethod
+    def from_descriptor(cls, descriptor: CandidateArtifactDescriptor) -> CandidateArtifact:
+        """Construct verified artifact from an explicit descriptor, enforcing byte/size/SHA anti-drift."""
+        descriptor.validate()
+        p = Path(descriptor.file_path)
+        if not p.exists() and descriptor.raw_bytes is None:
+            raise FileNotFoundError(f"Candidate font file not found: {p}")
+
+        raw_bytes = descriptor.raw_bytes if descriptor.raw_bytes is not None else p.read_bytes()
+        actual_size = len(raw_bytes)
+        if actual_size != descriptor.expected_size_bytes:
+            raise ValueError(
+                f"ARTIFACT_SIZE_DRIFT: expected {descriptor.expected_size_bytes} bytes, got {actual_size}"
+            )
+
+        actual_sha = hashlib.sha256(raw_bytes).hexdigest().lower()
+        if actual_sha != descriptor.expected_sha256_hex.lower():
+            raise ValueError(
+                f"ARTIFACT_SHA_DRIFT: expected SHA-256 {descriptor.expected_sha256_hex}, got {actual_sha}"
+            )
+
+        fmt: str
+        if raw_bytes.startswith(b"OTTO"):
+            fmt = "OTF"
+        elif raw_bytes.startswith(b"\x00\x01\x00\x00") or raw_bytes.startswith(b"true"):
+            fmt = "TTF"
+        else:
+            raise ValueError("UNSUPPORTED_OR_CORRUPT_FORMAT: invalid magic bytes header")
+
+        if fmt != descriptor.expected_format.upper():
+            raise ValueError(
+                f"ARTIFACT_FORMAT_DRIFT: descriptor declared {descriptor.expected_format}, but magic header is {fmt}"
+            )
+
+        return cls(
+            format=fmt,
+            file_path=str(p.resolve()) if p.exists() else "descriptor_memory",
+            size_bytes=actual_size,
+            sha256_hex=actual_sha,
+            raw_bytes=raw_bytes,
+        )
+
+    @classmethod
     def from_source(
         cls,
-        source: Path | str | bytes,
+        source: Path | str | bytes | CandidateArtifactDescriptor | CandidateArtifact,
         format_hint: str | None = None,
         file_path_hint: str | None = None,
     ) -> CandidateArtifact:
         """Validate and construct CandidateArtifact with strict byte, size, format, and SHA-256 checks."""
+        if isinstance(source, CandidateArtifact):
+            return source
+        if isinstance(source, CandidateArtifactDescriptor):
+            return cls.from_descriptor(source)
+
         raw_bytes: bytes
         file_path_str: str
 
@@ -97,101 +167,131 @@ class CandidateArtifact:
             fmt = "TTF"
         else:
             raise ValueError(
-                f"UNSUPPORTED_OR_CORRUPT_FORMAT: Candidate binary does not begin with valid OTF ('OTTO') or TTF ('\\x00\\x01\\x00\\x00' / 'true') magic header"
+                "UNSUPPORTED_OR_CORRUPT_FORMAT: Candidate binary does not begin with valid OTF ('OTTO') or TTF ('\\x00\\x01\\x00\\x00' / 'true') magic header"
             )
 
-        if format_hint is not None and format_hint.upper() != fmt:
+        if format_hint is not None and fmt != format_hint.upper():
             raise ValueError(
-                f"FORMAT_MISMATCH: Declared format '{format_hint.upper()}' does not match binary signature '{fmt}'"
+                f"FORMAT_MISMATCH: Caller declared format {format_hint}, but magic bytes header indicates {fmt}"
             )
 
-        sha = hashlib.sha256(raw_bytes).hexdigest().lower()
+        size_bytes = len(raw_bytes)
+        sha256_hex = hashlib.sha256(raw_bytes).hexdigest().lower()
 
         return cls(
             format=fmt,
             file_path=file_path_str,
-            size_bytes=len(raw_bytes),
-            sha256_hex=sha,
+            size_bytes=size_bytes,
+            sha256_hex=sha256_hex,
             raw_bytes=raw_bytes,
         )
 
 
 class FontToolsEvidenceProducer:
-    """Production producer executing real FontTools structural, table, and roundtrip validation."""
+    """Parses and validates OpenType table structure, cmap, and metrics round-tripping."""
 
     @classmethod
     def produce(cls, artifact: CandidateArtifact) -> BoundFontToolsEvidence:
-        """Execute FontTools validation and return BoundFontToolsEvidence bound to artifact SHA."""
-        data = artifact.raw_bytes
-        glyph_cnt = 0
-        upem = 0
+        """Parse candidate artifact bytes with FontTools and return bound structural evidence."""
+        try:
+            font = TTFont(io.BytesIO(artifact.raw_bytes))
+        except Exception as exc:
+            return BoundFontToolsEvidence(
+                candidate_artifact_sha=artifact.sha256_hex,
+                result=FormatValidationResult(
+                    format=artifact.format,
+                    file_path=artifact.file_path,
+                    size_bytes=artifact.size_bytes,
+                    sha256_hex=artifact.sha256_hex,
+                    is_direct_loadable_fonttools=False,
+                    is_direct_loadable_freetype=False,
+                    is_roundtrip_loadable_freetype=False,
+                    is_direct_loadable_harfbuzz=False,
+                    is_direct_loadable_chromium=False,
+                    glyph_count=0,
+                    units_per_em=0,
+                    has_valid_cmap=False,
+                    has_valid_metrics=False,
+                    decompression_round_trip=False,
+                    validation_error=f"FONTTOOLS_PARSE_EXCEPTION: {exc}",
+                ),
+            )
+
+        validation_err: str | None = None
         has_cmap = False
-        has_hmtx = False
-        decomp_ok = False
-        err_msg: str | None = None
-        ft_ok = False
+        has_metrics = False
+        glyph_count = 0
+        upem = 0
+        roundtrip_ok = False
 
         try:
-            tt = TTFont(io.BytesIO(data))
-            glyph_order = tt.getGlyphOrder()
-            glyph_cnt = len(glyph_order)
-            upem = int(tt["head"].unitsPerEm) if "head" in tt else 0
-            has_cmap = "cmap" in tt and bool(tt.getBestCmap())
-            has_hmtx = "hhea" in tt and "hmtx" in tt and len(tt["hmtx"].metrics) > 0
-
-            # Required common tables
-            tables = set(tt.keys())
-            missing_common = REQUIRED_COMMON_TABLES - tables
+            # 1. Check required tables
+            present_tables = set(font.keys())
+            missing_common = REQUIRED_COMMON_TABLES - present_tables
             if missing_common:
-                err_msg = f"Missing required common tables: {sorted(missing_common)}"
+                validation_err = f"MISSING_COMMON_TABLES: {sorted(list(missing_common))}"
 
-            # Format-specific tables
             if artifact.format == "OTF":
-                if "CFF " not in tables and "CFF2" not in tables:
-                    err_msg = (err_msg + "; " if err_msg else "") + "OTF missing CFF/CFF2 table"
+                if "CFF " not in present_tables and "CFF2" not in present_tables:
+                    validation_err = f"MISSING_OTF_OUTLINE_TABLE: neither 'CFF ' nor 'CFF2' in {sorted(list(present_tables))}"
             elif artifact.format == "TTF":
-                if "glyf" not in tables or "loca" not in tables:
-                    err_msg = (err_msg + "; " if err_msg else "") + "TTF missing glyf/loca tables"
+                if "glyf" not in present_tables or "loca" not in present_tables:
+                    validation_err = f"MISSING_TTF_OUTLINE_TABLES: 'glyf' or 'loca' missing in {sorted(list(present_tables))}"
 
-            # Decompression and reload round-trip
+            # 2. Check UPEM
+            if "head" in font:
+                upem = int(getattr(font["head"], "unitsPerEm", 0))
+                if upem <= 0:
+                    validation_err = f"INVALID_UNITS_PER_EM: {upem}"
+
+            # 3. Check cmap table
+            if "cmap" in font:
+                best_cmap = font.getBestCmap()
+                if best_cmap and len(best_cmap) > 0:
+                    has_cmap = True
+                else:
+                    validation_err = "EMPTY_OR_INVALID_CMAP"
+
+            # 4. Check horizontal metrics table (hmtx)
+            if "hmtx" in font and "maxp" in font:
+                glyph_count = int(getattr(font["maxp"], "numGlyphs", 0))
+                metrics = font["hmtx"].metrics
+                if metrics and len(metrics) >= glyph_count and glyph_count > 0:
+                    has_metrics = True
+                else:
+                    validation_err = f"INVALID_HMTX_METRICS_COUNT: {len(metrics)} != numGlyphs {glyph_count}"
+
+            # 5. Roundtrip serialization validation
             buf = io.BytesIO()
-            tt.save(buf)
-            tt2 = TTFont(io.BytesIO(buf.getvalue()))
-            decomp_ok = bool(
-                len(tt2.getGlyphOrder()) == glyph_cnt
-                and set(tt2.keys()) == tables
-                and tt2["head"].unitsPerEm == upem
-            )
+            font.save(buf)
+            reloaded_bytes = buf.getvalue()
+            reloaded_font = TTFont(io.BytesIO(reloaded_bytes))
+            if reloaded_font.getBestCmap() and len(reloaded_font.keys()) == len(present_tables):
+                roundtrip_ok = True
+            else:
+                validation_err = "DECOMPRESSION_ROUND_TRIP_FAILED"
 
-            ft_ok = bool(
-                err_msg is None
-                and glyph_cnt > 0
-                and upem > 0
-                and has_cmap
-                and has_hmtx
-                and decomp_ok
-            )
         except Exception as exc:
-            err_msg = f"FontTools validation exception: {exc}"
-            ft_ok = False
-            logger.warning("FontTools validation failed for artifact %s: %s", artifact.sha256_hex[:8], exc)
+            validation_err = f"FONTTOOLS_VALIDATION_EXCEPTION: {exc}"
+
+        is_direct_ok = (validation_err is None) and has_cmap and has_metrics and roundtrip_ok
 
         result = FormatValidationResult(
             format=artifact.format,
             file_path=artifact.file_path,
             size_bytes=artifact.size_bytes,
             sha256_hex=artifact.sha256_hex,
-            is_direct_loadable_fonttools=ft_ok,
-            is_direct_loadable_freetype=True,  # Evaluated by FreeType producer
-            is_roundtrip_loadable_freetype=True,
-            is_direct_loadable_harfbuzz=True,  # Evaluated by HarfBuzz producer
-            is_direct_loadable_chromium=True,  # Evaluated by Chromium producer
-            glyph_count=glyph_cnt,
+            is_direct_loadable_fonttools=is_direct_ok,
+            is_direct_loadable_freetype=False,
+            is_roundtrip_loadable_freetype=False,
+            is_direct_loadable_harfbuzz=False,
+            is_direct_loadable_chromium=False,
+            glyph_count=glyph_count,
             units_per_em=upem,
             has_valid_cmap=has_cmap,
-            has_valid_metrics=has_hmtx,
-            decompression_round_trip=decomp_ok,
-            validation_error=err_msg,
+            has_valid_metrics=has_metrics,
+            decompression_round_trip=roundtrip_ok,
+            validation_error=validation_err,
         )
 
         return BoundFontToolsEvidence(
@@ -201,7 +301,7 @@ class FontToolsEvidenceProducer:
 
 
 class FreeTypeEvidenceProducer:
-    """Production producer executing FreeType raster rendering comparison against held-out evidence."""
+    """Renders candidate font glyphs via FreeType and computes per-sample raster truth against held-out evidence."""
 
     @classmethod
     def produce(
@@ -222,6 +322,8 @@ class FreeTypeEvidenceProducer:
                     raster_iou=0.0,
                     pixel_delta_count=0,
                     render_error="ZERO_HELD_OUT_SAMPLES",
+                    samples=(),
+                    min_raster_iou=0.0,
                 ),
             )
 
@@ -237,27 +339,71 @@ class FreeTypeEvidenceProducer:
                     raster_iou=0.0,
                     pixel_delta_count=0,
                     render_error=f"FREETYPE_INIT_ERROR: {exc}",
+                    samples=(),
+                    min_raster_iou=0.0,
                 ),
             )
 
-        ious: list[float] = []
-        total_deltas: int = 0
-        render_err: str | None = None
+        samples: list[FreeTypeSampleEvidence] = []
+        first_error: str | None = None
 
         for rec in held_out_records:
             cp = rec.code_point
             char = chr(cp)
             res = rec.resolution
 
+            if cp not in model.glyphs:
+                sample_err = f"UNKNOWN_HELD_OUT_CODE_POINT_{cp}"
+                first_error = first_error or sample_err
+                samples.append(
+                    FreeTypeSampleEvidence(
+                        cache_key=rec.cache_key,
+                        code_point=cp,
+                        character=char,
+                        resolution=res,
+                        raster_sha256=rec.raster_sha256,
+                        raster_iou=0.0,
+                        pixel_delta_count=0,
+                        render_error=sample_err,
+                    )
+                )
+                continue
+
             raw_png = raster_provider(rec)
             if not raw_png:
-                render_err = f"MISSING_RASTER_BYTES for {rec.cache_key}"
-                break
+                sample_err = f"MISSING_RASTER_BYTES for {rec.cache_key}"
+                first_error = first_error or sample_err
+                samples.append(
+                    FreeTypeSampleEvidence(
+                        cache_key=rec.cache_key,
+                        code_point=cp,
+                        character=char,
+                        resolution=res,
+                        raster_sha256=rec.raster_sha256,
+                        raster_iou=0.0,
+                        pixel_delta_count=0,
+                        render_error=sample_err,
+                    )
+                )
+                continue
 
             actual_sha = hashlib.sha256(raw_png).hexdigest()
             if actual_sha != rec.raster_sha256 or len(raw_png) != rec.raster_size_bytes:
-                render_err = f"CORRUPT_RASTER_EVIDENCE for {rec.cache_key}"
-                break
+                sample_err = f"CORRUPT_RASTER_EVIDENCE for {rec.cache_key}"
+                first_error = first_error or sample_err
+                samples.append(
+                    FreeTypeSampleEvidence(
+                        cache_key=rec.cache_key,
+                        code_point=cp,
+                        character=char,
+                        resolution=res,
+                        raster_sha256=rec.raster_sha256,
+                        raster_iou=0.0,
+                        pixel_delta_count=0,
+                        render_error=sample_err,
+                    )
+                )
+                continue
 
             try:
                 # 1. Decode reference image
@@ -303,62 +449,84 @@ class FreeTypeEvidenceProducer:
                     src_x1 = bmp_w - max(0, dst_x1 - res)
                     src_y1 = bmp_h - max(0, dst_y1 - res)
 
-                    clip_dst_x0 = max(0, dst_x0)
-                    clip_dst_y0 = max(0, dst_y0)
-                    clip_dst_x1 = min(res, dst_x1)
-                    clip_dst_y1 = min(res, dst_y1)
+                    c_dst_x0 = max(0, dst_x0)
+                    c_dst_y0 = max(0, dst_y0)
+                    c_dst_x1 = min(res, dst_x1)
+                    c_dst_y1 = min(res, dst_y1)
 
-                    if clip_dst_x1 > clip_dst_x0 and clip_dst_y1 > clip_dst_y0:
-                        cand_mask[clip_dst_y0:clip_dst_y1, clip_dst_x0:clip_dst_x1] = cand_ink[
-                            src_y0:src_y1, src_x0:src_x1
-                        ]
+                    if src_x1 > src_x0 and src_y1 > src_y0 and c_dst_x1 > c_dst_x0 and c_dst_y1 > c_dst_y0:
+                        cand_mask[c_dst_y0:c_dst_y1, c_dst_x0:c_dst_x1] = cand_ink[src_y0:src_y1, src_x0:src_x1]
 
+                # 3. Compute exact binary IoU and pixel delta count
                 intersection = int(np.logical_and(cand_mask, ref_mask).sum())
                 union = int(np.logical_or(cand_mask, ref_mask).sum())
-                iou = float(intersection / max(union, 1))
-                delta_cnt = int(np.abs(cand_mask.astype(int) - ref_mask.astype(int)).sum())
+                iou = float(intersection) / max(union, 1)
+                pixel_deltas = int(np.abs(cand_mask.astype(int) - ref_mask.astype(int)).sum())
 
                 if not math.isfinite(iou):
-                    render_err = f"NON_FINITE_IOU for {rec.cache_key}"
-                    break
+                    iou = 0.0
+                    sample_err = "NON_FINITE_IOU"
+                    first_error = first_error or sample_err
+                else:
+                    sample_err = None
 
-                ious.append(iou)
-                total_deltas += delta_cnt
+                samples.append(
+                    FreeTypeSampleEvidence(
+                        cache_key=rec.cache_key,
+                        code_point=cp,
+                        character=char,
+                        resolution=res,
+                        raster_sha256=rec.raster_sha256,
+                        raster_iou=iou,
+                        pixel_delta_count=pixel_deltas,
+                        render_error=sample_err,
+                    )
+                )
+
             except Exception as exc:
-                render_err = f"FREETYPE_RENDER_EXCEPTION for {rec.cache_key}: {exc}"
-                break
+                sample_err = f"FREETYPE_RENDER_EXCEPTION: {exc}"
+                first_error = first_error or sample_err
+                samples.append(
+                    FreeTypeSampleEvidence(
+                        cache_key=rec.cache_key,
+                        code_point=cp,
+                        character=char,
+                        resolution=res,
+                        raster_sha256=rec.raster_sha256,
+                        raster_iou=0.0,
+                        pixel_delta_count=0,
+                        render_error=sample_err,
+                    )
+                )
 
-        if render_err is not None:
-            return BoundFreeTypeEvidence(
-                candidate_artifact_sha=artifact.sha256_hex,
-                result=RasterComparisonResult(
-                    code_point=held_out_records[0].code_point,
-                    character=chr(held_out_records[0].code_point),
-                    render_size_px=held_out_records[0].resolution,
-                    raster_iou=0.0,
-                    pixel_delta_count=0,
-                    render_error=render_err,
-                ),
-            )
+        min_iou = float(min((s.raster_iou for s in samples), default=0.0))
+        mean_iou = float(np.mean([s.raster_iou for s in samples])) if samples else 0.0
+        total_deltas = sum(s.pixel_delta_count for s in samples)
 
-        mean_iou = float(np.mean(ious)) if ious else 0.0
-        primary_rec = held_out_records[0]
+        primary_sample = samples[0] if samples else None
+        primary_cp = primary_sample.code_point if primary_sample else 0
+        primary_char = primary_sample.character if primary_sample else ""
+        primary_res = primary_sample.resolution if primary_sample else 0
+
+        result = RasterComparisonResult(
+            code_point=primary_cp,
+            character=primary_char,
+            render_size_px=primary_res,
+            raster_iou=mean_iou,
+            pixel_delta_count=total_deltas,
+            render_error=first_error,
+            samples=tuple(samples),
+            min_raster_iou=min_iou,
+        )
 
         return BoundFreeTypeEvidence(
             candidate_artifact_sha=artifact.sha256_hex,
-            result=RasterComparisonResult(
-                code_point=primary_rec.code_point,
-                character=chr(primary_rec.code_point),
-                render_size_px=primary_rec.resolution,
-                raster_iou=round(mean_iou, 4),
-                pixel_delta_count=total_deltas,
-                render_error=None,
-            ),
+            result=result,
         )
 
 
 class HarfBuzzEvidenceProducer:
-    """Production producer executing HarfBuzz shaping tests against canonical model expectations."""
+    """Shapes held-out text sequences and kerning pairs with HarfBuzz, computing per-sample shaping truth."""
 
     @classmethod
     def produce(
@@ -367,17 +535,40 @@ class HarfBuzzEvidenceProducer:
         model: CanonicalFontModel,
         held_out_pairs: Sequence[PairKerningObservation] | None = None,
     ) -> BoundHarfBuzzEvidence:
-        """Shape held-out text sequences using HarfBuzz and validate against canonical model metrics and cmap."""
+        """Shape declared held-out text sequences using HarfBuzz and return bound shaping evidence."""
+        if not held_out_pairs:
+            return BoundHarfBuzzEvidence(
+                candidate_artifact_sha=artifact.sha256_hex,
+                result=ShapingTestResult(
+                    text="",
+                    category="held_out_typography",
+                    in_candidate_cmap=False,
+                    glyph_sequence_match=False,
+                    candidate_glyph_names=[],
+                    reference_glyph_names=[],
+                    candidate_glyph_count=0,
+                    reference_glyph_count=0,
+                    candidate_total_advance_upem=0,
+                    reference_total_advance_upem=0,
+                    advance_delta_upem=0,
+                    max_position_delta_upem=0,
+                    samples=(),
+                    all_in_cmap=False,
+                    all_sequence_match=False,
+                    error_message="ZERO_HELD_OUT_PAIRS",
+                ),
+            )
+
         try:
             blob = hb.Blob(artifact.raw_bytes)
-            face = hb.Face(blob)
-            font = hb.Font(face)
+            hb_face = hb.Face(blob)
+            hb_font = hb.Font(hb_face)
         except Exception as exc:
             return BoundHarfBuzzEvidence(
                 candidate_artifact_sha=artifact.sha256_hex,
                 result=ShapingTestResult(
                     text="",
-                    category="error",
+                    category="held_out_typography",
                     in_candidate_cmap=False,
                     glyph_sequence_match=False,
                     candidate_glyph_names=[],
@@ -386,109 +577,127 @@ class HarfBuzzEvidenceProducer:
                     reference_glyph_count=0,
                     candidate_total_advance_upem=0,
                     reference_total_advance_upem=0,
-                    advance_delta_upem=999,
-                    max_position_delta_upem=999,
+                    advance_delta_upem=0,
+                    max_position_delta_upem=0,
+                    samples=(),
+                    all_in_cmap=False,
+                    all_sequence_match=False,
+                    error_message=f"HARFBUZZ_INIT_EXCEPTION: {exc}",
                 ),
             )
 
-        test_sequences: list[tuple[str, str, float]] = []
+        samples: list[HarfBuzzSampleEvidence] = []
+        first_error: str | None = None
 
-        if held_out_pairs:
-            for pair in held_out_pairs:
-                text = f"{pair.left_char}{pair.right_char}"
-                expected_adv = (
-                    model.glyphs[pair.left_cp].advance_width_upem
-                    + model.glyphs[pair.right_cp].advance_width_upem
-                    + model.kerning_pairs.get((pair.left_cp, pair.right_cp), 0)
-                    if pair.left_cp in model.glyphs and pair.right_cp in model.glyphs
-                    else pair.measured_pair_advance_upem
+        for pair in held_out_pairs:
+            text = f"{pair.left_char}{pair.right_char}"
+            if pair.left_cp not in model.glyphs or pair.right_cp not in model.glyphs:
+                sample_err = f"UNKNOWN_HELD_OUT_PAIR_GLYPHS_{pair.left_cp}_{pair.right_cp}"
+                first_error = first_error or sample_err
+                samples.append(
+                    HarfBuzzSampleEvidence(
+                        text=text,
+                        in_candidate_cmap=False,
+                        glyph_sequence_match=False,
+                        glyph_ids=(),
+                        candidate_total_advance_upem=0.0,
+                        expected_total_advance_upem=pair.measured_pair_advance_upem,
+                        advance_delta_upem=abs(pair.measured_pair_advance_upem),
+                        max_position_delta_upem=abs(pair.measured_pair_advance_upem),
+                        error_message=sample_err,
+                    )
                 )
-                test_sequences.append((text, "held_out_pair", expected_adv))
-        else:
-            # Fallback to shaping available model glyphs
-            for cp, g in list(model.glyphs.items())[:5]:
-                test_sequences.append((g.character, "single_glyph", g.advance_width_upem))
+                continue
 
-        if not test_sequences:
-            return BoundHarfBuzzEvidence(
-                candidate_artifact_sha=artifact.sha256_hex,
-                result=ShapingTestResult(
-                    text="",
-                    category="empty",
-                    in_candidate_cmap=False,
-                    glyph_sequence_match=False,
-                    candidate_glyph_names=[],
-                    reference_glyph_names=[],
-                    candidate_glyph_count=0,
-                    reference_glyph_count=0,
-                    candidate_total_advance_upem=0,
-                    reference_total_advance_upem=0,
-                    advance_delta_upem=999,
-                    max_position_delta_upem=999,
-                ),
-            )
+            try:
+                buf = hb.Buffer()
+                buf.add_str(text)
+                buf.guess_segment_properties()
+                hb.shape(hb_font, buf)
 
-        all_in_cmap = True
-        all_seq_match = True
-        total_adv_delta = 0.0
-        max_pos_delta = 0.0
-        first_names: list[str] = []
-        first_text, first_cat, first_expected_adv = test_sequences[0]
-        first_cand_adv = 0
+                infos = buf.glyph_infos
+                positions = buf.glyph_positions
+                glyph_ids = tuple(info.codepoint for info in infos)
 
-        for idx, (text, cat, expected_adv) in enumerate(test_sequences):
-            buf = hb.Buffer()
-            buf.add_str(text)
-            buf.guess_segment_properties()
-            hb.shape(font, buf)
+                # OpenType .notdef is glyph ID 0; in-cmap requires all non-zero glyph IDs
+                in_cmap = bool(len(infos) == 2 and all(gid != 0 for gid in glyph_ids))
 
-            infos = buf.glyph_infos
-            positions = buf.glyph_positions
+                cand_total_adv = float(sum(pos.x_advance for pos in positions))
+                expected_adv = pair.measured_pair_advance_upem
+                adv_delta = abs(cand_total_adv - expected_adv)
 
-            # In HarfBuzz, codepoint is glyph ID; 0 is .notdef / missing
-            cand_cps = [info.codepoint for info in infos]
-            in_cmap = bool(len(cand_cps) == len(text) and 0 not in cand_cps)
-            if not in_cmap:
-                all_in_cmap = False
+                # Cluster alignment: first glyph cluster=0, second glyph cluster=1
+                clusters_ok = len(infos) == 2 and infos[0].cluster == 0 and infos[1].cluster == 1
+                seq_match = bool(in_cmap and clusters_ok and adv_delta <= 15.0)
 
-            seq_match = bool(len(infos) == len(text) and in_cmap)
-            if not seq_match:
-                all_seq_match = False
+                sample_err = None if (in_cmap and seq_match) else "SHAPING_MISMATCH"
+                if sample_err:
+                    first_error = first_error or sample_err
 
-            cand_total_adv = sum(pos.x_advance for pos in positions)
-            if not math.isfinite(cand_total_adv):
-                all_in_cmap = False
-                all_seq_match = False
+                samples.append(
+                    HarfBuzzSampleEvidence(
+                        text=text,
+                        in_candidate_cmap=in_cmap,
+                        glyph_sequence_match=seq_match,
+                        glyph_ids=glyph_ids,
+                        candidate_total_advance_upem=cand_total_adv,
+                        expected_total_advance_upem=expected_adv,
+                        advance_delta_upem=adv_delta,
+                        max_position_delta_upem=adv_delta,
+                        error_message=sample_err,
+                    )
+                )
+            except Exception as exc:
+                sample_err = f"SHAPING_EXCEPTION: {exc}"
+                first_error = first_error or sample_err
+                samples.append(
+                    HarfBuzzSampleEvidence(
+                        text=text,
+                        in_candidate_cmap=False,
+                        glyph_sequence_match=False,
+                        glyph_ids=(),
+                        candidate_total_advance_upem=0.0,
+                        expected_total_advance_upem=pair.measured_pair_advance_upem,
+                        advance_delta_upem=abs(pair.measured_pair_advance_upem),
+                        max_position_delta_upem=abs(pair.measured_pair_advance_upem),
+                        error_message=sample_err,
+                    )
+                )
 
-            delta_adv = abs(cand_total_adv - expected_adv)
-            total_adv_delta += delta_adv
-            max_pos_delta = max(max_pos_delta, delta_adv)
+        all_in_cmap = all(s.in_candidate_cmap for s in samples) if samples else False
+        all_seq_match = all(s.glyph_sequence_match for s in samples) if samples else False
+        max_adv_delta = max((s.advance_delta_upem for s in samples), default=0.0)
 
-            if idx == 0:
-                first_names = [f"g_{cp}" for cp in cand_cps]
-                first_cand_adv = int(cand_total_adv)
+        primary_sample = samples[0] if samples else None
+        cand_names = [f"g_{gid}" for gid in (primary_sample.glyph_ids if primary_sample else ())]
+
+        result = ShapingTestResult(
+            text=primary_sample.text if primary_sample else "",
+            category="held_out_pair",
+            in_candidate_cmap=all_in_cmap,
+            glyph_sequence_match=all_seq_match,
+            candidate_glyph_names=cand_names,
+            reference_glyph_names=cand_names,
+            candidate_glyph_count=len(cand_names),
+            reference_glyph_count=len(cand_names),
+            candidate_total_advance_upem=int(round(primary_sample.candidate_total_advance_upem if primary_sample else 0)),
+            reference_total_advance_upem=int(round(primary_sample.expected_total_advance_upem if primary_sample else 0)),
+            advance_delta_upem=int(round(max_adv_delta)),
+            max_position_delta_upem=int(round(max_adv_delta)),
+            samples=tuple(samples),
+            all_in_cmap=all_in_cmap,
+            all_sequence_match=all_seq_match,
+            error_message=first_error,
+        )
 
         return BoundHarfBuzzEvidence(
             candidate_artifact_sha=artifact.sha256_hex,
-            result=ShapingTestResult(
-                text=first_text,
-                category=first_cat,
-                in_candidate_cmap=all_in_cmap,
-                glyph_sequence_match=all_seq_match,
-                candidate_glyph_names=first_names,
-                reference_glyph_names=first_names,
-                candidate_glyph_count=len(test_sequences),
-                reference_glyph_count=len(test_sequences),
-                candidate_total_advance_upem=first_cand_adv,
-                reference_total_advance_upem=int(first_expected_adv),
-                advance_delta_upem=int(round(total_adv_delta)),
-                max_position_delta_upem=int(round(max_pos_delta)),
-            ),
+            result=result,
         )
 
 
 class ChromiumEvidenceProducer:
-    """Production producer executing direct Chromium headless measurement, canvas verification, and non-regression."""
+    """Loads candidate font in headless Chromium, executing direct metric, canvas, and pair non-regression verification."""
 
     @classmethod
     async def produce(
@@ -497,7 +706,7 @@ class ChromiumEvidenceProducer:
         model: CanonicalFontModel,
         held_out_records: Sequence[ObservationRecord],
         held_out_pairs: Sequence[PairKerningObservation] | None = None,
-        session: ChromiumSession | None = None,
+        _test_session: ChromiumSession | None = None,
     ) -> BoundChromiumEvidence:
         """Execute headless Chromium session on candidate artifact and return BoundChromiumEvidence."""
         # 1. Capability check
@@ -518,6 +727,8 @@ class ChromiumEvidenceProducer:
                     measured_glyph_count=0,
                     mean_chromium_advance_error_upem=0.0,
                     pair_metrics=[],
+                    glyph_samples=(),
+                    pair_samples=(),
                     fit_pairs_material_improvement=False,
                     held_out_pairs_non_regression=False,
                     rendered_canvas_valid=False,
@@ -525,8 +736,8 @@ class ChromiumEvidenceProducer:
                 ),
             )
 
-        owns_session = session is None
-        sess = session or ChromiumSession(timeout_seconds=10.0)
+        owns_session = _test_session is None
+        sess = _test_session or ChromiumSession(timeout_seconds=10.0)
 
         try:
             await sess.start()
@@ -545,118 +756,139 @@ class ChromiumEvidenceProducer:
             out_rejected = not (await sess.is_glyph_supported_in_font(alias, test_out_cp))
             fallback_ok = bool(in_loaded and out_rejected)
 
+            # 2. Direct browser metric measurements for held-out glyphs
+            glyph_samples: list[ChromiumGlyphSampleEvidence] = []
             adv_deltas: list[float] = []
             for cp in measured_cps:
                 m = await sess.measure_glyph_direct(alias, cp, 200.0, upem=model.metrics.units_per_em)
                 expected_adv = model.glyphs[cp].advance_width_upem if cp in model.glyphs else m.advance_width_upem
-                adv_deltas.append(abs(m.advance_width_upem - expected_adv))
+                delta = abs(m.advance_width_upem - expected_adv)
+                adv_deltas.append(delta)
+                glyph_samples.append(
+                    ChromiumGlyphSampleEvidence(
+                        code_point=cp,
+                        character=chr(cp),
+                        candidate_advance_upem=m.advance_width_upem,
+                        expected_advance_upem=expected_adv,
+                        advance_delta_upem=delta,
+                    )
+                )
 
-            # 3. Canvas 2D render proof
+            # 3. Canvas 2D render proof with safely JSON-encoded characters
             test_chars = "".join(chr(cp) for cp in measured_cps[:4])
+            json_chars = json.dumps(test_chars)
+            target_font_str = json.dumps(f"100px {alias}, monospace")
             js_canvas = f"""
             (() => {{
                 const canvas = document.createElement('canvas');
                 canvas.width = 300;
-                canvas.height = 100;
-                const ctx = canvas.getContext('2d', {{ willReadFrequently: true }});
-                ctx.font = '32px "{alias}"';
-                ctx.fillStyle = 'black';
-                ctx.fillText('{test_chars}', 10, 50);
-                const imgData = ctx.getImageData(0, 0, 300, 100);
-                let inkCount = 0;
-                for (let i = 3; i < imgData.data.length; i += 4) {{
-                    if (imgData.data[i] > 10) inkCount++;
+                canvas.height = 300;
+                const ctx = canvas.getContext('2d');
+                ctx.font = {target_font_str};
+                ctx.fillStyle = '#000000';
+                ctx.fillText({json_chars}, 20, 150);
+                const data = ctx.getImageData(0, 0, 300, 300).data;
+                let inkPixels = 0;
+                for (let i = 3; i < data.length; i += 4) {{
+                    if (data[i] > 128) inkPixels++;
                 }}
-                return inkCount > 10;
+                return {{ inkPixels: inkPixels }};
             }})()
             """
-            canvas_valid = bool(await sess.evaluate_script(js_canvas))
+            render_res = await sess.evaluate_script(js_canvas)
+            canvas_valid = bool(render_res and render_res.get("inkPixels", 0) > 0)
 
-            # 4. Held-out typography pair evaluation
-            pair_metric_results: list[ChromiumPairMetricResult] = []
-            held_out_non_regression = True
+            # 4. Pair kerning non-regression verification
+            pair_metrics: list[ChromiumPairMetricResult] = []
+            pair_samples: list[ChromiumPairSampleEvidence] = []
 
             if held_out_pairs:
                 for pair in held_out_pairs:
-                    pair_str = f"{pair.left_char}{pair.right_char}"
-                    js_pair = f"""
-                    (() => {{
-                        const canvas = document.createElement('canvas');
-                        const ctx = canvas.getContext('2d');
-                        ctx.font = '200px "{alias}"';
-                        const w_single_left = (ctx.measureText('{pair.left_char}').width / 200.0) * 1000;
-                        const w_single_right = (ctx.measureText('{pair.right_char}').width / 200.0) * 1000;
-                        const w_pair = (ctx.measureText('{pair_str}').width / 200.0) * 1000;
-                        return {{
-                            single_sum: w_single_left + w_single_right,
-                            pair_w: w_pair,
-                            adj: w_pair - (w_single_left + w_single_right)
-                        }};
-                    }})()
-                    """
-                    raw_res = await sess.evaluate_script(js_pair)
-                    cand_pair_w = float(raw_res["pair_w"])
-                    gpos_adj = float(raw_res["adj"])
-                    single_sum = float(raw_res["single_sum"])
-                    expected_pair_w = (
-                        model.glyphs[pair.left_cp].advance_width_upem
-                        + model.glyphs[pair.right_cp].advance_width_upem
-                        + model.kerning_pairs.get((pair.left_cp, pair.right_cp), 0)
-                        if pair.left_cp in model.glyphs and pair.right_cp in model.glyphs
-                        else pair.measured_pair_advance_upem
-                    )
-                    pair_err = abs(cand_pair_w - expected_pair_w)
-                    if pair_err > 15.0:
-                        held_out_non_regression = False
+                    m_l = await sess.measure_glyph_direct(alias, pair.left_cp, 200.0, upem=model.metrics.units_per_em)
+                    m_r = await sess.measure_glyph_direct(alias, pair.right_cp, 200.0, upem=model.metrics.units_per_em)
+                    baseline_sum = m_l.advance_width_upem + m_r.advance_width_upem
 
-                    pair_metric_results.append(
-                        ChromiumPairMetricResult(
-                            pair=pair_str,
-                            category="held_out_pair",
-                            baseline_single_sum_upem=round(single_sum, 2),
-                            candidate_pair_advance_upem=round(cand_pair_w, 2),
-                            gpos_applied_adjustment_upem=round(gpos_adj, 2),
-                            reference_pair_advance_upem=round(expected_pair_w, 2),
-                            baseline_error_upem=round(abs(single_sum - expected_pair_w), 2),
-                            gpos_candidate_error_upem=round(pair_err, 2),
-                            material_improvement=bool(pair_err <= abs(single_sum - expected_pair_w)),
+                    pair_text = f"{pair.left_char}{pair.right_char}"
+                    cand_pair_adv = await sess.measure_text_advance(
+                        alias, pair_text, font_size_px=200.0, upem=model.metrics.units_per_em
+                    )
+
+                    expected_pair_adv = pair.measured_pair_advance_upem
+                    gpos_adj = cand_pair_adv - baseline_sum
+                    cand_err = abs(cand_pair_adv - expected_pair_adv)
+                    base_err = abs(baseline_sum - expected_pair_adv)
+
+                    non_reg = bool(cand_err <= base_err + 2.0)
+
+                    p_res = ChromiumPairMetricResult(
+                        pair=pair_text,
+                        category="held_out_pair",
+                        baseline_single_sum_upem=baseline_sum,
+                        candidate_pair_advance_upem=cand_pair_adv,
+                        gpos_applied_adjustment_upem=gpos_adj,
+                        reference_pair_advance_upem=expected_pair_adv,
+                        baseline_error_upem=base_err,
+                        gpos_candidate_error_upem=cand_err,
+                        material_improvement=non_reg,
+                    )
+                    pair_metrics.append(p_res)
+                    pair_samples.append(
+                        ChromiumPairSampleEvidence(
+                            pair=pair_text,
+                            baseline_single_sum_upem=baseline_sum,
+                            candidate_pair_advance_upem=cand_pair_adv,
+                            expected_pair_advance_upem=expected_pair_adv,
+                            gpos_applied_adjustment_upem=gpos_adj,
+                            advance_delta_upem=cand_err,
+                            non_regression=non_reg,
                         )
                     )
 
+                held_out_non_reg = all(s.non_regression for s in pair_samples)
+            else:
+                # No held-out pairs provided -> cannot claim non-regression!
+                held_out_non_reg = False
+
             mean_adv_err = float(np.mean(adv_deltas)) if adv_deltas else 0.0
+
+            result = ChromiumValidationResult(
+                is_available=True,
+                browser_version=sess.browser_version or "chromium",
+                is_direct_loadable_chromium=bool(in_loaded),
+                fallback_rejection_verified=fallback_ok,
+                measured_glyph_count=len(measured_cps),
+                mean_chromium_advance_error_upem=mean_adv_err,
+                pair_metrics=pair_metrics,
+                glyph_samples=tuple(glyph_samples),
+                pair_samples=tuple(pair_samples),
+                fit_pairs_material_improvement=held_out_non_reg,
+                held_out_pairs_non_regression=held_out_non_reg,
+                rendered_canvas_valid=canvas_valid,
+                error_message=None,
+            )
 
             return BoundChromiumEvidence(
                 candidate_artifact_sha=artifact.sha256_hex,
-                result=ChromiumValidationResult(
-                    is_available=True,
-                    browser_version=sess.browser_version,
-                    is_direct_loadable_chromium=True,
-                    fallback_rejection_verified=fallback_ok,
-                    measured_glyph_count=len(adv_deltas),
-                    mean_chromium_advance_error_upem=round(mean_adv_err, 2),
-                    pair_metrics=pair_metric_results,
-                    fit_pairs_material_improvement=True,
-                    held_out_pairs_non_regression=held_out_non_regression,
-                    rendered_canvas_valid=canvas_valid,
-                    error_message=None,
-                ),
+                result=result,
             )
+
         except Exception as exc:
-            logger.warning("Chromium producer execution error: %s", exc)
             return BoundChromiumEvidence(
                 candidate_artifact_sha=artifact.sha256_hex,
                 result=ChromiumValidationResult(
                     is_available=True,
-                    browser_version="error",
+                    browser_version=sess.browser_version or "chromium",
                     is_direct_loadable_chromium=False,
                     fallback_rejection_verified=False,
                     measured_glyph_count=0,
-                    mean_chromium_advance_error_upem=999.0,
+                    mean_chromium_advance_error_upem=0.0,
                     pair_metrics=[],
+                    glyph_samples=(),
+                    pair_samples=(),
                     fit_pairs_material_improvement=False,
                     held_out_pairs_non_regression=False,
                     rendered_canvas_valid=False,
-                    error_message=f"CHROMIUM_EXECUTION_ERROR: {exc}",
+                    error_message=f"CHROMIUM_EXECUTION_EXCEPTION: {exc}",
                 ),
             )
         finally:
@@ -665,45 +897,69 @@ class ChromiumEvidenceProducer:
 
 
 class ProductionConsumerEvidenceProducer:
-    """Authoritative production bundle assembler executing all four consumers without caller-authored PASS booleans."""
+    """Authoritative builder executing all four consumers and producing a strictly bound ConsumerEvidenceBundle."""
 
     @classmethod
     async def produce_bundle(
         cls,
-        candidate_source: Path | str | bytes,
+        candidate_source: Path | str | bytes | CandidateArtifactDescriptor | CandidateArtifact,
         model: CanonicalFontModel,
         config: ObservationConfig,
         held_out_records: Sequence[ObservationRecord],
+        held_out_pairs: Sequence[PairKerningObservation],
         raster_provider: Callable[[ObservationRecord], bytes],
-        held_out_pairs: Sequence[PairKerningObservation] | None = None,
         format_hint: str | None = None,
-        chromium_session: ChromiumSession | None = None,
+        expected_descriptor: CandidateArtifactDescriptor | None = None,
+        _test_chromium_session: ChromiumSession | None = None,
     ) -> ConsumerEvidenceBundle:
         """Execute FontTools, FreeType, HarfBuzz, and Chromium against the verified candidate artifact.
 
         Derives all cryptographic fingerprints and returns a strictly bound ConsumerEvidenceBundle.
         """
         # 1. Single artifact verification
-        artifact = CandidateArtifact.from_source(candidate_source, format_hint=format_hint)
+        if expected_descriptor is not None:
+            artifact = CandidateArtifact.from_descriptor(expected_descriptor)
+        else:
+            artifact = CandidateArtifact.from_source(candidate_source, format_hint=format_hint)
 
-        # 2. Strict pre-validation of inputs
+        # 2. Strict pre-validation of inputs (no zero or unknown samples permitted)
         if not held_out_records:
-            raise ValueError("ZERO_HELD_OUT_SAMPLES: held_out_records cannot be empty")
+            raise ValueError("ZERO_HELD_OUT_RASTER_SAMPLES: held_out_records cannot be empty")
+        if not held_out_pairs:
+            raise ValueError("ZERO_HELD_OUT_TYPOGRAPHY_SAMPLES: held_out_pairs cannot be empty")
+
+        for r in held_out_records:
+            if r.code_point not in model.glyphs:
+                raise ValueError(f"UNKNOWN_HELD_OUT_CODE_POINT: Glyph {r.code_point} not in canonical model")
+
+        for p in held_out_pairs:
+            if p.left_cp not in model.glyphs or p.right_cp not in model.glyphs:
+                raise ValueError(
+                    f"UNKNOWN_HELD_OUT_PAIR_GLYPHS: Pair ({p.left_cp}, {p.right_cp}) not in canonical model"
+                )
 
         model_hash = model.compute_canonical_hash()
         config_hash = config.compute_hash()
 
-        # Compute held-out records fingerprint matching FidelityEvaluator
         from fidelity.evaluator import FidelityEvaluator
-        held_out_fp = FidelityEvaluator._compute_records_fingerprint(held_out_records)
-        sorted_records = sorted(held_out_records, key=lambda r: (r.code_point, r.resolution, r.subpixel_x, r.subpixel_y))
+
+        held_out_raster_fp = FidelityEvaluator._compute_records_fingerprint(held_out_records)
+        held_out_typo_fp = FidelityEvaluator._compute_typography_fingerprint(held_out_pairs)
+        composite_held_out_fp = FidelityEvaluator._compute_composite_held_out_fingerprint(
+            held_out_records, held_out_pairs
+        )
+
+        sorted_records = sorted(
+            held_out_records, key=lambda r: (r.code_point, r.resolution, r.subpixel_x, r.subpixel_y)
+        )
+        sorted_pairs = sorted(held_out_pairs, key=lambda p: (p.left_cp, p.right_cp, p.provenance))
 
         # 3. Execute 4 independent consumer evidence producers
         ft_evidence = FontToolsEvidenceProducer.produce(artifact)
         fr_evidence = FreeTypeEvidenceProducer.produce(artifact, model, sorted_records, raster_provider)
-        hb_evidence = HarfBuzzEvidenceProducer.produce(artifact, model, held_out_pairs)
+        hb_evidence = HarfBuzzEvidenceProducer.produce(artifact, model, sorted_pairs)
         cr_evidence = await ChromiumEvidenceProducer.produce(
-            artifact, model, sorted_records, held_out_pairs, chromium_session
+            artifact, model, sorted_records, sorted_pairs, _test_session=_test_chromium_session
         )
 
         # 4. Construct and validate bundle
@@ -711,18 +967,22 @@ class ProductionConsumerEvidenceProducer:
             schema_version="1.0.0",
             model_canonical_hash=model_hash,
             config_hash=config_hash,
-            held_out_fingerprint=held_out_fp,
+            held_out_fingerprint=composite_held_out_fp,
             candidate_artifact_sha=artifact.sha256_hex,
             fonttools=ft_evidence,
             freetype=fr_evidence,
             harfbuzz=hb_evidence,
             chromium=cr_evidence,
+            held_out_raster_fingerprint=held_out_raster_fp,
+            held_out_typography_fingerprint=held_out_typo_fp,
         )
 
         binding_errors = bundle.validate_bindings(
             expected_model_hash=model_hash,
             expected_config_hash=config_hash,
-            expected_held_out_fingerprint=held_out_fp,
+            expected_held_out_fingerprint=composite_held_out_fp,
+            expected_raster_fingerprint=held_out_raster_fp,
+            expected_typography_fingerprint=held_out_typo_fp,
         )
         if binding_errors:
             raise ValueError(f"CONSUMER_BUNDLE_BINDING_FAILED: {binding_errors}")
@@ -732,23 +992,25 @@ class ProductionConsumerEvidenceProducer:
     @classmethod
     def produce_bundle_sync(
         cls,
-        candidate_source: Path | str | bytes,
+        candidate_source: Path | str | bytes | CandidateArtifactDescriptor | CandidateArtifact,
         model: CanonicalFontModel,
         config: ObservationConfig,
         held_out_records: Sequence[ObservationRecord],
+        held_out_pairs: Sequence[PairKerningObservation],
         raster_provider: Callable[[ObservationRecord], bytes],
-        held_out_pairs: Sequence[PairKerningObservation] | None = None,
         format_hint: str | None = None,
+        expected_descriptor: CandidateArtifactDescriptor | None = None,
     ) -> ConsumerEvidenceBundle:
-        """Synchronous convenience wrapper for produce_bundle."""
+        """Synchronous wrapper for produce_bundle."""
         return asyncio.run(
             cls.produce_bundle(
                 candidate_source=candidate_source,
                 model=model,
                 config=config,
                 held_out_records=held_out_records,
-                raster_provider=raster_provider,
                 held_out_pairs=held_out_pairs,
+                raster_provider=raster_provider,
                 format_hint=format_hint,
+                expected_descriptor=expected_descriptor,
             )
         )

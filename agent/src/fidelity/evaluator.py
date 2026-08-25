@@ -39,6 +39,27 @@ class FidelityEvaluator:
         return hashlib.sha256(":".join(sorted_keys).encode("utf-8")).hexdigest()
 
     @staticmethod
+    def _compute_typography_fingerprint(pairs: Sequence[PairKerningObservation]) -> str:
+        if not pairs:
+            return "empty"
+        sorted_pairs = sorted(pairs, key=lambda p: (p.left_cp, p.right_cp, p.provenance))
+        payload_items = [
+            f"{p.left_cp}:{p.right_cp}:{p.left_advance_upem:.2f}:{p.right_advance_upem:.2f}:{p.measured_pair_advance_upem:.2f}:{p.inferred_kerning_upem}:{p.provenance}"
+            for p in sorted_pairs
+        ]
+        return hashlib.sha256(";".join(payload_items).encode("utf-8")).hexdigest()
+
+    @classmethod
+    def _compute_composite_held_out_fingerprint(
+        cls,
+        records: Sequence[ObservationRecord],
+        pairs: Sequence[PairKerningObservation],
+    ) -> str:
+        r_fp = cls._compute_records_fingerprint(records)
+        t_fp = cls._compute_typography_fingerprint(pairs)
+        return hashlib.sha256(f"{r_fp}:{t_fp}".encode("utf-8")).hexdigest()
+
+    @staticmethod
     def _rasterize_glyph_contours(
         glyph,
         transform: CalibrationTransform,
@@ -128,11 +149,18 @@ class FidelityEvaluator:
 
         config_hash = config.compute_hash()
         fit_fp = cls._compute_records_fingerprint(fit_records)
-        held_out_fp = cls._compute_records_fingerprint(held_out_records)
+        held_out_raster_fp = cls._compute_records_fingerprint(held_out_records)
+        held_out_typo_fp = cls._compute_typography_fingerprint(held_out_pairs)
+        composite_held_out_fp = cls._compute_composite_held_out_fingerprint(held_out_records, held_out_pairs)
 
         # ==========================================
         # GATE 0: FIT / HELD-OUT PROVENANCE, LEAKAGE & MODEL BINDING
         # ==========================================
+        if not held_out_records:
+            failure_reasons.append("ZERO_HELD_OUT_RASTER_SAMPLES: Nonempty held-out raster records required")
+        if not held_out_pairs:
+            failure_reasons.append("ZERO_HELD_OUT_TYPOGRAPHY_SAMPLES: Nonempty held-out typography pairs required")
+
         if model.config_hash != config_hash:
             failure_reasons.append(
                 f"CONFIG_HASH_MISMATCH: Model config hash ({model.config_hash}) does not match active config hash ({config_hash})"
@@ -512,10 +540,14 @@ class FidelityEvaluator:
         if consumer_bundle is None or not isinstance(consumer_bundle, ConsumerEvidenceBundle):
             failure_reasons.append("CONSUMER_GATE_FAIL: MISSING_CONSUMER_BUNDLE: Production evaluation requires a valid bound ConsumerEvidenceBundle")
         else:
+            # Determine expected held_out_fingerprint (composite if typography bound, else raster)
+            expected_bundle_fp = composite_held_out_fp if consumer_bundle.held_out_typography_fingerprint else held_out_raster_fp
             binding_errors = consumer_bundle.validate_bindings(
                 expected_model_hash=model_hash,
                 expected_config_hash=config_hash,
-                expected_held_out_fingerprint=held_out_fp,
+                expected_held_out_fingerprint=expected_bundle_fp,
+                expected_raster_fingerprint=held_out_raster_fp,
+                expected_typography_fingerprint=held_out_typo_fp if held_out_pairs else None,
             )
             if binding_errors:
                 for err in binding_errors:
@@ -534,22 +566,57 @@ class FidelityEvaluator:
                 )
 
                 fr = consumer_bundle.freetype.result
+                fr_samples = getattr(fr, "samples", ())
+                fr_samples_ok = True
+                if fr_samples:
+                    # Verify every held-out record is represented and valid
+                    sample_keys = {s.cache_key for s in fr_samples}
+                    expected_keys = {r.cache_key for r in held_out_records}
+                    if expected_keys - sample_keys:
+                        fr_samples_ok = False
+                        failure_reasons.append("CONSUMER_GATE_FAIL: FreeType missing evaluated held-out samples")
+                    for s in fr_samples:
+                        if s.render_error is not None or not math.isfinite(s.raster_iou) or s.raster_iou < thresholds.min_raster_iou:
+                            fr_samples_ok = False
+                            failure_reasons.append(f"CONSUMER_GATE_FAIL: FreeType sample {s.cache_key} failed (iou={s.raster_iou:.4f}, err={s.render_error})")
                 freetype_pass = bool(
                     fr.render_error is None
                     and fr.render_size_px > 0
                     and math.isfinite(fr.raster_iou)
                     and fr.raster_iou >= thresholds.min_raster_iou
+                    and fr_samples_ok
                 )
 
                 hb = consumer_bundle.harfbuzz.result
+                hb_samples = getattr(hb, "samples", ())
+                hb_samples_ok = True
+                if hb_samples:
+                    sample_texts = {s.text for s in hb_samples}
+                    expected_texts = {f"{p.left_char}{p.right_char}" for p in held_out_pairs}
+                    if expected_texts - sample_texts:
+                        hb_samples_ok = False
+                        failure_reasons.append("CONSUMER_GATE_FAIL: HarfBuzz missing evaluated held-out pair samples")
+                    for s in hb_samples:
+                        if not s.in_candidate_cmap or not s.glyph_sequence_match or s.error_message is not None or s.advance_delta_upem > thresholds.max_kerning_delta_upem:
+                            hb_samples_ok = False
+                            failure_reasons.append(f"CONSUMER_GATE_FAIL: HarfBuzz sample '{s.text}' failed (cmap={s.in_candidate_cmap}, seq={s.glyph_sequence_match}, delta={s.advance_delta_upem:.2f})")
                 hb_pass = bool(
                     hb.in_candidate_cmap
                     and hb.glyph_sequence_match
                     and hb.candidate_glyph_count > 0
                     and math.isfinite(hb.candidate_total_advance_upem)
+                    and hb_samples_ok
+                    and getattr(hb, "error_message", None) is None
                 )
 
                 cr = consumer_bundle.chromium.result
+                cr_pair_samples = getattr(cr, "pair_samples", ())
+                cr_pair_samples_ok = True
+                if cr_pair_samples:
+                    for s in cr_pair_samples:
+                        if not s.non_regression:
+                            cr_pair_samples_ok = False
+                            failure_reasons.append(f"CONSUMER_GATE_FAIL: Chromium pair sample '{s.pair}' regressed")
                 chromium_pass = bool(
                     cr.is_available
                     and cr.is_direct_loadable_chromium
@@ -558,6 +625,7 @@ class FidelityEvaluator:
                     and cr.error_message is None
                     and cr.measured_glyph_count > 0
                     and cr.held_out_pairs_non_regression
+                    and cr_pair_samples_ok
                 )
 
                 if ft_pass and freetype_pass and hb_pass and chromium_pass:
@@ -593,8 +661,9 @@ class FidelityEvaluator:
         overall_status = "PASS" if all_passed else "FAIL"
 
         policy_hash = thresholds.compute_policy_hash()
+        final_held_out_fp = composite_held_out_fp if (held_out_records and held_out_pairs) else held_out_raster_fp
         report_id = hashlib.sha256(
-            f"{model_hash}:{config_hash}:{fit_fp}:{held_out_fp}:{policy_hash}:{bundle_hash}".encode("utf-8")
+            f"{model_hash}:{config_hash}:{fit_fp}:{final_held_out_fp}:{policy_hash}:{bundle_hash}".encode("utf-8")
         ).hexdigest()[:16]
 
         now_utc = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -605,7 +674,7 @@ class FidelityEvaluator:
             model_canonical_hash=model_hash,
             config_hash=config_hash,
             fit_set_fingerprint=fit_fp,
-            held_out_set_fingerprint=held_out_fp,
+            held_out_set_fingerprint=final_held_out_fp,
             policy_hash=policy_hash,
             policy=thresholds.to_dict(),
             overall_status=overall_status,
