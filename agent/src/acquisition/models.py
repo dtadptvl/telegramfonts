@@ -312,6 +312,13 @@ def is_complete_raster_pages(
             y = box.get("y", 0)
             if not (isinstance(w, (int, float)) and isinstance(h, (int, float)) and isinstance(x, (int, float)) and isinstance(y, (int, float))):
                 return False
+            if cp == 32 and g.get("is_space") is True:
+                # Independently bound zero-ink space representation: ONLY the
+                # exact zero-area cell is admitted; any other shape under the
+                # is_space flag fails closed.
+                if x != 0 or y != 0 or w != 0 or h != 0:
+                    return False
+                continue
             if w <= 0 or h <= 0 or x < 0 or y < 0:
                 return False
             # Verify bounding box is fully contained within decoded PNG dimensions

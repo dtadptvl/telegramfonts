@@ -391,6 +391,168 @@ async def test_STEALTH_RASTER_BINDING_MISSING_CONTINUES():
     assert client.fetch_all_sprite_pages.call_count == 1  # exact MD5 -> CDN lane continues
 
 
+def _space_eval_result(md5: str, glyphs: list) -> dict:
+    """Evaluator-shaped result carrying the exact glyph representations."""
+    import io
+    from PIL import Image
+    im = Image.new("RGBA", (200, 200), (0, 0, 0, 0))
+    buf = io.BytesIO()
+    im.save(buf, format="PNG")
+    b64_str = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+    cps = [g["code_point"] for g in glyphs]
+    return {
+        "results": [
+            {
+                "pt": 120,
+                "resolved_face": {
+                    "family": "Space Fam",
+                    "style": "normal",
+                    "weight": "400",
+                    "stretch": "normal",
+                    "status": "loaded",
+                    "resource_md5": md5,
+                    "attestation": _sealed_attestation(md5),
+                },
+                "required_source_cps": cps,
+                "candidate_cps": cps,
+                "proven_cps": cps,
+                "rejected_cps": [],
+                "pages": [
+                    {
+                        "page_index": 1,
+                        "dataUrl": b64_str,
+                        "glyphs": glyphs,
+                        "final": True,
+                        "next_cursor": "",
+                    }
+                ],
+                "pairs": [],
+                "features": [],
+            }
+        ]
+    }
+
+
+_PROVEN_SPACE_GLYPH = {
+    "code_point": 32,
+    "glyph_index": 1,
+    "is_space": True,
+    "sprite_box": {"x": 0, "y": 0, "width": 0, "height": 0},
+}
+_PRINTABLE_GLYPH = {
+    "code_point": 65,
+    "glyph_index": 2,
+    "sprite_box": {"x": 5, "y": 5, "width": 40, "height": 50},
+}
+
+
+@pytest.mark.asyncio
+async def test_STEALTH_PROVEN_SPACE_PRODUCTION_PATH():
+    """Production-path repro: the independently measured U+0020 zero-ink cell
+    (exact zero-area box, is_space=True) flows through the real Playwright
+    provider and AcquisitionPipeline.acquire to raster_authorized."""
+    md5 = "a" * 32
+    eval_result = _space_eval_result(md5, [_PROVEN_SPACE_GLYPH, _PRINTABLE_GLYPH])
+    launcher = _make_fake_playwright_launcher(eval_result, observed_responses=_observed_font_proof(md5))
+    stealth = PlaywrightStealthPersistentSession(playwright_launcher=launcher)
+
+    dump_transport = MagicMock(spec=DumpDomTransport)
+    dump_transport.dump_dom = AsyncMock(return_value="")
+
+    family_env = FamilyDiscoveryEnvelope(
+        family_name="Space Fam",
+        styles={
+            "regular": StyleDiscoveryRecord(
+                style_id="regular",
+                style_name="Space Fam Regular",
+                md5=md5,
+                provenance=STAGE_PLAYWRIGHT_STEALTH,
+            )
+        },
+        provenance=STAGE_PLAYWRIGHT_STEALTH,
+    )
+
+    pipeline = AcquisitionPipeline(
+        dump_dom_transport=dump_transport,
+        playwright_provider=stealth,
+        raster_provider=None,
+        algolia_provider=None,
+    )
+
+    outcome = await pipeline.acquire(
+        source_url="https://www.myfonts.com/collections/space-fam",
+        expected_family="Space Fam",
+        expected_style="Space Fam Regular",
+        family_envelope=family_env,
+    )
+
+    assert outcome.kind == "raster_authorized"
+    page = outcome.raster_pages[0]
+    space_glyphs = [g for g in page.payload["glyphs"] if g["code_point"] == 32]
+    assert len(space_glyphs) == 1
+    assert space_glyphs[0]["is_space"] is True
+    assert space_glyphs[0]["sprite_box"] == {"x": 0, "y": 0, "width": 0, "height": 0}
+
+
+def test_STEALTH_SPACE_REPRESENTATION_ADVERSARIAL_REJECTED():
+    """Adversarial: is_space=True on any non-U+0020 code point, or any
+    malformed/non-zero box under the zero-ink representation, fails closed
+    at the shared completion boundary."""
+    from acquisition.models import is_complete_raster_pages
+
+    md5 = "a" * 32
+
+    def _page_with(glyphs: list) -> SpriteRasterPage:
+        base = _make_dummy_sprite_page(md5, 120)
+        base.payload["glyphs"] = glyphs
+        object.__setattr__(base, "glyph_count", len(glyphs))
+        return base
+
+    valid_A = dict(_PRINTABLE_GLYPH)
+
+    # a) is_space on a non-U+0020 code point.
+    forged_cp = {"code_point": 65, "glyph_index": 1, "is_space": True,
+                 "sprite_box": {"x": 0, "y": 0, "width": 0, "height": 0}}
+    assert is_complete_raster_pages([_page_with([forged_cp])], [120], expected_md5=md5) is False
+
+    # b) Non-zero box under the zero-ink representation.
+    nonzero_w = {"code_point": 32, "glyph_index": 1, "is_space": True,
+                 "sprite_box": {"x": 0, "y": 0, "width": 5, "height": 0}}
+    assert is_complete_raster_pages([_page_with([nonzero_w, valid_A])], [120], expected_md5=md5) is False
+
+    # c) Malformed origin under the zero-ink representation.
+    bad_origin = {"code_point": 32, "glyph_index": 1, "is_space": True,
+                  "sprite_box": {"x": 1, "y": 0, "width": 0, "height": 0}}
+    assert is_complete_raster_pages([_page_with([bad_origin, valid_A])], [120], expected_md5=md5) is False
+
+    # d) Zero-area cell without the is_space binding still fails closed.
+    unflagged_zero = {"code_point": 32, "glyph_index": 1,
+                      "sprite_box": {"x": 0, "y": 0, "width": 0, "height": 0}}
+    assert is_complete_raster_pages([_page_with([unflagged_zero, valid_A])], [120], expected_md5=md5) is False
+
+    # e) Positive control: the exact bound representation completes.
+    assert is_complete_raster_pages(
+        [_page_with([dict(_PROVEN_SPACE_GLYPH), valid_A])], [120], expected_md5=md5
+    ) is True
+
+
+@pytest.mark.asyncio
+async def test_STEALTH_FORGED_SPACE_CAPTURE_REJECTED():
+    """Capture-level adversarial: an is_space representation on a non-U+0020
+    code point never produces pages through the real provider validation."""
+    md5 = "a" * 32
+    forged = {"code_point": 65, "glyph_index": 1, "is_space": True,
+              "sprite_box": {"x": 0, "y": 0, "width": 0, "height": 0}}
+    eval_result = _space_eval_result(md5, [forged])
+    launcher = _make_fake_playwright_launcher(eval_result, observed_responses=_observed_font_proof(md5))
+    stealth = PlaywrightStealthPersistentSession(playwright_launcher=launcher)
+    style_rec = StyleDiscoveryRecord(style_id="regular", style_name="Space Fam Regular", md5=md5)
+    pages = await stealth.capture_raster_pages(
+        "https://www.myfonts.com/collections/space-fam", style_rec, [120]
+    )
+    assert pages is None
+
+
 @pytest.mark.asyncio
 async def test_FALLBACK_ORDER_EXACT():
     """FALLBACK_ORDER_EXACT: only the stated applicable order; partial lanes continue."""
