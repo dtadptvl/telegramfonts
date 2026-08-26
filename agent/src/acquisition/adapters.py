@@ -617,24 +617,57 @@ class PlaywrightStealthPersistentSession:
         async (args) => {
             const { requested_sizes, style_name, expected_md5 } = args;
 
-            // 1. Resolve and bind exact loaded FontFace
-            let matchedFace = null;
-            const normTarget = style_name.toLowerCase().replace(/[^a-z0-9]/g, "");
+            // 1. Resolve and bind exact loaded FontFace from document.fonts
+            const normTarget = style_name.toLowerCase().replace(/['"]/g, "").replace(/[^a-z0-9]/g, "");
+            const isItalicTarget = normTarget.includes("italic") || normTarget.includes("oblique");
+            const isBoldTarget = normTarget.includes("bold") && !normTarget.includes("semibold") && !normTarget.includes("demibold") && !normTarget.includes("extrabold") && !normTarget.includes("ultrabold");
+
+            const candidates = [];
             for (const face of document.fonts) {
-                const normFamily = face.family.toLowerCase().replace(/['"]/g, "").replace(/[^a-z0-9]/g, "");
-                if (normFamily === normTarget || normTarget.includes(normFamily) || normFamily.includes(normTarget)) {
-                    matchedFace = face;
-                    break;
+                const faceFamNorm = face.family.toLowerCase().replace(/['"]/g, "").replace(/[^a-z0-9]/g, "");
+                const faceStyle = (face.style || "normal").toLowerCase();
+                const faceWeight = (face.weight || "normal").toLowerCase();
+
+                // Family matching
+                const familyMatches = (faceFamNorm === normTarget || normTarget.includes(faceFamNorm) || faceFamNorm.includes(normTarget));
+                if (!familyMatches) continue;
+
+                // Style matching (italic / oblique vs normal)
+                const faceIsItalic = faceStyle.includes("italic") || faceStyle.includes("oblique");
+                if (isItalicTarget !== faceIsItalic) continue;
+
+                // Weight matching
+                if (isBoldTarget) {
+                    const faceIsBold = faceWeight === "700" || faceWeight === "bold" || faceWeight === "800" || faceWeight === "900";
+                    if (!faceIsBold && (faceWeight === "400" || faceWeight === "normal" || faceWeight === "300" || faceWeight === "light")) {
+                        continue;
+                    }
                 }
-            }
-            if (!matchedFace) {
-                return { error: "NO_MATCHING_LOADED_FONT_FACE" };
+
+                candidates.push(face);
             }
 
+            if (candidates.length === 0) {
+                return { error: "NO_MATCHING_LOADED_FONT_FACE" };
+            }
+            if (candidates.length > 1) {
+                return { error: "STEALTH_FACE_IDENTITY_AMBIGUOUS" };
+            }
+
+            const matchedFace = candidates[0];
             const fontStyle = matchedFace.style || "normal";
             const fontWeight = matchedFace.weight || "normal";
             const fontStretch = matchedFace.stretch || "normal";
             const fontFamily = matchedFace.family.replace(/['"]/g, "");
+
+            const resolvedFace = {
+                family: matchedFace.family,
+                style: fontStyle,
+                weight: fontWeight,
+                stretch: fontStretch,
+                unicodeRange: matchedFace.unicodeRange || "",
+                status: matchedFace.status || "loaded",
+            };
 
             function getExactFontSpec(ptSize) {
                 return `${fontStyle} ${fontWeight} ${ptSize}px "${fontFamily}"`;
@@ -650,26 +683,44 @@ class PlaywrightStealthPersistentSession:
                 return { error: "FONT_NOT_LOADED" };
             }
 
-            // 2. Discover target coverage from FontFace unicodeRange + standard Latin/specimen
-            const codePointSet = new Set();
+            // 2. Discover target coverage from FontFace unicodeRange
+            let requiredSourceCps = [];
             if (matchedFace.unicodeRange) {
                 const ranges = matchedFace.unicodeRange.split(",");
+                const declaredSet = new Set();
+                let totalRangeSpan = 0;
                 for (const r of ranges) {
                     const clean = r.trim().replace(/^U\\+/i, "");
                     if (clean.includes("-")) {
                         const [start, end] = clean.split("-").map(h => parseInt(h, 16));
-                        if (!isNaN(start) && !isNaN(end)) {
-                            for (let cp = start; cp <= Math.min(end, start + 1000); cp++) {
-                                codePointSet.add(cp);
+                        if (!isNaN(start) && !isNaN(end) && end >= start) {
+                            totalRangeSpan += (end - start + 1);
+                            if (totalRangeSpan > 1500) {
+                                return { error: "UNICODE_RANGE_EXCEEDS_BOUNDED_POLICY" };
+                            }
+                            for (let cp = start; cp <= end; cp++) {
+                                declaredSet.add(cp);
                             }
                         }
                     } else {
                         const cp = parseInt(clean, 16);
-                        if (!isNaN(cp)) codePointSet.add(cp);
+                        if (!isNaN(cp)) {
+                            totalRangeSpan++;
+                            if (totalRangeSpan > 1500) {
+                                return { error: "UNICODE_RANGE_EXCEEDS_BOUNDED_POLICY" };
+                            }
+                            declaredSet.add(cp);
+                        }
                     }
                 }
+                requiredSourceCps = Array.from(declaredSet).sort((a, b) => a - b);
+            } else {
+                for (let i = 32; i <= 126; i++) {
+                    requiredSourceCps.push(i);
+                }
             }
-            for (let i = 32; i <= 126; i++) codePointSet.add(i);
+
+            const candidateSet = new Set(requiredSourceCps);
             const extraCps = [
                 192, 193, 194, 195, 200, 201, 202, 204, 205, 210, 211, 212, 213, 217, 218, 221,
                 224, 225, 226, 227, 232, 233, 234, 236, 237, 242, 243, 244, 245, 249, 250, 253,
@@ -682,8 +733,8 @@ class PlaywrightStealthPersistentSession:
                 7910, 7911, 7912, 7913, 7914, 7915, 7916, 7917, 7918, 7919, 7920, 7921, 7922, 7923,
                 7924, 7925, 7926, 7927, 7928, 7929
             ];
-            for (const cp of extraCps) codePointSet.add(cp);
-            const candidateCodePoints = Array.from(codePointSet).sort((a, b) => a - b);
+            for (const cp of extraCps) candidateSet.add(cp);
+            const candidateCodePoints = Array.from(candidateSet).sort((a, b) => a - b);
 
             const results = [];
             for (const pt of requested_sizes) {
@@ -890,45 +941,75 @@ class PlaywrightStealthPersistentSession:
                     }
                 }
 
-                // 5. Measure OpenType features with explicit ON vs OFF probes
+                // 5. Measure OpenType features using causal DOM elements attached to document.body
                 const features = [];
-                // Test liga (fi)
-                cellCtx.font = exactFontSpec;
-                cellCtx.canvas.style.fontFeatureSettings = '"liga" 1';
-                const wLigaOn = cellCtx.measureText("fi").width;
-                cellCtx.canvas.style.fontFeatureSettings = '"liga" 0';
-                const wLigaOff = cellCtx.measureText("fi").width;
-                cellCtx.canvas.style.fontFeatureSettings = 'normal';
-                const ligaDelta = wLigaOn - wLigaOff;
-                if (Math.abs(ligaDelta) > 0.05) {
-                    features.push({
-                        feature_tag: "liga",
-                        sample_text: "fi",
-                        delta_px: ligaDelta,
-                        measured: true,
-                        provenance: "playwright:canvas_feature_probe"
-                    });
-                }
+                try {
+                    const container = document.createElement("div");
+                    container.style.position = "absolute";
+                    container.style.left = "-9999px";
+                    container.style.top = "-9999px";
+                    container.style.visibility = "hidden";
+                    document.body.appendChild(container);
 
-                // Test smcp (Standard)
-                cellCtx.canvas.style.fontFeatureSettings = '"smcp" 1';
-                const wSmcpOn = cellCtx.measureText("Standard").width;
-                cellCtx.canvas.style.fontFeatureSettings = '"smcp" 0';
-                const wSmcpOff = cellCtx.measureText("Standard").width;
-                cellCtx.canvas.style.fontFeatureSettings = 'normal';
-                const smcpDelta = wSmcpOn - wSmcpOff;
-                if (Math.abs(smcpDelta) > 0.05) {
-                    features.push({
-                        feature_tag: "smcp",
-                        sample_text: "Standard",
-                        delta_px: smcpDelta,
-                        measured: true,
-                        provenance: "playwright:canvas_feature_probe"
-                    });
-                }
+                    // Test liga (fi)
+                    const spanLigaOn = document.createElement("span");
+                    spanLigaOn.style.font = exactFontSpec;
+                    spanLigaOn.style.fontFeatureSettings = '"liga" 1';
+                    spanLigaOn.textContent = "fi";
+                    container.appendChild(spanLigaOn);
+
+                    const spanLigaOff = document.createElement("span");
+                    spanLigaOff.style.font = exactFontSpec;
+                    spanLigaOff.style.fontFeatureSettings = '"liga" 0';
+                    spanLigaOff.textContent = "fi";
+                    container.appendChild(spanLigaOff);
+
+                    const rLigaOn = spanLigaOn.getBoundingClientRect();
+                    const rLigaOff = spanLigaOff.getBoundingClientRect();
+                    const ligaDelta = rLigaOn.width - rLigaOff.width;
+                    if (Math.abs(ligaDelta) > 0.05) {
+                        features.push({
+                            feature_tag: "liga",
+                            sample_text: "fi",
+                            delta_px: ligaDelta,
+                            measured: true,
+                            provenance: "playwright:dom_feature_probe",
+                        });
+                    }
+
+                    // Test smcp (Standard)
+                    const spanSmcpOn = document.createElement("span");
+                    spanSmcpOn.style.font = exactFontSpec;
+                    spanSmcpOn.style.fontFeatureSettings = '"smcp" 1';
+                    spanSmcpOn.textContent = "Standard";
+                    container.appendChild(spanSmcpOn);
+
+                    const spanSmcpOff = document.createElement("span");
+                    spanSmcpOff.style.font = exactFontSpec;
+                    spanSmcpOff.style.fontFeatureSettings = '"smcp" 0';
+                    spanSmcpOff.textContent = "Standard";
+                    container.appendChild(spanSmcpOff);
+
+                    const rSmcpOn = spanSmcpOn.getBoundingClientRect();
+                    const rSmcpOff = spanSmcpOff.getBoundingClientRect();
+                    const smcpDelta = rSmcpOn.width - rSmcpOff.width;
+                    if (Math.abs(smcpDelta) > 0.05) {
+                        features.push({
+                            feature_tag: "smcp",
+                            sample_text: "Standard",
+                            delta_px: smcpDelta,
+                            measured: true,
+                            provenance: "playwright:dom_feature_probe",
+                        });
+                    }
+
+                    document.body.removeChild(container);
+                } catch (e) {}
 
                 results.push({
                     pt,
+                    resolved_face: resolvedFace,
+                    required_source_cps: requiredSourceCps,
                     candidate_cps: candidateCodePoints,
                     proven_cps: provenCodePoints,
                     rejected_cps: rejectedCodePoints,
@@ -1002,6 +1083,28 @@ class PlaywrightStealthPersistentSession:
                 pt = res.get("pt")
                 if pt is None or int(pt) not in requested_sizes:
                     return None
+
+                resolved_face = res.get("resolved_face")
+                if not resolved_face or not isinstance(resolved_face, dict):
+                    return None
+                rf_family = str(resolved_face.get("family", "")).strip().lower().replace("'", "").replace('"', "")
+                if not rf_family:
+                    return None
+                norm_style = style_name.lower().replace("-", " ").replace("_", " ")
+                norm_rf = rf_family.replace("-", " ").replace("_", " ")
+                if not (norm_rf in norm_style or norm_style in norm_rf or any(p in norm_style for p in norm_rf.split())):
+                    return None
+
+                # Style & weight descriptor validation
+                rf_style = str(resolved_face.get("style", "normal")).lower()
+                rf_weight = str(resolved_face.get("weight", "normal")).lower()
+                if "italic" in norm_style and rf_style not in ("italic", "oblique"):
+                    return None
+                if ("bold" in norm_style and "semi" not in norm_style and "extra" not in norm_style and "ultra" not in norm_style):
+                    if rf_weight not in ("700", "bold", "800", "900"):
+                        return None
+
+                required_source_cps = res.get("required_source_cps", [])
                 candidate_cps = res.get("candidate_cps", [])
                 proven_cps = res.get("proven_cps", [])
                 rejected_cps = res.get("rejected_cps", [])
@@ -1009,14 +1112,19 @@ class PlaywrightStealthPersistentSession:
                 pairs = res.get("pairs", [])
                 features = res.get("features", [])
 
-                if not candidate_cps or not proven_cps or not raw_pages:
+                if not required_source_cps or not candidate_cps or not proven_cps or not raw_pages:
                     return None
 
-                # Exact set equality & disjointness checks
+                set_req = set(int(c) for c in required_source_cps)
                 set_cand = set(int(c) for c in candidate_cps)
                 set_prov = set(int(c) for c in proven_cps)
                 set_rej = set(int(c) for c in rejected_cps)
 
+                # Required source coverage MUST be fully proven
+                if not set_req.issubset(set_prov):
+                    return None
+
+                # Exact set equality & disjointness checks
                 if set_cand != (set_prov | set_rej):
                     return None
                 if set_prov & set_rej:
@@ -1086,6 +1194,7 @@ class PlaywrightStealthPersistentSession:
                                 "md5": expected_md5,
                                 "acs_pt": pt,
                                 "provenance": STAGE_PLAYWRIGHT_STEALTH,
+                                "resolved_face": resolved_face,
                             },
                         )
                     )

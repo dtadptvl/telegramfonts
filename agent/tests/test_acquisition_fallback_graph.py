@@ -940,6 +940,8 @@ async def test_STEALTH_SPRITE_OVERFLOW_REJECTED():
         "results": [
             {
                 "pt": 120,
+                "resolved_face": {"family": "Regular", "style": "normal", "weight": "normal", "stretch": "normal"},
+                "required_source_cps": [65],
                 "candidate_cps": [65],
                 "proven_cps": [65],
                 "rejected_cps": [],
@@ -992,6 +994,8 @@ async def test_STEALTH_TARGET_FONT_PROVEN():
         "results": [
             {
                 "pt": 120,
+                "resolved_face": {"family": "Regular", "style": "normal", "weight": "normal", "stretch": "normal"},
+                "required_source_cps": [65, 66],
                 "candidate_cps": [65, 66, 67],
                 "proven_cps": [65, 66],
                 "rejected_cps": [67],
@@ -1011,7 +1015,7 @@ async def test_STEALTH_TARGET_FONT_PROVEN():
                     {"left_char": "A", "right_char": "V", "pair_text": "AV", "kern_px": -2.5, "provenance": "playwright:canvas_text_metrics"}
                 ],
                 "features": [
-                    {"feature_tag": "liga", "sample_text": "fi", "delta_px": -1.2, "measured": True, "provenance": "playwright:canvas_feature_probe"}
+                    {"feature_tag": "liga", "sample_text": "fi", "delta_px": -1.2, "measured": True, "provenance": "playwright:dom_feature_probe"}
                 ],
             }
         ]
@@ -1028,6 +1032,7 @@ async def test_STEALTH_TARGET_FONT_PROVEN():
     assert pages[0].payload["features"]
     assert pages[0].payload["glyphs"][0]["sprite_box"]["width"] == 40
     assert pages[0].glyph_count == 2
+    assert pages[0].payload["resolved_face"]["family"] == "Regular"
 
 
 @pytest.mark.asyncio
@@ -1045,6 +1050,8 @@ async def test_STEALTH_TRUNCATION_CONTINUES_PAGES():
         "results": [
             {
                 "pt": 120,
+                "resolved_face": {"family": "Regular", "style": "normal", "weight": "normal", "stretch": "normal"},
+                "required_source_cps": [65, 66, 67, 68],
                 "candidate_cps": [65, 66, 67, 68],
                 "proven_cps": [65, 66, 67, 68],
                 "rejected_cps": [],
@@ -1108,6 +1115,8 @@ async def test_STEALTH_DECLARED_PROVEN_SET_EQUALITY():
         "results": [
             {
                 "pt": 120,
+                "resolved_face": {"family": "Regular", "style": "normal", "weight": "normal", "stretch": "normal"},
+                "required_source_cps": [65, 66, 67],
                 "candidate_cps": [65, 66, 67],
                 "proven_cps": [65, 66, 67],
                 "rejected_cps": [],
@@ -1163,6 +1172,8 @@ async def test_STEALTH_FEATURE_ON_OFF():
         "results": [
             {
                 "pt": 120,
+                "resolved_face": {"family": "Regular", "style": "normal", "weight": "normal", "stretch": "normal"},
+                "required_source_cps": [65],
                 "candidate_cps": [65],
                 "proven_cps": [65],
                 "rejected_cps": [],
@@ -1179,8 +1190,8 @@ async def test_STEALTH_FEATURE_ON_OFF():
                 ],
                 "pairs": [],
                 "features": [
-                    {"feature_tag": "liga", "sample_text": "fi", "delta_px": -1.2, "measured": True, "provenance": "playwright:canvas_feature_probe"},
-                    {"feature_tag": "smcp", "sample_text": "Standard", "delta_px": 0.0, "measured": False, "provenance": "playwright:canvas_feature_probe"},
+                    {"feature_tag": "liga", "sample_text": "fi", "delta_px": -1.2, "measured": True, "provenance": "playwright:dom_feature_probe"},
+                    {"feature_tag": "smcp", "sample_text": "Standard", "delta_px": 0.0, "measured": False, "provenance": "playwright:dom_feature_probe"},
                 ],
             }
         ]
@@ -1196,6 +1207,214 @@ async def test_STEALTH_FEATURE_ON_OFF():
     # Only measured liga is kept; unmeasured smcp is rejected/omitted
     assert len(pages[0].payload["features"]) == 1
     assert pages[0].payload["features"][0]["feature_tag"] == "liga"
+
+
+@pytest.mark.asyncio
+async def test_STEALTH_MULTI_FACE_AMBIGUOUS():
+    """STEALTH_MULTI_FACE_AMBIGUOUS: If multiple matching FontFace records exist, fails closed."""
+    launcher = _make_fake_playwright_launcher({"error": "STEALTH_FACE_IDENTITY_AMBIGUOUS"})
+    stealth = PlaywrightStealthPersistentSession(playwright_launcher=launcher)
+    style_rec = StyleDiscoveryRecord(style_id="helvetica-bold", style_name="Helvetica Bold", md5="a" * 32)
+    pages = await stealth.capture_raster_pages("https://www.myfonts.com/collections/test", style_rec, [120])
+    assert pages is None
+
+
+@pytest.mark.asyncio
+async def test_STEALTH_RESOLVED_FACE_MISMATCH():
+    """STEALTH_RESOLVED_FACE_MISMATCH: Returned resolved_face inconsistent with requested style fails closed in Python."""
+    import io
+    from PIL import Image
+    im = Image.new("RGBA", (200, 200), (0, 0, 0, 0))
+    buf = io.BytesIO()
+    im.save(buf, format="PNG")
+    png_bytes = buf.getvalue()
+    b64_str = "data:image/png;base64," + base64.b64encode(png_bytes).decode("ascii")
+
+    # Requested style is Bold, but returned resolved_face has family "Futura Light" and weight "300"
+    eval_result = {
+        "results": [
+            {
+                "pt": 120,
+                "resolved_face": {"family": "Futura Light", "style": "normal", "weight": "300", "stretch": "normal"},
+                "required_source_cps": [65],
+                "candidate_cps": [65],
+                "proven_cps": [65],
+                "rejected_cps": [],
+                "pages": [
+                    {
+                        "page_index": 1,
+                        "dataUrl": b64_str,
+                        "glyphs": [
+                            {"code_point": 65, "glyph_index": 1, "sprite_box": {"x": 5, "y": 5, "width": 40, "height": 50}},
+                        ],
+                        "final": True,
+                        "next_cursor": "",
+                    }
+                ],
+                "pairs": [],
+                "features": [],
+            }
+        ]
+    }
+
+    launcher = _make_fake_playwright_launcher(eval_result)
+    stealth = PlaywrightStealthPersistentSession(playwright_launcher=launcher)
+    style_rec = StyleDiscoveryRecord(style_id="helvetica-bold", style_name="Helvetica Bold", md5="a" * 32)
+    pages = await stealth.capture_raster_pages("https://www.myfonts.com/collections/test", style_rec, [120])
+    # Python validation must reject resolved_face mismatch
+    assert pages is None
+
+
+@pytest.mark.asyncio
+async def test_STEALTH_REQUIRED_RANGE_NOT_CAPPED():
+    """STEALTH_REQUIRED_RANGE_NOT_CAPPED: Declared unicode range exceeding bounded capacity fails closed."""
+    launcher = _make_fake_playwright_launcher({"error": "UNICODE_RANGE_EXCEEDS_BOUNDED_POLICY"})
+    stealth = PlaywrightStealthPersistentSession(playwright_launcher=launcher)
+    style_rec = StyleDiscoveryRecord(style_id="regular", style_name="Regular", md5="a" * 32)
+    pages = await stealth.capture_raster_pages("https://www.myfonts.com/collections/test", style_rec, [120])
+    assert pages is None
+
+
+@pytest.mark.asyncio
+async def test_STEALTH_DOM_FEATURE_ON_OFF():
+    """STEALTH_DOM_FEATURE_ON_OFF: Proves DOM feature measurement records delta correctly and filters zero delta."""
+    import io
+    from PIL import Image
+    im = Image.new("RGBA", (200, 200), (0, 0, 0, 0))
+    buf = io.BytesIO()
+    im.save(buf, format="PNG")
+    png_bytes = buf.getvalue()
+    b64_str = "data:image/png;base64," + base64.b64encode(png_bytes).decode("ascii")
+
+    eval_result = {
+        "results": [
+            {
+                "pt": 120,
+                "resolved_face": {"family": "Helvetica", "style": "normal", "weight": "normal", "stretch": "normal"},
+                "required_source_cps": [65],
+                "candidate_cps": [65],
+                "proven_cps": [65],
+                "rejected_cps": [],
+                "pages": [
+                    {
+                        "page_index": 1,
+                        "dataUrl": b64_str,
+                        "glyphs": [
+                            {"code_point": 65, "glyph_index": 1, "sprite_box": {"x": 5, "y": 5, "width": 40, "height": 50}},
+                        ],
+                        "final": True,
+                        "next_cursor": "",
+                    }
+                ],
+                "pairs": [],
+                "features": [
+                    {
+                        "feature_tag": "liga",
+                        "sample_text": "fi",
+                        "delta_px": -2.4,
+                        "measured": True,
+                        "provenance": "playwright:dom_feature_probe",
+                    }
+                ],
+            }
+        ]
+    }
+
+    launcher = _make_fake_playwright_launcher(eval_result)
+    stealth = PlaywrightStealthPersistentSession(playwright_launcher=launcher)
+    style_rec = StyleDiscoveryRecord(style_id="helvetica-regular", style_name="Helvetica Regular", md5="a" * 32)
+    pages = await stealth.capture_raster_pages("https://www.myfonts.com/collections/test", style_rec, [120])
+
+    assert pages is not None
+    assert len(pages) == 1
+    assert len(pages[0].payload["features"]) == 1
+    feat = pages[0].payload["features"][0]
+    assert feat["feature_tag"] == "liga"
+    assert feat["delta_px"] == -2.4
+    assert feat["provenance"] == "playwright:dom_feature_probe"
+
+
+@pytest.mark.asyncio
+async def test_STEALTH_LOCAL_EVALUATOR_EXECUTION():
+    """STEALTH_LOCAL_EVALUATOR_EXECUTION: Executes dynamic evaluator resolution and envelope creation."""
+    import io
+    from PIL import Image
+
+    im = Image.new("RGBA", (200, 200), (0, 0, 0, 0))
+    buf = io.BytesIO()
+    im.save(buf, format="PNG")
+    png_bytes = buf.getvalue()
+    b64_str = "data:image/png;base64," + base64.b64encode(png_bytes).decode("ascii")
+
+    # Dynamic evaluator callback that processes args and generates dynamic closed envelope
+    async def dynamic_evaluator(script, args):
+        assert "document.fonts" in script
+        assert "requiredSourceCps" in script or "required_source_cps" in script or "normTarget" in script
+        s_name = args.get("style_name", "Regular")
+        sizes = args.get("requested_sizes", [120])
+        res_list = []
+        for s in sizes:
+            res_list.append({
+                "pt": s,
+                "resolved_face": {
+                    "family": s_name,
+                    "style": "normal",
+                    "weight": "normal",
+                    "stretch": "normal",
+                    "unicodeRange": "U+0041-0043",
+                    "status": "loaded",
+                },
+                "required_source_cps": [65, 66, 67],
+                "candidate_cps": [65, 66, 67],
+                "proven_cps": [65, 66, 67],
+                "rejected_cps": [],
+                "pages": [
+                    {
+                        "page_index": 1,
+                        "dataUrl": b64_str,
+                        "glyphs": [
+                            {"code_point": 65, "glyph_index": 1, "sprite_box": {"x": 5, "y": 5, "width": 40, "height": 50}},
+                            {"code_point": 66, "glyph_index": 2, "sprite_box": {"x": 50, "y": 5, "width": 38, "height": 50}},
+                            {"code_point": 67, "glyph_index": 3, "sprite_box": {"x": 95, "y": 5, "width": 38, "height": 50}},
+                        ],
+                        "final": True,
+                        "next_cursor": "",
+                    }
+                ],
+                "pairs": [],
+                "features": [
+                    {
+                        "feature_tag": "liga",
+                        "sample_text": "fi",
+                        "delta_px": -1.8,
+                        "measured": True,
+                        "provenance": "playwright:dom_feature_probe",
+                    }
+                ],
+            })
+        return {"results": res_list}
+
+    mock_page = AsyncMock()
+    mock_page.goto = AsyncMock()
+    mock_page.evaluate = AsyncMock(side_effect=dynamic_evaluator)
+
+    mock_ctx = AsyncMock()
+    mock_ctx.add_init_script = AsyncMock()
+    mock_ctx.new_page = AsyncMock(return_value=mock_page)
+    mock_ctx.close = AsyncMock()
+
+    launcher = AsyncMock(return_value=mock_ctx)
+    stealth = PlaywrightStealthPersistentSession(playwright_launcher=launcher)
+    style_rec = StyleDiscoveryRecord(style_id="helvetica-regular", style_name="Helvetica Regular", md5="a" * 32)
+    pages = await stealth.capture_raster_pages("https://www.myfonts.com/collections/test", style_rec, [120])
+
+    assert pages is not None
+    assert len(pages) == 1
+    assert pages[0].glyph_count == 3
+    assert pages[0].payload["resolved_face"]["unicodeRange"] == "U+0041-0043"
+    assert pages[0].payload["features"][0]["delta_px"] == -1.8
+
+
 
 
 
