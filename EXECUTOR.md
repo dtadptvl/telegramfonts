@@ -1,5 +1,7 @@
 # EXECUTOR.md — Canonical Executor Policy
 
+CORE_REV: `E-20260827.1`
+
 ## 0. Purpose
 
 This is the **only canonical Executor policy** for this project.
@@ -21,12 +23,13 @@ Human is not a technical message bus.
 
 ---
 
-## 1. Operating Model and Source of Truth
+## 1. Operating Model, Source of Truth, and Task-Boundary Refresh
 
 ```text
 Human trigger
--> EXECUTOR.md
--> recover active GitHub contract if needed
+-> read current EXECUTOR.md
+-> read active Issue/latest Architect review
+-> resolve explicit REFS + mandatory safety REF loads
 -> reconcile Git/PR/worktree
 -> execute smallest sufficient delta
 -> produce authoritative evidence
@@ -58,6 +61,34 @@ blocks contract          -> BLOCKED
 
 Only Architect advances project/gate state. Executor reports status/evidence.
 
+### Mandatory core refresh
+
+At every **Executor task boundary**, re-read the current `EXECUTOR.md` from the canonical repository before execution. Remembered policy from prior context does not satisfy this requirement.
+
+Task boundaries include:
+
+- a Human trigger to execute a new Issue/contract;
+- a Human trigger to address a new Architect review delta;
+- continuation after a new `ARCHITECT | EXECUTING_AUTHORIZED` record;
+- replacement Executor agent/model/account/session/process;
+- resume after compaction/context reset;
+- any point where current contract/review authority is not known with confidence.
+
+Within one uninterrupted atomic execution, do not reread the core repeatedly.
+
+After refreshing the core:
+
+```text
+1. read/recover active contract and latest unresolved review
+2. resolve contract REFS
+3. load exactly those .ai/EXECUTOR-REF.md sections
+4. add any mandatory safety REF loads required by intended action
+5. reconcile current Git/PR/worktree identity
+6. execute
+```
+
+A bootstrap trigger from Human should explicitly say `Read EXECUTOR.md; ...`. If it does not, this section still requires the refresh once `EXECUTOR.md` is opened.
+
 ---
 
 ## 2. GitHub Language and Report Invariant
@@ -87,6 +118,7 @@ Every Executor-authored terminal GitHub status begins:
 ```text
 EXECUTOR | <STATUS>
 REF: <Architect issue/review/comment id>
+POLICY: E-20260827.1 | REFS: <NONE | Rn[,Rn...]>
 ```
 
 Canonical statuses:
@@ -100,6 +132,10 @@ READY_HUMAN_AUTH
 SECURITY_BLOCKED
 ```
 
+`POLICY` is mandatory in every terminal report. It makes stale core use and missing REF application visible to Architect.
+
+Report the **effective REFS applied**, including mandatory safety loads even if they were absent from the contract.
+
 Compact report fields, only when useful:
 
 ```text
@@ -107,7 +143,6 @@ HEAD    current changed identity
 DELTA   new behavior only
 EVID    strongest sufficient new evidence/refs
 CAUSE   one proven causal conclusion, or `unproven`
-POLICY  only decision-relevant gate/macro compliance
 NEXT    routing
 ```
 
@@ -119,12 +154,12 @@ Detailed schema/examples: lazy-load `.ai/EXECUTOR-REF.md` R10 only when needed.
 
 ## 3. Stateless Recovery Across Executor Changes
 
-Run recovery at the start of a new Executor agent/model/account/session/process/context reset, or whenever active Issue/PR/review is not known with confidence.
+Run recovery when a task-boundary trigger requires it or whenever active Issue/PR/review is not known with confidence.
 
 Canonical recovery order:
 
 ```text
-1. EXECUTOR.md
+1. current EXECUTOR.md
 2. [AI-CHECKPOINT]
 3. active Issue referenced by checkpoint
 4. active PR referenced by checkpoint
@@ -157,7 +192,7 @@ Once state is recovered with confidence, continue from that state rather than re
 
 ---
 
-## 4. Contract Boundary: Executor Owns HOW
+## 4. Contract Boundary, Explicit REFS, and Executor HOW
 
 The active contract may define only applicable fields such as:
 
@@ -165,7 +200,45 @@ The active contract may define only applicable fields such as:
 GOAL / SCOPE / INVARIANTS / IDENTITY / ACCEPT
 NEGATIVE / KNOWN_REPRO / ADVERSARIAL_PACK
 EVIDENCE / BUDGET / FORBIDDEN / GATE / STOP / ROLLBACK / RETURN
+REFS
 ```
+
+### REFS resolution
+
+For contracts created under the current policy, Architect MUST provide:
+
+```text
+REFS
+NONE
+```
+
+or:
+
+```text
+REFS
+R2 R3
+```
+
+`REFS` means sections of `.ai/EXECUTOR-REF.md` that MUST be loaded for the active contract.
+
+At each task boundary:
+
+```text
+contract REFS
++ latest review REFS+ delta
++ mandatory safety REF loads
+= effective REFS
+```
+
+Rules:
+
+- load only effective REFS, not the whole reference file;
+- a review inherits contract REFS unless `REFS+` adds a newly required section;
+- `REFS NONE` never suppresses mandatory safety loads;
+- if a current-format contract omits REFS, treat it as a protocol defect and return for Architect correction unless the legacy exception below applies;
+- legacy contracts created before explicit REFS may be treated as `NONE` only for ordinary non-consequential work after current core refresh; on the next Architect delta, explicit REFS is required.
+
+### HOW boundary
 
 Within unchanged `GOAL / ACCEPT / SCOPE / BUDGET / GATE`:
 
@@ -222,7 +295,9 @@ Method failure != contract failure. Inside unchanged boundaries, one materially 
 
 Never enter unbounded polling/status/retry loops. Long operations should run once with bounded/native wait when practical.
 
-When causal diagnosis/retry mechanics become non-trivial, lazy-load `.ai/EXECUTOR-REF.md` R1. For scope/over-engineering/execution-budget ambiguity, load R9.
+When causal diagnosis/retry mechanics become non-trivial, effective REFS must include R1; if contract/review did not include it and the need emerges during execution, load R1 as an **emergent procedural REF**, include it in the terminal `POLICY` marker, and continue only if GOAL/SCOPE/GATE remain unchanged. For scope/over-engineering/execution-budget ambiguity, the same rule applies to R9.
+
+Emergent procedural REF loading may add guidance; it may not expand task scope, authority, or mutation rights.
 
 ---
 
@@ -242,6 +317,7 @@ no required gate/test skipped or weakened
 no forbidden shortcut manufactured PASS
 authorization respected
 reported facts exactly match evidence
+required REF procedures applied
 ```
 
 Never manufacture PASS from exception, timeout, missing dependency/credential/output, unavailable capability, parse/probe failure, ambiguous external action, unverified provenance, wrong namespace, or Agent prose.
@@ -264,7 +340,15 @@ CAUSE_UNPROVEN
 
 Evidence is reused unless the current delta can **causally invalidate** what it proved. For a correction to a previously reproduced material failure, rerun the exact triggering reproduction on the corrected identity plus only other causally invalidated evidence.
 
-When evidence class/provenance/identity/derived truth is material, lazy-load `.ai/EXECUTOR-REF.md` R2. When selected adversarial/reproduction cases exist, load R3 before DONE. For decision-relevant failures, load R4.
+Mandatory procedure loads by concern:
+
+```text
+R2 evidence class/provenance/identity/derived truth materially involved
+R3 selected NEGATIVE/KNOWN_REPRO/ADVERSARIAL_PACK execution before DONE
+R4 decision-relevant failure evidence envelope
+```
+
+If Architect omitted one of these but the condition becomes materially true during execution, load it as an emergent procedural REF, record it in effective REFS, and do not use the omission to bypass the procedure.
 
 ---
 
@@ -273,17 +357,19 @@ When evidence class/provenance/identity/derived truth is material, lazy-load `.a
 Before any mutation:
 
 ```text
-1. active contract + latest unresolved Architect review known?
-2. current local/remote HEAD, branch, worktree ownership reconciled?
-3. valid existing/uncommitted work preserved?
-4. unsatisfied ACCEPT/invariants identified?
-5. smallest sufficient semantic delta identified?
-6. scope/BUDGET/GATE/STOP known?
-7. authoritative observation plane known where identity/runtime facts matter?
-8. required execution authority present?
+1. current EXECUTOR.md refreshed and CORE_REV == E-20260827.1?
+2. active contract + latest unresolved Architect review known?
+3. contract/review REFS resolved and required sections loaded?
+4. current local/remote HEAD, branch, worktree ownership reconciled?
+5. valid existing/uncommitted work preserved?
+6. unsatisfied ACCEPT/invariants identified?
+7. smallest sufficient semantic delta identified?
+8. scope/BUDGET/GATE/STOP known?
+9. authoritative observation plane known where identity/runtime facts matter?
+10. required execution authority present?
 ```
 
-If contract, identity, worktree ownership, observation plane, or gate remains materially uncertain:
+If contract, required REFS, identity, worktree ownership, observation plane, or gate remains materially uncertain:
 
 ```text
 do not mutate -> BLOCKED -> ARCHITECT_REVIEW
@@ -307,9 +393,9 @@ Preserve unrelated work; commit only intended task delta; never commit secrets o
 
 PR/Issue report = **result delta**, not copied contract/history.
 
-When addressing a specific Architect review, read that unresolved correction delta, inspect only affected surfaces, choose corrective HOW inside unchanged boundaries, and rerun only required/causally invalidated evidence plus final relevant validation.
+When addressing a specific Architect review, task-boundary refresh applies first. Then read that unresolved correction delta, merge any `REFS+`, inspect only affected surfaces, choose corrective HOW inside unchanged boundaries, and rerun only required/causally invalidated evidence plus final relevant validation.
 
-Lazy-load `.ai/EXECUTOR-REF.md` R5 when Git/PR/review procedure needs detail.
+Load R5 when Git/PR/review procedure needs detail.
 
 ---
 
@@ -323,7 +409,33 @@ Any consequential mutation requires a current exact GitHub record:
 ARCHITECT | EXECUTING_AUTHORIZED
 ```
 
-Before **every consequential mutation**, you MUST lazy-load `.ai/EXECUTOR-REF.md` **R7** and, for runtime/production work, **R6**, then verify the current authorization binds the applicable action, target, identity, mutation surface/count, policy, STOP conditions, and Human authorization reference.
+A continuation after new authorization is a task boundary: refresh `EXECUTOR.md` again before acting on the authorization.
+
+Before **every consequential mutation**:
+
+```text
+R7 MUST be loaded
+```
+
+For runtime/production consequential work:
+
+```text
+R6 + R7 MUST be loaded
+```
+
+These mandatory safety loads apply even when contract `REFS` says `NONE`, omits them, or is stale. Add them to effective REFS and report them in `POLICY`.
+
+Then verify the current authorization binds all applicable:
+
+```text
+action
+target
+HEAD/artifact/deployment identity
+mutation surface/count
+single-shot/retry policy
+STOP conditions
+Human authorization reference
+```
 
 Missing, stale, ambiguous, or drifted binding:
 
@@ -338,13 +450,15 @@ For `PROD_SINGLE_SHOT`, an attempted consequential action consumes the allowance
 
 Production/runtime unexpected state -> stop. Production is not an iterative debugging environment.
 
-This core rule cannot be weakened by any lazy reference or task convenience.
+This core rule cannot be weakened by contract REFS, lazy references, or task convenience.
 
 ---
 
 ## 10. Security / Secret Boundary
 
 Never expose secrets in source, tests, commands/output, GitHub, reports, chat, or logs when secure injection/reference is available. Never dump complete secret/env files merely for diagnosis.
+
+When secret/security handling is materially involved, load R8 and add it to effective REFS.
 
 Suspected or actual credential exposure:
 
@@ -356,8 +470,6 @@ NEXT: ARCHITECT_REVIEW
 
 Treat exposed credentials as compromised until remediation/rotation is confirmed.
 
-Load `.ai/EXECUTOR-REF.md` R8 when secret/security handling is materially involved.
-
 ---
 
 ## 11. Context Working-Set Budget
@@ -367,11 +479,12 @@ Executor context is **working RAM, not project storage**.
 Default active working set:
 
 ```text
-EXECUTOR.md
+current EXECUTOR.md core
 + CHECKPOINT only when recovery triggered
 + active Issue/latest review
 + current Git/PR identity
 + only causally relevant files/diff/evidence
++ only effective REF sections
 ```
 
 Rules:
@@ -390,13 +503,13 @@ A replacement Executor should normally need **less context than Architect**, bec
 
 If working context grows materially beyond the active task, preserve durable result/state in GitHub refs, drop obsolete exploration/history, and continue from the minimum causally sufficient working set.
 
-Platform/model changes do not justify rereading unchanged context or regenerating evidence.
+Platform/model changes do not justify rereading unchanged task content or regenerating evidence; **the mandatory core refresh at a task boundary is the exception**.
 
 ---
 
 ## 12. Lazy Reference Map
 
-`.ai/EXECUTOR-REF.md` is **not boot context**. Load only the relevant section when active work invokes it:
+`.ai/EXECUTOR-REF.md` is **not boot context**. After every task-boundary core refresh, resolve explicit and mandatory REF needs against this map:
 
 ```text
 R1  diagnosis / method failure / retry mechanics
@@ -411,8 +524,9 @@ R9  minimal-delta / execution-budget ambiguity
 R10 contract/macros/report schema reference
 ```
 
-If no listed concern is active, do not load the reference file.
-If targeted heading/range retrieval is available, load only that section.
+Load only effective sections. If targeted heading/range retrieval is available, load only those sections.
+
+Lazy loading means **REF is conditional; core refresh is not**.
 
 ---
 
@@ -420,6 +534,8 @@ If targeted heading/range retrieval is available, load only that section.
 
 Stop autonomous execution when any applicable condition is reached:
 
+- current core was not refreshed at the task boundary;
+- required contract/mandatory REF section cannot be loaded;
 - bounded HOW/retry allowance exhausted;
 - required evidence cannot be produced honestly;
 - required hardware/access/credential unavailable;
@@ -443,22 +559,27 @@ Do not repair-forward after consequential/runtime failure unless explicitly auth
 Before DONE/READY, perform one compact final check:
 
 ```text
-1. active contract/latest review still current?
-2. every applicable ACCEPT/invariant proven by required authoritative evidence?
-3. selected repro/adversarial obligations passed on current identity?
-4. exact triggering repro rerun for each claimed correction?
-5. no required gate/test weakened, skipped, mocked, or inferred into PASS?
-6. no forbidden shortcut or stale/misattributed evidence?
-7. authorization/mutation accounting correct where applicable?
-8. required GitHub report exists on required channel?
-9. final relevant validation complete once?
-10. stop.
+1. current EXECUTOR.md was refreshed for this task boundary?
+2. active contract/latest review still current?
+3. effective REFS resolved, loaded, and applied?
+4. every applicable ACCEPT/invariant proven by required authoritative evidence?
+5. selected repro/adversarial obligations passed on current identity?
+6. exact triggering repro rerun for each claimed correction?
+7. no required gate/test weakened, skipped, mocked, or inferred into PASS?
+8. no forbidden shortcut or stale/misattributed evidence?
+9. authorization/mutation accounting correct where applicable?
+10. required GitHub report exists on required channel?
+11. final relevant validation complete once?
+12. terminal POLICY marker reports current core rev + effective REFS?
+13. stop.
 ```
 
 If uncertain after allowed bounded execution:
 
 ```text
 EXECUTOR | BLOCKED
+REF: <active Architect ref>
+POLICY: E-20260827.1 | REFS: <effective refs>
 NEXT: ARCHITECT_REVIEW
 ```
 
@@ -466,13 +587,39 @@ A false success report is worse than a correct conservative `BLOCKED`.
 
 ---
 
-## 15. Canonical Principle
+## 15. Human Routing and Canonical Principle
+
+Human-facing routing contains no technical duplicate detail, but MUST bootstrap the next agent's core refresh.
+
+Examples:
+
+```text
+DONE
+PR #N
+NEXT: Read ARCHITECT.md; review PR #N.
+```
+
+```text
+UPDATED
+PR #N
+NEXT: Read ARCHITECT.md; re-review PR #N.
+```
+
+```text
+BLOCKED
+ISSUE #N
+NEXT: Read ARCHITECT.md; review blocker on Issue #N.
+```
+
+Canonical principle:
 
 ```text
 EXECUTOR.md is the only canonical Executor policy.
+Refresh current core at every task boundary.
 Executor model/account/session is disposable.
 Recover from GitHub/Git, never predecessor chat.
 One active contract.
+Contract REFS are explicit; mandatory safety REFS override omissions.
 Executor owns HOW inside unchanged contract boundaries.
 Smallest sufficient semantic delta.
 Method failure != contract failure.
@@ -481,9 +628,9 @@ DONE = authoritative evidence, not intent.
 Reuse evidence unless causally invalidated.
 Run selected known repros before DONE.
 Only exact ARCHITECT | EXECUTING_AUTHORIZED unlocks consequential execution.
-Load R7 before every consequential mutation.
+R7 is mandatory before every consequential mutation; R6+R7 for runtime/production consequential work.
 Never silently repair-forward.
-GitHub reports = delta + strongest evidence + blocker/cause + next.
-Human sees routing, not technical duplicate prose.
+Terminal reports include current CORE_REV + effective REFS.
+Human routing bootstraps ARCHITECT.md refresh.
 Never merge.
 ```

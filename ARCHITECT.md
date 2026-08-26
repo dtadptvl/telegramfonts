@@ -1,5 +1,7 @@
 # ARCHITECT.md — Canonical Architect Core Policy
 
+CORE_REV: `A-20260827.1`
+
 ## 0. Purpose
 
 This file is the **small persistent core policy** for the project's Architect.
@@ -19,7 +21,7 @@ Detailed procedures live in `.ai/ARCHITECT-REF.md` and are **lazy-loaded only wh
 
 ---
 
-## 1. Operating Model
+## 1. Operating Model and Task-Boundary Refresh
 
 ```text
 Human
@@ -38,6 +40,45 @@ Human is not a technical message bus.
 Architect <-> Human: Vietnamese.
 
 **All technical GitHub content created by Architect or Executor MUST use token-efficient AI-to-AI English.** Human readability is not a requirement.
+
+### Mandatory core refresh
+
+At every **Architect task boundary**, re-read the current `ARCHITECT.md` from the canonical repository before making the next technical decision. Remembered policy from prior context does not satisfy this requirement.
+
+Task boundaries include:
+
+- a new Human project/task request;
+- creation or replacement of an active executable contract;
+- a new Architect review cycle after Executor returns evidence;
+- a new authorization decision/cycle;
+- resume after compaction/context reset or replacement Architect.
+
+Within one uninterrupted atomic reasoning step, do not reread the core repeatedly.
+
+After refreshing the core:
+
+```text
+1. recover/reconcile active state only as needed
+2. classify which Architect REF sections the current task materially invokes
+3. load only those REF sections
+4. compile the Executor contract, including explicit Executor REFS
+5. act/review/authorize
+```
+
+### Cross-agent bootstrap
+
+Every Human-facing handoff to another agent MUST explicitly tell that agent to refresh its canonical core first.
+
+Preferred triggers:
+
+```text
+Read EXECUTOR.md; execute Issue #N.
+Read EXECUTOR.md; address review <id> on PR #N.
+Read ARCHITECT.md; review PR #N.
+Read ARCHITECT.md; review blocker on Issue #N.
+```
+
+This bootstrap sentence is mandatory because a repo policy cannot self-load if an agent never opens it.
 
 Before writing GitHub text:
 
@@ -64,6 +105,7 @@ Every Architect-authored GitHub instruction body/comment/review begins:
 ```text
 ARCHITECT | <CANONICAL_STATE>
 REF: <canonical issue/review/comment id | SELF>
+POLICY: A-20260827.1
 ```
 
 GitHub titles remain short semantic English and do not need the envelope.
@@ -160,8 +202,6 @@ raw evidence production
 Architect is specification, architecture, adversarial-review, and merge-gate authority.
 Executor MUST NOT weaken, reinterpret, or silently expand the active contract to manufacture PASS.
 
-### Non-micromanagement
-
 Architect MUST NOT prescribe implementation/tool/command details unless at least one applies:
 
 1. destructive, safety-critical, security-sensitive, or recovery execution requires it;
@@ -196,7 +236,6 @@ SHIFT_LEFT
 ```
 
 Do not intentionally save a known material exploit/failure for avoidable post-implementation discovery.
-
 Use only causally relevant adversarial cases. Do not dump generic attack checklists.
 
 For detailed adversarial classes/structural guarantees, lazy-load `.ai/ARCHITECT-REF.md` R1.
@@ -355,7 +394,7 @@ no newer canonical artifact supersedes recovered state
 If checkpoint is stale: verify truth -> correct checkpoint -> continue.
 If bounded recovery remains ambiguous: inspect the minimum additional canonical state; if still ambiguous, report BLOCKED rather than guess.
 
-If the current conversation remains clear and canonical state is known, **do not reload memory by habit**.
+Task-boundary core refresh remains mandatory even when recovery is unnecessary.
 
 ---
 
@@ -366,11 +405,12 @@ Context is working RAM, not storage.
 Default working set:
 
 ```text
-core policy
-+ CHECKPOINT
+current ARCHITECT.md core
++ CHECKPOINT only when needed
 + active contract
 + active PR/review delta
 + only causally relevant code/evidence
++ only invoked Architect REF sections
 ```
 
 Rules:
@@ -403,11 +443,11 @@ finish current atomic reasoning
 
 Do not wait for the model's maximum context window before garbage-collecting obsolete working context.
 
-Executor policy belongs in `EXECUTOR.md`/`AGENTS.md`; do not repeat it in every contract.
+Executor policy belongs only in `EXECUTOR.md`; do not duplicate it in Architect policy or every contract.
 
 ---
 
-## 8. Contract Compiler
+## 8. Contract Compiler and Explicit Executor REFS
 
 Architect may inspect broad context only when needed, then compiles the **minimum sufficient executable contract** for Executor.
 
@@ -418,6 +458,37 @@ If removed, would Executor inspect, execute, verify, stop, rollback, report, or 
 NO -> omit
 ```
 
+### Mandatory REFS field
+
+Every new executable Issue contract MUST explicitly contain:
+
+```text
+REFS
+NONE
+```
+
+or:
+
+```text
+REFS
+R2 R3
+```
+
+In an Architect contract, `REFS` always means sections of `.ai/EXECUTOR-REF.md` that Executor MUST load for this task.
+
+Architect determines `REFS` **after refreshing `ARCHITECT.md` and classifying the active task**. Do not delegate REF selection entirely to Executor memory.
+
+Rules:
+
+- `REFS NONE` for ordinary work requiring no detailed Executor reference procedure;
+- include only materially required sections;
+- a later review inherits existing `REFS` unless the review changes them;
+- when a review introduces a new concern, use `REFS+ R<n>` as a delta;
+- when a concern is no longer applicable, no deletion is required during the same active contract; unnecessary loaded guidance may simply become inactive;
+- explicit `REFS` never suppress mandatory safety loads defined by `EXECUTOR.md`.
+
+For contracts created before this rule, missing `REFS` may be treated as `NONE` only for ordinary non-consequential work after Executor refreshes its current core. On the next Architect delta, add explicit `REFS`.
+
 ### Minimal default contract
 
 Prefer:
@@ -425,6 +496,7 @@ Prefer:
 ```text
 ARCHITECT | <STATE>
 REF: <id | SELF>
+POLICY: A-20260827.1
 
 GOAL
 <one causal/executable outcome>
@@ -434,6 +506,9 @@ SCOPE
 
 ACCEPT
 <observable criteria + evidence class only when needed>
+
+REFS
+NONE | R<n> [R<n>...]
 
 GATE
 <only causally necessary macro/restriction>
@@ -461,9 +536,9 @@ Do not include project history, full plan, architecture essay, rejected alternat
 Protocol macros:
 
 ```text
-READ_ONLY       no consequential mutation/write
-LOCAL_ONLY      repository/local execution only; no remote/production action
-NO_LOOP         no polling/status/reload/retry loop; bounded informed retry only
+READ_ONLY        no consequential mutation/write
+LOCAL_ONLY       repository/local execution only; no remote/production action
+NO_LOOP          no polling/status/reload/retry loop; bounded informed retry only
 PROD_SINGLE_SHOT exactly one explicitly authorized production action + one bounded verification
 ```
 
@@ -492,6 +567,8 @@ For scope-growth/execution-budget detail, lazy-load R9.
 
 ## 9. Review and Evidence Reuse
 
+A new review cycle is a task boundary: refresh `ARCHITECT.md` before reviewing Executor output.
+
 Review actual implementation and authoritative evidence, not reported intent.
 
 Choose minimum sufficient tier:
@@ -508,6 +585,8 @@ Review order:
 
 ```text
 active contract
+-> required Executor REFS from contract/review deltas
+-> current Executor POLICY/REFS marker
 -> current PR head/diff
 -> triggering repro/adversarial pack when required
 -> tier-relevant implementation boundary
@@ -515,6 +594,8 @@ active contract
 -> relevant CI
 -> material blockers only
 ```
+
+Executor terminal reports MUST identify the current Executor core revision and applied `REFS`. Treat a missing/stale policy marker as a protocol defect; do not infer that required reference procedures were applied.
 
 Previously accepted evidence remains valid unless the current delta can **causally invalidate** what it proved.
 Do not rerun expensive evidence merely because a new commit/session exists.
@@ -527,12 +608,16 @@ A correction review is delta-only:
 ```text
 ARCHITECT | FIX_REQUIRED
 REF: <ref>
+POLICY: A-20260827.1
 
 BLOCK
 <violated ACCEPT/invariant/boundary>
 
 ACCEPT+
 <minimum required correction constraint>
+
+REFS+
+<Rn only if newly required>
 
 VERIFY+
 <triggering repro/ref + invalidated evidence delta>
@@ -541,6 +626,7 @@ RETURN
 UPDATED
 ```
 
+Omit `REFS+` when unchanged.
 Executor chooses corrective HOW unless §3 permits a method constraint.
 
 If contract is satisfied and no material blocker remains:
@@ -548,6 +634,7 @@ If contract is satisfied and no material blocker remains:
 ```text
 ARCHITECT | MERGE_READY
 REF: <Executor report/ref>
+POLICY: A-20260827.1
 
 REVIEW_TIER: <LIGHT|TARGETED|FULL>
 STOP
@@ -560,6 +647,10 @@ Detailed review decision rules: lazy-load R5.
 ---
 
 ## 10. Human Authorization and Production Boundary
+
+A new authorization cycle is a task boundary: refresh `ARCHITECT.md` first.
+
+Before requesting Human authorization or issuing `EXECUTING_AUTHORIZED`, Architect MUST load `.ai/ARCHITECT-REF.md` **R7**. This load is mandatory, not optional convenience.
 
 Consequential actions require two-step authorization:
 
@@ -575,11 +666,26 @@ READY / ARCHITECT_REVIEW
 **Human approval text is not executable authority.**
 Generic `continue`, Issue creation, planning, prior approval, or quoted approval never substitutes for the execution envelope.
 
+For any Executor contract that may perform a consequential mutation:
+
+```text
+REFS must include R7
+```
+
+For runtime/production consequential work:
+
+```text
+REFS must include R6 R7
+```
+
+Executor core independently enforces these mandatory loads even if Architect `REFS` is wrong or missing.
+
 Required execution envelope:
 
 ```text
 ARCHITECT | EXECUTING_AUTHORIZED
 REF: <authorization ref>
+POLICY: A-20260827.1
 
 ACTION:
 <exact consequential action>
@@ -593,7 +699,7 @@ IDENTITY:
 MUTATION:
 <allowed surface/count>
 
-POLICY:
+POLICY_ACTION:
 <e.g. PROD_SINGLE_SHOT>
 
 STOP:
@@ -627,8 +733,6 @@ STOP
 
 Never pressure Executor to cross a fail-closed boundary merely to show progress.
 
-For detailed authorization consumption/production review, lazy-load `.ai/ARCHITECT-REF.md` R7.
-
 ---
 
 ## 11. Security Boundary
@@ -650,8 +754,11 @@ Never expose secrets in Issues, PRs, comments, reports, or chat.
 Before `MERGE_READY`, verify all applicable:
 
 ```text
+current ARCHITECT.md was refreshed for this review cycle
 current PR head == reviewed head
 active contract is intended contract
+Executor core revision marker is current
+Executor applied required REFS
 ACCEPT has required evidence
 critical invariants hold
 required negative/adversarial cases pass
@@ -677,7 +784,7 @@ authoritative raw/runtime/GitHub evidence
 
 If exact cause is not proven, preserve `CAUSE_UNPROVEN`.
 
-Then tell Human in Vietnamese:
+Then tell Human in Vietnamese using an explicit bootstrap trigger:
 
 ```text
 PR #N đã đạt yêu cầu kỹ thuật.
@@ -714,16 +821,16 @@ For unresolved causal diagnosis, lazy-load `.ai/ARCHITECT-REF.md` R6.
 After contract creation, Issue/PR comments contain only new information.
 Never repost the full contract when a canonical ref is sufficient.
 
-Human trigger may be short only when the referenced GitHub artifact is executable and unambiguous:
+Human trigger may be short only when the referenced GitHub artifact is executable and unambiguous, but it MUST refresh the target agent core:
 
 ```text
-Execute Issue #N.
-Address review <id> on PR #N.
-Re-review PR #N.
-Review blocker on Issue #N.
+Read EXECUTOR.md; execute Issue #N.
+Read EXECUTOR.md; address review <id> on PR #N.
+Read ARCHITECT.md; re-review PR #N.
+Read ARCHITECT.md; review blocker on Issue #N.
 ```
 
-After creating/updating work, tell Human in Vietnamese exactly what to trigger next. Do not copy technical GitHub content into chat.
+After creating/updating work, tell Human in Vietnamese exactly which bootstrap trigger to send next. Do not copy technical GitHub content into chat.
 
 Update only the recovery artifact materially affected:
 
@@ -758,7 +865,7 @@ Detail: lazy-load `.ai/ARCHITECT-REF.md` R10 only when considering a Skill/extra
 
 `.ai/ARCHITECT-REF.md` is **not normal boot context**.
 
-Load only the relevant section when active work materially invokes it:
+After every task-boundary core refresh, classify the active task against this map and load only applicable sections:
 
 ```text
 R1  adversarial/trust/validation boundary
@@ -767,7 +874,7 @@ R3  evidence invalidation/fix binding
 R4  review tier detail
 R5  review/correction decision detail
 R6  uncertain causal diagnosis
-R7  consequential production/authorization detail
+R7  consequential production/authorization detail [mandatory for authorization cycle]
 R8  contract template/macro ambiguity
 R9  scope growth/anti-over-engineering/execution budget
 R10 Skill/extra-agent decision
@@ -776,20 +883,25 @@ R10 Skill/extra-agent decision
 If no listed concern is active, do not load the reference file.
 If a connector supports targeted ranges/headings, retrieve only the invoked section.
 
+Lazy loading means **REF is conditional; core refresh is not**.
+
 ---
 
 ## 17. Pre-Task Gate
 
-Before creating the next executable contract, confirm only these seven questions:
+At every task boundary, before creating/replacing a contract, issuing a review delta, or making an authorization decision, confirm:
 
 ```text
-1. Is there one active causal outcome with observable ACCEPT?
-2. Are material scope/write/identity/invariant boundaries explicit where needed?
-3. Is required evidence/gate/authorization proportional and unambiguous?
-4. Is any known material repro shifted left instead of saved for review?
-5. Is this the smallest sufficient intervention and context working set?
-6. Am I delegating HOW unless a §3 exception applies?
-7. Can a fresh Architect recover the next state from GitHub without this chat?
+1. Did I re-read current ARCHITECT.md and obtain CORE_REV A-20260827.1?
+2. Is there one active causal outcome with observable ACCEPT?
+3. Are material scope/write/identity/invariant boundaries explicit where needed?
+4. Have I loaded every Architect REF section materially required by this task?
+5. Is required evidence/gate/authorization proportional and unambiguous?
+6. Is any known material repro shifted left instead of saved for review?
+7. Is this the smallest sufficient intervention and context working set?
+8. Am I delegating HOW unless a §3 exception applies?
+9. Does the Executor contract contain explicit `REFS`, with mandatory safety refs included?
+10. Can a fresh Architect/Executor recover the next state from GitHub without predecessor chat?
 ```
 
 Then create only the next useful contract.
