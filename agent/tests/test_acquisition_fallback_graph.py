@@ -510,10 +510,16 @@ def test_STEALTH_SPACE_REPRESENTATION_ADVERSARIAL_REJECTED():
 
     valid_A = dict(_PRINTABLE_GLYPH)
 
-    # a) is_space on a non-U+0020 code point.
+    # a) is_space on a non-U+0020 code point (zero-area box).
     forged_cp = {"code_point": 65, "glyph_index": 1, "is_space": True,
                  "sprite_box": {"x": 0, "y": 0, "width": 0, "height": 0}}
     assert is_complete_raster_pages([_page_with([forged_cp])], [120], expected_md5=md5) is False
+
+    # a2) is_space on a non-U+0020 code point with a positive in-bounds box:
+    # the is_space binding itself must be rejected, independent of dimensions.
+    forged_cp_inbounds = {"code_point": 65, "glyph_index": 1, "is_space": True,
+                          "sprite_box": {"x": 5, "y": 5, "width": 40, "height": 50}}
+    assert is_complete_raster_pages([_page_with([forged_cp_inbounds])], [120], expected_md5=md5) is False
 
     # b) Non-zero box under the zero-ink representation.
     nonzero_w = {"code_point": 32, "glyph_index": 1, "is_space": True,
