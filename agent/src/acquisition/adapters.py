@@ -595,6 +595,166 @@ class PlaywrightStealthPersistentSession:
             logger.debug("Playwright persistent discovery exception: %s", exc)
             return None
 
+def extract_font_descriptors(style_name: str, style_id: str = "") -> dict[str, str]:
+    """Extract closed normalized font descriptors (style, weight, stretch) from style name/id."""
+    combined = f"{style_name} {style_id}".lower().replace("-", " ").replace("_", " ")
+
+    # Style
+    style = "normal"
+    if "italic" in combined or "oblique" in combined:
+        style = "italic"
+
+    # Weight (100..900)
+    if "extra light" in combined or "extralight" in combined or "ultra light" in combined or "ultralight" in combined or " 200" in combined or combined.endswith("200"):
+        weight = "200"
+    elif "semi bold" in combined or "semibold" in combined or "demi bold" in combined or "demibold" in combined or " 600" in combined or combined.endswith("600"):
+        weight = "600"
+    elif "extra bold" in combined or "extrabold" in combined or "ultra bold" in combined or "ultrabold" in combined or " 800" in combined or combined.endswith("800"):
+        weight = "800"
+    elif "thin" in combined or "hairline" in combined or " 100" in combined or combined.endswith("100"):
+        weight = "100"
+    elif "light" in combined or "book" in combined or " 300" in combined or combined.endswith("300"):
+        weight = "300"
+    elif "medium" in combined or " 500" in combined or combined.endswith("500"):
+        weight = "500"
+    elif "black" in combined or "heavy" in combined or " 900" in combined or combined.endswith("900"):
+        weight = "900"
+    elif "bold" in combined or " 700" in combined or combined.endswith("700"):
+        weight = "700"
+    else:
+        weight = "400"
+
+    # Stretch
+    stretch = "normal"
+    if "condensed" in combined or "narrow" in combined:
+        stretch = "condensed"
+    elif "expanded" in combined or "wide" in combined:
+        stretch = "expanded"
+
+    return {
+        "style": style,
+        "weight": weight,
+        "stretch": stretch,
+    }
+
+
+class PlaywrightStealthPersistentSession:
+    """Acquires rich font metrics, kerning pairs, and raster pages with browser stealth."""
+
+    DESKTOP_UA = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    )
+
+    LAUNCH_ARGS = [
+        "--disable-blink-features=AutomationControlled",
+        "--disable-infobars",
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-background-networking",
+    ]
+
+    IGNORED_DEFAULT_ARGS = [
+        "--enable-automation",
+    ]
+
+    STEALTH_INIT_SCRIPT = """
+    Object.defineProperty(navigator, 'webdriver', {
+        get: () => undefined
+    });
+    window.chrome = {
+        runtime: {},
+        loadTimes: function() {},
+        csi: function() {},
+        app: {}
+    };
+    const originalQuery = window.navigator.permissions.query;
+    window.navigator.permissions.query = (parameters) => (
+        parameters.name === 'notifications' ?
+            Promise.resolve({ state: Notification.permission }) :
+            originalQuery(parameters)
+    );
+    """
+
+    def __init__(
+        self,
+        user_data_dir: Path | str | None = None,
+        timeout_seconds: int = 15,
+        playwright_launcher: Any | None = None,
+        transport_override: Any | None = None,
+        discovery_override: Any | None = None,
+    ) -> None:
+        self.user_data_dir = Path(user_data_dir) if user_data_dir else None
+        self.timeout_seconds = timeout_seconds
+        self._playwright_launcher = playwright_launcher
+        self._transport_override = transport_override
+        self._discovery_override = discovery_override
+
+    def available(self) -> bool:
+        if self._transport_override is not None or self._discovery_override is not None or self._playwright_launcher is not None:
+            return True
+        if self.user_data_dir is None:
+            return False
+        return self.user_data_dir.exists() and self.user_data_dir.is_dir()
+
+    async def discover_family(self, source_url: str) -> FamilyDiscoveryRecord | None:
+        """Fetch font family page using stealth persistent context and parse catalog items."""
+        if self._discovery_override is not None:
+            return await self._discovery_override(source_url)
+        if self._transport_override is not None:
+            return await self._transport_override(source_url)
+
+        if not self.available():
+            return None
+
+        from acquisition.dump_parser import parse_family_discovery_from_dump
+        from acquisition.models import STAGE_PLAYWRIGHT_STEALTH
+
+        try:
+            if self._playwright_launcher is not None:
+                context = await self._playwright_launcher(
+                    user_data_dir=str(self.user_data_dir or ""),
+                    channel="chrome",
+                    headless=True,
+                    args=self.LAUNCH_ARGS,
+                    ignore_default_args=self.IGNORED_DEFAULT_ARGS,
+                    user_agent=self.DESKTOP_UA,
+                    timeout=self.timeout_seconds * 1000,
+                )
+                try:
+                    await context.add_init_script(self.STEALTH_INIT_SCRIPT)
+                    page = await context.new_page()
+                    await page.goto(source_url, timeout=self.timeout_seconds * 1000, wait_until="domcontentloaded")
+                    content = await page.content()
+                    return parse_family_discovery_from_dump(content, source_url, STAGE_PLAYWRIGHT_STEALTH)
+                finally:
+                    await context.close()
+            else:
+                from playwright.async_api import async_playwright
+                async with async_playwright() as p:
+                    context = await p.chromium.launch_persistent_context(
+                        user_data_dir=str(self.user_data_dir),
+                        channel="chrome",
+                        headless=True,
+                        args=self.LAUNCH_ARGS,
+                        ignore_default_args=self.IGNORED_DEFAULT_ARGS,
+                        user_agent=self.DESKTOP_UA,
+                        timeout=self.timeout_seconds * 1000,
+                    )
+                    try:
+                        await context.add_init_script(self.STEALTH_INIT_SCRIPT)
+                        page = await context.new_page()
+                        await page.goto(source_url, timeout=self.timeout_seconds * 1000, wait_until="domcontentloaded")
+                        content = await page.content()
+                        return parse_family_discovery_from_dump(content, source_url, STAGE_PLAYWRIGHT_STEALTH)
+                    finally:
+                        await context.close()
+        except Exception as exc:
+            logger.debug("Playwright persistent discovery exception: %s", exc)
+            return None
+
     async def capture_raster_pages(
         self,
         source_url: str,
@@ -611,40 +771,155 @@ class PlaywrightStealthPersistentSession:
         from acquisition.models import STAGE_PLAYWRIGHT_STEALTH, is_complete_raster_pages
 
         style_name = getattr(style_rec, "style_name", "") or getattr(style_rec, "style_id", "Regular")
+        style_id = getattr(style_rec, "style_id", "")
         expected_md5 = getattr(style_rec, "md5", "")
 
         canvas_script = """
         async (args) => {
-            const { requested_sizes, style_name, expected_md5 } = args;
+            const { requested_sizes, style_name, style_id, expected_md5 } = args;
 
-            // 1. Resolve and bind exact loaded FontFace from document.fonts
-            const normTarget = style_name.toLowerCase().replace(/['"]/g, "").replace(/[^a-z0-9]/g, "");
-            const isItalicTarget = normTarget.includes("italic") || normTarget.includes("oblique");
-            const isBoldTarget = normTarget.includes("bold") && !normTarget.includes("semibold") && !normTarget.includes("demibold") && !normTarget.includes("extrabold") && !normTarget.includes("ultrabold");
+            function normWeight(w) {
+                if (!w) return "400";
+                const sw = String(w).toLowerCase();
+                if (sw === "normal" || sw === "regular") return "400";
+                if (sw === "bold") return "700";
+                if (sw === "bolder") return "800";
+                if (sw === "lighter") return "300";
+                const num = parseInt(sw, 10);
+                if (!isNaN(num)) return String(num);
+                return "400";
+            }
+            function normStyle(s) {
+                if (!s) return "normal";
+                const ss = String(s).toLowerCase();
+                if (ss.includes("italic") || ss.includes("oblique")) return "italic";
+                return "normal";
+            }
+            function normStretch(st) {
+                if (!st) return "normal";
+                const sst = String(st).toLowerCase();
+                if (sst.includes("condensed") || sst.includes("narrow")) return "condensed";
+                if (sst.includes("expanded") || sst.includes("wide")) return "expanded";
+                return "normal";
+            }
 
+            function extractDescriptors(nameStr, idStr) {
+                const combined = (nameStr + " " + idStr).toLowerCase().replace(/[-_]/g, " ");
+                let style = "normal";
+                if (combined.includes("italic") || combined.includes("oblique")) {
+                    style = "italic";
+                }
+                let weight = "400";
+                if (combined.includes("extra light") || combined.includes("extralight") || combined.includes("ultra light") || combined.includes("ultralight") || combined.includes(" 200") || combined.endsWith("200")) {
+                    weight = "200";
+                } else if (combined.includes("semi bold") || combined.includes("semibold") || combined.includes("demi bold") || combined.includes("demibold") || combined.includes(" 600") || combined.endsWith("600")) {
+                    weight = "600";
+                } else if (combined.includes("extra bold") || combined.includes("extrabold") || combined.includes("ultra bold") || combined.includes("ultrabold") || combined.includes(" 800") || combined.endsWith("800")) {
+                    weight = "800";
+                } else if (combined.includes("thin") || combined.includes("hairline") || combined.includes(" 100") || combined.endsWith("100")) {
+                    weight = "100";
+                } else if (combined.includes("light") || combined.includes("book") || combined.includes(" 300") || combined.endsWith("300")) {
+                    weight = "300";
+                } else if (combined.includes("medium") || combined.includes(" 500") || combined.endsWith("500")) {
+                    weight = "500";
+                } else if (combined.includes("black") || combined.includes("heavy") || combined.includes(" 900") || combined.endsWith("900")) {
+                    weight = "900";
+                } else if (combined.includes("bold") || combined.includes(" 700") || combined.endsWith("700")) {
+                    weight = "700";
+                } else {
+                    weight = "400";
+                }
+                let stretch = "normal";
+                if (combined.includes("condensed") || combined.includes("narrow")) {
+                    stretch = "condensed";
+                } else if (combined.includes("expanded") || combined.includes("wide")) {
+                    stretch = "expanded";
+                }
+                return { style, weight, stretch };
+            }
+
+            const targetDesc = extractDescriptors(style_name || "", style_id || "");
+            const normTargetFamily = (style_name || "").toLowerCase().replace(/['"]/g, "").replace(/[^a-z0-9]/g, "");
+
+            // 1. Scan @font-face rules from stylesheets
+            const fontFaceRules = [];
+            try {
+                for (const sheet of document.styleSheets) {
+                    try {
+                        const rules = sheet.cssRules || sheet.rules;
+                        if (!rules) continue;
+                        for (const r of rules) {
+                            if (r instanceof CSSFontFaceRule || r.type === 5 || (r.cssText && r.cssText.startsWith("@font-face"))) {
+                                const fStyle = r.style || {};
+                                fontFaceRules.push({
+                                    family: (fStyle.fontFamily || "").replace(/['"]/g, "").trim(),
+                                    style: normStyle(fStyle.fontStyle),
+                                    weight: normWeight(fStyle.fontWeight),
+                                    stretch: normStretch(fStyle.fontStretch),
+                                    unicodeRange: fStyle.unicodeRange || "",
+                                    src: fStyle.src || r.cssText || "",
+                                });
+                            }
+                        }
+                    } catch (e) {}
+                }
+            } catch (e) {}
+
+            // 2. Resolve matching FontFace candidates
             const candidates = [];
             for (const face of document.fonts) {
                 const faceFamNorm = face.family.toLowerCase().replace(/['"]/g, "").replace(/[^a-z0-9]/g, "");
-                const faceStyle = (face.style || "normal").toLowerCase();
-                const faceWeight = (face.weight || "normal").toLowerCase();
+                const faceStyle = normStyle(face.style);
+                const faceWeight = normWeight(face.weight);
+                const faceStretch = normStretch(face.stretch);
 
-                // Family matching
-                const familyMatches = (faceFamNorm === normTarget || normTarget.includes(faceFamNorm) || faceFamNorm.includes(normTarget));
+                const familyMatches = (faceFamNorm === normTargetFamily || normTargetFamily.includes(faceFamNorm) || faceFamNorm.includes(normTargetFamily));
                 if (!familyMatches) continue;
 
-                // Style matching (italic / oblique vs normal)
-                const faceIsItalic = faceStyle.includes("italic") || faceStyle.includes("oblique");
-                if (isItalicTarget !== faceIsItalic) continue;
+                // Exact descriptor matching
+                if (faceStyle !== targetDesc.style) continue;
+                if (faceWeight !== targetDesc.weight) continue;
+                if (faceStretch !== targetDesc.stretch) continue;
 
-                // Weight matching
-                if (isBoldTarget) {
-                    const faceIsBold = faceWeight === "700" || faceWeight === "bold" || faceWeight === "800" || faceWeight === "900";
-                    if (!faceIsBold && (faceWeight === "400" || faceWeight === "normal" || faceWeight === "300" || faceWeight === "light")) {
-                        continue;
+                // Match with @font-face rule if available
+                let matchedRule = null;
+                for (const rule of fontFaceRules) {
+                    const rFamNorm = rule.family.toLowerCase().replace(/['"]/g, "").replace(/[^a-z0-9]/g, "");
+                    if (rFamNorm === faceFamNorm && rule.weight === faceWeight && rule.style === faceStyle) {
+                        matchedRule = rule;
+                        break;
                     }
                 }
 
-                candidates.push(face);
+                // Check resource MD5 binding if expected_md5 is specified
+                let ruleSrc = matchedRule ? matchedRule.src : "";
+                let ruleUnicode = matchedRule ? matchedRule.unicodeRange : "";
+                let resMd5 = "";
+                if (expected_md5) {
+                    if (ruleSrc) {
+                        const hexMatches = ruleSrc.match(/[0-9a-fA-F]{32}/g);
+                        if (hexMatches && hexMatches.length > 0) {
+                            if (!hexMatches.map(h => h.toLowerCase()).includes(expected_md5.toLowerCase())) {
+                                // Explicit MD5 mismatch in @font-face resource
+                                continue;
+                            }
+                            resMd5 = expected_md5;
+                        }
+                    }
+                    if (!resMd5 && (ruleSrc.includes(expected_md5) || face.family.includes(expected_md5))) {
+                        resMd5 = expected_md5;
+                    }
+                }
+
+                candidates.push({
+                    face,
+                    style: faceStyle,
+                    weight: faceWeight,
+                    stretch: faceStretch,
+                    unicodeRange: face.unicodeRange || ruleUnicode || "",
+                    src: ruleSrc,
+                    resourceMd5: resMd5,
+                });
             }
 
             if (candidates.length === 0) {
@@ -654,19 +929,22 @@ class PlaywrightStealthPersistentSession:
                 return { error: "STEALTH_FACE_IDENTITY_AMBIGUOUS" };
             }
 
-            const matchedFace = candidates[0];
-            const fontStyle = matchedFace.style || "normal";
-            const fontWeight = matchedFace.weight || "normal";
-            const fontStretch = matchedFace.stretch || "normal";
+            const matched = candidates[0];
+            const matchedFace = matched.face;
+            const fontStyle = matched.style;
+            const fontWeight = matched.weight;
+            const fontStretch = matched.stretch;
             const fontFamily = matchedFace.family.replace(/['"]/g, "");
 
             const resolvedFace = {
-                family: matchedFace.family,
+                family: fontFamily,
                 style: fontStyle,
                 weight: fontWeight,
                 stretch: fontStretch,
-                unicodeRange: matchedFace.unicodeRange || "",
+                unicodeRange: matched.unicodeRange,
                 status: matchedFace.status || "loaded",
+                src: matched.src,
+                resource_md5: matched.resourceMd5 || (expected_md5 && matched.src.includes(expected_md5) ? expected_md5 : ""),
             };
 
             function getExactFontSpec(ptSize) {
@@ -683,34 +961,41 @@ class PlaywrightStealthPersistentSession:
                 return { error: "FONT_NOT_LOADED" };
             }
 
-            // 2. Discover target coverage from FontFace unicodeRange
+            // 3. Discover target coverage from FontFace unicodeRange with wildcard expansion
             let requiredSourceCps = [];
-            if (matchedFace.unicodeRange) {
-                const ranges = matchedFace.unicodeRange.split(",");
+            const rawUnicodeRange = resolvedFace.unicodeRange;
+            if (rawUnicodeRange) {
+                const ranges = rawUnicodeRange.split(",");
                 const declaredSet = new Set();
                 let totalRangeSpan = 0;
                 for (const r of ranges) {
                     const clean = r.trim().replace(/^U\\+/i, "");
+                    let start = -1, end = -1;
                     if (clean.includes("-")) {
-                        const [start, end] = clean.split("-").map(h => parseInt(h, 16));
-                        if (!isNaN(start) && !isNaN(end) && end >= start) {
-                            totalRangeSpan += (end - start + 1);
-                            if (totalRangeSpan > 1500) {
-                                return { error: "UNICODE_RANGE_EXCEEDS_BOUNDED_POLICY" };
-                            }
-                            for (let cp = start; cp <= end; cp++) {
-                                declaredSet.add(cp);
-                            }
-                        }
+                        const parts = clean.split("-");
+                        start = parseInt(parts[0], 16);
+                        end = parseInt(parts[1], 16);
+                    } else if (clean.includes("?")) {
+                        // Wildcard expansion: U+4?? -> 0x0400..0x04FF
+                        const sHex = clean.replace(/\\?/g, "0");
+                        const eHex = clean.replace(/\\?/g, "F");
+                        start = parseInt(sHex, 16);
+                        end = parseInt(eHex, 16);
                     } else {
-                        const cp = parseInt(clean, 16);
-                        if (!isNaN(cp)) {
-                            totalRangeSpan++;
-                            if (totalRangeSpan > 1500) {
-                                return { error: "UNICODE_RANGE_EXCEEDS_BOUNDED_POLICY" };
-                            }
-                            declaredSet.add(cp);
-                        }
+                        start = parseInt(clean, 16);
+                        end = start;
+                    }
+
+                    if (isNaN(start) || isNaN(end) || end < start) {
+                        return { error: "INVALID_UNICODE_RANGE_SPECIFICATION" };
+                    }
+
+                    totalRangeSpan += (end - start + 1);
+                    if (totalRangeSpan > 1500) {
+                        return { error: "UNICODE_RANGE_EXCEEDS_BOUNDED_POLICY" };
+                    }
+                    for (let cp = start; cp <= end; cp++) {
+                        declaredSet.add(cp);
                     }
                 }
                 requiredSourceCps = Array.from(declaredSet).sort((a, b) => a - b);
@@ -1043,6 +1328,7 @@ class PlaywrightStealthPersistentSession:
                         {
                             "requested_sizes": requested_sizes,
                             "style_name": style_name,
+                            "style_id": style_id,
                             "expected_md5": expected_md5,
                         },
                     )
@@ -1069,6 +1355,7 @@ class PlaywrightStealthPersistentSession:
                             {
                                 "requested_sizes": requested_sizes,
                                 "style_name": style_name,
+                                "style_id": style_id,
                                 "expected_md5": expected_md5,
                             },
                         )
@@ -1077,6 +1364,8 @@ class PlaywrightStealthPersistentSession:
 
             if not eval_out or not isinstance(eval_out, dict) or eval_out.get("error") or not eval_out.get("results"):
                 return None
+
+            target_desc = extract_font_descriptors(style_name, style_id)
 
             out_pages: list[SpriteRasterPage] = []
             for res in eval_out["results"]:
@@ -1095,14 +1384,59 @@ class PlaywrightStealthPersistentSession:
                 if not (norm_rf in norm_style or norm_style in norm_rf or any(p in norm_style for p in norm_rf.split())):
                     return None
 
-                # Style & weight descriptor validation
-                rf_style = str(resolved_face.get("style", "normal")).lower()
-                rf_weight = str(resolved_face.get("weight", "normal")).lower()
-                if "italic" in norm_style and rf_style not in ("italic", "oblique"):
+                # Exact style, weight, stretch validation in Python
+                raw_style = str(resolved_face.get("style", "normal")).lower()
+                rf_style = "italic" if ("italic" in raw_style or "oblique" in raw_style) else "normal"
+
+                raw_weight = str(resolved_face.get("weight", "400")).lower().strip()
+                if raw_weight in ("normal", "regular", "roman", "plain", "400"):
+                    rf_weight = "400"
+                elif raw_weight in ("bold", "700"):
+                    rf_weight = "700"
+                elif raw_weight in ("bolder", "extra bold", "extrabold", "ultra bold", "ultrabold", "800"):
+                    rf_weight = "800"
+                elif raw_weight in ("semi bold", "semibold", "demi bold", "demibold", "600"):
+                    rf_weight = "600"
+                elif raw_weight in ("lighter", "light", "book", "300"):
+                    rf_weight = "300"
+                elif raw_weight in ("extra light", "extralight", "ultra light", "ultralight", "200"):
+                    rf_weight = "200"
+                elif raw_weight in ("thin", "hairline", "100"):
+                    rf_weight = "100"
+                elif raw_weight in ("black", "heavy", "900"):
+                    rf_weight = "900"
+                elif raw_weight in ("medium", "500"):
+                    rf_weight = "500"
+                elif raw_weight.isdigit():
+                    rf_weight = raw_weight
+                else:
+                    rf_weight = "400"
+
+                raw_stretch = str(resolved_face.get("stretch", "normal")).lower()
+                if "condensed" in raw_stretch or "narrow" in raw_stretch:
+                    rf_stretch = "condensed"
+                elif "expanded" in raw_stretch or "wide" in raw_stretch:
+                    rf_stretch = "expanded"
+                else:
+                    rf_stretch = "normal"
+
+                if rf_style != target_desc["style"]:
                     return None
-                if ("bold" in norm_style and "semi" not in norm_style and "extra" not in norm_style and "ultra" not in norm_style):
-                    if rf_weight not in ("700", "bold", "800", "900"):
+                if rf_weight != target_desc["weight"]:
+                    return None
+                if rf_stretch != target_desc["stretch"]:
+                    return None
+
+                # MD5 / Resource binding verification
+                if expected_md5:
+                    rf_md5 = resolved_face.get("resource_md5", "")
+                    rf_src = resolved_face.get("src", "")
+                    if rf_md5 and rf_md5.lower() != expected_md5.lower():
                         return None
+                    if rf_src:
+                        src_hexes = re.findall(r"[0-9a-fA-F]{32}", rf_src)
+                        if src_hexes and expected_md5.lower() not in [h.lower() for h in src_hexes]:
+                            return None
 
                 required_source_cps = res.get("required_source_cps", [])
                 candidate_cps = res.get("candidate_cps", [])

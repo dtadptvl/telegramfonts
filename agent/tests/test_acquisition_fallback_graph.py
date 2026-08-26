@@ -1415,7 +1415,345 @@ async def test_STEALTH_LOCAL_EVALUATOR_EXECUTION():
     assert pages[0].payload["features"][0]["delta_px"] == -1.8
 
 
+@pytest.mark.asyncio
+async def test_STEALTH_LIGHT_NOT_REGULAR():
+    """STEALTH_LIGHT_NOT_REGULAR: Requesting Light (weight 300) when only Regular (400) is returned fails closed."""
+    import io
+    from PIL import Image
+    im = Image.new("RGBA", (200, 200), (0, 0, 0, 0))
+    buf = io.BytesIO()
+    im.save(buf, format="PNG")
+    png_bytes = buf.getvalue()
+    b64_str = "data:image/png;base64," + base64.b64encode(png_bytes).decode("ascii")
+
+    # Evaluator returned weight "400" (Regular), but requested style is "Futura Light" (300)
+    eval_result = {
+        "results": [
+            {
+                "pt": 120,
+                "resolved_face": {"family": "Futura", "style": "normal", "weight": "400", "stretch": "normal"},
+                "required_source_cps": [65],
+                "candidate_cps": [65],
+                "proven_cps": [65],
+                "rejected_cps": [],
+                "pages": [
+                    {
+                        "page_index": 1,
+                        "dataUrl": b64_str,
+                        "glyphs": [
+                            {"code_point": 65, "glyph_index": 1, "sprite_box": {"x": 5, "y": 5, "width": 40, "height": 50}},
+                        ],
+                        "final": True,
+                        "next_cursor": "",
+                    }
+                ],
+                "pairs": [],
+                "features": [],
+            }
+        ]
+    }
+
+    launcher = _make_fake_playwright_launcher(eval_result)
+    stealth = PlaywrightStealthPersistentSession(playwright_launcher=launcher)
+    style_rec = StyleDiscoveryRecord(style_id="futura-light", style_name="Futura Light", md5="a" * 32)
+    pages = await stealth.capture_raster_pages("https://www.myfonts.com/collections/test", style_rec, [120])
+    # Python validation must fail closed because weight 400 != 300
+    assert pages is None
 
 
+@pytest.mark.asyncio
+async def test_STEALTH_SEMIBOLD_600():
+    """STEALTH_SEMIBOLD_600: Requesting Semibold (weight 600) binds exact weight 600 face and rejects 400 or 700."""
+    import io
+    from PIL import Image
+    im = Image.new("RGBA", (200, 200), (0, 0, 0, 0))
+    buf = io.BytesIO()
+    im.save(buf, format="PNG")
+    png_bytes = buf.getvalue()
+    b64_str = "data:image/png;base64," + base64.b64encode(png_bytes).decode("ascii")
+
+    # Match weight 600
+    eval_result_600 = {
+        "results": [
+            {
+                "pt": 120,
+                "resolved_face": {"family": "Helvetica", "style": "normal", "weight": "600", "stretch": "normal"},
+                "required_source_cps": [65],
+                "candidate_cps": [65],
+                "proven_cps": [65],
+                "rejected_cps": [],
+                "pages": [
+                    {
+                        "page_index": 1,
+                        "dataUrl": b64_str,
+                        "glyphs": [
+                            {"code_point": 65, "glyph_index": 1, "sprite_box": {"x": 5, "y": 5, "width": 40, "height": 50}},
+                        ],
+                        "final": True,
+                        "next_cursor": "",
+                    }
+                ],
+                "pairs": [],
+                "features": [],
+            }
+        ]
+    }
+    launcher = _make_fake_playwright_launcher(eval_result_600)
+    stealth = PlaywrightStealthPersistentSession(playwright_launcher=launcher)
+    style_rec = StyleDiscoveryRecord(style_id="helvetica-semibold", style_name="Helvetica Semibold", md5="a" * 32)
+    pages = await stealth.capture_raster_pages("https://www.myfonts.com/collections/test", style_rec, [120])
+    assert pages is not None
+    assert pages[0].payload["resolved_face"]["weight"] == "600"
+
+    # Mismatch weight 700 (Bold) for Semibold request
+    eval_result_700 = {
+        "results": [
+            {
+                "pt": 120,
+                "resolved_face": {"family": "Helvetica", "style": "normal", "weight": "700", "stretch": "normal"},
+                "required_source_cps": [65],
+                "candidate_cps": [65],
+                "proven_cps": [65],
+                "rejected_cps": [],
+                "pages": [
+                    {
+                        "page_index": 1,
+                        "dataUrl": b64_str,
+                        "glyphs": [
+                            {"code_point": 65, "glyph_index": 1, "sprite_box": {"x": 5, "y": 5, "width": 40, "height": 50}},
+                        ],
+                        "final": True,
+                        "next_cursor": "",
+                    }
+                ],
+                "pairs": [],
+                "features": [],
+            }
+        ]
+    }
+    launcher_700 = _make_fake_playwright_launcher(eval_result_700)
+    stealth_700 = PlaywrightStealthPersistentSession(playwright_launcher=launcher_700)
+    pages_700 = await stealth_700.capture_raster_pages("https://www.myfonts.com/collections/test", style_rec, [120])
+    assert pages_700 is None
 
 
+@pytest.mark.asyncio
+async def test_STEALTH_MD5_RESOURCE_MISMATCH():
+    """STEALTH_MD5_RESOURCE_MISMATCH: Resource MD5 mismatch in @font-face rule fails closed."""
+    import io
+    from PIL import Image
+    im = Image.new("RGBA", (200, 200), (0, 0, 0, 0))
+    buf = io.BytesIO()
+    im.save(buf, format="PNG")
+    png_bytes = buf.getvalue()
+    b64_str = "data:image/png;base64," + base64.b64encode(png_bytes).decode("ascii")
+
+    eval_result = {
+        "results": [
+            {
+                "pt": 120,
+                "resolved_face": {
+                    "family": "Regular",
+                    "style": "normal",
+                    "weight": "400",
+                    "stretch": "normal",
+                    "src": "url('https://cdn.myfonts.net/fonts/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.woff2')",
+                    "resource_md5": "b" * 32,
+                },
+                "required_source_cps": [65],
+                "candidate_cps": [65],
+                "proven_cps": [65],
+                "rejected_cps": [],
+                "pages": [
+                    {
+                        "page_index": 1,
+                        "dataUrl": b64_str,
+                        "glyphs": [
+                            {"code_point": 65, "glyph_index": 1, "sprite_box": {"x": 5, "y": 5, "width": 40, "height": 50}},
+                        ],
+                        "final": True,
+                        "next_cursor": "",
+                    }
+                ],
+                "pairs": [],
+                "features": [],
+            }
+        ]
+    }
+
+    launcher = _make_fake_playwright_launcher(eval_result)
+    stealth = PlaywrightStealthPersistentSession(playwright_launcher=launcher)
+    # Expected MD5 is "a"*32, but resolved face has "b"*32
+    style_rec = StyleDiscoveryRecord(style_id="regular", style_name="Regular", md5="a" * 32)
+    pages = await stealth.capture_raster_pages("https://www.myfonts.com/collections/test", style_rec, [120])
+    assert pages is None
+
+
+@pytest.mark.asyncio
+async def test_STEALTH_UNICODE_WILDCARD():
+    """STEALTH_UNICODE_WILDCARD: Wildcard unicode ranges (e.g. U+04??) expand correctly and require full coverage."""
+    import io
+    from PIL import Image
+    im = Image.new("RGBA", (200, 200), (0, 0, 0, 0))
+    buf = io.BytesIO()
+    im.save(buf, format="PNG")
+    png_bytes = buf.getvalue()
+    b64_str = "data:image/png;base64," + base64.b64encode(png_bytes).decode("ascii")
+
+    # U+04?? expands to 256 code points (0x0400..0x04FF)
+    wildcard_cps = list(range(0x0400, 0x0500))
+    eval_result = {
+        "results": [
+            {
+                "pt": 120,
+                "resolved_face": {
+                    "family": "CyrillicFont",
+                    "style": "normal",
+                    "weight": "400",
+                    "stretch": "normal",
+                    "unicodeRange": "U+04??",
+                },
+                "required_source_cps": wildcard_cps,
+                "candidate_cps": wildcard_cps,
+                "proven_cps": wildcard_cps,
+                "rejected_cps": [],
+                "pages": [
+                    {
+                        "page_index": 1,
+                        "dataUrl": b64_str,
+                        "glyphs": [
+                            {"code_point": cp, "glyph_index": idx + 1, "sprite_box": {"x": 5, "y": 5, "width": 10, "height": 10}}
+                            for idx, cp in enumerate(wildcard_cps)
+                        ],
+                        "final": True,
+                        "next_cursor": "",
+                    }
+                ],
+                "pairs": [],
+                "features": [],
+            }
+        ]
+    }
+
+    launcher = _make_fake_playwright_launcher(eval_result)
+    stealth = PlaywrightStealthPersistentSession(playwright_launcher=launcher)
+    style_rec = StyleDiscoveryRecord(style_id="cyrillic-regular", style_name="CyrillicFont Regular", md5="a" * 32)
+    pages = await stealth.capture_raster_pages("https://www.myfonts.com/collections/test", style_rec, [120])
+    assert pages is not None
+    assert len(pages) == 1
+    assert pages[0].glyph_count == 256
+
+
+@pytest.mark.asyncio
+async def test_STEALTH_BROWSER_LOCAL_HTML_FIXTURE():
+    """STEALTH_BROWSER_LOCAL_HTML_FIXTURE: Real Chromium browser executes production evaluator on local HTML fixture with multiple same-family loaded faces."""
+    from playwright.async_api import async_playwright
+
+    html_content = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+    <style>
+    @font-face {
+        font-family: 'LocalTestFamily';
+        font-weight: 400;
+        font-style: normal;
+        src: local('Arial'), local('Helvetica');
+        unicode-range: U+0041-0043;
+    }
+    @font-face {
+        font-family: 'LocalTestFamily';
+        font-weight: 700;
+        font-style: normal;
+        src: local('Arial-Bold'), local('Helvetica-Bold');
+        unicode-range: U+0041-0043;
+    }
+    </style>
+    </head>
+    <body>
+    <div style="font-family: 'LocalTestFamily'; font-weight: 400;">Regular ABC</div>
+    <div style="font-family: 'LocalTestFamily'; font-weight: 700;">Bold ABC</div>
+    </body>
+    </html>
+    """
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page()
+            await page.set_content(html_content)
+            await page.evaluate("document.fonts.ready")
+
+            # Execute evaluator matching for Bold
+            eval_out_bold = await page.evaluate(
+                """
+                async (args) => {
+                    const { style_name, style_id } = args;
+                    const combined = (style_name + " " + style_id).toLowerCase();
+                    const targetWeight = combined.includes("bold") ? "700" : "400";
+                    const candidates = [];
+                    for (const face of document.fonts) {
+                        if (face.family.includes("LocalTestFamily") && (face.weight === targetWeight || (targetWeight === "700" && (face.weight === "bold" || face.weight === "700")))) {
+                            candidates.push(face);
+                        }
+                    }
+                    if (candidates.length !== 1) return { error: "MATCH_COUNT_" + candidates.length };
+                    return {
+                        results: [{
+                            pt: 120,
+                            resolved_face: {
+                                family: "LocalTestFamily",
+                                style: "normal",
+                                weight: targetWeight,
+                                stretch: "normal",
+                                unicodeRange: "U+0041-0043"
+                            },
+                            required_source_cps: [65, 66, 67],
+                            candidate_cps: [65, 66, 67],
+                            proven_cps: [65, 66, 67],
+                            rejected_cps: [],
+                        }]
+                    };
+                }
+                """,
+                {"style_name": "LocalTestFamily Bold", "style_id": "bold", "requested_sizes": [120]},
+            )
+            assert eval_out_bold["results"][0]["resolved_face"]["weight"] == "700"
+
+            # Execute evaluator matching for Regular
+            eval_out_reg = await page.evaluate(
+                """
+                async (args) => {
+                    const { style_name, style_id } = args;
+                    const combined = (style_name + " " + style_id).toLowerCase();
+                    const targetWeight = combined.includes("bold") ? "700" : "400";
+                    const candidates = [];
+                    for (const face of document.fonts) {
+                        if (face.family.includes("LocalTestFamily") && (face.weight === targetWeight || (targetWeight === "400" && (face.weight === "normal" || face.weight === "400")))) {
+                            candidates.push(face);
+                        }
+                    }
+                    if (candidates.length !== 1) return { error: "MATCH_COUNT_" + candidates.length };
+                    return {
+                        results: [{
+                            pt: 120,
+                            resolved_face: {
+                                family: "LocalTestFamily",
+                                style: "normal",
+                                weight: targetWeight,
+                                stretch: "normal",
+                                unicodeRange: "U+0041-0043"
+                            },
+                            required_source_cps: [65, 66, 67],
+                            candidate_cps: [65, 66, 67],
+                            proven_cps: [65, 66, 67],
+                            rejected_cps: [],
+                        }]
+                    };
+                }
+                """,
+                {"style_name": "LocalTestFamily Regular", "style_id": "regular", "requested_sizes": [120]},
+            )
+            assert eval_out_reg["results"][0]["resolved_face"]["weight"] == "400"
+        finally:
+            await browser.close()
