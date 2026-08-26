@@ -246,7 +246,7 @@ def is_complete_raster_pages(
     expected_md5: str = "",
 ) -> bool:
     """Validate closed raster completion: exact page sequences, terminal signal, unique non-conflicting code points, valid MD5."""
-    if not pages:
+    if not isinstance(pages, (tuple, list)) or not pages:
         return False
 
     norm_expected_md5 = expected_md5.lower().strip() if expected_md5 else ""

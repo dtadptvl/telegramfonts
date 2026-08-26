@@ -111,6 +111,16 @@ def _slice_sprite_cells(
         if w < 1 or h < 1 or x < 0 or y < 0 or x + w > sprite_w or y + h > sprite_h:
             raise ValueError(f"RASTER_INGEST_BOX_OUT_OF_BOUNDS_CP_{cp}")
         cell = sprite.crop((x, y, x + w, y + h))
+        # Closed ink gate: a fully transparent/blank cell carries no glyph
+        # evidence (transparent/tofu-shaped cells fail closed here and can
+        # never become authorized reconstruction pixels).
+        if cell.mode in ("RGBA", "LA", "PA"):
+            if cell.getchannel("A").getextrema()[1] <= 0:
+                raise ValueError(f"RASTER_INGEST_CELL_NO_INK_CP_{cp}")
+        else:
+            lo, _hi = cell.convert("L").getextrema()
+            if lo >= 255:
+                raise ValueError(f"RASTER_INGEST_CELL_NO_INK_CP_{cp}")
         buf = io.BytesIO()
         cell.save(buf, format="PNG")
         png_bytes = buf.getvalue()

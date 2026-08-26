@@ -6,7 +6,6 @@ Session material flows through opaque callables and is consumed in-memory only.
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
 import re
 from typing import Any, Awaitable, Callable, Protocol
@@ -16,10 +15,8 @@ from acquisition.models import (
     BinaryCandidate,
     DiscoveryEnvelope,
     FamilyDiscoveryEnvelope,
-    STAGE_DUMP_DOM_NATIVE,
     StyleDiscoveryRecord,
     SpriteRasterPage,
-    is_complete_raster_pages,
 )
 
 
@@ -190,7 +187,6 @@ def parse_family_discovery_from_dump(dump: str, source_url: str, provenance: str
 
     family_name = ""
     styles: dict[str, StyleDiscoveryRecord] = {}
-    raster_resources_by_style: dict[str, list[dict[str, Any]]] = {}
 
     # 1. JSON-LD structured metadata
     for block in re.finditer(
@@ -206,15 +202,6 @@ def parse_family_discovery_from_dump(dump: str, source_url: str, provenance: str
         for node in nodes:
             if not isinstance(node, dict):
                 continue
-            rr = node.get("rasterResources") or node.get("raster_resources")
-            if isinstance(rr, list):
-                for entry in rr:
-                    if not isinstance(entry, dict):
-                        continue
-                    rr_key = str(entry.get("styleId") or entry.get("style_id") or "")
-                    norm_rr_key = rr_key.lower().replace("-", "_").replace(" ", "_")
-                    if norm_rr_key:
-                        raster_resources_by_style.setdefault(norm_rr_key, []).append(entry)
             name = node.get("name") or node.get("familyName")
             if isinstance(name, str) and name.strip():
                 family_name = family_name or name.strip()
@@ -364,26 +351,6 @@ def parse_family_discovery_from_dump(dump: str, source_url: str, provenance: str
                     updated_styles[k] = rec
             styles = updated_styles
 
-    # Attach closed dump-dom raster resources to their exact style records.
-    # Resources are consumed by the pipeline as raster evidence; they never
-    # replace binary candidates and never weaken MD5 binding.
-    if raster_resources_by_style:
-        rr_updated: dict[str, StyleDiscoveryRecord] = {}
-        for k, rec in styles.items():
-            entries = raster_resources_by_style.get(k) or []
-            if entries:
-                rr_updated[k] = StyleDiscoveryRecord(
-                    style_id=rec.style_id,
-                    style_name=rec.style_name,
-                    md5=rec.md5,
-                    binary_candidates=rec.binary_candidates,
-                    raster_resources=tuple(entries),
-                    provenance=rec.provenance,
-                )
-            else:
-                rr_updated[k] = rec
-        styles = rr_updated
-
     canonical_key = family_name.lower().replace("-", "_").replace(" ", "_") if family_name else ""
     return FamilyDiscoveryEnvelope(
         family_name=family_name,
@@ -451,81 +418,6 @@ async def extract_binary_from_dump_dom(
             if converted and len(converted) <= policy.max_binary_bytes:
                 return converted
     return None
-
-
-def extract_raster_pages_from_dump_resources(
-    style_rec: StyleDiscoveryRecord,
-    requested_pts: list[int] | None,
-    expected_md5: str = "",
-) -> tuple[SpriteRasterPage, ...]:
-    """Consume closed dump-dom raster resources into validated sprite pages.
-
-    Every resource entry must bind the exact style MD5 and decode into a
-    valid PNG sprite page; any malformed, mismatched, or incomplete entry
-    fails closed (empty result). Completeness is validated against the
-    exact requested render sizes through the shared closed completion gate.
-    """
-    resources = tuple(getattr(style_rec, "raster_resources", ()) or ())
-    if not resources:
-        return ()
-    norm_md5 = (expected_md5 or style_rec.md5 or "").strip().lower()
-    if not norm_md5 or len(norm_md5) != 32:
-        return ()
-
-    pages: list[SpriteRasterPage] = []
-    try:
-        for entry in resources:
-            if not isinstance(entry, dict):
-                return ()
-            if str(entry.get("md5", "")).strip().lower() != norm_md5:
-                return ()
-            try:
-                acs_pt = int(entry.get("acsPt", entry.get("acs_pt", 0)))
-            except (TypeError, ValueError):
-                return ()
-            if acs_pt <= 0:
-                return ()
-            raw_pages = entry.get("pages")
-            if not isinstance(raw_pages, list) or not raw_pages:
-                return ()
-            for page_entry in raw_pages:
-                if not isinstance(page_entry, dict):
-                    return ()
-                data_url = str(page_entry.get("png", ""))
-                if not data_url.startswith("data:image/png;base64,"):
-                    return ()
-                raw_png = base64.b64decode(data_url.split(",", 1)[1], validate=True)
-                if not raw_png.startswith(b"\x89PNG\r\n\x1a\n") or len(raw_png) < 24:
-                    return ()
-                glyphs = page_entry.get("glyphs")
-                if not isinstance(glyphs, list) or not glyphs:
-                    return ()
-                pages.append(
-                    SpriteRasterPage(
-                        page_index=int(page_entry.get("pageIndex", len(pages) + 1)),
-                        glyph_count=len(glyphs),
-                        raster_bytes=raw_png,
-                        next_cursor=str(page_entry.get("nextCursor", "")),
-                        final=bool(page_entry.get("final", False)),
-                        payload={
-                            "browser_version": "dump_dom_native",
-                            "glyphs": glyphs,
-                            "sprite_sha256": hashlib.sha256(raw_png).hexdigest(),
-                            "md5": norm_md5,
-                            "acs_pt": acs_pt,
-                            "provenance": STAGE_DUMP_DOM_NATIVE,
-                        },
-                    )
-                )
-    except Exception:
-        return ()
-
-    if not pages:
-        return ()
-    page_tuple = tuple(pages)
-    if not is_complete_raster_pages(page_tuple, requested_pts, expected_md5=norm_md5):
-        return ()
-    return page_tuple
 
 
 class MonotypeRasterProvider:

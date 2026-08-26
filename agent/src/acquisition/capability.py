@@ -18,6 +18,24 @@ from dataclasses import dataclass
 
 PROVIDER_MONOTYPE_RENDER = "monotype_render_105"
 
+# Playwright Stealth persistent-Chrome canvas capture is a distinct raster
+# producer; it is never relabeled as the Monotype CDN provider.
+PROVIDER_PLAYWRIGHT_STEALTH = "playwright_stealth_persistent"
+
+
+def resolve_raster_provider(pages: "tuple | list | None") -> str:
+    """Derive the exact raster provider identity from the produced pages.
+
+    The sealed capability/attestation identity is bound to the producer that
+    actually generated the pages; relabeling one provider as another is
+    forbidden. Unknown/absent provenance defaults to the Monotype CDN lane.
+    """
+    for page in pages or ():
+        provenance = str((getattr(page, "payload", None) or {}).get("provenance", ""))
+        if provenance == PROVIDER_PLAYWRIGHT_STEALTH:
+            return PROVIDER_PLAYWRIGHT_STEALTH
+    return PROVIDER_MONOTYPE_RENDER
+
 # The approved render query renders phase (0.0, 0.0) only; no parameter in
 # the captured contract exposes subpixel phase control.
 FIXED_PHASE: tuple[float, float] = (0.0, 0.0)

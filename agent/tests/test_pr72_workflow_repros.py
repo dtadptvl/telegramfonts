@@ -848,3 +848,123 @@ async def test_L3_PROVENANCE_stage_bound_identity_and_compatible_repeat(test_set
     assert acquirer2.acquire_calls == 0
     events = [e for e in runner2.last_reuse_trace["events"] if e["event"] == "L3_CACHE_HIT"]
     assert events and events[0]["provenance"] == BINARY_STAGE_DUMP_DOM
+
+
+# =========================================================================
+# RASTER PRODUCTION HANDOFF (Issue #73 comment 5420825557)
+# =========================================================================
+
+_PW_HANDOFF_BOXES = {65: (0, 0, 50, 60), 66: (60, 0, 45, 60)}
+
+
+def _playwright_shaped_page(md5: str, acs_pt: int, with_binding: bool = True, ink: bool = True) -> SpriteRasterPage:
+    """One observable Playwright-stealth-shaped raster page (ink cells)."""
+    import io
+    from PIL import Image, ImageDraw
+
+    img = Image.new("L", (500, 500), 255)
+    draw = ImageDraw.Draw(img)
+    glyphs = []
+    for idx, cp in enumerate(sorted(_PW_HANDOFF_BOXES)):
+        x, y, w, h = _PW_HANDOFF_BOXES[cp]
+        if ink:
+            draw.rectangle([x, y, x + w - 1, y + h - 1], fill=0)
+        glyphs.append(
+            {"code_point": cp, "glyph_index": idx + 1, "sprite_box": {"x": x, "y": y, "width": w, "height": h}}
+        )
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    png_bytes = buf.getvalue()
+    payload = {
+        "browser_version": "playwright_stealth_v1",
+        "glyphs": glyphs,
+        "pairs": [],
+        "features": [],
+        "sprite_sha256": hashlib.sha256(png_bytes).hexdigest(),
+        "md5": md5,
+        "acs_pt": acs_pt,
+        "provenance": "playwright_stealth_persistent",
+    }
+    if with_binding:
+        payload["request_params"] = {
+            "provider": "playwright_stealth_persistent",
+            "style_id": "regular",
+            "md5": md5,
+            "acs_pt": str(acs_pt),
+            "acs_p": "1",
+        }
+    return SpriteRasterPage(
+        page_index=1,
+        glyph_count=len(glyphs),
+        raster_bytes=png_bytes,
+        next_cursor="",
+        final=True,
+        payload=payload,
+    )
+
+
+def test_DUMP_OR_PLAYWRIGHT_RASTER_PRODUCTION_HANDOFF(tmp_path: Path):
+    """DUMP_OR_PLAYWRIGHT_RASTER_PRODUCTION_HANDOFF: authorized Playwright-shaped
+    result -> provider-typed capability -> page attestation -> ingest/finalization
+    succeeds, bound to the actual producer (never relabeled Monotype)."""
+    from acquisition.capability import (
+        PROVIDER_MONOTYPE_RENDER,
+        PROVIDER_PLAYWRIGHT_STEALTH,
+        ProviderRasterCapability,
+        resolve_raster_provider,
+    )
+    from acquisition.raster_ingest import ingest_raster_pages, page_slice_attestation
+    from measurement.store import ObservationStore
+    from tests.test_issue72_review_repros import RASTER_ONLY_CONFIG, _browser_supplement_for_seed
+
+    capability = ProviderRasterCapability.deterministic_size_schedule(
+        PROVIDER_PLAYWRIGHT_STEALTH, RASTER_ONLY_CONFIG.resolutions
+    )
+    pages = tuple(_playwright_shaped_page(ENVELOPE_MD5, pt) for pt in capability.all_sizes())
+
+    # Provider identity is derived from the pages themselves.
+    assert resolve_raster_provider(pages) == PROVIDER_PLAYWRIGHT_STEALTH
+    assert resolve_raster_provider(pages) != PROVIDER_MONOTYPE_RENDER
+
+    # Page attestation succeeds with the exact request binding.
+    attestation = page_slice_attestation(pages)
+    assert attestation["sprite_sha256"] and attestation["bindings"]
+
+    supplement = _browser_supplement_for_seed("chromium_pw_handoff_v1", config=RASTER_ONLY_CONFIG)
+    store = ObservationStore(tmp_path / "obs_pw_handoff")
+    ingested = ingest_raster_pages(
+        store,
+        RASTER_ONLY_CONFIG,
+        "pw_handoff_fam",
+        "regular",
+        supplement,
+        pages,
+        capability,
+        source_url="https://www.myfonts.com/collections/pw-handoff-fam",
+    )
+    assert ingested == 2
+    cfg_h = RASTER_ONLY_CONFIG.compute_hash()
+    assert store.get_coverage("pw_handoff_fam", "regular", browser_version="chromium_pw_handoff_v1", config_hash=cfg_h) == [65, 66]
+    # Finalization completes under the Playwright-bound capability.
+    assert store.is_source_collection_completed(
+        "pw_handoff_fam", "regular", config_hash=cfg_h, browser_version="chromium_pw_handoff_v1"
+    )
+    assert PROVIDER_PLAYWRIGHT_STEALTH in capability.to_json()
+    assert PROVIDER_MONOTYPE_RENDER not in capability.to_json()
+
+
+def test_RASTER_TRANSPARENT_OR_BINDING_MISSING(tmp_path: Path):
+    """RASTER_TRANSPARENT_OR_BINDING_MISSING: transparent cells or missing
+    request binding fail closed at the ingest boundary; never an authorized
+    completion."""
+    from acquisition.raster_ingest import page_slice_attestation
+
+    # Fully transparent glyph cells carry no ink evidence.
+    transparent_page = _playwright_shaped_page(ENVELOPE_MD5, 120, with_binding=True, ink=False)
+    with pytest.raises(ValueError, match="RASTER_INGEST_CELL_NO_INK"):
+        page_slice_attestation((transparent_page,))
+
+    # Ink cells without the exact request binding cannot be attested.
+    unbound_page = _playwright_shaped_page(ENVELOPE_MD5, 120, with_binding=False, ink=True)
+    with pytest.raises(ValueError, match="RASTER_INGEST_REQUEST_BINDING_MISSING"):
+        page_slice_attestation((unbound_page,))

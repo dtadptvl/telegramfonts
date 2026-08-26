@@ -66,12 +66,13 @@ def test_settings_missing_fields(monkeypatch):
         Settings(_env_file=None)
 
 
-def test_OPENROUTER_DEV_VARS_LOWERCASE_LOADS(tmp_path: Path, monkeypatch):
-    """OPENROUTER_DEV_VARS_LOWERCASE_LOADS: non-versioned dev.vars-shaped lowercase
-    openrouter_api_key loads safely into OPENROUTER_API_KEY (temporary fake file;
-    the real dev.vars is never read and the value never leaks into repr/logs)."""
-    fake_key = "sk-or-v1-fake-devvars-load-test-000000000000"
-    (tmp_path / "dev.vars").write_text(f"openrouter_api_key = {fake_key}\n", encoding="utf-8")
+def test_SETTINGS_DEFAULT_NO_DEV_VARS_READ(tmp_path: Path, monkeypatch):
+    """SETTINGS_DEFAULT_NO_DEV_VARS_READ: direct Settings construction can never
+    open a cwd/repo dev.vars sentinel. The dev.vars-shaped key is consumed
+    only by the explicit runtime loader at the composition boundary."""
+    sentinel = "sk-or-v1-devvars-sentinel-must-not-load"
+    (tmp_path / "dev.vars").write_text(f"openrouter_api_key = {sentinel}\n", encoding="utf-8")
+    (tmp_path / ".dev.vars").write_text(f"openrouter_api_key = {sentinel}\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
 
@@ -84,10 +85,76 @@ def test_OPENROUTER_DEV_VARS_LOWERCASE_LOADS(tmp_path: Path, monkeypatch):
         SCRATCH_DIR=tmp_path,
     )
 
-    assert settings.OPENROUTER_API_KEY is not None
-    assert settings.OPENROUTER_API_KEY.get_secret_value() == fake_key
-    # VIETNAMESE_AI_ENABLED stays explicitly opt-in (default false).
+    # The sentinel never reaches Settings; VI stays explicitly opt-in.
+    assert settings.OPENROUTER_API_KEY is None
     assert settings.VIETNAMESE_AI_ENABLED is False
-    # Secret value never leaks into stringified settings.
-    assert fake_key not in repr(settings)
-    assert fake_key not in str(settings)
+
+
+def test_RUNTIME_KEY_ONLY_VI_PROVIDER(tmp_path: Path, test_settings: Settings):
+    """RUNTIME_KEY_ONLY_VI_PROVIDER: explicit temporary dev.vars-shaped lowercase
+    key-only file -> VI missing-coverage provider available through the fixed
+    OpenRouter route (mocked transport). Real dev.vars reads=0, live requests=0."""
+    import asyncio
+    import json
+
+    import httpx
+
+    from composition import build_production_components, load_dev_vars_secret
+    from compute.openrouter_client import MODEL_PRIMARY
+    from tests.test_issue72_review_repros import _valid_candidate_payload
+
+    fake_key = "sk-or-v1-fake-key-only-runnable-000000000000"
+    dev_vars = tmp_path / "dev.vars"
+    dev_vars.write_text(
+        "# temporary fake secret file (test only)\n"
+        f"openrouter_api_key = {fake_key}\n",
+        encoding="utf-8",
+    )
+
+    # Lowercase key shape parses exactly; missing key/file fails closed.
+    assert load_dev_vars_secret(dev_vars, "openrouter_api_key") == fake_key
+    assert load_dev_vars_secret(tmp_path / "absent.dev.vars", "openrouter_api_key") == ""
+
+    # Key-only shape: flag stays false, no env key; the explicit loader path
+    # makes the fixed OpenRouter provider available for VI missing coverage.
+    settings = test_settings.model_copy(update={"VIETNAMESE_AI_ENABLED": False})
+    assert settings.OPENROUTER_API_KEY is None
+    components = build_production_components(
+        settings, tmp_path / "scratch", dev_vars_path=dev_vars
+    )
+    provider = components["vietnamese_ai_provider"]
+    assert provider is not None
+    assert provider.model_id == "openrouter"
+
+    # Fixed route under a mocked transport (live requests=0): routine missing
+    # case -> PRIMARY only.
+    missing = [0x0110, 0x0111]
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        calls.append(body["model"])
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": _valid_candidate_payload(missing)}}]}
+        )
+
+    provider._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider._owns_client = False
+    specs = asyncio.run(
+        provider.generate_candidates(
+            {
+                "missing_codepoints": missing,
+                "units_per_em": 1000,
+                "source_hash": "s" * 64,
+                "style_evidence": {"family_name": "Key Only Fam", "style_name": "Regular"},
+            }
+        )
+    )
+    assert len(specs) == 2
+    assert calls == [MODEL_PRIMARY]
+
+    # Without any explicit dev.vars path, no file is read and (flag false)
+    # composition stays provider-less: missing key fails closed only when AI
+    # is actually required.
+    bare = build_production_components(settings, tmp_path / "scratch2")
+    assert bare["vietnamese_ai_provider"] is None

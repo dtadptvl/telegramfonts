@@ -1563,6 +1563,16 @@ class PlaywrightStealthPersistentSession:
                                 "sprite_sha256": sha,
                                 "md5": expected_md5,
                                 "acs_pt": pt,
+                                # Exact request binding (same closed shape the CDN
+                                # lane carries): required for production handoff/
+                                # slice attestation; absent binding fails closed.
+                                "request_params": {
+                                    "provider": STAGE_PLAYWRIGHT_STEALTH,
+                                    "style_id": str(style_id or ""),
+                                    "md5": expected_md5,
+                                    "acs_pt": str(pt),
+                                    "acs_p": str(p_idx),
+                                },
                                 "provenance": STAGE_PLAYWRIGHT_STEALTH,
                                 "resolved_face": resolved_face,
                             },

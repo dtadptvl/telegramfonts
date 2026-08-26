@@ -41,7 +41,6 @@ from acquisition.providers import (
     PlaywrightStealthProvider,
     AlgoliaMetadataProvider,
     extract_binary_from_dump_dom,
-    extract_raster_pages_from_dump_resources,
     parse_family_discovery_from_dump,
     parse_discovery_from_dump,
 )
@@ -257,74 +256,11 @@ class AcquisitionPipeline:
         )
 
         # -------------------------------------------------------------
-        # STEP 1B: Dump-DOM embedded raster resources (D04). When the dump
-        # itself carries complete MD5-bound raster evidence, the raster is
-        # complete here and every fallback lane makes zero calls.
-        # -------------------------------------------------------------
-        if style_rec and getattr(style_rec, "raster_resources", ()):
-            dump_pages = extract_raster_pages_from_dump_resources(
-                style_rec, req_pts, expected_md5=style_rec.md5
-            )
-            if dump_pages and is_complete_raster_pages(dump_pages, req_pts, expected_md5=style_rec.md5):
-                records.append(
-                    AcquisitionStageRecord(
-                        stage=STAGE_DUMP_DOM_NATIVE,
-                        attempted=True,
-                        produced_binary=False,
-                        produced_raster=True,
-                        outcome="OK",
-                    )
-                )
-                return outcome_with("raster_authorized", pages=dump_pages)
-            records.append(
-                AcquisitionStageRecord(
-                    stage=STAGE_DUMP_DOM_NATIVE,
-                    attempted=True,
-                    produced_binary=False,
-                    produced_raster=False,
-                    outcome="RASTER_ABSENT",
-                    reason_code="DUMP_RASTER_RESOURCES_INCOMPLETE",
-                )
-            )
-
-        # -------------------------------------------------------------
         # STEP 2: Playwright Stealth Persistent Context (Method 2)
+        # A valid authorized binary observed by the stealth session wins
+        # IMMEDIATELY before any raster work (D04/D08 binary precedence).
         # -------------------------------------------------------------
         if self.policy.playwright_stealth_enabled and self.playwright_provider is not None and self.playwright_provider.available():
-            pages = ()
-            try:
-                pages = await self.playwright_provider.capture_raster_pages(
-                    source_url, style_rec or StyleDiscoveryRecord(style_id=expected_style, style_name=expected_style), stealth_pts
-                ) or ()
-            except Exception as exc:
-                logger.debug("Playwright raster capture exception: %s", exc)
-                pages = ()
-
-            if pages and is_complete_raster_pages(pages, req_pts, expected_md5=style_rec.md5 if (style_rec and style_rec.md5) else ""):
-                records.append(
-                    AcquisitionStageRecord(
-                        stage=STAGE_PLAYWRIGHT_STEALTH,
-                        attempted=True,
-                        produced_binary=False,
-                        produced_raster=True,
-                        outcome="OK",
-                    )
-                )
-                return outcome_with("raster_authorized", pages=pages)
-            else:
-                records.append(
-                    AcquisitionStageRecord(
-                        stage=STAGE_PLAYWRIGHT_STEALTH,
-                        attempted=True,
-                        produced_binary=False,
-                        produced_raster=False,
-                        outcome="RASTER_ABSENT",
-                        reason_code="STEALTH_RASTER_INCOMPLETE_OR_UNAVAILABLE",
-                    )
-                )
-
-            # Playwright may also surface a valid authorized binary observed
-            # in the session; a valid binary wins before raster/reconstruction.
             capture_binary_fn = getattr(self.playwright_provider, "capture_binary", None)
             if callable(capture_binary_fn):
                 raw_pw: bytes | None = None
@@ -375,6 +311,58 @@ class AcquisitionPipeline:
                             "insufficient",
                             terminal=f"ACQUISITION_BINARY_INTEGRITY_FAILED:{pw_verification.reason_code}",
                         )
+
+            pages = ()
+            try:
+                pages = await self.playwright_provider.capture_raster_pages(
+                    source_url, style_rec or StyleDiscoveryRecord(style_id=expected_style, style_name=expected_style), stealth_pts
+                ) or ()
+            except Exception as exc:
+                logger.debug("Playwright raster capture exception: %s", exc)
+                pages = ()
+
+            if pages and is_complete_raster_pages(pages, req_pts, expected_md5=style_rec.md5 if (style_rec and style_rec.md5) else ""):
+                # Production handoff identity: every page must carry the exact
+                # request binding and producer provenance; unbound pages are
+                # never authorized and the lane continues to fallbacks.
+                binding_ok = all(
+                    isinstance((p.payload or {}).get("request_params"), dict)
+                    and bool((p.payload or {}).get("request_params"))
+                    and str((p.payload or {}).get("provenance", ""))
+                    for p in pages
+                )
+                if binding_ok:
+                    records.append(
+                        AcquisitionStageRecord(
+                            stage=STAGE_PLAYWRIGHT_STEALTH,
+                            attempted=True,
+                            produced_binary=False,
+                            produced_raster=True,
+                            outcome="OK",
+                        )
+                    )
+                    return outcome_with("raster_authorized", pages=pages)
+                records.append(
+                    AcquisitionStageRecord(
+                        stage=STAGE_PLAYWRIGHT_STEALTH,
+                        attempted=True,
+                        produced_binary=False,
+                        produced_raster=False,
+                        outcome="RASTER_ABSENT",
+                        reason_code="STEALTH_RASTER_REQUEST_BINDING_MISSING",
+                    )
+                )
+            else:
+                records.append(
+                    AcquisitionStageRecord(
+                        stage=STAGE_PLAYWRIGHT_STEALTH,
+                        attempted=True,
+                        produced_binary=False,
+                        produced_raster=False,
+                        outcome="RASTER_ABSENT",
+                        reason_code="STEALTH_RASTER_INCOMPLETE_OR_UNAVAILABLE",
+                    )
+                )
 
         # Legacy Session Provider fallback (for backward-compatibility with stage 9D test fixtures)
         if self.policy.authorized_session_enabled and self.session_provider is not None and self.session_provider.available():
@@ -502,9 +490,13 @@ class AcquisitionPipeline:
 
         # -------------------------------------------------------------
         # STEP 4: Algolia Metadata Search -> Monotype CDN Ingestion (Method 4)
+        # D04 applicability: Algolia runs ONLY when the exact style MD5 is
+        # absent. With an exact MD5 the direct CDN lane is the terminal
+        # raster path; CDN partial/failure there is insufficient.
         # -------------------------------------------------------------
         if (
-            self.policy.algolia_enabled
+            not style_md5
+            and self.policy.algolia_enabled
             and self.algolia_provider is not None
             and self.algolia_provider.available()
             and self.policy.monotype_raster_enabled

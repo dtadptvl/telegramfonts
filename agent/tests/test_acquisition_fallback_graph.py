@@ -117,6 +117,13 @@ def _make_dummy_sprite_page(md5: str, acs_pt: int, page_index: int = 1, final: b
             "md5": md5,
             "acs_pt": acs_pt,
             "sprite_sha256": hashlib.sha256(png_bytes).hexdigest(),
+            "request_params": {
+                "provider": "monotype_render_105",
+                "md5": md5,
+                "acs_pt": str(acs_pt),
+                "acs_p": str(page_index),
+            },
+            "provenance": STAGE_DIRECT_MONOTYPE_CDN,
         },
     )
 
@@ -148,59 +155,19 @@ def test_DUMP_DOM_FAMILY_MAP():
     assert reg.md5 != bold.md5 != light.md5
 
 
-def _dump_raster_resource_html(md5: str, acs_pt: int = 120) -> str:
-    """Dump-DOM fixture carrying closed MD5-bound raster resources (D04)."""
-    import io
-    from PIL import Image
-    im = Image.new("RGBA", (500, 500), (0, 0, 0, 0))
-    buf = io.BytesIO()
-    im.save(buf, format="PNG")
-    png_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-    payload = {
-        "@type": "FontFamily",
-        "name": "Raster Dump Fam",
-        "hasVariant": [
-            {"name": "Raster Dump Fam Regular", "sku": "regular", "fontMd5": md5},
-        ],
-        "rasterResources": [
-            {
-                "styleId": "regular",
-                "md5": md5,
-                "acsPt": acs_pt,
-                "pages": [
-                    {
-                        "pageIndex": 1,
-                        "png": "data:image/png;base64," + png_b64,
-                        "glyphs": [
-                            {"code_point": 65, "glyph_index": 1, "sprite_box": {"x": 0, "y": 0, "width": 50, "height": 60}},
-                            {"code_point": 66, "glyph_index": 2, "sprite_box": {"x": 50, "y": 0, "width": 45, "height": 60}},
-                        ],
-                        "final": True,
-                        "nextCursor": "",
-                    }
-                ],
-            }
-        ],
-    }
-    return (
-        "<!DOCTYPE html><html><head>"
-        '<script type="application/ld+json">'
-        + json.dumps(payload)
-        + "</script></head><body></body></html>"
-    )
-
-
 @pytest.mark.asyncio
 async def test_DUMP_DOM_COMPLETE():
-    """DUMP_DOM_COMPLETE: Native dump-dom completes raster from its own raster resources; fallback lanes make 0 calls."""
-    dump_md5 = "a1b2c3d4e5f60718293a4b5c6d7e8f90"
+    """DUMP_DOM_COMPLETE: dump-dom completes discovery/MD5 metadata; raster
+    completes through the applicable ordered lane (direct CDN with exact MD5)
+    while Playwright/Algolia make zero calls. Dump-dom never produces raster:
+    unobserved page schemas are never claimed as production evidence."""
     dump_transport = MagicMock(spec=DumpDomTransport)
-    dump_transport.dump_dom = AsyncMock(return_value=_dump_raster_resource_html(dump_md5))
+    dump_transport.dump_dom = AsyncMock(return_value=SAMPLE_MULTI_STYLE_HTML)
 
     playwright = MagicMock()
     playwright.available.return_value = True
     playwright.discover_family = AsyncMock()
-    playwright.capture_raster_pages = AsyncMock()
+    playwright.capture_raster_pages = AsyncMock(return_value=None)
 
     algolia = MagicMock()
     algolia.available.return_value = True
@@ -209,7 +176,9 @@ async def test_DUMP_DOM_COMPLETE():
     raster_provider = MagicMock()
     raster_provider.available.return_value = True
     raster_provider.client = MagicMock()
-    raster_provider.client.fetch_all_sprite_pages = AsyncMock()
+    raster_provider.client.fetch_all_sprite_pages = AsyncMock(
+        return_value=(_make_dummy_sprite_page("a1b2c3d4e5f60718293a4b5c6d7e8f90", 120),)
+    )
 
     pipeline = AcquisitionPipeline(
         dump_dom_transport=dump_transport,
@@ -219,68 +188,25 @@ async def test_DUMP_DOM_COMPLETE():
     )
 
     outcome = await pipeline.acquire(
-        source_url="https://www.myfonts.com/collections/raster-dump-fam",
-        expected_family="Raster Dump Fam",
-        expected_style="Raster Dump Fam Regular",
+        source_url="https://www.myfonts.com/collections/helvetica-now-font-monotype",
+        expected_family="Helvetica Now",
+        expected_style="Helvetica Now Regular",
     )
 
     assert outcome.kind == "raster_authorized"
     assert len(outcome.raster_pages) == 1
-    assert outcome.raster_pages[0].payload["md5"] == dump_md5
-    assert outcome.raster_pages[0].payload["provenance"] == STAGE_DUMP_DOM_NATIVE
-    # Dump-dom completed raster: every fallback lane makes exactly zero calls.
+    # Discovery/Algolia lanes made zero calls; the applicable raster order
+    # was Playwright (incomplete) then the exact-MD5 direct CDN lane.
     assert playwright.discover_family.call_count == 0
-    assert playwright.capture_raster_pages.call_count == 0
-    assert raster_provider.client.fetch_all_sprite_pages.call_count == 0
     assert algolia.discover_family.call_count == 0
+    assert raster_provider.client.fetch_all_sprite_pages.call_count == 1
 
 
 @pytest.mark.asyncio
-async def test_DUMP_DOM_RASTER_COMPLETE_ZERO_FALLBACKS():
-    """DUMP_DOM_RASTER_COMPLETE_ZERO_FALLBACKS: complete dump-dom raster -> Playwright/CDN/Algolia calls=0."""
-    dump_md5 = "b2c3d4e5f60718293a4b5c6d7e8f9012"
-    dump_transport = MagicMock(spec=DumpDomTransport)
-    dump_transport.dump_dom = AsyncMock(return_value=_dump_raster_resource_html(dump_md5))
-
-    playwright = MagicMock()
-    playwright.available.return_value = True
-    playwright.discover_family = AsyncMock()
-    playwright.capture_raster_pages = AsyncMock()
-
-    algolia = MagicMock()
-    algolia.available.return_value = True
-    algolia.discover_family = AsyncMock()
-
-    client = MagicMock()
-    client.fetch_all_sprite_pages = AsyncMock()
-    raster_provider = MonotypeRasterProvider(client=client)
-
-    pipeline = AcquisitionPipeline(
-        dump_dom_transport=dump_transport,
-        playwright_provider=playwright,
-        algolia_provider=algolia,
-        raster_provider=raster_provider,
-    )
-
-    outcome = await pipeline.acquire(
-        source_url="https://www.myfonts.com/collections/raster-dump-fam",
-        expected_family="Raster Dump Fam",
-        expected_style="Raster Dump Fam Regular",
-        raster_request={"acs_pts": [120]},
-    )
-
-    assert outcome.kind == "raster_authorized"
-    assert {p.payload["acs_pt"] for p in outcome.raster_pages} == {120}
-    # Exact attempted order contains only the dump-dom lane.
-    assert set(outcome.trace.stage_order()) == {STAGE_DUMP_DOM_NATIVE}
-    assert playwright.capture_raster_pages.call_count == 0
-    assert client.fetch_all_sprite_pages.call_count == 0
-    assert algolia.discover_family.call_count == 0
-
-
-@pytest.mark.asyncio
-async def test_PLAYWRIGHT_BINARY_WINS():
-    """PLAYWRIGHT_BINARY_WINS: valid authorized binary observed by stealth wins; raster/CDN/Algolia/reconstruction calls=0."""
+async def test_PLAYWRIGHT_BINARY_AND_RASTER_BINARY_WINS():
+    """PLAYWRIGHT_BINARY_AND_RASTER_BINARY_WINS: when the stealth session
+    exposes BOTH a valid binary and complete raster, the binary wins
+    immediately; capture_raster/CDN/Algolia/reconstruction calls=0."""
     raw_ttf = _build_real_ttf("Stealth Binary Fam", "Regular")
 
     family_env = FamilyDiscoveryEnvelope(
@@ -301,7 +227,10 @@ async def test_PLAYWRIGHT_BINARY_WINS():
 
     playwright = MagicMock()
     playwright.available.return_value = True
-    playwright.capture_raster_pages = AsyncMock(return_value=None)
+    # Both results are available; binary precedence must skip raster entirely.
+    playwright.capture_raster_pages = AsyncMock(
+        return_value=(_make_dummy_sprite_page("e" * 32, 120),)
+    )
     playwright.capture_binary = AsyncMock(return_value=raw_ttf)
 
     algolia = MagicMock()
@@ -331,10 +260,135 @@ async def test_PLAYWRIGHT_BINARY_WINS():
     assert outcome.binary.format == "TTF"
     assert outcome.binary.provenance == STAGE_PLAYWRIGHT_STEALTH
     assert outcome.binary.raw_bytes == raw_ttf
-    # Binary wins before raster/reconstruction: zero CDN/Algolia work.
+    # Binary wins before raster/reconstruction: zero raster/CDN/Algolia work.
     assert playwright.capture_binary.call_count == 1
+    assert playwright.capture_raster_pages.call_count == 0
     assert client.fetch_all_sprite_pages.call_count == 0
     assert algolia.discover_family.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_CDN_FAIL_WITH_MD5_ALGOLIA_ZERO():
+    """CDN_FAIL_WITH_MD5_ALGOLIA_ZERO: exact MD5 + incomplete CDN -> insufficient;
+    Algolia calls=0 (Algolia is applicable only when the exact MD5 is absent)."""
+    dump_transport = MagicMock(spec=DumpDomTransport)
+    dump_transport.dump_dom = AsyncMock(return_value="")
+
+    playwright = MagicMock()
+    playwright.available.return_value = True
+    playwright.capture_raster_pages = AsyncMock(return_value=None)
+    playwright.capture_binary = AsyncMock(return_value=None)
+
+    algolia = MagicMock()
+    algolia.available.return_value = True
+    algolia.discover_family = AsyncMock()
+
+    client = MagicMock()
+    client.fetch_all_sprite_pages = AsyncMock(return_value=())  # CDN failure/empty
+    raster_provider = MonotypeRasterProvider(client=client)
+
+    env_md5 = FamilyDiscoveryEnvelope(
+        family_name="Cdn Fail Fam",
+        styles={"regular": StyleDiscoveryRecord(style_id="regular", style_name="Regular", md5="f" * 32, provenance="dump_dom_native")},
+        provenance="dump_dom_native",
+    )
+
+    pipeline = AcquisitionPipeline(
+        dump_dom_transport=dump_transport,
+        playwright_provider=playwright,
+        algolia_provider=algolia,
+        raster_provider=raster_provider,
+    )
+
+    outcome = await pipeline.acquire(
+        source_url="https://www.myfonts.com/collections/cdn-fail-fam",
+        expected_family="Cdn Fail Fam",
+        expected_style="Regular",
+        family_envelope=env_md5,
+    )
+
+    assert outcome.kind == "insufficient"
+    assert outcome.terminal_reason_code == "ACQUISITION_INSUFFICIENT"
+    # Exact MD5 present: direct CDN is the terminal raster path.
+    assert client.fetch_all_sprite_pages.call_count == 1
+    assert algolia.discover_family.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_STEALTH_RASTER_BINDING_MISSING_CONTINUES():
+    """RASTER_TRANSPARENT_OR_BINDING_MISSING (pipeline boundary): complete but
+    unbound stealth raster pages are never authorized; the lane fails closed
+    and continues to the applicable fallback."""
+    import io
+    from PIL import Image
+    im = Image.new("RGBA", (200, 200), (0, 0, 0, 0))
+    buf = io.BytesIO()
+    im.save(buf, format="PNG")
+    png_bytes = buf.getvalue()
+
+    unbound_page = SpriteRasterPage(
+        page_index=1,
+        glyph_count=1,
+        raster_bytes=png_bytes,
+        next_cursor="",
+        final=True,
+        payload={
+            "browser_version": "playwright_stealth_v1",
+            "glyphs": [
+                {"code_point": 65, "glyph_index": 1, "sprite_box": {"x": 5, "y": 5, "width": 40, "height": 50}},
+            ],
+            "md5": "a" * 32,
+            "acs_pt": 120,
+            "sprite_sha256": hashlib.sha256(png_bytes).hexdigest(),
+            # request_params deliberately absent -> never authorized.
+            "provenance": STAGE_PLAYWRIGHT_STEALTH,
+        },
+    )
+
+    dump_transport = MagicMock(spec=DumpDomTransport)
+    dump_transport.dump_dom = AsyncMock(return_value="")
+
+    playwright = MagicMock()
+    playwright.available.return_value = True
+    playwright.capture_raster_pages = AsyncMock(return_value=(unbound_page,))
+    playwright.capture_binary = AsyncMock(return_value=None)
+
+    algolia = MagicMock()
+    algolia.available.return_value = True
+    algolia.discover_family = AsyncMock(return_value=None)
+
+    client = MagicMock()
+    client.fetch_all_sprite_pages = AsyncMock(return_value=())
+    raster_provider = MonotypeRasterProvider(client=client)
+
+    env_md5 = FamilyDiscoveryEnvelope(
+        family_name="Unbound Fam",
+        styles={"regular": StyleDiscoveryRecord(style_id="regular", style_name="Regular", md5="a" * 32, provenance="dump_dom_native")},
+        provenance="dump_dom_native",
+    )
+
+    pipeline = AcquisitionPipeline(
+        dump_dom_transport=dump_transport,
+        playwright_provider=playwright,
+        algolia_provider=algolia,
+        raster_provider=raster_provider,
+    )
+
+    outcome = await pipeline.acquire(
+        source_url="https://www.myfonts.com/collections/unbound-fam",
+        expected_family="Unbound Fam",
+        expected_style="Regular",
+        family_envelope=env_md5,
+    )
+
+    # Unbound raster is never an authorized completion; fallbacks continue.
+    assert outcome.kind == "insufficient"
+    binding_records = [
+        r for r in outcome.trace.records
+        if r.stage == STAGE_PLAYWRIGHT_STEALTH and r.reason_code == "STEALTH_RASTER_REQUEST_BINDING_MISSING"
+    ]
+    assert binding_records
+    assert client.fetch_all_sprite_pages.call_count == 1  # exact MD5 -> CDN lane continues
 
 
 @pytest.mark.asyncio
@@ -742,7 +796,9 @@ def test_CLOSED_RASTER_COMPLETION_contract():
 
 @pytest.mark.asyncio
 async def test_STRICT_ORDER_native_to_playwright_to_cdn_to_algolia():
-    """Verify strict 4-lane fallback order: Native -> Playwright -> CDN -> Algolia-to-CDN."""
+    """Verify strict D04 fallback order. With an exact MD5 the order is
+    Native -> Playwright -> direct CDN, and CDN failure is insufficient:
+    Algolia is applicable ONLY when the exact MD5 is absent."""
     execution_order = []
 
     family_envelope = FamilyDiscoveryEnvelope(
@@ -797,14 +853,11 @@ async def test_STRICT_ORDER_native_to_playwright_to_cdn_to_algolia():
     assert execution_order == [
         "lane2_playwright",
         "lane3_cdn",
-        "lane4_algolia",
-        "lane3_cdn",  # Algolia invokes the same CDN crawler
     ]
     assert outcome.trace.stage_order() == (
         STAGE_DUMP_DOM_NATIVE,
         STAGE_PLAYWRIGHT_STEALTH,
         STAGE_DIRECT_MONOTYPE_CDN,
-        STAGE_ALGOLIA_METADATA_CDN,
     )
 
 
@@ -997,10 +1050,12 @@ async def test_REAL_CALL_ORDER():
         family_envelope=family_env,
     )
 
+    # Exact MD5 present (via raster request): D04 applicability -> the direct
+    # CDN lane is the terminal raster path; Algolia is never applicable and
+    # CDN failure is insufficient.
+    assert outcome.kind == "insufficient"
     assert acquire_calls == [
         "lane2_stealth_capture",
-        "lane3_cdn",
-        "lane4_algolia_discover",
         "lane3_cdn",
     ]
 

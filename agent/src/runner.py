@@ -21,7 +21,7 @@ from acquisition.models import (
     BINARY_STAGE_DUMP_DOM,
 )
 from acquisition.pipeline import AcquisitionPipeline
-from acquisition.capability import PROVIDER_MONOTYPE_RENDER, ProviderRasterCapability
+from acquisition.capability import PROVIDER_MONOTYPE_RENDER, ProviderRasterCapability, resolve_raster_provider
 from acquisition.raster_ingest import (
     RASTER_FALLBACK_PROVENANCE,
     collect_browser_measurement,
@@ -1005,8 +1005,13 @@ class JobRunner:
                                 # Closed capability descriptor: size axis only,
                                 # deterministic disjoint fit/held-out render
                                 # sizes, sealed into the collection identity.
+                                # Provider identity is derived from the pages
+                                # that actually produced the raster; dump/
+                                # Playwright evidence is never relabeled as
+                                # the Monotype CDN provider.
+                                raster_provider_id = resolve_raster_provider(outcome.raster_pages)
                                 raster_capability = ProviderRasterCapability.deterministic_size_schedule(
-                                    PROVIDER_MONOTYPE_RENDER, gate_config.resolutions
+                                    raster_provider_id, gate_config.resolutions
                                 )
                                 attestation = page_slice_attestation(outcome.raster_pages)
                                 ingested = ingest_raster_pages(
@@ -1019,12 +1024,17 @@ class JobRunner:
                                     raster_capability,
                                     source_url=job.source_url,
                                 )
+                                raster_trace_prov = (
+                                    RASTER_FALLBACK_PROVENANCE
+                                    if raster_provider_id == PROVIDER_MONOTYPE_RENDER
+                                    else str((outcome.raster_pages[0].payload or {}).get("provenance", ""))
+                                )
                                 self._trace_record(
                                     f"PREACQ_{style.id}",
                                     "RASTER_HANDOFF",
                                     glyphs=ingested,
                                     browser_version=supplement.browser_version,
-                                    raster_provenance=RASTER_FALLBACK_PROVENANCE,
+                                    raster_provenance=raster_trace_prov,
                                     capability_hash=raster_capability.compute_hash(),
                                     capability_fit_sizes=list(raster_capability.fit_sizes),
                                     capability_held_out_sizes=list(raster_capability.held_out_sizes),
