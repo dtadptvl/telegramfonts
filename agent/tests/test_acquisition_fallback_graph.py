@@ -95,7 +95,7 @@ SAMPLE_MULTI_STYLE_HTML = """
 """
 
 
-def _make_dummy_sprite_page(md5: str, acs_pt: int, page_index: int = 1, final: bool = True) -> SpriteRasterPage:
+def _make_dummy_sprite_page(md5: str, acs_pt: int, page_index: int = 1, final: bool = True, provider: str = "monotype_render_105") -> SpriteRasterPage:
     import io
     from PIL import Image
     im = Image.new("RGBA", (500, 500), (0, 0, 0, 0))
@@ -118,12 +118,12 @@ def _make_dummy_sprite_page(md5: str, acs_pt: int, page_index: int = 1, final: b
             "acs_pt": acs_pt,
             "sprite_sha256": hashlib.sha256(png_bytes).hexdigest(),
             "request_params": {
-                "provider": "monotype_render_105",
+                "provider": provider,
                 "md5": md5,
                 "acs_pt": str(acs_pt),
                 "acs_p": str(page_index),
             },
-            "provenance": STAGE_DIRECT_MONOTYPE_CDN,
+            "provenance": provider,
         },
     )
 
@@ -510,8 +510,11 @@ async def test_DUMP_DOM_PARTIAL_TO_PLAYWRIGHT():
     playwright.available.return_value = True
     playwright.discover_family = AsyncMock(return_value=playwright_env)
     playwright.capture_raster_pages = AsyncMock(
-        return_value=(_make_dummy_sprite_page("a1b2c3d4e5f60718293a4b5c6d7e8f90", 120),)
+        return_value=(_make_dummy_sprite_page(
+            "a1b2c3d4e5f60718293a4b5c6d7e8f90", 120, provider=STAGE_PLAYWRIGHT_STEALTH
+        ),)
     )
+    playwright.capture_binary = AsyncMock(return_value=None)
 
     algolia = MagicMock()
     algolia.available.return_value = True

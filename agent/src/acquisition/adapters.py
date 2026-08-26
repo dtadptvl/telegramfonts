@@ -19,6 +19,7 @@ import hashlib
 
 import httpx
 
+from acquisition.capability import PROVIDER_MONOTYPE_RENDER
 from acquisition.models import BinaryAcquisitionPolicy, DiscoveryEnvelope, SpriteRasterPage
 from acquisition.pipeline import AcquisitionPipeline
 from acquisition.providers import (
@@ -282,6 +283,9 @@ class MonotypeRenderClient:
         params = {name: value for name, value in cls.RENDER_QUERY}
         params["acs_p"] = "1"
         params["acs_pt"] = str(acs_pt)
+        # Explicit producer identity inside the request binding: ingest
+        # recomputes equality against the page provenance (no defaults).
+        params["provider"] = PROVIDER_MONOTYPE_RENDER
         return params
 
     @classmethod
@@ -324,7 +328,14 @@ class MonotypeRenderClient:
         binding = {
             "md5": md5,
             "acs_pt": acs_pt,
-            "request_params": {**cls._request_params(acs_pt), "acs_p": str(page_index)},
+            "request_params": {
+                **cls._request_params(acs_pt),
+                "acs_p": str(page_index),
+                "md5": md5,
+            },
+            # Explicit producer provenance on every page (closed set);
+            # capability/attestation identity is recomputed from it.
+            "provenance": PROVIDER_MONOTYPE_RENDER,
         }
 
         if not layout:
@@ -1019,12 +1030,15 @@ async (args) => {
             currentPageGlyphs.push({
                 code_point: pg.code_point,
                 glyph_index: currentPageGlyphs.length + 1,
-                sprite_box: {
-                    x: Math.floor(curX),
-                    y: Math.floor(curY),
-                    width: Math.floor(pg.glyph_w),
-                    height: Math.floor(pg.glyph_h),
-                }
+                is_space: pg.is_space === true,
+                sprite_box: pg.is_space === true
+                    ? { x: 0, y: 0, width: 0, height: 0 }
+                    : {
+                        x: Math.floor(curX),
+                        y: Math.floor(curY),
+                        width: Math.floor(pg.glyph_w),
+                        height: Math.floor(pg.glyph_h),
+                    },
             });
 
             curX += pg.glyph_w + 5;
@@ -1544,6 +1558,12 @@ class PlaywrightStealthPersistentSession:
                         y = box.get("y", 0)
                         w = box.get("width", 0)
                         h = box.get("height", 0)
+                        if g.get("is_space") is True:
+                            # Independently proven zero-outline glyph (measured
+                            # space): bound zero-area cell, never a pixel cell.
+                            if int(cp) != 32 or x != 0 or y != 0 or w != 0 or h != 0:
+                                return None
+                            continue
                         if x < 0 or y < 0 or w <= 0 or h <= 0 or x + w > png_w or y + h > png_h:
                             return None
 

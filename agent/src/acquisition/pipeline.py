@@ -49,6 +49,37 @@ from acquisition.verifier import verify_acquired_binary
 logger = logging.getLogger("telegramfonts.agent.acquisition.pipeline")
 
 
+def _validate_stealth_page_binding(page: Any, expected_md5: str, style_id: str) -> bool:
+    """Recompute the exact request binding for one stealth raster page.
+
+    A presence-only dict is insufficient: producer provider/provenance, MD5,
+    render size, page index and (where exposed) style identity must all
+    match the page and the acquisition target.
+    """
+    payload = getattr(page, "payload", None) or {}
+    if str(payload.get("provenance", "")) != STAGE_PLAYWRIGHT_STEALTH:
+        return False
+    rp = payload.get("request_params")
+    if not isinstance(rp, dict) or not rp:
+        return False
+    if str(rp.get("provider", "")) != STAGE_PLAYWRIGHT_STEALTH:
+        return False
+    page_md5 = str(payload.get("md5", "")).strip().lower()
+    if page_md5 != expected_md5 or str(rp.get("md5", "")).strip().lower() != expected_md5:
+        return False
+    try:
+        if int(rp.get("acs_pt", 0)) != int(payload.get("acs_pt", 0)):
+            return False
+        if int(rp.get("acs_p", 0)) != int(getattr(page, "page_index", 0)):
+            return False
+    except (TypeError, ValueError):
+        return False
+    rp_style = str(rp.get("style_id", "") or "")
+    if rp_style and style_id and rp_style != style_id:
+        return False
+    return True
+
+
 class AcquisitionPipeline:
     def __init__(
         self,
@@ -322,13 +353,15 @@ class AcquisitionPipeline:
                 pages = ()
 
             if pages and is_complete_raster_pages(pages, req_pts, expected_md5=style_rec.md5 if (style_rec and style_rec.md5) else ""):
-                # Production handoff identity: every page must carry the exact
-                # request binding and producer provenance; unbound pages are
-                # never authorized and the lane continues to fallbacks.
+                # Production handoff identity: recompute the exact request
+                # binding of every page against the target (provider/
+                # provenance, MD5, render size, page index, style identity
+                # where exposed). Presence-only dicts never authorize; unbound
+                # or mismatched pages fail closed and continue to fallbacks.
+                target_style_id = str(getattr(style_rec, "style_id", "") or "") if style_rec else ""
+                exp_md5_lower = (style_rec.md5.strip().lower() if (style_rec and style_rec.md5) else "")
                 binding_ok = all(
-                    isinstance((p.payload or {}).get("request_params"), dict)
-                    and bool((p.payload or {}).get("request_params"))
-                    and str((p.payload or {}).get("provenance", ""))
+                    _validate_stealth_page_binding(p, exp_md5_lower, target_style_id)
                     for p in pages
                 )
                 if binding_ok:

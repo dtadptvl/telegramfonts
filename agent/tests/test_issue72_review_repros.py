@@ -163,9 +163,11 @@ def _raster_pages_for_seed(
         "observed_headers": {"content_type": "application/json; charset=utf-8"},
         "md5": md5,
         "acs_pt": acs_pt,
+        "provenance": "monotype_render_105",
         "request_params": {
             "rbe": "gmap", "acs_pt": str(acs_pt), "acs_w": "1500",
             "acs_l": "1", "acs_ar": "0", "acs_p": "1", "acs_gpp": "100",
+            "provider": "monotype_render_105", "md5": md5,
         },
     }
     return [SpriteRasterPage(page_index=1, glyph_count=len(SEED_ADVS), raster_bytes=sprite, next_cursor=next_cursor, final=final, payload=payload)]

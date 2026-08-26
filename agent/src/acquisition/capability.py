@@ -22,19 +22,31 @@ PROVIDER_MONOTYPE_RENDER = "monotype_render_105"
 # producer; it is never relabeled as the Monotype CDN provider.
 PROVIDER_PLAYWRIGHT_STEALTH = "playwright_stealth_persistent"
 
+# Closed producer set (D14 fail-closed identity): unknown, absent, mixed or
+# arbitrary provider identities are never admitted and never defaulted.
+KNOWN_RASTER_PROVIDERS = frozenset({PROVIDER_MONOTYPE_RENDER, PROVIDER_PLAYWRIGHT_STEALTH})
+
 
 def resolve_raster_provider(pages: "tuple | list | None") -> str:
     """Derive the exact raster provider identity from the produced pages.
 
-    The sealed capability/attestation identity is bound to the producer that
-    actually generated the pages; relabeling one provider as another is
-    forbidden. Unknown/absent provenance defaults to the Monotype CDN lane.
+    Every page must carry explicit producer provenance, and the whole page
+    set must agree on exactly one known provider. Absent, unknown, empty or
+    mixed provenance raises ValueError (fail closed): provider identity is
+    never defaulted and never relabeled.
     """
-    for page in pages or ():
-        provenance = str((getattr(page, "payload", None) or {}).get("provenance", ""))
-        if provenance == PROVIDER_PLAYWRIGHT_STEALTH:
-            return PROVIDER_PLAYWRIGHT_STEALTH
-    return PROVIDER_MONOTYPE_RENDER
+    page_list = list(pages or ())
+    if not page_list:
+        raise ValueError("RASTER_PROVIDER_ABSENT")
+    providers = set()
+    for page in page_list:
+        provenance = str((getattr(page, "payload", None) or {}).get("provenance", "")).strip()
+        if not provenance or provenance not in KNOWN_RASTER_PROVIDERS:
+            raise ValueError("RASTER_PROVIDER_UNKNOWN_OR_ABSENT")
+        providers.add(provenance)
+    if len(providers) != 1:
+        raise ValueError("RASTER_PROVIDER_MIXED")
+    return providers.pop()
 
 # The approved render query renders phase (0.0, 0.0) only; no parameter in
 # the captured contract exposes subpixel phase control.
@@ -53,6 +65,11 @@ class ProviderRasterCapability:
     def validate(self) -> None:
         if not isinstance(self.provider, str) or not self.provider.strip():
             raise ValueError("CAPABILITY_FORGED: provider identity required")
+        if self.provider not in KNOWN_RASTER_PROVIDERS:
+            raise ValueError(
+                f"CAPABILITY_FORGED: unknown raster provider '{self.provider}' "
+                f"(closed set: {sorted(KNOWN_RASTER_PROVIDERS)})"
+            )
         if tuple(self.phase) != FIXED_PHASE:
             raise ValueError(
                 f"CAPABILITY_FORGED: provider '{self.provider}' exposes size axis "

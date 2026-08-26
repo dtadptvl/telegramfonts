@@ -1008,8 +1008,12 @@ class JobRunner:
                                 # Provider identity is derived from the pages
                                 # that actually produced the raster; dump/
                                 # Playwright evidence is never relabeled as
-                                # the Monotype CDN provider.
-                                raster_provider_id = resolve_raster_provider(outcome.raster_pages)
+                                # the Monotype CDN provider. Unknown/absent/
+                                # mixed provenance fails closed (no default).
+                                try:
+                                    raster_provider_id = resolve_raster_provider(outcome.raster_pages)
+                                except ValueError:
+                                    raise ValueError("ACQUISITION_RASTER_PROVIDER_IDENTITY_FAILED")
                                 raster_capability = ProviderRasterCapability.deterministic_size_schedule(
                                     raster_provider_id, gate_config.resolutions
                                 )

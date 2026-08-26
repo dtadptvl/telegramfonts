@@ -954,17 +954,443 @@ def test_DUMP_OR_PLAYWRIGHT_RASTER_PRODUCTION_HANDOFF(tmp_path: Path):
 
 
 def test_RASTER_TRANSPARENT_OR_BINDING_MISSING(tmp_path: Path):
-    """RASTER_TRANSPARENT_OR_BINDING_MISSING: transparent cells or missing
+    """RASTER_TRANSPARENT_OR_BINDING_MISSING: blank (zero-ink) cells or missing
     request binding fail closed at the ingest boundary; never an authorized
     completion."""
     from acquisition.raster_ingest import page_slice_attestation
 
-    # Fully transparent glyph cells carry no ink evidence.
-    transparent_page = _playwright_shaped_page(ENVELOPE_MD5, 120, with_binding=True, ink=False)
+    # Zero-ink glyph cells carry no ink evidence (alpha>0 is never ink).
+    blank_page = _playwright_shaped_page(ENVELOPE_MD5, 120, with_binding=True, ink=False)
     with pytest.raises(ValueError, match="RASTER_INGEST_CELL_NO_INK"):
-        page_slice_attestation((transparent_page,))
+        page_slice_attestation((blank_page,))
 
     # Ink cells without the exact request binding cannot be attested.
     unbound_page = _playwright_shaped_page(ENVELOPE_MD5, 120, with_binding=False, ink=True)
     with pytest.raises(ValueError, match="RASTER_INGEST_REQUEST_BINDING_MISSING"):
         page_slice_attestation((unbound_page,))
+
+
+def _monotype_shaped_page(md5: str, acs_pt: int) -> SpriteRasterPage:
+    """One Monotype-CDN-shaped raster page (ink cells, explicit provenance)."""
+    import io
+    from PIL import Image, ImageDraw
+
+    img = Image.new("L", (500, 500), 255)
+    draw = ImageDraw.Draw(img)
+    glyphs = []
+    for idx, cp in enumerate(sorted(_PW_HANDOFF_BOXES)):
+        x, y, w, h = _PW_HANDOFF_BOXES[cp]
+        draw.rectangle([x, y, x + w - 1, y + h - 1], fill=0)
+        glyphs.append(
+            {"code_point": cp, "glyph_index": idx + 1, "sprite_box": {"x": x, "y": y, "width": w, "height": h}}
+        )
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    png_bytes = buf.getvalue()
+    return SpriteRasterPage(
+        page_index=1,
+        glyph_count=len(glyphs),
+        raster_bytes=png_bytes,
+        next_cursor="",
+        final=True,
+        payload={
+            "browser_version": "monotype_render_105",
+            "glyphs": glyphs,
+            "pairs": [],
+            "features": [],
+            "sprite_sha256": hashlib.sha256(png_bytes).hexdigest(),
+            "md5": md5,
+            "acs_pt": acs_pt,
+            "provenance": "monotype_render_105",
+            "request_params": {
+                "provider": "monotype_render_105",
+                "md5": md5,
+                "acs_pt": str(acs_pt),
+                "acs_p": "1",
+            },
+        },
+    )
+
+
+def test_RASTER_PROVIDER_UNKNOWN_OR_MIXED_REJECTED():
+    """RASTER_PROVIDER_UNKNOWN_OR_MIXED_REJECTED: unknown/absent/mixed page
+    provenance and arbitrary capability providers fail closed (no default)."""
+    from acquisition.capability import FIXED_PHASE, ProviderRasterCapability, resolve_raster_provider
+    from acquisition.raster_ingest import page_slice_attestation
+
+    unknown = _playwright_shaped_page(ENVELOPE_MD5, 120)
+    unknown.payload["provenance"] = "some_unknown_renderer"
+    with pytest.raises(ValueError, match="RASTER_PROVIDER_UNKNOWN_OR_ABSENT"):
+        resolve_raster_provider((unknown,))
+    with pytest.raises(ValueError, match="RASTER_PROVIDER_UNKNOWN_OR_ABSENT"):
+        page_slice_attestation((unknown,))
+
+    absent = _playwright_shaped_page(ENVELOPE_MD5, 120)
+    del absent.payload["provenance"]
+    with pytest.raises(ValueError, match="RASTER_PROVIDER_UNKNOWN_OR_ABSENT"):
+        resolve_raster_provider((absent,))
+
+    mixed = (_playwright_shaped_page(ENVELOPE_MD5, 120), _monotype_shaped_page(ENVELOPE_MD5, 120))
+    with pytest.raises(ValueError, match="RASTER_PROVIDER_MIXED"):
+        resolve_raster_provider(mixed)
+
+    # Arbitrary capability provider strings are never admitted.
+    with pytest.raises(ValueError, match="CAPABILITY_FORGED"):
+        ProviderRasterCapability(
+            provider="arbitrary_renderer", phase=FIXED_PHASE, fit_sizes=(120,), held_out_sizes=(240,)
+        ).validate()
+
+
+def test_RASTER_CAPABILITY_PAGE_PROVIDER_MISMATCH_REJECTED(tmp_path: Path):
+    """RASTER_CAPABILITY_PAGE_PROVIDER_MISMATCH_REJECTED: pages and capability
+    bound to different producers fail closed before persistence."""
+    from acquisition.capability import PROVIDER_MONOTYPE_RENDER, ProviderRasterCapability
+    from acquisition.raster_ingest import ingest_raster_pages
+    from measurement.store import ObservationStore
+    from tests.test_issue72_review_repros import RASTER_ONLY_CONFIG, _browser_supplement_for_seed
+
+    pages = (_playwright_shaped_page(ENVELOPE_MD5, 120),)
+    supplement = _browser_supplement_for_seed("chromium_mismatch_v1", config=RASTER_ONLY_CONFIG)
+    wrong_capability = ProviderRasterCapability.deterministic_size_schedule(
+        PROVIDER_MONOTYPE_RENDER, (120, 240)
+    )
+    store = ObservationStore(tmp_path / "obs_mismatch")
+    with pytest.raises(ValueError, match="RASTER_PROVIDER_PAGE_CAPABILITY_MISMATCH"):
+        ingest_raster_pages(
+            store, RASTER_ONLY_CONFIG, "mismatch_fam", "regular",
+            supplement, pages, wrong_capability,
+            source_url="https://www.myfonts.com/collections/mismatch-fam",
+        )
+
+
+def test_RASTER_REQUEST_BINDING_VALUE_MISMATCH_REJECTED():
+    """RASTER_REQUEST_BINDING_VALUE_MISMATCH_REJECTED: forged provider/MD5/
+    render-size/page-index binding values fail closed (presence-only is
+    insufficient); a forged style identity is never authorized by the
+    pipeline."""
+    import asyncio
+
+    from acquisition.capability import PROVIDER_MONOTYPE_RENDER
+    from acquisition.models import FamilyDiscoveryEnvelope, StyleDiscoveryRecord
+    from acquisition.pipeline import AcquisitionPipeline
+    from acquisition.providers import DumpDomTransport, MonotypeRasterProvider
+    from acquisition.raster_ingest import page_slice_attestation
+    from unittest.mock import AsyncMock, MagicMock
+
+    def _variant(mutate):
+        page = _playwright_shaped_page(ENVELOPE_MD5, 120)
+        mutate(page)
+        return page
+
+    def forge_provider(page):
+        page.payload["request_params"]["provider"] = PROVIDER_MONOTYPE_RENDER
+
+    def forge_md5(page):
+        page.payload["request_params"]["md5"] = "b" * 32
+
+    def forge_size(page):
+        page.payload["request_params"]["acs_pt"] = "240"
+
+    def forge_page_index(page):
+        page.payload["request_params"]["acs_p"] = "2"
+
+    with pytest.raises(ValueError, match="RASTER_INGEST_REQUEST_BINDING_PROVIDER_MISMATCH"):
+        page_slice_attestation((_variant(forge_provider),))
+    with pytest.raises(ValueError, match="RASTER_INGEST_REQUEST_BINDING_MD5_MISMATCH"):
+        page_slice_attestation((_variant(forge_md5),))
+    with pytest.raises(ValueError, match="RASTER_INGEST_REQUEST_BINDING_SIZE"):
+        page_slice_attestation((_variant(forge_size),))
+    with pytest.raises(ValueError, match="RASTER_INGEST_REQUEST_BINDING_PAGE"):
+        page_slice_attestation((_variant(forge_page_index),))
+
+    # Style identity variant at the acquisition boundary: a page whose exposed
+    # style binding does not match the target is never authorized; the lane
+    # fails closed and continues.
+    forged_style_page = _variant(lambda page: page.payload["request_params"].update({"style_id": "other"}))
+
+    dump_transport = MagicMock(spec=DumpDomTransport)
+    dump_transport.dump_dom = AsyncMock(return_value="")
+    playwright = MagicMock()
+    playwright.available.return_value = True
+    playwright.capture_raster_pages = AsyncMock(return_value=(forged_style_page,))
+    playwright.capture_binary = AsyncMock(return_value=None)
+    algolia = MagicMock()
+    algolia.available.return_value = True
+    algolia.discover_family = AsyncMock(return_value=None)
+    client = MagicMock()
+    client.fetch_all_sprite_pages = AsyncMock(return_value=())
+    raster_provider = MonotypeRasterProvider(client=client)
+    env_md5 = FamilyDiscoveryEnvelope(
+        family_name="Style Forge Fam",
+        styles={"regular": StyleDiscoveryRecord(style_id="regular", style_name="Regular", md5=ENVELOPE_MD5, provenance="dump_dom_native")},
+        provenance="dump_dom_native",
+    )
+    pipeline = AcquisitionPipeline(
+        dump_dom_transport=dump_transport,
+        playwright_provider=playwright,
+        algolia_provider=algolia,
+        raster_provider=raster_provider,
+    )
+    outcome = asyncio.run(pipeline.acquire(
+        source_url="https://www.myfonts.com/collections/style-forge-fam",
+        expected_family="Style Forge Fam",
+        expected_style="Regular",
+        family_envelope=env_md5,
+    ))
+    assert outcome.kind == "insufficient"
+    assert any(
+        r.reason_code == "STEALTH_RASTER_REQUEST_BINDING_MISSING" for r in outcome.trace.records
+    )
+
+
+def _handoff_direct_metrics(cp: int, config, adv: float):
+    from measurement.models import DirectMetrics
+
+    scale = float(config.font_size_px) / float(config.upem)
+    return DirectMetrics(
+        code_point=cp,
+        character=chr(cp),
+        font_size_px=float(config.font_size_px),
+        raw_advance_width=adv * scale,
+        raw_actual_left=50.0 * scale,
+        raw_actual_right=550.0 * scale,
+        raw_actual_ascent=700.0 * scale,
+        raw_actual_descent=200.0 * scale,
+        raw_font_ascent=700.0 * scale,
+        raw_font_descent=200.0 * scale,
+        advance_width_upem=adv,
+        lsb_upem=50.0,
+        rsb_upem=adv - 550.0,
+        ascent_upem=700.0,
+        descent_upem=-200.0,
+        bbox_width_upem=500.0,
+        bbox_height_upem=650.0,
+    )
+
+
+def test_RASTER_ZERO_INK_SEMANTICS(tmp_path: Path):
+    """RASTER_ZERO_INK_SEMANTICS: ordinary printable blank and observable
+    tofu/missing evidence reject; an independently proven space-like zero-ink
+    glyph passes (bound zero-area cell, never an alpha-only rule)."""
+    import io
+    from PIL import Image, ImageDraw
+
+    from acquisition.capability import PROVIDER_PLAYWRIGHT_STEALTH, ProviderRasterCapability
+    from acquisition.raster_ingest import (
+        BrowserSupplementalEvidence,
+        ingest_raster_pages,
+        page_slice_attestation,
+    )
+    from measurement.store import ObservationStore
+    from tests.test_issue72_review_repros import RASTER_ONLY_CONFIG
+
+    # 1. Ordinary printable blank (zero ink) rejects.
+    blank = _playwright_shaped_page(ENVELOPE_MD5, 120, ink=False)
+    with pytest.raises(ValueError, match="RASTER_INGEST_CELL_NO_INK"):
+        page_slice_attestation((blank,))
+
+    # 2. Opaque-white RGBA blank: alpha>0 everywhere yet zero ink -> rejects.
+    img = Image.new("RGBA", (500, 500), (255, 255, 255, 255))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    png_bytes = buf.getvalue()
+    opaque_blank = SpriteRasterPage(
+        page_index=1,
+        glyph_count=1,
+        raster_bytes=png_bytes,
+        next_cursor="",
+        final=True,
+        payload={
+            "browser_version": "playwright_stealth_v1",
+            "glyphs": [
+                {"code_point": 65, "glyph_index": 1, "sprite_box": {"x": 0, "y": 0, "width": 50, "height": 60}},
+            ],
+            "sprite_sha256": hashlib.sha256(png_bytes).hexdigest(),
+            "md5": ENVELOPE_MD5,
+            "acs_pt": 120,
+            "provenance": "playwright_stealth_persistent",
+            "request_params": {
+                "provider": "playwright_stealth_persistent",
+                "md5": ENVELOPE_MD5,
+                "acs_pt": "120",
+                "acs_p": "1",
+            },
+        },
+    )
+    with pytest.raises(ValueError, match="RASTER_INGEST_CELL_NO_INK"):
+        page_slice_attestation((opaque_blank,))
+
+    # 3. Observable tofu and producer-flagged missing glyphs reject.
+    tofu = _playwright_shaped_page(ENVELOPE_MD5, 120)
+    tofu.payload["observed_headers"] = {"x_tofus_found": "1"}
+    missing_flag = _playwright_shaped_page(ENVELOPE_MD5, 120)
+    missing_flag.payload["observed_headers"] = {"x_missing_unicodes": "U+0041"}
+
+    supplement66 = BrowserSupplementalEvidence(
+        browser_version="chromium_zero_ink_v1",
+        metrics={66: _handoff_direct_metrics(66, RASTER_ONLY_CONFIG, 600.0)},
+        pairs=(),
+        features=[
+            {
+                "feature_tag": tag,
+                "sample_text": text,
+                "enabled_advance_upem": 1200.0,
+                "disabled_advance_upem": 1200.0,
+                "enabled_raster_signature": "a",
+                "disabled_raster_signature": "a",
+            }
+            for tag, text in RASTER_ONLY_CONFIG.feature_probes
+        ],
+    )
+    capability = ProviderRasterCapability.deterministic_size_schedule(
+        PROVIDER_PLAYWRIGHT_STEALTH, (120, 240)
+    )
+    store = ObservationStore(tmp_path / "obs_zero_ink")
+    with pytest.raises(ValueError, match="RASTER_INGEST_TOFU_EVIDENCE"):
+        ingest_raster_pages(
+            store, RASTER_ONLY_CONFIG, "zero_fam", "regular", supplement66,
+            (tofu,), capability, source_url="https://www.myfonts.com/collections/zero-fam",
+        )
+    with pytest.raises(ValueError, match="RASTER_INGEST_MISSING_UNICODE_CP_65"):
+        ingest_raster_pages(
+            store, RASTER_ONLY_CONFIG, "zero_fam", "regular", supplement66,
+            (missing_flag,), capability, source_url="https://www.myfonts.com/collections/zero-fam",
+        )
+
+    # 4. Independently proven space-like zero-ink glyph passes (bound
+    # zero-area cell with measured advance; no blanket allowlist).
+    def _space_page(pt: int) -> SpriteRasterPage:
+        img2 = Image.new("L", (500, 500), 255)
+        draw = ImageDraw.Draw(img2)
+        space_glyphs = []
+        for idx, cp in enumerate((32, 65)):
+            if cp == 32:
+                space_glyphs.append(
+                    {"code_point": 32, "glyph_index": idx + 1, "is_space": True,
+                     "sprite_box": {"x": 0, "y": 0, "width": 0, "height": 0}}
+                )
+            else:
+                x, y, w, h = _PW_HANDOFF_BOXES[cp]
+                draw.rectangle([x, y, x + w - 1, y + h - 1], fill=0)
+                space_glyphs.append(
+                    {"code_point": cp, "glyph_index": idx + 1,
+                     "sprite_box": {"x": x, "y": y, "width": w, "height": h}}
+                )
+        buf2 = io.BytesIO()
+        img2.save(buf2, format="PNG")
+        space_png = buf2.getvalue()
+        return SpriteRasterPage(
+            page_index=1,
+            glyph_count=2,
+            raster_bytes=space_png,
+            next_cursor="",
+            final=True,
+            payload={
+                "browser_version": "playwright_stealth_v1",
+                "glyphs": space_glyphs,
+                "sprite_sha256": hashlib.sha256(space_png).hexdigest(),
+                "md5": ENVELOPE_MD5,
+                "acs_pt": pt,
+                "provenance": "playwright_stealth_persistent",
+                "request_params": {
+                    "provider": "playwright_stealth_persistent",
+                    "md5": ENVELOPE_MD5,
+                    "acs_pt": str(pt),
+                    "acs_p": "1",
+                },
+            },
+        )
+
+    space_pages = tuple(_space_page(pt) for pt in capability.all_sizes())
+    supplement_space = BrowserSupplementalEvidence(
+        browser_version="chromium_zero_ink_v1",
+        metrics={
+            32: _handoff_direct_metrics(32, RASTER_ONLY_CONFIG, 250.0),
+            65: _handoff_direct_metrics(65, RASTER_ONLY_CONFIG, 650.0),
+        },
+        pairs=(),
+        features=supplement66.features,
+    )
+    attestation = page_slice_attestation(space_pages)
+    assert attestation["bindings"]["32"]["zero_ink_proven"] is True
+    ingested = ingest_raster_pages(
+        store, RASTER_ONLY_CONFIG, "zero_fam", "regular", supplement_space,
+        space_pages, capability, source_url="https://www.myfonts.com/collections/zero-fam",
+    )
+    assert ingested == 2
+
+
+def test_CDN_AND_PLAYWRIGHT_TYPED_HANDOFF(tmp_path: Path):
+    """CDN_AND_PLAYWRIGHT_TYPED_HANDOFF: each exact provider passes its own
+    complete handoff under its own typed capability; no default/relabel path."""
+    import asyncio
+
+    from acquisition.adapters import MonotypeRenderClient
+    from acquisition.capability import (
+        PROVIDER_MONOTYPE_RENDER,
+        PROVIDER_PLAYWRIGHT_STEALTH,
+        ProviderRasterCapability,
+        resolve_raster_provider,
+    )
+    from acquisition.models import BinaryAcquisitionPolicy
+    from acquisition.providers import MonotypeRasterProvider
+    from acquisition.raster_ingest import ingest_raster_pages, page_slice_attestation
+    from measurement.store import ObservationStore
+    from tests.test_issue72_review_repros import (
+        RASTER_ONLY_CONFIG,
+        _browser_supplement_for_seed,
+    )
+
+    # Playwright lane: provider identity stays Playwright end to end.
+    pw_pages = tuple(
+        _playwright_shaped_page(ENVELOPE_MD5, pt)
+        for pt in ProviderRasterCapability.deterministic_size_schedule(
+            PROVIDER_PLAYWRIGHT_STEALTH, RASTER_ONLY_CONFIG.resolutions
+        ).all_sizes()
+    )
+    pw_capability = ProviderRasterCapability.deterministic_size_schedule(
+        PROVIDER_PLAYWRIGHT_STEALTH, RASTER_ONLY_CONFIG.resolutions
+    )
+    pw_attestation = page_slice_attestation(pw_pages)
+    assert pw_attestation["provider"] == PROVIDER_PLAYWRIGHT_STEALTH
+    pw_supplement = _browser_supplement_for_seed("chromium_typed_pw_v1", config=RASTER_ONLY_CONFIG)
+    pw_store = ObservationStore(tmp_path / "obs_typed_pw")
+    assert ingest_raster_pages(
+        pw_store, RASTER_ONLY_CONFIG, "typed_pw_fam", "regular",
+        pw_supplement, pw_pages, pw_capability,
+        source_url="https://www.myfonts.com/collections/typed-pw-fam",
+    ) == 2
+
+    # CDN lane: real production client over the captured response shape.
+    def handler(request: httpx.Request) -> httpx.Response:
+        params = dict(request.url.params)
+        page_no = int(params["acs_p"])
+        if page_no == 1:
+            return httpx.Response(200, json=_captured_shape_response([65, 66]), headers=CAPTURED_HEADERS)
+        return httpx.Response(200, json=_captured_shape_response([]), headers=CAPTURED_HEADERS)
+
+    async def cdn_run():
+        client = MonotypeRenderClient()
+        provider = MonotypeRasterProvider(_TransportBoundClient(client, httpx.MockTransport(handler)))
+        cdn_capability = ProviderRasterCapability.deterministic_size_schedule(
+            PROVIDER_MONOTYPE_RENDER, RASTER_ONLY_CONFIG.resolutions
+        )
+        pages = await provider.fetch_sprite_pages(
+            {"family": "Typed CDN Fam", "style": "Regular", "md5": ENVELOPE_MD5,
+             "acs_pts": list(cdn_capability.all_sizes())},
+            BinaryAcquisitionPolicy(max_sprite_pages=8),
+        )
+        assert pages
+        assert resolve_raster_provider(pages) == PROVIDER_MONOTYPE_RENDER
+        attestation = page_slice_attestation(pages)
+        assert attestation["provider"] == PROVIDER_MONOTYPE_RENDER
+        supplement = _browser_supplement_for_seed("chromium_typed_cdn_v1", config=RASTER_ONLY_CONFIG)
+        store = ObservationStore(tmp_path / "obs_typed_cdn")
+        ingested = ingest_raster_pages(
+            store, RASTER_ONLY_CONFIG, "typed_cdn_fam", "regular",
+            supplement, pages, cdn_capability,
+            source_url="https://www.myfonts.com/collections/typed-cdn-fam",
+        )
+        assert ingested == 2
+
+    asyncio.run(cdn_run())
