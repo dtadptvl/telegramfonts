@@ -26,11 +26,13 @@ from __future__ import annotations
 import datetime
 import hashlib
 import io
+import re
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
 from PIL import Image
 
+from acquisition.capability import KNOWN_RASTER_PROVIDERS, resolve_raster_provider
 from acquisition.capability import ProviderRasterCapability
 from acquisition.models import SpriteRasterPage
 from measurement.collector import ObservationCollector
@@ -38,6 +40,62 @@ from measurement.models import DirectMetrics, ObservationConfig, ObservationReco
 from measurement.store import ObservationStore
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+
+def _empty_cell_png() -> bytes:
+    """Deterministic zero-ink cell for independently proven space glyphs."""
+    buf = io.BytesIO()
+    Image.new("RGBA", (1, 1), (0, 0, 0, 0)).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+EMPTY_CELL_PNG = _empty_cell_png()
+
+
+def _cell_has_ink(cell: "Image.Image") -> bool:
+    """Observable ink discriminator; alpha>0 alone is never ink.
+
+    Ink requires a dark component. Transparent blanks, opaque-white blanks
+    and fully white cells carry no ink. Alpha is consumed only as a mask
+    over white and is never equated with target glyph ink.
+    """
+    img = cell
+    if img.mode in ("RGBA", "LA", "PA"):
+        rgba = img.convert("RGBA")
+        background = Image.new("RGB", rgba.size, (255, 255, 255))
+        background.paste(rgba, mask=rgba.getchannel("A"))
+        img = background
+    lo, _hi = img.convert("L").getextrema()
+    return lo < 240
+
+
+def _page_flagged_codepoints(page: SpriteRasterPage) -> tuple[set[int], bool]:
+    """Provider missing/tofu signals observed on the page response.
+
+    Returns the set of code points the producer flagged missing and whether
+    any tofu evidence was observed. Absent headers yield no flags.
+    """
+    observed = (page.payload or {}).get("observed_headers") or {}
+    tofu_flag = False
+    tofu_raw = str(observed.get("x_tofus_found", "") or "").strip()
+    if tofu_raw:
+        try:
+            tofu_flag = int(tofu_raw) > 0
+        except ValueError:
+            # Unparseable non-empty tofu signal fails closed.
+            tofu_flag = True
+    missing: set[int] = set()
+    missing_raw = str(observed.get("x_missing_unicodes", "") or "").strip()
+    if missing_raw:
+        for token in re.split(r"[,;\s]+", missing_raw):
+            cleaned = token.strip().upper().replace("U+", "")
+            if not cleaned:
+                continue
+            try:
+                missing.add(int(cleaned, 16))
+            except ValueError:
+                continue
+    return missing, tofu_flag
 
 # Provenance of raster pixels persisted from the authorized raster fallback.
 # Distinct from chromium canvas provenance by construction.
@@ -69,13 +127,17 @@ class BrowserSupplementalEvidence:
 
 def _slice_sprite_cells(
     page: SpriteRasterPage,
+    missing_cps: "set[int] | frozenset[int]" = frozenset(),
 ) -> tuple[dict[int, bytes], dict[int, dict[str, Any]]]:
     """Validate the page sprite and slice each observable glyph cell.
 
     Consumes the actual binary PNG sprite: every mapped glyph must have a
-    bounds-checked cell that re-encodes as a non-empty PNG. Returns the
-    slices plus their exact request binding (MD5, page index, acs_pt,
-    request parameters, sprite/slice hashes). Any gap fails closed.
+    bounds-checked cell that re-encodes as a non-empty PNG. The exact
+    request binding (provider/provenance, MD5, render size, page index) is
+    recomputed here — a presence-only dict is insufficient. Blank/tofu/
+    missing glyph evidence fails closed; an independently proven space-like
+    zero-ink glyph is accepted only via its bound zero-area cell. Returns
+    the slices plus their exact request binding. Any gap fails closed.
     """
     payload = page.payload or {}
     glyphs = payload.get("glyphs") or []
@@ -96,10 +158,32 @@ def _slice_sprite_cells(
         raise ValueError("RASTER_INGEST_SPRITE_DECODE_FAILED") from exc
     sprite_w, sprite_h = sprite.size
 
+    # Recomputed exact request binding: provider/provenance, MD5, render
+    # size and page index must all match — never presence-only.
+    provenance = str(payload.get("provenance", "")).strip()
+    if not provenance or provenance not in KNOWN_RASTER_PROVIDERS:
+        raise ValueError("RASTER_PROVIDER_UNKNOWN_OR_ABSENT")
+    if str(request_params.get("provider", "")) != provenance:
+        raise ValueError("RASTER_INGEST_REQUEST_BINDING_PROVIDER_MISMATCH")
+    if str(request_params.get("md5", "")).strip().lower() != md5:
+        raise ValueError("RASTER_INGEST_REQUEST_BINDING_MD5_MISMATCH")
+    try:
+        rp_acs_pt = int(request_params.get("acs_pt", 0))
+        rp_acs_p = int(request_params.get("acs_p", 0))
+    except (TypeError, ValueError):
+        raise ValueError("RASTER_INGEST_REQUEST_BINDING_MISMATCH")
+    if rp_acs_pt != acs_pt:
+        raise ValueError("RASTER_INGEST_REQUEST_BINDING_SIZE_MISMATCH")
+    if rp_acs_p != int(page.page_index):
+        raise ValueError("RASTER_INGEST_REQUEST_BINDING_PAGE_MISMATCH")
+
     slices: dict[int, bytes] = {}
     bindings: dict[int, dict[str, Any]] = {}
     for g in glyphs:
         cp = int(g["code_point"])
+        # Provider-flagged missing glyphs are never ingested.
+        if cp in missing_cps:
+            raise ValueError(f"RASTER_INGEST_MISSING_UNICODE_CP_{cp}")
         box = g.get("sprite_box") or {}
         try:
             x = int(box["x"])
@@ -108,9 +192,32 @@ def _slice_sprite_cells(
             h = int(box["height"])
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError(f"RASTER_INGEST_BOX_MALFORMED_CP_{cp}") from exc
+        if g.get("is_space") is True:
+            # Independently proven zero-outline glyph (measured space): bound
+            # zero-area cell, never sliced pixels, never required ink.
+            if cp != 32 or x != 0 or y != 0 or w != 0 or h != 0:
+                raise ValueError(f"RASTER_INGEST_SPACE_BINDING_MALFORMED_CP_{cp}")
+            if cp in slices:
+                raise ValueError(f"RASTER_INGEST_DUPLICATE_CP_{cp}")
+            slices[cp] = EMPTY_CELL_PNG
+            bindings[cp] = {
+                "md5": md5,
+                "acs_pt": acs_pt,
+                "page_index": int(page.page_index),
+                "request_params": dict(request_params),
+                "sprite_sha256": str(payload.get("sprite_sha256", ""))
+                or hashlib.sha256(page.raster_bytes).hexdigest(),
+                "slice_sha256": hashlib.sha256(EMPTY_CELL_PNG).hexdigest(),
+                "zero_ink_proven": True,
+            }
+            continue
         if w < 1 or h < 1 or x < 0 or y < 0 or x + w > sprite_w or y + h > sprite_h:
             raise ValueError(f"RASTER_INGEST_BOX_OUT_OF_BOUNDS_CP_{cp}")
         cell = sprite.crop((x, y, x + w, y + h))
+        # Closed ink gate: transparent blanks, opaque-white blanks and any
+        # zero-ink printable cell fail closed; alpha>0 alone is never ink.
+        if not _cell_has_ink(cell):
+            raise ValueError(f"RASTER_INGEST_CELL_NO_INK_CP_{cp}")
         buf = io.BytesIO()
         cell.save(buf, format="PNG")
         png_bytes = buf.getvalue()
@@ -158,6 +265,13 @@ def ingest_raster_pages(
     if not isinstance(capability, ProviderRasterCapability):
         raise ValueError("CAPABILITY_FORGED: closed capability descriptor required")
     capability.validate()
+    # Independently recomputed provider identity: every page must agree on
+    # exactly one known producer, and it must equal the capability provider.
+    # Unknown/absent/mixed provenance or a page/capability mismatch fails
+    # closed before any persistence (no default, no relabel).
+    resolved_provider = resolve_raster_provider(pages)
+    if resolved_provider != capability.provider:
+        raise ValueError("RASTER_PROVIDER_PAGE_CAPABILITY_MISMATCH")
     browser_version = str(supplement.browser_version or "")
     if not browser_version:
         raise ValueError("RASTER_INGEST_IDENTITY_REQUIRED")
@@ -170,7 +284,12 @@ def ingest_raster_pages(
         payload = page.payload or {}
         if not str(payload.get("browser_version", "")):
             raise ValueError("RASTER_INGEST_IDENTITY_DRIFT")
-        page_slices, page_bindings = _slice_sprite_cells(page)
+        # Provider missing/tofu signals: tofu evidence or producer-flagged
+        # missing glyphs fail closed and are never ingested.
+        missing_cps, tofu_flag = _page_flagged_codepoints(page)
+        if tofu_flag:
+            raise ValueError("RASTER_INGEST_TOFU_EVIDENCE")
+        page_slices, page_bindings = _slice_sprite_cells(page, missing_cps)
         pt = int(payload["acs_pt"])
         bucket = slices_by_pt.setdefault(pt, {})
         for cp, png in page_slices.items():
@@ -405,6 +524,9 @@ def page_slice_attestation(pages: Sequence[SpriteRasterPage]) -> dict[str, Any]:
     ``ingest_raster_pages`` fail-closed behavior.
     """
     attestation: dict[str, Any] = {"sprite_sha256": [], "bindings": {}}
+    # Provider identity is resolved fail-closed (known, single, explicit);
+    # attestation never relabels or defaults the producer.
+    attestation["provider"] = resolve_raster_provider(pages)
     for page in pages:
         payload = page.payload or {}
         sprite_sha = str(payload.get("sprite_sha256", ""))

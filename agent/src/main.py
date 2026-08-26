@@ -6,7 +6,7 @@ import signal
 import sys
 from pathlib import Path
 
-from composition import build_production_components
+from composition import build_production_components, default_dev_vars_path
 from config import Settings
 from logging_utils import setup_logging
 from queue_client import CloudflareQueueClient
@@ -30,7 +30,11 @@ async def main() -> None:
     worker_client = WorkerJobClient(settings)
     # Stage 9D production composition: concrete L2/L3/acquisition/AI deps;
     # readiness fails closed when an enabled capability is not constructible.
-    components = build_production_components(settings, scratch_manager.root)
+    # The non-versioned dev.vars-shaped OpenRouter key (key-only shape) is
+    # consumed explicitly here and nowhere else.
+    components = build_production_components(
+        settings, scratch_manager.root, dev_vars_path=default_dev_vars_path()
+    )
     runner = A23Runner(
         settings=settings,
         queue_client=queue_client,

@@ -12,6 +12,9 @@ LEASE_SAFETY_MARGIN_SECONDS = 15
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
+        # Ordinary Settings construction must never open the non-versioned
+        # repo-root dev.vars secret file; that shape is consumed only by the
+        # explicit runtime loader at the production composition boundary.
         env_file=(".env", str(Path.home() / ".telefont.env")),
         env_file_encoding="utf-8",
         extra="ignore",
@@ -87,13 +90,37 @@ class Settings(BaseSettings):
         description="Runtime secret file with opaque authorized-session material",
     )
     MONOTYPE_RASTER_ENDPOINT_URL: str = Field(
-        default="",
-        description="Authorized Monotype raster endpoint URL (empty disables the stage)",
+        default="https://sig.monotype.com",
+        description="Authorized Monotype raster endpoint URL",
     )
     MONOTYPE_RASTER_TOKEN: SecretStr | None = Field(
         default=None,
         description="Authorized Monotype raster endpoint bearer token (runtime secret)",
     )
+    # Playwright Stealth persistent Chrome fallback settings
+    PLAYWRIGHT_USER_DATA_DIR: Path | None = Field(
+        default=None,
+        description="Persistent profile directory path for Playwright Stealth (retains cf_clearance)",
+    )
+    PLAYWRIGHT_STEALTH_ENABLED: bool = Field(
+        default=True,
+        description="Enable Playwright Stealth persistent Chrome fallback",
+    )
+
+    # MyFonts Algolia metadata search fallback settings (runtime-only secrets)
+    MYFONTS_ALGOLIA_APP_ID: str = Field(
+        default="N9095TCBC5",
+        description="MyFonts Algolia application ID",
+    )
+    MYFONTS_ALGOLIA_API_KEY: SecretStr | None = Field(
+        default=None,
+        description="MyFonts Algolia Search API Key (runtime-only; never logged)",
+    )
+    MYFONTS_ALGOLIA_INDEX_NAME: str = Field(
+        default="prod_myfonts_fonts",
+        description="MyFonts Algolia fonts index name",
+    )
+
     VIETNAMESE_AI_ENABLED: bool = Field(
         default=False,
         description="Enable AI-assisted Vietnamese extension (VIETNAMESE mode only)",

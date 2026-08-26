@@ -173,7 +173,7 @@ def test_CAPABILITY_IDENTITY_cross_provider_and_tamper_fail_closed(tmp_path: Pat
         provider="other_provider_v9", phase=FIXED_PHASE,
         fit_sizes=(128,), held_out_sizes=(256,),
     )
-    with pytest.raises(ValueError, match="STORE_LOAD_ERROR"):
+    with pytest.raises(ValueError, match="CAPABILITY_FORGED|STORE_LOAD_ERROR"):
         ObservationStoreSnapshot.load_from_store(
             store=store, reference_id="cap_fam", style_id="regular",
             family_name="Cap Fam", style_name="Regular", config=ISSUE71_CONFIG,

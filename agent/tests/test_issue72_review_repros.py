@@ -131,7 +131,16 @@ def _build_seed_sprite(acs_pt: int) -> bytes:
     return buf.getvalue()
 
 
-def _raster_pages_for_seed(browser_version: str, acs_pt: int = 128) -> list[SpriteRasterPage]:
+RASTER_HANDOFF_MD5 = "ab12cd34ef56ab78cd90ef12ab34cd56"
+
+
+def _raster_pages_for_seed(
+    browser_version: str,
+    acs_pt: int = 128,
+    md5: str = RASTER_HANDOFF_MD5,
+    final: bool = True,
+    next_cursor: str = "",
+) -> list[SpriteRasterPage]:
     """Captured-shape raster page: real binary PNG sprite + observable boxes.
 
     Raster-only provider evidence bound to the exact MD5/page/request
@@ -152,14 +161,16 @@ def _raster_pages_for_seed(browser_version: str, acs_pt: int = 128) -> list[Spri
         "features": [],
         "sprite_sha256": hashlib.sha256(sprite).hexdigest(),
         "observed_headers": {"content_type": "application/json; charset=utf-8"},
-        "md5": RASTER_HANDOFF_MD5,
+        "md5": md5,
         "acs_pt": acs_pt,
+        "provenance": "monotype_render_105",
         "request_params": {
             "rbe": "gmap", "acs_pt": str(acs_pt), "acs_w": "1500",
             "acs_l": "1", "acs_ar": "0", "acs_p": "1", "acs_gpp": "100",
+            "provider": "monotype_render_105", "md5": md5,
         },
     }
-    return [SpriteRasterPage(page_index=1, glyph_count=len(SEED_ADVS), raster_bytes=sprite, next_cursor="2", final=False, payload=payload)]
+    return [SpriteRasterPage(page_index=1, glyph_count=len(SEED_ADVS), raster_bytes=sprite, next_cursor=next_cursor, final=final, payload=payload)]
 
 
 def _browser_supplement_for_seed(browser_version: str, config=ISSUE71_CONFIG):
