@@ -5,8 +5,17 @@ evidence. Held-out evidence never enters the objective, candidate selection,
 stopping criterion, or retry logic (structural guarantee: the optimizer API
 only ever receives fit records).
 
+FULL MAX production loss vector (all five components are required and
+computed on every objective evaluation; none is optional, no-op-able, or
+caller-attested):
+- coverage:  1 - IoU between model and reference masks;
+- edge:      boundary-pixel mismatch between model and reference masks;
+- sdf:       mean normalized signed-distance mismatch over mask boundaries;
+- curvature: outline turning-angle energy (shape smoothness);
+- complexity: outline segment-count penalty.
+
 Guarantees:
-- Finite objective (mean raster mismatch over fit observations); non-finite
+- Finite objective (weighted loss vector over fit observations); non-finite
   objectives raise and fail closed.
 - Explicit iteration budget and stop criterion (step exhaustion = CONVERGED,
   budget exhaustion = fail-closed non-convergence).
@@ -29,7 +38,28 @@ from measurement.calibration import CalibrationTransform
 from measurement.models import ObservationRecord
 from reconstruction.models import Contour, CubicSegment, LineSegment, Point2D, ReconstructedGlyph
 
-OPTIMIZER_VERSION = "stage9d-fit-only-outline-v1"
+OPTIMIZER_VERSION = "stage9d-fit-only-outline-v2-lossvector"
+
+# Canonical FULL MAX production loss vector. Fixed order and weights; the
+# vector is closed — removing or no-op-ing any component invalidates the
+# production objective (LOSS_VECTOR_COMPLETE).
+REQUIRED_OPTIMIZATION_LOSSES: tuple[str, ...] = (
+    "coverage",
+    "edge",
+    "sdf",
+    "curvature",
+    "complexity",
+)
+OPTIMIZATION_LOSS_WEIGHTS: dict[str, float] = {
+    "coverage": 1.0,
+    "edge": 0.5,
+    "sdf": 0.25,
+    "curvature": 0.05,
+    "complexity": 0.01,
+}
+# Canonical complexity normalization: segment counts above this bound saturate
+# the complexity penalty.
+CANONICAL_MAX_OUTLINE_SEGMENTS = 128
 
 
 class OptimizerNonFiniteObjectiveError(RuntimeError):
@@ -74,6 +104,17 @@ class GlyphOptimizationRecord:
     iterations: int
     stop_reason: str
     accepted_objective_trace: tuple[float, ...]
+    loss_components: tuple[tuple[str, float], ...] = ()
+
+
+def validate_loss_vector_complete(record: GlyphOptimizationRecord) -> None:
+    """Fail closed unless every required loss component is present and finite."""
+    components = dict(record.loss_components)
+    for name in REQUIRED_OPTIMIZATION_LOSSES:
+        if name not in components:
+            raise ValueError(f"OPTIMIZER_LOSS_VECTOR_INCOMPLETE:{name}")
+        if not math.isfinite(float(components[name])):
+            raise ValueError(f"OPTIMIZER_LOSS_NON_FINITE:{name}")
 
 
 @dataclass(frozen=True)
@@ -93,6 +134,7 @@ class OptimizationTrace:
             "optimizer_version": self.optimizer_version,
             "input_fingerprint": self.input_fingerprint,
             "policy": self.policy.to_dict(),
+            "loss_vector": {k: OPTIMIZATION_LOSS_WEIGHTS[k] for k in REQUIRED_OPTIMIZATION_LOSSES},
             "records": [
                 {
                     "code_point": r.code_point,
@@ -101,6 +143,7 @@ class OptimizationTrace:
                     "iterations": r.iterations,
                     "stop_reason": r.stop_reason,
                     "accepted_objective_trace": [repr(v) for v in r.accepted_objective_trace],
+                    "loss_components": [[name, repr(value)] for name, value in r.loss_components],
                 }
                 for r in self.records
             ],
@@ -201,19 +244,129 @@ class FitOnlyGlyphOptimizer:
         contours: Sequence[Contour],
         prepared: Sequence[tuple[CalibrationTransform, np.ndarray, int]],
     ) -> float:
-        if not prepared:
-            raise ValueError("OPTIMIZER_NO_FIT_OBSERVATIONS")
-        losses: list[float] = []
-        for transform, ref_mask, resolution in prepared:
-            model_mask = self._rasterize_contours(contours, transform, resolution, self.policy.samples_per_segment)
-            intersection = int(np.logical_and(model_mask, ref_mask).sum())
-            union = int(np.logical_or(model_mask, ref_mask).sum())
-            iou = float(intersection) / max(union, 1)
-            losses.append(1.0 - iou)
-        objective = float(np.mean(losses))
+        components = self._loss_components(contours, prepared)
+        objective = sum(
+            OPTIMIZATION_LOSS_WEIGHTS[name] * components[name]
+            for name in REQUIRED_OPTIMIZATION_LOSSES
+        )
         if not math.isfinite(objective):
             raise OptimizerNonFiniteObjectiveError("OPTIMIZER_NON_FINITE_OBJECTIVE")
-        return objective
+        return float(objective)
+
+    @staticmethod
+    def _boundary(mask: np.ndarray) -> np.ndarray:
+        """4-neighborhood boundary pixels of a binary mask."""
+        if mask.size == 0:
+            return mask.astype(bool)
+        padded = np.pad(mask, 1, mode="constant", constant_values=0)
+        interior = (
+            padded[1:-1, 2:]
+            & padded[1:-1, :-2]
+            & padded[2:, 1:-1]
+            & padded[:-2, 1:-1]
+        )
+        return mask.astype(bool) & ~interior
+
+    @staticmethod
+    def _distance_transform(mask: np.ndarray) -> np.ndarray:
+        """Exact deterministic L1 distance transform (BFS chamfer)."""
+        from collections import deque
+
+        h, w = mask.shape
+        dist = np.full((h, w), h + w, dtype=np.int32)
+        queue: deque = deque()
+        ys, xs = np.nonzero(mask)
+        for y, x in zip(ys.tolist(), xs.tolist()):
+            dist[y, x] = 0
+            queue.append((y, x))
+        while queue:
+            y, x = queue.popleft()
+            d = dist[y, x] + 1
+            for ny, nx in ((y + 1, x), (y - 1, x), (y, x + 1), (y, x - 1)):
+                if 0 <= ny < h and 0 <= nx < w and dist[ny, nx] > d:
+                    dist[ny, nx] = d
+                    queue.append((ny, nx))
+        return dist
+
+    def _curvature_loss(self, contours: Sequence[Contour]) -> float:
+        """Outline turning-angle energy normalized to [0, 1]; shape-only term."""
+        angles: list[float] = []
+        for c in contours:
+            pts = c.sample_points(samples_per_segment=self.policy.samples_per_segment)
+            if len(pts) < 3:
+                continue
+            for i in range(1, len(pts) - 1):
+                v1x = pts[i].x - pts[i - 1].x
+                v1y = pts[i].y - pts[i - 1].y
+                v2x = pts[i + 1].x - pts[i].x
+                v2y = pts[i + 1].y - pts[i].y
+                n1 = math.hypot(v1x, v1y)
+                n2 = math.hypot(v2x, v2y)
+                if n1 == 0.0 or n2 == 0.0:
+                    continue
+                cos_t = max(-1.0, min(1.0, (v1x * v2x + v1y * v2y) / (n1 * n2)))
+                angles.append(abs(math.acos(cos_t)))
+        if not angles:
+            return 1.0
+        return float(min(1.0, (sum(angles) / len(angles)) / math.pi))
+
+    def _complexity_loss(self, contours: Sequence[Contour]) -> float:
+        """Outline segment-count penalty normalized by the canonical bound."""
+        total_segments = sum(len(c.segments) for c in contours)
+        return float(min(1.0, total_segments / float(CANONICAL_MAX_OUTLINE_SEGMENTS)))
+
+    def _loss_components(
+        self,
+        contours: Sequence[Contour],
+        prepared: Sequence[tuple[CalibrationTransform, np.ndarray, int]],
+    ) -> dict[str, float]:
+        """Compute the complete required loss vector; every component is real."""
+        if not prepared:
+            raise ValueError("OPTIMIZER_NO_FIT_OBSERVATIONS")
+        coverage_terms: list[float] = []
+        edge_terms: list[float] = []
+        sdf_terms: list[float] = []
+        for transform, ref_mask, resolution in prepared:
+            model_mask = self._rasterize_contours(
+                contours, transform, resolution, self.policy.samples_per_segment
+            ).astype(bool)
+            ref_bool = ref_mask.astype(bool)
+
+            intersection = int(np.logical_and(model_mask, ref_bool).sum())
+            union = int(np.logical_or(model_mask, ref_bool).sum())
+            coverage_terms.append(1.0 - (float(intersection) / max(union, 1)))
+
+            model_edge = self._boundary(model_mask)
+            ref_edge = self._boundary(ref_bool)
+            edge_mismatch = int(np.logical_xor(model_edge, ref_edge).sum())
+            edge_denom = max(int(np.logical_or(model_edge, ref_edge).sum()), 1)
+            edge_terms.append(min(1.0, float(edge_mismatch) / float(edge_denom)))
+
+            union_mask = np.logical_or(model_mask, ref_bool)
+            union_count = int(union_mask.sum())
+            if union_count == 0:
+                sdf_terms.append(0.0)
+            else:
+                dist_ref = self._distance_transform(ref_bool)
+                dist_model = self._distance_transform(model_mask)
+                sdf_sum = float(dist_ref[model_mask & ~ref_bool].sum()) + float(
+                    dist_model[ref_bool & ~model_mask].sum()
+                )
+                sdf_terms.append(min(1.0, sdf_sum / (float(union_count) * float(max(resolution, 1)))))
+
+        components = {
+            "coverage": float(np.mean(coverage_terms)),
+            "edge": float(np.mean(edge_terms)),
+            "sdf": float(np.mean(sdf_terms)),
+            "curvature": self._curvature_loss(contours),
+            "complexity": self._complexity_loss(contours),
+        }
+        for name in REQUIRED_OPTIMIZATION_LOSSES:
+            if not math.isfinite(components[name]):
+                raise OptimizerNonFiniteObjectiveError(
+                    f"OPTIMIZER_NON_FINITE_OBJECTIVE:{name}"
+                )
+        return components
 
     def optimize_glyph(
         self,
@@ -276,6 +429,7 @@ class FitOnlyGlyphOptimizer:
                     break
 
         converged = stop_reason == "CONVERGED"
+        final_components = self._loss_components(current_contours, prepared)
         record = GlyphOptimizationRecord(
             code_point=glyph.code_point,
             initial_objective=initial,
@@ -283,7 +437,11 @@ class FitOnlyGlyphOptimizer:
             iterations=iterations,
             stop_reason=stop_reason,
             accepted_objective_trace=tuple(accepted_trace),
+            loss_components=tuple(
+                (name, final_components[name]) for name in REQUIRED_OPTIMIZATION_LOSSES
+            ),
         )
+        validate_loss_vector_complete(record)
         if not converged:
             raise OptimizerNonConvergenceError(
                 f"OPTIMIZER_NON_CONVERGENCE_CP_{glyph.code_point}"

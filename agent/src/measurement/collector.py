@@ -8,7 +8,7 @@ import time
 from typing import Any, Callable
 
 from measurement.browser_session import ChromiumSession
-from measurement.discovery import ObservableGlyphDiscovery
+from measurement.discovery import DiscoveryBudgetExhaustedError, ObservableGlyphDiscovery
 from measurement.manifest import create_reproducibility_manifest
 from measurement.models import (
     BrowserFontSelection,
@@ -62,9 +62,15 @@ class ObservationCollector:
 
         # If code_points not explicitly supplied, discover observable glyphs dynamically using authoritative discovery
         if code_points is None:
-            code_points = await ObservableGlyphDiscovery.discover_observable_glyphs(
+            code_points, termination = await ObservableGlyphDiscovery.discover_with_termination(
                 measure_fn=lambda cp: self.session.is_glyph_supported_in_font(font_family, cp),
             )
+            if termination in ObservableGlyphDiscovery.TERMINAL_BLOCKED:
+                # Safety-budget exhaustion is never successful completion:
+                # fail closed with partial coverage, never save it as complete.
+                raise DiscoveryBudgetExhaustedError(
+                    f"DISCOVERY_BUDGET_EXHAUSTED: partial coverage {len(code_points)} glyphs"
+                )
 
         self.store.save_coverage(
             reference_id=reference_id,
@@ -164,55 +170,56 @@ class ObservationCollector:
                     total_rasters += 1
 
             # 4. Multi-resolution disjoint held-out evaluation schedule captures (Evaluation Evidence)
-            eval_res = max(self.config.resolutions)
-            for sub_x, sub_y in self.config.held_out_subpixel_phases:
-                cache_key = ObservationRecord.build_cache_key(
-                    reference_id=reference_id,
-                    style_id=style_id,
-                    code_point=cp,
-                    browser_version=self.session.browser_version,
-                    resolution=eval_res,
-                    subpixel_x=sub_x,
-                    subpixel_y=sub_y,
-                    config_hash=config_hash,
-                )
+            held_out_sizes = tuple(int(s) for s in self.config.held_out_sizes_px) or (max(self.config.resolutions),)
+            for eval_res in held_out_sizes:
+                for sub_x, sub_y in self.config.held_out_subpixel_phases:
+                    cache_key = ObservationRecord.build_cache_key(
+                        reference_id=reference_id,
+                        style_id=style_id,
+                        code_point=cp,
+                        browser_version=self.session.browser_version,
+                        resolution=eval_res,
+                        subpixel_x=sub_x,
+                        subpixel_y=sub_y,
+                        config_hash=config_hash,
+                    )
 
-                if self.store.has_observation(cache_key):
+                    if self.store.has_observation(cache_key):
+                        total_rasters += 1
+                        continue
+
+                    png_bytes = await self.session.capture_lossless_raster(
+                        font_family=font_family,
+                        code_point=cp,
+                        resolution_px=eval_res,
+                        subpixel_offset=(sub_x, sub_y),
+                    )
+
+                    png_sha256 = hashlib.sha256(png_bytes).hexdigest()
+                    browser_hash = hashlib.sha256(self.session.browser_version.encode("utf-8")).hexdigest()
+                    env_tag = f"{config_hash}_{browser_hash}"
+                    rel_path = f"{reference_id}/{style_id}/{env_tag}/{cp:04X}/{eval_res}px_heldout_{cache_key}.png"
+                    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+                    record = ObservationRecord(
+                        cache_key=cache_key,
+                        reference_id=reference_id,
+                        style_id=style_id,
+                        code_point=cp,
+                        resolution=eval_res,
+                        subpixel_x=sub_x,
+                        subpixel_y=sub_y,
+                        raster_relative_path=rel_path,
+                        raster_sha256=png_sha256,
+                        raster_size_bytes=len(png_bytes),
+                        metrics=direct_metrics,
+                        created_at=now_iso,
+                        browser_version=self.session.browser_version,
+                        config_hash=config_hash,
+                    )
+
+                    self.store.save_observation(record, png_bytes)
                     total_rasters += 1
-                    continue
-
-                png_bytes = await self.session.capture_lossless_raster(
-                    font_family=font_family,
-                    code_point=cp,
-                    resolution_px=eval_res,
-                    subpixel_offset=(sub_x, sub_y),
-                )
-
-                png_sha256 = hashlib.sha256(png_bytes).hexdigest()
-                browser_hash = hashlib.sha256(self.session.browser_version.encode("utf-8")).hexdigest()
-                env_tag = f"{config_hash}_{browser_hash}"
-                rel_path = f"{reference_id}/{style_id}/{env_tag}/{cp:04X}/{eval_res}px_heldout_{cache_key}.png"
-                now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
-
-                record = ObservationRecord(
-                    cache_key=cache_key,
-                    reference_id=reference_id,
-                    style_id=style_id,
-                    code_point=cp,
-                    resolution=eval_res,
-                    subpixel_x=sub_x,
-                    subpixel_y=sub_y,
-                    raster_relative_path=rel_path,
-                    raster_sha256=png_sha256,
-                    raster_size_bytes=len(png_bytes),
-                    metrics=direct_metrics,
-                    created_at=now_iso,
-                    browser_version=self.session.browser_version,
-                    config_hash=config_hash,
-                )
-
-                self.store.save_observation(record, png_bytes)
-                total_rasters += 1
 
             if progress_cb:
                 progress_cb(idx, total_glyphs)
