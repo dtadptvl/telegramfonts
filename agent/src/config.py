@@ -12,7 +12,11 @@ LEASE_SAFETY_MARGIN_SECONDS = 15
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=(".env", str(Path.home() / ".telefont.env")),
+        # Non-versioned runtime secret sources. The dev.vars-shaped files
+        # (lowercase keys such as openrouter_api_key) are loaded last so an
+        # operator key stored there reaches OPENROUTER_API_KEY. Secrets are
+        # never printed/logged; SecretStr fields stay redacted.
+        env_file=(".env", str(Path.home() / ".telefont.env"), ".dev.vars", "dev.vars"),
         env_file_encoding="utf-8",
         extra="ignore",
     )

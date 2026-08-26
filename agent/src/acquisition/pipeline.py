@@ -41,6 +41,7 @@ from acquisition.providers import (
     PlaywrightStealthProvider,
     AlgoliaMetadataProvider,
     extract_binary_from_dump_dom,
+    extract_raster_pages_from_dump_resources,
     parse_family_discovery_from_dump,
     parse_discovery_from_dump,
 )
@@ -179,6 +180,11 @@ class AcquisitionPipeline:
 
         style_rec = family_envelope.get_style_record(expected_style, expected_style)
 
+        # Requested render sizes bind every raster completeness gate.
+        req_pts_raw = (raster_request or {}).get("acs_pts")
+        req_pts = [int(p) for p in req_pts_raw] if req_pts_raw is not None else None
+        stealth_pts = req_pts or [int((raster_request or {}).get("acs_pt", 120))]
+
         # -------------------------------------------------------------
         # STEP 1: Check Binary-First from Dump / Envelope candidates
         # -------------------------------------------------------------
@@ -251,12 +257,39 @@ class AcquisitionPipeline:
         )
 
         # -------------------------------------------------------------
+        # STEP 1B: Dump-DOM embedded raster resources (D04). When the dump
+        # itself carries complete MD5-bound raster evidence, the raster is
+        # complete here and every fallback lane makes zero calls.
+        # -------------------------------------------------------------
+        if style_rec and getattr(style_rec, "raster_resources", ()):
+            dump_pages = extract_raster_pages_from_dump_resources(
+                style_rec, req_pts, expected_md5=style_rec.md5
+            )
+            if dump_pages and is_complete_raster_pages(dump_pages, req_pts, expected_md5=style_rec.md5):
+                records.append(
+                    AcquisitionStageRecord(
+                        stage=STAGE_DUMP_DOM_NATIVE,
+                        attempted=True,
+                        produced_binary=False,
+                        produced_raster=True,
+                        outcome="OK",
+                    )
+                )
+                return outcome_with("raster_authorized", pages=dump_pages)
+            records.append(
+                AcquisitionStageRecord(
+                    stage=STAGE_DUMP_DOM_NATIVE,
+                    attempted=True,
+                    produced_binary=False,
+                    produced_raster=False,
+                    outcome="RASTER_ABSENT",
+                    reason_code="DUMP_RASTER_RESOURCES_INCOMPLETE",
+                )
+            )
+
+        # -------------------------------------------------------------
         # STEP 2: Playwright Stealth Persistent Context (Method 2)
         # -------------------------------------------------------------
-        req_pts_raw = (raster_request or {}).get("acs_pts")
-        req_pts = [int(p) for p in req_pts_raw] if req_pts_raw is not None else None
-        stealth_pts = req_pts or [int((raster_request or {}).get("acs_pt", 120))]
-
         if self.policy.playwright_stealth_enabled and self.playwright_provider is not None and self.playwright_provider.available():
             pages = ()
             try:
@@ -289,6 +322,59 @@ class AcquisitionPipeline:
                         reason_code="STEALTH_RASTER_INCOMPLETE_OR_UNAVAILABLE",
                     )
                 )
+
+            # Playwright may also surface a valid authorized binary observed
+            # in the session; a valid binary wins before raster/reconstruction.
+            capture_binary_fn = getattr(self.playwright_provider, "capture_binary", None)
+            if callable(capture_binary_fn):
+                raw_pw: bytes | None = None
+                try:
+                    raw_pw = await capture_binary_fn(
+                        source_url,
+                        style_rec or StyleDiscoveryRecord(style_id=expected_style, style_name=expected_style),
+                    )
+                except Exception as exc:
+                    logger.debug("Playwright binary capture exception: %s", exc)
+                    raw_pw = None
+                if isinstance(raw_pw, (bytes, bytearray)) and raw_pw:
+                    pw_verification = verify_acquired_binary(
+                        bytes(raw_pw), expected_family, expected_style, self.policy.max_binary_bytes
+                    )
+                    if pw_verification.status == "VALID":
+                        records.append(
+                            AcquisitionStageRecord(
+                                stage=STAGE_PLAYWRIGHT_STEALTH,
+                                attempted=True,
+                                produced_binary=True,
+                                produced_raster=False,
+                                outcome="OK",
+                            )
+                        )
+                        return outcome_with(
+                            "binary",
+                            binary=AcquiredBinary(
+                                raw_bytes=bytes(raw_pw),
+                                format=pw_verification.format,
+                                family_name=pw_verification.family_name,
+                                style_name=pw_verification.style_name,
+                                provenance=STAGE_PLAYWRIGHT_STEALTH,
+                            ),
+                        )
+                    if pw_verification.status == "INTEGRITY_FAILED":
+                        records.append(
+                            AcquisitionStageRecord(
+                                stage=STAGE_PLAYWRIGHT_STEALTH,
+                                attempted=True,
+                                produced_binary=False,
+                                produced_raster=False,
+                                outcome="INTEGRITY_FAILED",
+                                reason_code=pw_verification.reason_code,
+                            )
+                        )
+                        return outcome_with(
+                            "insufficient",
+                            terminal=f"ACQUISITION_BINARY_INTEGRITY_FAILED:{pw_verification.reason_code}",
+                        )
 
         # Legacy Session Provider fallback (for backward-compatibility with stage 9D test fixtures)
         if self.policy.authorized_session_enabled and self.session_provider is not None and self.session_provider.available():

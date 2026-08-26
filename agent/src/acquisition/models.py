@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
+from typing import Any
 
 
 BINARY_STAGE_DUMP_DOM = "dump_dom_binary"
@@ -47,7 +48,7 @@ class StyleDiscoveryRecord:
     style_name: str
     md5: str = ""
     binary_candidates: tuple[BinaryCandidate, ...] = ()
-    raster_resources: tuple[str, ...] = ()
+    raster_resources: tuple[Any, ...] = ()
     provenance: str = ""
 
     def is_complete_metadata(self) -> bool:

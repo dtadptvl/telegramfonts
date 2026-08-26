@@ -148,15 +148,59 @@ def test_DUMP_DOM_FAMILY_MAP():
     assert reg.md5 != bold.md5 != light.md5
 
 
+def _dump_raster_resource_html(md5: str, acs_pt: int = 120) -> str:
+    """Dump-DOM fixture carrying closed MD5-bound raster resources (D04)."""
+    import io
+    from PIL import Image
+    im = Image.new("RGBA", (500, 500), (0, 0, 0, 0))
+    buf = io.BytesIO()
+    im.save(buf, format="PNG")
+    png_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+    payload = {
+        "@type": "FontFamily",
+        "name": "Raster Dump Fam",
+        "hasVariant": [
+            {"name": "Raster Dump Fam Regular", "sku": "regular", "fontMd5": md5},
+        ],
+        "rasterResources": [
+            {
+                "styleId": "regular",
+                "md5": md5,
+                "acsPt": acs_pt,
+                "pages": [
+                    {
+                        "pageIndex": 1,
+                        "png": "data:image/png;base64," + png_b64,
+                        "glyphs": [
+                            {"code_point": 65, "glyph_index": 1, "sprite_box": {"x": 0, "y": 0, "width": 50, "height": 60}},
+                            {"code_point": 66, "glyph_index": 2, "sprite_box": {"x": 50, "y": 0, "width": 45, "height": 60}},
+                        ],
+                        "final": True,
+                        "nextCursor": "",
+                    }
+                ],
+            }
+        ],
+    }
+    return (
+        "<!DOCTYPE html><html><head>"
+        '<script type="application/ld+json">'
+        + json.dumps(payload)
+        + "</script></head><body></body></html>"
+    )
+
+
 @pytest.mark.asyncio
 async def test_DUMP_DOM_COMPLETE():
-    """DUMP_DOM_COMPLETE: Native dump-dom succeeds; fallback lanes make 0 calls."""
+    """DUMP_DOM_COMPLETE: Native dump-dom completes raster from its own raster resources; fallback lanes make 0 calls."""
+    dump_md5 = "a1b2c3d4e5f60718293a4b5c6d7e8f90"
     dump_transport = MagicMock(spec=DumpDomTransport)
-    dump_transport.dump_dom = AsyncMock(return_value=SAMPLE_MULTI_STYLE_HTML)
+    dump_transport.dump_dom = AsyncMock(return_value=_dump_raster_resource_html(dump_md5))
 
     playwright = MagicMock()
     playwright.available.return_value = True
     playwright.discover_family = AsyncMock()
+    playwright.capture_raster_pages = AsyncMock()
 
     algolia = MagicMock()
     algolia.available.return_value = True
@@ -165,9 +209,7 @@ async def test_DUMP_DOM_COMPLETE():
     raster_provider = MagicMock()
     raster_provider.available.return_value = True
     raster_provider.client = MagicMock()
-    raster_provider.client.fetch_all_sprite_pages = AsyncMock(
-        return_value=(_make_dummy_sprite_page("a1b2c3d4e5f60718293a4b5c6d7e8f90", 120),)
-    )
+    raster_provider.client.fetch_all_sprite_pages = AsyncMock()
 
     pipeline = AcquisitionPipeline(
         dump_dom_transport=dump_transport,
@@ -177,16 +219,217 @@ async def test_DUMP_DOM_COMPLETE():
     )
 
     outcome = await pipeline.acquire(
-        source_url="https://www.myfonts.com/collections/helvetica-now-font-monotype",
-        expected_family="Helvetica Now",
-        expected_style="Helvetica Now Regular",
+        source_url="https://www.myfonts.com/collections/raster-dump-fam",
+        expected_family="Raster Dump Fam",
+        expected_style="Raster Dump Fam Regular",
     )
 
     assert outcome.kind == "raster_authorized"
     assert len(outcome.raster_pages) == 1
-    # Fallback lanes made zero discovery calls
+    assert outcome.raster_pages[0].payload["md5"] == dump_md5
+    assert outcome.raster_pages[0].payload["provenance"] == STAGE_DUMP_DOM_NATIVE
+    # Dump-dom completed raster: every fallback lane makes exactly zero calls.
     assert playwright.discover_family.call_count == 0
+    assert playwright.capture_raster_pages.call_count == 0
+    assert raster_provider.client.fetch_all_sprite_pages.call_count == 0
     assert algolia.discover_family.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_DUMP_DOM_RASTER_COMPLETE_ZERO_FALLBACKS():
+    """DUMP_DOM_RASTER_COMPLETE_ZERO_FALLBACKS: complete dump-dom raster -> Playwright/CDN/Algolia calls=0."""
+    dump_md5 = "b2c3d4e5f60718293a4b5c6d7e8f9012"
+    dump_transport = MagicMock(spec=DumpDomTransport)
+    dump_transport.dump_dom = AsyncMock(return_value=_dump_raster_resource_html(dump_md5))
+
+    playwright = MagicMock()
+    playwright.available.return_value = True
+    playwright.discover_family = AsyncMock()
+    playwright.capture_raster_pages = AsyncMock()
+
+    algolia = MagicMock()
+    algolia.available.return_value = True
+    algolia.discover_family = AsyncMock()
+
+    client = MagicMock()
+    client.fetch_all_sprite_pages = AsyncMock()
+    raster_provider = MonotypeRasterProvider(client=client)
+
+    pipeline = AcquisitionPipeline(
+        dump_dom_transport=dump_transport,
+        playwright_provider=playwright,
+        algolia_provider=algolia,
+        raster_provider=raster_provider,
+    )
+
+    outcome = await pipeline.acquire(
+        source_url="https://www.myfonts.com/collections/raster-dump-fam",
+        expected_family="Raster Dump Fam",
+        expected_style="Raster Dump Fam Regular",
+        raster_request={"acs_pts": [120]},
+    )
+
+    assert outcome.kind == "raster_authorized"
+    assert {p.payload["acs_pt"] for p in outcome.raster_pages} == {120}
+    # Exact attempted order contains only the dump-dom lane.
+    assert set(outcome.trace.stage_order()) == {STAGE_DUMP_DOM_NATIVE}
+    assert playwright.capture_raster_pages.call_count == 0
+    assert client.fetch_all_sprite_pages.call_count == 0
+    assert algolia.discover_family.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_PLAYWRIGHT_BINARY_WINS():
+    """PLAYWRIGHT_BINARY_WINS: valid authorized binary observed by stealth wins; raster/CDN/Algolia/reconstruction calls=0."""
+    raw_ttf = _build_real_ttf("Stealth Binary Fam", "Regular")
+
+    family_env = FamilyDiscoveryEnvelope(
+        family_name="Stealth Binary Fam",
+        styles={
+            "regular": StyleDiscoveryRecord(
+                style_id="regular",
+                style_name="Regular",
+                md5="e" * 32,
+                provenance=STAGE_PLAYWRIGHT_STEALTH,
+            )
+        },
+        provenance=STAGE_PLAYWRIGHT_STEALTH,
+    )
+
+    dump_transport = MagicMock(spec=DumpDomTransport)
+    dump_transport.dump_dom = AsyncMock(return_value="")
+
+    playwright = MagicMock()
+    playwright.available.return_value = True
+    playwright.capture_raster_pages = AsyncMock(return_value=None)
+    playwright.capture_binary = AsyncMock(return_value=raw_ttf)
+
+    algolia = MagicMock()
+    algolia.available.return_value = True
+    algolia.discover_family = AsyncMock()
+
+    client = MagicMock()
+    client.fetch_all_sprite_pages = AsyncMock()
+    raster_provider = MonotypeRasterProvider(client=client)
+
+    pipeline = AcquisitionPipeline(
+        dump_dom_transport=dump_transport,
+        playwright_provider=playwright,
+        algolia_provider=algolia,
+        raster_provider=raster_provider,
+    )
+
+    outcome = await pipeline.acquire(
+        source_url="https://www.myfonts.com/collections/stealth-binary-fam",
+        expected_family="Stealth Binary Fam",
+        expected_style="Regular",
+        family_envelope=family_env,
+    )
+
+    assert outcome.kind == "binary"
+    assert outcome.binary is not None
+    assert outcome.binary.format == "TTF"
+    assert outcome.binary.provenance == STAGE_PLAYWRIGHT_STEALTH
+    assert outcome.binary.raw_bytes == raw_ttf
+    # Binary wins before raster/reconstruction: zero CDN/Algolia work.
+    assert playwright.capture_binary.call_count == 1
+    assert client.fetch_all_sprite_pages.call_count == 0
+    assert algolia.discover_family.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_FALLBACK_ORDER_EXACT():
+    """FALLBACK_ORDER_EXACT: only the stated applicable order; partial lanes continue."""
+    # Variant A: MD5 absent -> dump-dom -> Playwright -> Algolia(->CDN); direct
+    # CDN is not attempted without an exact MD5.
+    dump_transport = MagicMock(spec=DumpDomTransport)
+    dump_transport.dump_dom = AsyncMock(return_value="")
+
+    playwright = MagicMock()
+    playwright.available.return_value = True
+    playwright.capture_raster_pages = AsyncMock(return_value=None)
+    playwright.capture_binary = AsyncMock(return_value=None)
+
+    algolia = MagicMock()
+    algolia.available.return_value = True
+    algolia.discover_family = AsyncMock(return_value=None)
+
+    client = MagicMock()
+    client.fetch_all_sprite_pages = AsyncMock()
+    raster_provider = MonotypeRasterProvider(client=client)
+
+    env_no_md5 = FamilyDiscoveryEnvelope(
+        family_name="Order Fam",
+        styles={"regular": StyleDiscoveryRecord(style_id="regular", style_name="Regular", provenance="dump_dom_native")},
+        provenance="dump_dom_native",
+    )
+
+    pipeline = AcquisitionPipeline(
+        dump_dom_transport=dump_transport,
+        playwright_provider=playwright,
+        algolia_provider=algolia,
+        raster_provider=raster_provider,
+    )
+    outcome_a = await pipeline.acquire(
+        source_url="https://www.myfonts.com/collections/order-fam",
+        expected_family="Order Fam",
+        expected_style="Regular",
+        family_envelope=env_no_md5,
+    )
+    assert outcome_a.kind == "insufficient"
+    assert outcome_a.trace.stage_order() == (
+        STAGE_DUMP_DOM_NATIVE,
+        STAGE_PLAYWRIGHT_STEALTH,
+        STAGE_ALGOLIA_METADATA_CDN,
+    )
+    cdn_records = [r for r in outcome_a.trace.records if r.stage == STAGE_DIRECT_MONOTYPE_CDN]
+    assert cdn_records and all(r.attempted is False for r in cdn_records)
+    assert algolia.discover_family.call_count == 1
+    assert client.fetch_all_sprite_pages.call_count == 0
+
+    # Variant B: exact MD5 present -> dump-dom -> Playwright -> direct CDN;
+    # Algolia is never called once the CDN completes.
+    playwright_b = MagicMock()
+    playwright_b.available.return_value = True
+    playwright_b.capture_raster_pages = AsyncMock(return_value=None)
+    playwright_b.capture_binary = AsyncMock(return_value=None)
+
+    algolia_b = MagicMock()
+    algolia_b.available.return_value = True
+    algolia_b.discover_family = AsyncMock()
+
+    client_b = MagicMock()
+    client_b.fetch_all_sprite_pages = AsyncMock(
+        return_value=(_make_dummy_sprite_page("d" * 32, 120),)
+    )
+    raster_provider_b = MonotypeRasterProvider(client=client_b)
+
+    env_md5 = FamilyDiscoveryEnvelope(
+        family_name="Order Fam",
+        styles={"regular": StyleDiscoveryRecord(style_id="regular", style_name="Regular", md5="d" * 32, provenance="dump_dom_native")},
+        provenance="dump_dom_native",
+    )
+
+    pipeline_b = AcquisitionPipeline(
+        dump_dom_transport=dump_transport,
+        playwright_provider=playwright_b,
+        algolia_provider=algolia_b,
+        raster_provider=raster_provider_b,
+    )
+    outcome_b = await pipeline_b.acquire(
+        source_url="https://www.myfonts.com/collections/order-fam",
+        expected_family="Order Fam",
+        expected_style="Regular",
+        family_envelope=env_md5,
+    )
+    assert outcome_b.kind == "raster_authorized"
+    assert outcome_b.trace.stage_order() == (
+        STAGE_DUMP_DOM_NATIVE,
+        STAGE_PLAYWRIGHT_STEALTH,
+        STAGE_DIRECT_MONOTYPE_CDN,
+    )
+    assert algolia_b.discover_family.call_count == 0
+    assert client_b.fetch_all_sprite_pages.call_count == 1
 
 
 @pytest.mark.asyncio
@@ -1878,7 +2121,120 @@ async def test_STEALTH_MD5_BINDING_EXACT_ACCEPTED():
     pages = await stealth.capture_raster_pages("https://www.myfonts.com/collections/test", style_rec, [120])
     assert pages is not None
     assert len(pages) == 1
-    assert pages[0].payload["resolved_face"]["resource_md5"] == exact_md5
+    assert pages[0].payload["resolved_face"]["attestation"]["resource_md5"] == exact_md5
+
+
+@pytest.mark.asyncio
+async def test_ATTESTATION_URL_FINGERPRINT_MISMATCH():
+    """ATTESTATION_URL_FINGERPRINT_MISMATCH: attestation url fingerprint not equal to the recomputed exact observed URL fingerprint -> reject."""
+    import io
+    from PIL import Image
+    im = Image.new("RGBA", (200, 200), (0, 0, 0, 0))
+    buf = io.BytesIO()
+    im.save(buf, format="PNG")
+    png_bytes = buf.getvalue()
+    b64_str = "data:image/png;base64," + base64.b64encode(png_bytes).decode("ascii")
+
+    forged_md5 = "c" * 32
+    forged_attestation = _sealed_attestation(forged_md5)
+    # Forged/misattributed fingerprint: does not bind the observed URL.
+    forged_attestation["url_sha256"] = hashlib.sha256(b"forged-different-url").hexdigest()
+
+    eval_result = {
+        "results": [
+            {
+                "pt": 120,
+                "resolved_face": {
+                    "family": "Helvetica",
+                    "style": "normal",
+                    "weight": "400",
+                    "stretch": "normal",
+                    "status": "loaded",
+                    "resource_md5": forged_md5,
+                    "attestation": forged_attestation,
+                },
+                "required_source_cps": [65],
+                "candidate_cps": [65],
+                "proven_cps": [65],
+                "rejected_cps": [],
+                "pages": [
+                    {
+                        "page_index": 1,
+                        "dataUrl": b64_str,
+                        "glyphs": [
+                            {"code_point": 65, "glyph_index": 1, "sprite_box": {"x": 5, "y": 5, "width": 40, "height": 50}},
+                        ],
+                        "final": True,
+                        "next_cursor": "",
+                    }
+                ],
+                "pairs": [],
+                "features": [],
+            }
+        ]
+    }
+
+    launcher = _make_fake_playwright_launcher(eval_result, observed_responses=_observed_font_proof(forged_md5))
+    stealth = PlaywrightStealthPersistentSession(playwright_launcher=launcher)
+    style_rec = StyleDiscoveryRecord(style_id="helvetica-regular", style_name="Helvetica Regular", md5=forged_md5)
+    pages = await stealth.capture_raster_pages("https://www.myfonts.com/collections/test", style_rec, [120])
+    assert pages is None
+
+
+@pytest.mark.asyncio
+async def test_ATTESTATION_EMPTY_RESOURCE_TYPE():
+    """ATTESTATION_EMPTY_RESOURCE_TYPE: observed evidence with empty resource_type is never admitted -> reject."""
+    import io
+    from PIL import Image
+    im = Image.new("RGBA", (200, 200), (0, 0, 0, 0))
+    buf = io.BytesIO()
+    im.save(buf, format="PNG")
+    png_bytes = buf.getvalue()
+    b64_str = "data:image/png;base64," + base64.b64encode(png_bytes).decode("ascii")
+
+    empty_type_md5 = "d" * 32
+    eval_result = {
+        "results": [
+            {
+                "pt": 120,
+                "resolved_face": {
+                    "family": "Helvetica",
+                    "style": "normal",
+                    "weight": "400",
+                    "stretch": "normal",
+                    "status": "loaded",
+                    "resource_md5": empty_type_md5,
+                    "attestation": _sealed_attestation(empty_type_md5),
+                },
+                "required_source_cps": [65],
+                "candidate_cps": [65],
+                "proven_cps": [65],
+                "rejected_cps": [],
+                "pages": [
+                    {
+                        "page_index": 1,
+                        "dataUrl": b64_str,
+                        "glyphs": [
+                            {"code_point": 65, "glyph_index": 1, "sprite_box": {"x": 5, "y": 5, "width": 40, "height": 50}},
+                        ],
+                        "final": True,
+                        "next_cursor": "",
+                    }
+                ],
+                "pairs": [],
+                "features": [],
+            }
+        ]
+    }
+
+    # Only evidence with an empty resource type exists: the observer never
+    # admits it, so no attested final 2xx font response binds the MD5.
+    empty_type_observed = [_FakeFontResponse("https://cdn.myfonts.net/fonts/" + empty_type_md5 + ".woff2", resource_type="")]
+    launcher = _make_fake_playwright_launcher(eval_result, observed_responses=empty_type_observed)
+    stealth = PlaywrightStealthPersistentSession(playwright_launcher=launcher)
+    style_rec = StyleDiscoveryRecord(style_id="helvetica-regular", style_name="Helvetica Regular", md5=empty_type_md5)
+    pages = await stealth.capture_raster_pages("https://www.myfonts.com/collections/test", style_rec, [120])
+    assert pages is None
 
 
 @pytest.mark.asyncio

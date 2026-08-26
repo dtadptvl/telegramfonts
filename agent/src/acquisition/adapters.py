@@ -1279,8 +1279,9 @@ class PlaywrightStealthPersistentSession:
                     resource_type = str(getattr(req, "resource_type", "") or "").lower()
                 except Exception:
                     resource_type = ""
-                # Reject unrelated resource types (image/xhr/css/...).
-                if resource_type and resource_type != "font":
+                # Exactly font-typed responses may attest; empty/other types
+                # (image/xhr/css/...) are never admitted.
+                if resource_type != "font":
                     return
                 entry: dict[str, Any] = {"url": url, "status": status, "resource_type": resource_type, "byte_sha256": ""}
                 try:
@@ -1439,24 +1440,38 @@ class PlaywrightStealthPersistentSession:
                         return None
                     if not (200 <= final_status < 300):
                         return None
-                    # Independently re-verify against raw observer evidence: an actual
-                    # observed final 2xx font response must bind the expected MD5.
-                    matched_observed = any(
-                        exp_lower in str(r.get("url", "")).lower()
-                        and 200 <= int(r.get("status", 0) or 0) < 300
-                        for r in observed_font_responses
-                    )
-                    if not matched_observed:
+                    # Independently re-verify the sealed attestation against raw
+                    # observer evidence by recomputing the exact observed URL
+                    # fingerprint/status/MD5/body-hash binding. Absent, empty,
+                    # redirect, unrelated or mismatched evidence fails closed.
+                    att_url_fp = str(attestation.get("url_sha256", "")).strip().lower()
+                    if not att_url_fp or len(att_url_fp) != 64:
                         return None
-                    # Byte hash, when observable, must match an observed response body.
+                    attested: dict[str, Any] | None = None
+                    for r in observed_font_responses:
+                        r_url = str(r.get("url", ""))
+                        if not r_url:
+                            continue
+                        if str(r.get("resource_type", "")).lower() != "font":
+                            continue
+                        try:
+                            r_status = int(r.get("status", 0) or 0)
+                        except (TypeError, ValueError):
+                            continue
+                        if r_status != final_status or not (200 <= r_status < 300):
+                            continue
+                        if exp_lower not in r_url.lower():
+                            continue
+                        if hashlib.sha256(r_url.encode("utf-8")).hexdigest() != att_url_fp:
+                            continue
+                        attested = r
+                        break
+                    if attested is None:
+                        return None
+                    # Byte hash, when observable, must match the attested body.
                     att_byte_hash = str(attestation.get("byte_sha256", "")).strip().lower()
                     if att_byte_hash:
-                        byte_match = any(
-                            str(r.get("byte_sha256", "")).strip().lower() == att_byte_hash
-                            and exp_lower in str(r.get("url", "")).lower()
-                            for r in observed_font_responses
-                        )
-                        if not byte_match:
+                        if str(attested.get("byte_sha256", "")).strip().lower() != att_byte_hash:
                             return None
 
                 required_source_cps = res.get("required_source_cps", [])
@@ -1563,6 +1578,118 @@ class PlaywrightStealthPersistentSession:
         except Exception as exc:
             logger.debug("Playwright persistent raster capture exception: %s", exc)
             return None
+        return None
+
+    async def capture_binary(self, source_url: str, style_rec: Any) -> bytes | None:
+        """Capture an authorized font binary from the stealth session.
+
+        Only an actually observed final 2xx font-typed response whose URL
+        binds the exact style MD5 and whose body is a valid font container
+        can produce bytes. Anything else fails closed with None. Raw URLs
+        stay in-memory only and are never persisted/logged.
+        """
+        if self._transport_override is not None:
+            return None
+        if not self.available():
+            return None
+
+        expected_md5 = str(getattr(style_rec, "md5", "") or "").strip().lower()
+        if not expected_md5 or len(expected_md5) != 32:
+            return None
+
+        from acquisition.providers import classify_font_container, looks_like_font_bytes
+
+        observed_bodies: list[bytes] = []
+
+        async def on_response(resp: Any) -> None:
+            try:
+                url = str(getattr(resp, "url", "") or "")
+                status = int(getattr(resp, "status", 0) or 0)
+                if not url or not (200 <= status < 300):
+                    return
+                resource_type = ""
+                try:
+                    req = getattr(resp, "request", None)
+                    resource_type = str(getattr(req, "resource_type", "") or "").lower()
+                except Exception:
+                    resource_type = ""
+                if resource_type != "font":
+                    return
+                if expected_md5 not in url.lower():
+                    return
+                body = await asyncio.wait_for(resp.body(), timeout=10.0)
+                if body:
+                    observed_bodies.append(bytes(body))
+            except Exception:
+                pass
+
+        try:
+            if self._playwright_launcher is not None:
+                context = await self._playwright_launcher(
+                    user_data_dir=str(self.user_data_dir or ""),
+                    channel="chrome",
+                    headless=True,
+                    args=self.LAUNCH_ARGS,
+                    ignore_default_args=self.IGNORED_DEFAULT_ARGS,
+                    user_agent=self.DESKTOP_UA,
+                    timeout=self.timeout_seconds * 1000,
+                )
+                try:
+                    await context.add_init_script(self.STEALTH_INIT_SCRIPT)
+                    page = await context.new_page()
+                    if hasattr(page, "on") and callable(page.on):
+                        res_on = page.on("response", on_response)
+                        if asyncio.iscoroutine(res_on):
+                            await res_on
+                    await page.goto(source_url, timeout=self.timeout_seconds * 1000, wait_until="domcontentloaded")
+                    try:
+                        await page.evaluate("document.fonts.ready")
+                    except Exception:
+                        pass
+                finally:
+                    await context.close()
+            else:
+                from playwright.async_api import async_playwright
+                async with async_playwright() as p:
+                    context = await p.chromium.launch_persistent_context(
+                        user_data_dir=str(self.user_data_dir),
+                        channel="chrome",
+                        headless=True,
+                        args=self.LAUNCH_ARGS,
+                        ignore_default_args=self.IGNORED_DEFAULT_ARGS,
+                        user_agent=self.DESKTOP_UA,
+                        timeout=self.timeout_seconds * 1000,
+                    )
+                    try:
+                        await context.add_init_script(self.STEALTH_INIT_SCRIPT)
+                        page = await context.new_page()
+                        if hasattr(page, "on") and callable(page.on):
+                            res_on = page.on("response", on_response)
+                            if asyncio.iscoroutine(res_on):
+                                await res_on
+                        await page.goto(source_url, timeout=self.timeout_seconds * 1000, wait_until="domcontentloaded")
+                        try:
+                            await page.evaluate("document.fonts.ready")
+                        except Exception:
+                            pass
+                    finally:
+                        await context.close()
+        except Exception as exc:
+            logger.debug("Playwright persistent binary capture exception: %s", exc)
+            return None
+
+        for raw in observed_bodies:
+            if not looks_like_font_bytes(raw):
+                continue
+            container = classify_font_container(raw)
+            if container in ("TTF", "OTF"):
+                return raw
+            if container in ("WOFF", "WOFF2"):
+                from compute.binary_gate import convert_container_to_sfnt
+
+                converted = convert_container_to_sfnt(raw)
+                if converted:
+                    return converted
         return None
 
 

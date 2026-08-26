@@ -64,3 +64,30 @@ def test_settings_missing_fields(monkeypatch):
     monkeypatch.delenv("A23_NODE_SECRET", raising=False)
     with pytest.raises(ValidationError):
         Settings(_env_file=None)
+
+
+def test_OPENROUTER_DEV_VARS_LOWERCASE_LOADS(tmp_path: Path, monkeypatch):
+    """OPENROUTER_DEV_VARS_LOWERCASE_LOADS: non-versioned dev.vars-shaped lowercase
+    openrouter_api_key loads safely into OPENROUTER_API_KEY (temporary fake file;
+    the real dev.vars is never read and the value never leaks into repr/logs)."""
+    fake_key = "sk-or-v1-fake-devvars-load-test-000000000000"
+    (tmp_path / "dev.vars").write_text(f"openrouter_api_key = {fake_key}\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    settings = Settings(
+        CF_ACCOUNT_ID="acc1",
+        CF_QUEUE_ID="q1",
+        CF_QUEUES_TOKEN="tok1",
+        EDGE_BASE_URL="http://example.com/edge",
+        A23_NODE_SECRET="sec1",
+        SCRATCH_DIR=tmp_path,
+    )
+
+    assert settings.OPENROUTER_API_KEY is not None
+    assert settings.OPENROUTER_API_KEY.get_secret_value() == fake_key
+    # VIETNAMESE_AI_ENABLED stays explicitly opt-in (default false).
+    assert settings.VIETNAMESE_AI_ENABLED is False
+    # Secret value never leaks into stringified settings.
+    assert fake_key not in repr(settings)
+    assert fake_key not in str(settings)

@@ -13,7 +13,10 @@ from config import Settings
 
 @pytest.fixture
 def test_settings(tmp_path: Path) -> Settings:
+    # Hermetic: never read local .env / dev.vars / ~/.telefont.env runtime
+    # secret files; every test value is supplied explicitly.
     return Settings(
+        _env_file=None,
         CF_ACCOUNT_ID="test_account_123",
         CF_QUEUE_ID="test_queue_456",
         CF_QUEUES_TOKEN="test_cf_token_secret",
