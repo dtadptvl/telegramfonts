@@ -12,10 +12,12 @@ Repros and invariants covered:
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -760,12 +762,52 @@ async def test_REAL_CALL_ORDER():
     ]
 
 
-def _make_fake_playwright_launcher(eval_result: Any):
+_FONT_PROOF_BODY = b"telefont-sealed-font-proof-body"
+
+
+def _sealed_attestation(md5: str, status: int = 200, body: bytes = _FONT_PROOF_BODY) -> dict:
+    """Sealed sanitized provenance attestation shape produced by the evaluator."""
+    return {
+        "resource_md5": md5,
+        "final_status": status,
+        "url_sha256": hashlib.sha256(("https://cdn.myfonts.net/fonts/" + md5 + ".woff2").encode("utf-8")).hexdigest(),
+        "byte_sha256": hashlib.sha256(body).hexdigest(),
+    }
+
+
+class _FakeFontResponse:
+    """Fake observed font response dispatched through the stealth response observer."""
+
+    def __init__(self, url: str, status: int = 200, body: bytes = _FONT_PROOF_BODY, resource_type: str = "font"):
+        self.url = url
+        self.status = status
+        self.request = SimpleNamespace(resource_type=resource_type)
+        self._body = body
+
+    async def body(self) -> bytes:
+        return self._body
+
+
+def _observed_font_proof(md5: str) -> list:
+    """One observed final 2xx font response binding the expected MD5."""
+    return [_FakeFontResponse("https://cdn.myfonts.net/fonts/" + md5 + ".woff2")]
+
+
+def _make_fake_playwright_launcher(eval_result: Any, observed_responses: list | None = None):
     async def _launcher(**kwargs):
         mock_page = MagicMock()
         mock_page.goto = AsyncMock()
         mock_page.evaluate = AsyncMock(return_value=eval_result)
         mock_page.content = AsyncMock(return_value="<html></html>")
+
+        async def _on(event, handler):
+            if event == "response" and observed_responses:
+                for fake_resp in observed_responses:
+                    dispatched = handler(fake_resp)
+                    if asyncio.iscoroutine(dispatched):
+                        await dispatched
+
+        mock_page.on = MagicMock(side_effect=_on)
 
         mock_context = MagicMock()
         mock_context.add_init_script = AsyncMock()
@@ -995,7 +1037,15 @@ async def test_STEALTH_TARGET_FONT_PROVEN():
         "results": [
             {
                 "pt": 120,
-                "resolved_face": {"family": "Regular", "style": "normal", "weight": "normal", "stretch": "normal", "resource_md5": "a" * 32},
+                "resolved_face": {
+                                    "family": "Regular",
+                                    "style": "normal",
+                                    "weight": "normal",
+                                    "stretch": "normal",
+                                    "status": "loaded",
+                                    "resource_md5": "a" * 32,
+                                    "attestation": _sealed_attestation("a" * 32),
+                                },
                 "required_source_cps": [65, 66],
                 "candidate_cps": [65, 66, 67],
                 "proven_cps": [65, 66],
@@ -1022,7 +1072,7 @@ async def test_STEALTH_TARGET_FONT_PROVEN():
         ]
     }
 
-    launcher = _make_fake_playwright_launcher(eval_result)
+    launcher = _make_fake_playwright_launcher(eval_result, observed_responses=_observed_font_proof("a" * 32))
     stealth = PlaywrightStealthPersistentSession(playwright_launcher=launcher)
     style_rec = StyleDiscoveryRecord(style_id="regular", style_name="Regular", md5="a" * 32)
     pages = await stealth.capture_raster_pages("https://www.myfonts.com/collections/test", style_rec, [120])
@@ -1051,7 +1101,15 @@ async def test_STEALTH_TRUNCATION_CONTINUES_PAGES():
         "results": [
             {
                 "pt": 120,
-                "resolved_face": {"family": "Regular", "style": "normal", "weight": "normal", "stretch": "normal", "resource_md5": "a" * 32},
+                "resolved_face": {
+                                    "family": "Regular",
+                                    "style": "normal",
+                                    "weight": "normal",
+                                    "stretch": "normal",
+                                    "status": "loaded",
+                                    "resource_md5": "a" * 32,
+                                    "attestation": _sealed_attestation("a" * 32),
+                                },
                 "required_source_cps": [65, 66, 67, 68],
                 "candidate_cps": [65, 66, 67, 68],
                 "proven_cps": [65, 66, 67, 68],
@@ -1084,7 +1142,7 @@ async def test_STEALTH_TRUNCATION_CONTINUES_PAGES():
         ]
     }
 
-    launcher = _make_fake_playwright_launcher(eval_result)
+    launcher = _make_fake_playwright_launcher(eval_result, observed_responses=_observed_font_proof("a" * 32))
     stealth = PlaywrightStealthPersistentSession(playwright_launcher=launcher)
     style_rec = StyleDiscoveryRecord(style_id="regular", style_name="Regular", md5="a" * 32)
     pages = await stealth.capture_raster_pages("https://www.myfonts.com/collections/test", style_rec, [120])
@@ -1173,7 +1231,15 @@ async def test_STEALTH_FEATURE_ON_OFF():
         "results": [
             {
                 "pt": 120,
-                "resolved_face": {"family": "Regular", "style": "normal", "weight": "normal", "stretch": "normal", "resource_md5": "a" * 32},
+                "resolved_face": {
+                                    "family": "Regular",
+                                    "style": "normal",
+                                    "weight": "normal",
+                                    "stretch": "normal",
+                                    "status": "loaded",
+                                    "resource_md5": "a" * 32,
+                                    "attestation": _sealed_attestation("a" * 32),
+                                },
                 "required_source_cps": [65],
                 "candidate_cps": [65],
                 "proven_cps": [65],
@@ -1198,7 +1264,7 @@ async def test_STEALTH_FEATURE_ON_OFF():
         ]
     }
 
-    launcher = _make_fake_playwright_launcher(eval_result)
+    launcher = _make_fake_playwright_launcher(eval_result, observed_responses=_observed_font_proof("a" * 32))
     stealth = PlaywrightStealthPersistentSession(playwright_launcher=launcher)
     style_rec = StyleDiscoveryRecord(style_id="regular", style_name="Regular", md5="a" * 32)
     pages = await stealth.capture_raster_pages("https://www.myfonts.com/collections/test", style_rec, [120])
@@ -1291,7 +1357,7 @@ async def test_STEALTH_DOM_FEATURE_ON_OFF():
         "results": [
             {
                 "pt": 120,
-                "resolved_face": {"family": "Helvetica", "style": "normal", "weight": "normal", "stretch": "normal", "resource_md5": "a" * 32},
+                "resolved_face": {"family": "Helvetica", "style": "normal", "weight": "normal", "stretch": "normal", "status": "loaded", "resource_md5": "a" * 32, "attestation": _sealed_attestation("a" * 32)},
                 "required_source_cps": [65],
                 "candidate_cps": [65],
                 "proven_cps": [65],
@@ -1321,7 +1387,7 @@ async def test_STEALTH_DOM_FEATURE_ON_OFF():
         ]
     }
 
-    launcher = _make_fake_playwright_launcher(eval_result)
+    launcher = _make_fake_playwright_launcher(eval_result, observed_responses=_observed_font_proof("a" * 32))
     stealth = PlaywrightStealthPersistentSession(playwright_launcher=launcher)
     style_rec = StyleDiscoveryRecord(style_id="helvetica-regular", style_name="Helvetica Regular", md5="a" * 32)
     pages = await stealth.capture_raster_pages("https://www.myfonts.com/collections/test", style_rec, [120])
@@ -1365,6 +1431,7 @@ async def test_STEALTH_LOCAL_EVALUATOR_EXECUTION():
                     "unicodeRange": "U+0041-0043",
                     "status": "loaded",
                     "resource_md5": args.get("expected_md5", "a" * 32),
+                    "attestation": _sealed_attestation(args.get("expected_md5", "a" * 32)),
                 },
                 "required_source_cps": [65, 66, 67],
                 "candidate_cps": [65, 66, 67],
@@ -1400,6 +1467,15 @@ async def test_STEALTH_LOCAL_EVALUATOR_EXECUTION():
     mock_page.goto = AsyncMock()
     mock_page.evaluate = AsyncMock(side_effect=dynamic_evaluator)
 
+    async def _dispatch_observed(event, handler):
+        if event == "response":
+            for fake_resp in _observed_font_proof("a" * 32):
+                dispatched = handler(fake_resp)
+                if asyncio.iscoroutine(dispatched):
+                    await dispatched
+
+    mock_page.on = MagicMock(side_effect=_dispatch_observed)
+
     mock_ctx = AsyncMock()
     mock_ctx.add_init_script = AsyncMock()
     mock_ctx.new_page = AsyncMock(return_value=mock_page)
@@ -1433,7 +1509,7 @@ async def test_STEALTH_LIGHT_NOT_REGULAR():
         "results": [
             {
                 "pt": 120,
-                "resolved_face": {"family": "Helvetica", "style": "normal", "weight": "300", "stretch": "normal", "resource_md5": "a" * 32},
+                "resolved_face": {"family": "Helvetica", "style": "normal", "weight": "300", "stretch": "normal", "status": "loaded", "resource_md5": "a" * 32, "attestation": _sealed_attestation("a" * 32)},
                 "required_source_cps": [65],
                 "candidate_cps": [65],
                 "proven_cps": [65],
@@ -1454,7 +1530,7 @@ async def test_STEALTH_LIGHT_NOT_REGULAR():
             }
         ]
     }
-    launcher = _make_fake_playwright_launcher(eval_result_300)
+    launcher = _make_fake_playwright_launcher(eval_result_300, observed_responses=_observed_font_proof("a" * 32))
     stealth = PlaywrightStealthPersistentSession(playwright_launcher=launcher)
     style_rec = StyleDiscoveryRecord(style_id="helvetica-light", style_name="Helvetica Light", md5="a" * 32)
     pages = await stealth.capture_raster_pages("https://www.myfonts.com/collections/test", style_rec, [120])
@@ -1509,7 +1585,7 @@ async def test_STEALTH_SEMIBOLD_600():
         "results": [
             {
                 "pt": 120,
-                "resolved_face": {"family": "Helvetica", "style": "normal", "weight": "600", "stretch": "normal", "resource_md5": "a" * 32},
+                "resolved_face": {"family": "Helvetica", "style": "normal", "weight": "600", "stretch": "normal", "status": "loaded", "resource_md5": "a" * 32, "attestation": _sealed_attestation("a" * 32)},
                 "required_source_cps": [65],
                 "candidate_cps": [65],
                 "proven_cps": [65],
@@ -1530,7 +1606,7 @@ async def test_STEALTH_SEMIBOLD_600():
             }
         ]
     }
-    launcher = _make_fake_playwright_launcher(eval_result_600)
+    launcher = _make_fake_playwright_launcher(eval_result_600, observed_responses=_observed_font_proof("a" * 32))
     stealth = PlaywrightStealthPersistentSession(playwright_launcher=launcher)
     style_rec = StyleDiscoveryRecord(style_id="helvetica-semibold", style_name="Helvetica Semibold", md5="a" * 32)
     pages = await stealth.capture_raster_pages("https://www.myfonts.com/collections/test", style_rec, [120])
@@ -1644,7 +1720,9 @@ async def test_STEALTH_UNICODE_WILDCARD():
                     "weight": "400",
                     "stretch": "normal",
                     "unicodeRange": "U+04??",
+                    "status": "loaded",
                     "resource_md5": "a" * 32,
+                    "attestation": _sealed_attestation("a" * 32),
                 },
                 "required_source_cps": wildcard_cps,
                 "candidate_cps": wildcard_cps,
@@ -1668,7 +1746,7 @@ async def test_STEALTH_UNICODE_WILDCARD():
         ]
     }
 
-    launcher = _make_fake_playwright_launcher(eval_result)
+    launcher = _make_fake_playwright_launcher(eval_result, observed_responses=_observed_font_proof("a" * 32))
     stealth = PlaywrightStealthPersistentSession(playwright_launcher=launcher)
     style_rec = StyleDiscoveryRecord(style_id="cyrillic-regular", style_name="CyrillicFont Regular", md5="a" * 32)
     pages = await stealth.capture_raster_pages("https://www.myfonts.com/collections/test", style_rec, [120])
@@ -1768,8 +1846,10 @@ async def test_STEALTH_MD5_BINDING_EXACT_ACCEPTED():
                     "style": "normal",
                     "weight": "400",
                     "stretch": "normal",
+                    "status": "loaded",
                     "src": f"url('https://cdn.myfonts.net/fonts/{exact_md5}.woff2')",
                     "resource_md5": exact_md5,
+                    "attestation": _sealed_attestation(exact_md5),
                 },
                 "required_source_cps": [65],
                 "candidate_cps": [65],
@@ -1792,7 +1872,7 @@ async def test_STEALTH_MD5_BINDING_EXACT_ACCEPTED():
         ]
     }
 
-    launcher = _make_fake_playwright_launcher(eval_result)
+    launcher = _make_fake_playwright_launcher(eval_result, observed_responses=_observed_font_proof(exact_md5))
     stealth = PlaywrightStealthPersistentSession(playwright_launcher=launcher)
     style_rec = StyleDiscoveryRecord(style_id="helvetica-regular", style_name="Helvetica Regular", md5=exact_md5)
     pages = await stealth.capture_raster_pages("https://www.myfonts.com/collections/test", style_rec, [120])
@@ -1880,6 +1960,9 @@ async def test_STEALTH_BROWSER_LOCAL_HTML_FIXTURE():
         assert "results" in eval_out_bold
         assert eval_out_bold["results"][0]["resolved_face"]["weight"] == "700"
         assert eval_out_bold["results"][0]["resolved_face"]["resource_md5"] == md5_bold
+        bold_att = eval_out_bold["results"][0]["resolved_face"]["attestation"]
+        assert bold_att["resource_md5"] == md5_bold
+        assert 200 <= bold_att["final_status"] < 300
 
         # Execute production CANVAS_EVALUATOR_SCRIPT for Regular
         eval_out_reg = await page.evaluate(
@@ -1896,6 +1979,9 @@ async def test_STEALTH_BROWSER_LOCAL_HTML_FIXTURE():
         assert "results" in eval_out_reg
         assert eval_out_reg["results"][0]["resolved_face"]["weight"] == "400"
         assert eval_out_reg["results"][0]["resolved_face"]["resource_md5"] == md5_reg
+        reg_att = eval_out_reg["results"][0]["resolved_face"]["attestation"]
+        assert reg_att["resource_md5"] == md5_reg
+        assert 200 <= reg_att["final_status"] < 300
     finally:
         await browser.close()
         await p_ctx.__aexit__(None, None, None)
@@ -2027,6 +2113,284 @@ async def test_STEALTH_OBSERVED_FONT_RESPONSE_ACCEPTED():
         res = eval_out["results"][0]
         assert res["resolved_face"]["resource_md5"] == valid_md5
         assert res["resolved_face"]["weight"] == "400"
+        att = res["resolved_face"]["attestation"]
+        assert att["resource_md5"] == valid_md5
+        assert 200 <= att["final_status"] < 300
+    finally:
+        await browser.close()
+        await p_ctx.__aexit__(None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_STEALTH_PERFORMANCE_ONLY_REJECTED():
+    """STEALTH_PERFORMANCE_ONLY_REJECTED: matching performance entry + no observed final 2xx font response -> STEALTH_MD5_RESOURCE_NOT_LOADED."""
+    from playwright.async_api import async_playwright
+
+    perf_md5 = "55555555555555555555555555555555"
+    perf_ttf = _build_real_ttf("PerfOnlyFamily", "Regular")
+
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+    <style>
+    @font-face {{
+        font-family: 'PerfOnlyFamily';
+        font-weight: 400;
+        font-style: normal;
+        src: url('https://fonts.example.com/{perf_md5}.woff2');
+        unicode-range: U+0041-0043;
+    }}
+    </style>
+    </head>
+    <body>
+    <div style="font-family: 'PerfOnlyFamily'; font-weight: 400;">Perf ABC</div>
+    </body>
+    </html>
+    """
+
+    try:
+        p_ctx = async_playwright()
+        p = await p_ctx.__aenter__()
+        browser = await p.chromium.launch(headless=True)
+    except Exception as exc:
+        pytest.skip(f"Browser launch unavailable in test environment: {exc}")
+
+    try:
+        page = await browser.new_page()
+        await page.route(
+            f"**/{perf_md5}.woff2",
+            lambda route: route.fulfill(status=200, content_type="font/woff2", body=perf_ttf),
+        )
+        await page.set_content(html_content)
+        await page.evaluate("document.fonts.ready")
+
+        # Font IS loaded (performance resource entry exists), but the network
+        # observer supplies no final 2xx attestation: performance timing alone
+        # can never attest identity.
+        eval_out = await page.evaluate(
+            CANVAS_EVALUATOR_SCRIPT,
+            {
+                "style_name": "PerfOnlyFamily Regular",
+                "style_id": "regular",
+                "requested_sizes": [120],
+                "expected_md5": perf_md5,
+                "observed_font_responses": [],
+            },
+        )
+        assert eval_out is not None
+        assert eval_out.get("error") == "STEALTH_MD5_RESOURCE_NOT_LOADED"
+    finally:
+        await browser.close()
+        await p_ctx.__aexit__(None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_STEALTH_REDIRECT_THEN_FAIL_REJECTED():
+    """STEALTH_REDIRECT_THEN_FAIL_REJECTED: expected-MD5 URL 3xx -> failed target/local fallback -> reject."""
+    from playwright.async_api import async_playwright
+
+    redir_md5 = "66666666666666666666666666666666"
+
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+    <style>
+    @font-face {{
+        font-family: 'RedirectFamily';
+        font-weight: 400;
+        font-style: normal;
+        src: url('https://fonts.example.com/{redir_md5}.woff2'), local('Arial');
+        unicode-range: U+0041-0043;
+    }}
+    </style>
+    </head>
+    <body>
+    <div style="font-family: 'RedirectFamily'; font-weight: 400;">Redirect ABC</div>
+    </body>
+    </html>
+    """
+
+    try:
+        p_ctx = async_playwright()
+        p = await p_ctx.__aenter__()
+        browser = await p.chromium.launch(headless=True)
+    except Exception as exc:
+        pytest.skip(f"Browser launch unavailable in test environment: {exc}")
+
+    try:
+        page = await browser.new_page()
+        await page.route(
+            f"**/{redir_md5}.woff2",
+            lambda route: route.fulfill(
+                status=302,
+                headers={"location": "https://fonts.example.com/redirect-target.woff2"},
+            ),
+        )
+        await page.route(
+            "**/redirect-target.woff2",
+            lambda route: route.fulfill(status=404, body=b"Not Found"),
+        )
+        observed_responses: list[dict[str, Any]] = []
+        page.on("response", lambda r: observed_responses.append({"url": r.url, "status": r.status}) if 200 <= r.status < 400 else None)
+
+        await page.set_content(html_content)
+        await page.evaluate("document.fonts.ready")
+
+        eval_out = await page.evaluate(
+            CANVAS_EVALUATOR_SCRIPT,
+            {
+                "style_name": "RedirectFamily Regular",
+                "style_id": "regular",
+                "requested_sizes": [120],
+                "expected_md5": redir_md5,
+                "observed_font_responses": observed_responses,
+            },
+        )
+        # 3xx redirect + failed target/local fallback can never attest identity.
+        assert eval_out is not None
+        assert eval_out.get("error") == "STEALTH_MD5_RESOURCE_NOT_LOADED"
+    finally:
+        await browser.close()
+        await p_ctx.__aexit__(None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_STEALTH_UNRELATED_MD5_RESPONSE_REJECTED():
+    """STEALTH_UNRELATED_MD5_RESPONSE_REJECTED: unrelated 2xx URL containing expected MD5 while font URL fails/local fallback -> reject."""
+    from playwright.async_api import async_playwright
+
+    unrel_md5 = "77777777777777777777777777777777"
+
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+    <style>
+    @font-face {{
+        font-family: 'UnrelatedFamily';
+        font-weight: 400;
+        font-style: normal;
+        src: url('https://fonts.example.com/{unrel_md5}.woff2'), local('Arial');
+        unicode-range: U+0041-0043;
+    }}
+    </style>
+    </head>
+    <body>
+    <div style="font-family: 'UnrelatedFamily'; font-weight: 400;">Unrelated ABC</div>
+    </body>
+    </html>
+    """
+
+    try:
+        p_ctx = async_playwright()
+        p = await p_ctx.__aenter__()
+        browser = await p.chromium.launch(headless=True)
+    except Exception as exc:
+        pytest.skip(f"Browser launch unavailable in test environment: {exc}")
+
+    try:
+        page = await browser.new_page()
+        # The declared font URL fails.
+        await page.route(
+            f"**/{unrel_md5}.woff2",
+            lambda route: route.fulfill(status=404, body=b"Not Found"),
+        )
+        # An unrelated 2xx response whose URL contains the expected MD5.
+        await page.route(
+            f"**/asset-meta-{unrel_md5}.json",
+            lambda route: route.fulfill(status=200, content_type="application/json", body=b"{}"),
+        )
+        observed_responses: list[dict[str, Any]] = []
+        page.on("response", lambda r: observed_responses.append({"url": r.url, "status": r.status}) if 200 <= r.status < 400 else None)
+
+        await page.set_content(html_content)
+        await page.evaluate("document.fonts.ready")
+        await page.evaluate("fetch('https://assets.example.com/asset-meta-" + unrel_md5 + ".json').catch(() => null)")
+
+        eval_out = await page.evaluate(
+            CANVAS_EVALUATOR_SCRIPT,
+            {
+                "style_name": "UnrelatedFamily Regular",
+                "style_id": "regular",
+                "requested_sizes": [120],
+                "expected_md5": unrel_md5,
+                "observed_font_responses": observed_responses,
+            },
+        )
+        # Unrelated 2xx response cannot attest the selected font source.
+        assert eval_out is not None
+        assert eval_out.get("error") == "STEALTH_MD5_RESOURCE_NOT_LOADED"
+    finally:
+        await browser.close()
+        await p_ctx.__aexit__(None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_STEALTH_UNLOADED_FACE_REJECTED():
+    """STEALTH_UNLOADED_FACE_REJECTED: matching descriptors but FontFace not loaded -> reject."""
+    from playwright.async_api import async_playwright
+
+    unld_md5 = "88888888888888888888888888888888"
+    unld_ttf = _build_real_ttf("UnloadedFamily", "Regular")
+
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+    <style>
+    @font-face {{
+        font-family: 'UnloadedFamily';
+        font-weight: 400;
+        font-style: normal;
+        src: url('https://fonts.example.com/{unld_md5}.woff2');
+        unicode-range: U+4E00-4E01;
+    }}
+    </style>
+    </head>
+    <body>
+    <div style="font-family: sans-serif;">No CJK text, face stays unloaded</div>
+    </body>
+    </html>
+    """
+
+    try:
+        p_ctx = async_playwright()
+        p = await p_ctx.__aenter__()
+        browser = await p.chromium.launch(headless=True)
+    except Exception as exc:
+        pytest.skip(f"Browser launch unavailable in test environment: {exc}")
+
+    try:
+        page = await browser.new_page()
+        await page.route(
+            f"**/{unld_md5}.woff2",
+            lambda route: route.fulfill(status=200, content_type="font/woff2", body=unld_ttf),
+        )
+        observed_responses: list[dict[str, Any]] = []
+        page.on("response", lambda r: observed_responses.append({"url": r.url, "status": r.status}) if 200 <= r.status < 400 else None)
+
+        await page.set_content(html_content)
+        await page.evaluate("document.fonts.ready")
+        # An observed final 2xx response for the exact font URL exists (via fetch),
+        # but the FontFace itself was never loaded.
+        await page.evaluate("fetch('https://fonts.example.com/" + unld_md5 + ".woff2', {cache: 'no-store'}).catch(() => null)")
+
+        eval_out = await page.evaluate(
+            CANVAS_EVALUATOR_SCRIPT,
+            {
+                "style_name": "UnloadedFamily Regular",
+                "style_id": "regular",
+                "requested_sizes": [120],
+                "expected_md5": unld_md5,
+                "observed_font_responses": observed_responses,
+            },
+        )
+        # An unloaded FontFace can never attest identity, even with an observed
+        # final 2xx response for its URL.
+        assert eval_out is not None
+        assert eval_out.get("error") == "STEALTH_MD5_RESOURCE_NOT_LOADED"
     finally:
         await browser.close()
         await p_ctx.__aexit__(None, None, None)

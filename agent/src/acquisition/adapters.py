@@ -636,27 +636,30 @@ async (args) => {
         }
     } catch (e) {}
 
-    // Performance resource URLs for loaded font files
-    const perfResourceUrls = [];
-    try {
-        const perfEntries = performance.getEntriesByType("resource") || [];
-        for (const pe of perfEntries) {
-            if (pe.name && (pe.initiatorType === "font" || pe.initiatorType === "css" || pe.name.includes(".woff") || pe.name.includes(".ttf") || pe.name.includes(".otf"))) {
-                const okStatus = (pe.responseStatus === undefined || pe.responseStatus === 0 || (pe.responseStatus >= 200 && pe.responseStatus < 400));
-                const hasBytes = (pe.decodedBodySize > 0 || pe.transferSize > 0 || pe.duration > 0);
-                if (okStatus && (hasBytes || pe.responseStatus >= 200)) {
-                    perfResourceUrls.push(pe.name);
-                }
-            }
+    // Sealed observed font responses from Playwright network observer.
+    // ONLY an actual final 2xx observed font response can attest identity.
+    // Performance timing, redirects (3xx), CSS rule text and unrelated/non-2xx
+    // responses are metadata only and can never independently attest identity.
+    const observedFinalResponses = (observed_font_responses || [])
+        .filter(r => r && typeof r.url === "string" && r.url &&
+                     Number.isInteger(r.status) && r.status >= 200 && r.status < 300);
+
+    function normalizeUrl(u) {
+        try {
+            return new URL(u, document.baseURI).href.toLowerCase();
+        } catch (e) {
+            return String(u).toLowerCase();
         }
-    } catch (e) {}
+    }
 
-    // Sealed observed font responses from Playwright network observer
-    const networkFontUrls = (observed_font_responses || [])
-        .filter(r => r && r.status >= 200 && r.status < 400 && r.url)
-        .map(r => r.url);
-
-    const verifiedLoadedUrls = Array.from(new Set([...perfResourceUrls, ...networkFontUrls]));
+    async function sha256Hex(text) {
+        try {
+            const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+            return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
+        } catch (e) {
+            return "";
+        }
+    }
 
     // 2. Resolve matching FontFace candidates
     const candidates = [];
@@ -674,6 +677,9 @@ async (args) => {
         if (faceWeight !== targetDesc.weight) continue;
         if (faceStretch !== targetDesc.stretch) continue;
 
+        // A candidate MUST be an actually loaded FontFace
+        if (face.status !== "loaded") continue;
+
         // Match with @font-face rule if available
         let matchedRule = null;
         for (const rule of fontFaceRules) {
@@ -684,38 +690,55 @@ async (args) => {
             }
         }
 
-        let ruleSrc = matchedRule ? matchedRule.src : "";
         let ruleUnicode = matchedRule ? matchedRule.unicodeRange : "";
         let resMd5 = "";
-        let resUrl = "";
+        let attestation = null;
 
         if (expected_md5) {
             const lowerExpected = expected_md5.toLowerCase();
-            // Cryptographic causal attestation:
-            // A font resource URL containing expected_md5 MUST have been successfully loaded with 2xx status.
-            // CSS rule declaration text alone is metadata, never proof of actual font loading!
-            let verifiedUrlMatch = "";
-            for (const vUrl of verifiedLoadedUrls) {
-                if (vUrl.toLowerCase().includes(lowerExpected)) {
-                    verifiedUrlMatch = vUrl;
-                    break;
+            // Sealed provenance attestation: the selected @font-face descriptor/source,
+            // a loaded FontFace, and an actual final 2xx observed font response MUST all
+            // bind the exact expected MD5. CSS text, performance timing, redirects and
+            // unrelated responses are metadata only and can never attest identity.
+            if (!matchedRule) continue;
+            const declaredSrcUrls = [];
+            const urlRe = /url\\(([^)]*)\\)/g;
+            let urlMatch;
+            while ((urlMatch = urlRe.exec(matchedRule.src || "")) !== null) {
+                let rawSrc = String(urlMatch[1]).trim();
+                if ((rawSrc.startsWith("'") && rawSrc.endsWith("'")) || (rawSrc.startsWith('"') && rawSrc.endsWith('"'))) {
+                    rawSrc = rawSrc.slice(1, -1);
                 }
+                if (rawSrc) declaredSrcUrls.push(normalizeUrl(rawSrc));
             }
+            if (declaredSrcUrls.length === 0) continue;
 
-            if (verifiedUrlMatch) {
-                resMd5 = lowerExpected;
-                resUrl = verifiedUrlMatch;
-            } else {
-                // If expected_md5 URL failed or was absent, and Chrome fell back to local('...'), reject candidate!
+            let attestEntry = null;
+            for (const obs of observedFinalResponses) {
+                const obsNorm = normalizeUrl(obs.url);
+                if (!obsNorm.includes(lowerExpected)) continue;
+                if (!declaredSrcUrls.includes(obsNorm)) continue;
+                attestEntry = obs;
+                break;
+            }
+            if (!attestEntry) {
+                // expected_md5 source failed/was absent, or only redirect/unrelated
+                // responses matched: local fallback can never attest identity.
                 continue;
             }
+            resMd5 = lowerExpected;
+            attestation = {
+                resource_md5: lowerExpected,
+                final_status: attestEntry.status,
+                url_sha256: await sha256Hex(attestEntry.url),
+                byte_sha256: attestEntry.byte_sha256 || "",
+            };
         } else {
-            // Find any 32-hex in verified loaded URLs
-            for (const vUrl of verifiedLoadedUrls) {
-                const hexes = vUrl.match(/[0-9a-fA-F]{32}/g);
+            // Find any 32-hex in observed final 2xx font responses
+            for (const obs of observedFinalResponses) {
+                const hexes = obs.url.match(/[0-9a-fA-F]{32}/g);
                 if (hexes && hexes.length > 0) {
                     resMd5 = hexes[0].toLowerCase();
-                    resUrl = vUrl;
                     break;
                 }
             }
@@ -727,9 +750,8 @@ async (args) => {
             weight: faceWeight,
             stretch: faceStretch,
             unicodeRange: face.unicodeRange || ruleUnicode || "",
-            src: ruleSrc,
             resourceMd5: resMd5,
-            resourceUrl: resUrl,
+            attestation: attestation,
         });
     }
 
@@ -757,9 +779,8 @@ async (args) => {
         stretch: fontStretch,
         unicodeRange: matched.unicodeRange,
         status: matchedFace.status || "loaded",
-        src: matched.src,
         resource_md5: matched.resourceMd5,
-        resource_url: matched.resourceUrl,
+        attestation: matched.attestation || null,
     };
 
     function getExactFontSpec(ptSize) {
@@ -1245,12 +1266,30 @@ class PlaywrightStealthPersistentSession:
 
         observed_font_responses: list[dict[str, Any]] = []
 
-        def on_response(resp: Any) -> None:
+        async def on_response(resp: Any) -> None:
             try:
-                url = str(getattr(resp, "url", ""))
-                status = int(getattr(resp, "status", 200))
-                if 200 <= status < 400 and url:
-                    observed_font_responses.append({"url": url, "status": status})
+                url = str(getattr(resp, "url", "") or "")
+                status = int(getattr(resp, "status", 0) or 0)
+                # Only actual final 2xx responses can ever attest identity.
+                if not url or not (200 <= status < 300):
+                    return
+                resource_type = ""
+                try:
+                    req = getattr(resp, "request", None)
+                    resource_type = str(getattr(req, "resource_type", "") or "").lower()
+                except Exception:
+                    resource_type = ""
+                # Reject unrelated resource types (image/xhr/css/...).
+                if resource_type and resource_type != "font":
+                    return
+                entry: dict[str, Any] = {"url": url, "status": status, "resource_type": resource_type, "byte_sha256": ""}
+                try:
+                    body = await asyncio.wait_for(resp.body(), timeout=10.0)
+                    if body:
+                        entry["byte_sha256"] = hashlib.sha256(body).hexdigest()
+                except Exception:
+                    pass
+                observed_font_responses.append(entry)
             except Exception:
                 pass
 
@@ -1382,22 +1421,42 @@ class PlaywrightStealthPersistentSession:
                 if rf_stretch != target_desc["stretch"]:
                     return None
 
-                # MD5 / Resource binding verification
+                # Sealed provenance attestation verification (fail closed).
+                # Raw observer URLs stay in-memory only; the persisted payload
+                # carries only the sealed sanitized attestation.
                 if expected_md5:
-                    rf_md5 = str(resolved_face.get("resource_md5", "")).strip().lower()
-                    rf_url = str(resolved_face.get("resource_url", "")).strip().lower()
                     exp_lower = expected_md5.strip().lower()
-
-                    if not rf_md5 or rf_md5 != exp_lower:
+                    if str(resolved_face.get("status", "")).lower() != "loaded":
                         return None
-
-                    # If observed_font_responses is non-empty, ensure at least one 2xx response matched exp_lower or rf_url
-                    if observed_font_responses:
-                        matched_observed = any(
-                            exp_lower in r.get("url", "").lower() and 200 <= r.get("status", 0) < 400
+                    attestation = resolved_face.get("attestation")
+                    if not attestation or not isinstance(attestation, dict):
+                        return None
+                    if str(attestation.get("resource_md5", "")).strip().lower() != exp_lower:
+                        return None
+                    try:
+                        final_status = int(attestation.get("final_status", 0) or 0)
+                    except (TypeError, ValueError):
+                        return None
+                    if not (200 <= final_status < 300):
+                        return None
+                    # Independently re-verify against raw observer evidence: an actual
+                    # observed final 2xx font response must bind the expected MD5.
+                    matched_observed = any(
+                        exp_lower in str(r.get("url", "")).lower()
+                        and 200 <= int(r.get("status", 0) or 0) < 300
+                        for r in observed_font_responses
+                    )
+                    if not matched_observed:
+                        return None
+                    # Byte hash, when observable, must match an observed response body.
+                    att_byte_hash = str(attestation.get("byte_sha256", "")).strip().lower()
+                    if att_byte_hash:
+                        byte_match = any(
+                            str(r.get("byte_sha256", "")).strip().lower() == att_byte_hash
+                            and exp_lower in str(r.get("url", "")).lower()
                             for r in observed_font_responses
                         )
-                        if not matched_observed and rf_url and exp_lower not in rf_url:
+                        if not byte_match:
                             return None
 
                 required_source_cps = res.get("required_source_cps", [])
