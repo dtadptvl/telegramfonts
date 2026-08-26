@@ -258,9 +258,14 @@ def is_complete_raster_pages(
     for p in pages:
         if not isinstance(p, SpriteRasterPage) or not p.raster_bytes:
             return False
-        # Validate PNG magic bytes
-        if not p.raster_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        # Validate PNG magic bytes and dimensions
+        if not p.raster_bytes.startswith(b"\x89PNG\r\n\x1a\n") or len(p.raster_bytes) < 24:
             return False
+        png_width = int.from_bytes(p.raster_bytes[16:20], "big")
+        png_height = int.from_bytes(p.raster_bytes[20:24], "big")
+        if png_width <= 0 or png_height <= 0:
+            return False
+
         payload = p.payload
         if not isinstance(payload, dict):
             return False
@@ -307,6 +312,9 @@ def is_complete_raster_pages(
             if not (isinstance(w, (int, float)) and isinstance(h, (int, float)) and isinstance(x, (int, float)) and isinstance(y, (int, float))):
                 return False
             if w <= 0 or h <= 0 or x < 0 or y < 0:
+                return False
+            # Verify bounding box is fully contained within decoded PNG dimensions
+            if x + w > png_width or y + h > png_height:
                 return False
 
         sizes_map.setdefault(pt, []).append(p)

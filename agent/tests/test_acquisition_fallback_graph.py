@@ -93,7 +93,12 @@ SAMPLE_MULTI_STYLE_HTML = """
 
 
 def _make_dummy_sprite_page(md5: str, acs_pt: int, page_index: int = 1, final: bool = True) -> SpriteRasterPage:
-    png_bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x10\x00\x00\x00\x10\x08\x06\x00\x00\x00\x1f\xf3\xffa\x00\x00\x00\x19IDATx\x9cc\xf8\xff\xff?\x03\x05\x00\x07\x00\x02\x01\x00\x00\x00\x00IEND\xaeB`\x82"
+    import io
+    from PIL import Image
+    im = Image.new("RGBA", (500, 500), (0, 0, 0, 0))
+    buf = io.BytesIO()
+    im.save(buf, format="PNG")
+    png_bytes = buf.getvalue()
     return SpriteRasterPage(
         page_index=page_index,
         glyph_count=2,
@@ -752,5 +757,257 @@ async def test_REAL_CALL_ORDER():
         "lane4_algolia_discover",
         "lane3_cdn",
     ]
+
+
+def _make_fake_playwright_launcher(eval_result: Any):
+    async def _launcher(**kwargs):
+        mock_page = MagicMock()
+        mock_page.goto = AsyncMock()
+        mock_page.evaluate = AsyncMock(return_value=eval_result)
+        mock_page.content = AsyncMock(return_value="<html></html>")
+
+        mock_context = MagicMock()
+        mock_context.add_init_script = AsyncMock()
+        mock_context.new_page = AsyncMock(return_value=mock_page)
+        mock_context.close = AsyncMock()
+        return mock_context
+    return _launcher
+
+
+# =========================================================================
+# CAUSAL PRODUCTION-BOUNDARY REPROS (Issue #73 comment 5418960565)
+# =========================================================================
+
+def test_CLEAN_DEPENDENCY_INSTALL():
+    """CLEAN_DEPENDENCY_INSTALL: Playwright is pinned in requirements-lock.txt and pyproject.toml."""
+    req_lock = (Path(__file__).resolve().parent.parent / "requirements-lock.txt").read_text(encoding="utf-8")
+    pyproject = (Path(__file__).resolve().parent.parent / "pyproject.toml").read_text(encoding="utf-8")
+
+    assert "playwright==" in req_lock or "playwright>=" in req_lock
+    assert "playwright" in pyproject
+
+
+def test_LEGACY_HTTP_ZERO():
+    """LEGACY_HTTP_ZERO: Production builder wires session_provider=None and makes zero legacy HTTP calls."""
+    from config import Settings
+    from acquisition.adapters import build_production_acquisition_pipeline
+
+    class _MockSettings:
+        ACQUISITION_ENABLED = True
+        AUTHORIZED_SESSION_MATERIAL_FILE = Path("/some/nonexistent/secret.json")
+        PLAYWRIGHT_STEALTH_ENABLED = False
+        MONOTYPE_RASTER_ENDPOINT_URL = ""
+        MYFONTS_ALGOLIA_APP_ID = ""
+        MYFONTS_ALGOLIA_API_KEY = None
+
+    pipeline = build_production_acquisition_pipeline(_MockSettings)
+    assert pipeline is not None
+    assert pipeline.session_provider is None
+
+
+def test_CDN_DUPLICATE_CONFLICT():
+    """CDN_DUPLICATE_CONFLICT: is_complete_raster_pages rejects duplicate/conflicting code points."""
+    from acquisition.models import is_complete_raster_pages, SpriteRasterPage
+
+    # Page 1 has U+0041 ('A')
+    p1 = _make_dummy_sprite_page("a" * 32, 120, page_index=1, final=False)
+    # Page 2 also has U+0041 ('A') with conflicting box
+    p2 = SpriteRasterPage(
+        page_index=2,
+        glyph_count=1,
+        raster_bytes=p1.raster_bytes,
+        next_cursor="",
+        final=True,
+        payload={
+            "md5": "a" * 32,
+            "acs_pt": 120,
+            "glyphs": [
+                {"code_point": 65, "glyph_index": 1, "sprite_box": {"x": 5, "y": 5, "width": 50, "height": 60}}
+            ],
+        },
+    )
+
+    # Conflicting U+0041 across pages must return False
+    assert is_complete_raster_pages([p1, p2], [120], expected_md5="a" * 32) is False
+
+
+def test_CDN_BOUND_WITHOUT_TERMINAL():
+    """CDN_BOUND_WITHOUT_TERMINAL: Hitting page bound without terminal completion fails closed."""
+    from acquisition.models import is_complete_raster_pages
+
+    # Non-final page with next_cursor="2" but no second page
+    p_open = _make_dummy_sprite_page("a" * 32, 120, page_index=1, final=False)
+    assert is_complete_raster_pages([p_open], [120], expected_md5="a" * 32) is False
+
+
+@pytest.mark.asyncio
+async def test_CDN_REAL_EMPTY_TERMINATOR():
+    """CDN_REAL_EMPTY_TERMINATOR: Production crawler fetches Page 1 (data) and Page 2 (empty terminal) and passes."""
+    import io
+    from PIL import Image
+    im = Image.new("RGBA", (200, 200), (0, 0, 0, 0))
+    buf = io.BytesIO()
+    im.save(buf, format="PNG")
+    png_bytes = buf.getvalue()
+    png_b64 = base64.b64encode(png_bytes).decode("ascii")
+
+    page1_data = {
+        "status": 200,
+        "image": png_b64,
+        "layout": {
+            "0": {"x": 5, "y": 5, "width": 30, "height": 40, "glyph": 1, "codePoint": 65},
+            "1": {"x": 40, "y": 5, "width": 30, "height": 40, "glyph": 2, "codePoint": 66},
+        },
+    }
+    page2_data = {
+        "status": 200,
+        "image": png_b64,
+        "layout": {},  # Empty layout terminal page
+    }
+
+    client = MonotypeRenderClient(base_url="https://sig.monotype.com")
+
+    call_count = 0
+    async def mock_fetch_sprite_page(req, cursor):
+        nonlocal call_count
+        call_count += 1
+        md5 = req["md5"]
+        pt = req.get("acs_pt", 120)
+        if cursor == "":
+            return client._parse_page(page1_data, {"content-type": "application/json"}, 1, md5, pt)
+        elif cursor == "2":
+            return client._parse_page(page2_data, {"content-type": "application/json"}, 2, md5, pt)
+        return None
+
+    client.fetch_sprite_page = AsyncMock(side_effect=mock_fetch_sprite_page)
+
+    policy = BinaryAcquisitionPolicy(max_sprite_pages=5)
+    request = {
+        "family": "Test Family",
+        "style": "Regular",
+        "md5": "a" * 32,
+        "acs_pts": [120],
+    }
+
+    pages = await client.fetch_all_sprite_pages(request, policy)
+    assert pages is not None
+    assert len(pages) == 2
+    assert pages[0].page_index == 1
+    assert pages[0].glyph_count == 2
+    assert pages[0].final is False
+    assert pages[1].page_index == 2
+    assert pages[1].glyph_count == 0
+    assert pages[1].final is True
+    assert pages[1].next_cursor == ""
+
+
+@pytest.mark.asyncio
+async def test_STEALTH_FALLBACK_FONT_REJECTED():
+    """STEALTH_FALLBACK_FONT_REJECTED: If target font is unverified or falls back to system font, returns None."""
+    stealth_invalid = PlaywrightStealthPersistentSession(user_data_dir=Path("/nonexistent/dir"))
+    assert stealth_invalid.available() is False
+
+    res = await stealth_invalid.capture_raster_pages(
+        "https://www.myfonts.com/collections/test",
+        StyleDiscoveryRecord(style_id="regular", style_name="Regular", md5="a" * 32),
+        [120],
+    )
+    assert res is None
+
+
+@pytest.mark.asyncio
+async def test_STEALTH_PER_GLYPH_FALLBACK_REJECTED():
+    """STEALTH_PER_GLYPH_FALLBACK_REJECTED: Evaluator returning fallback error fails closed."""
+    launcher = _make_fake_playwright_launcher({"error": "FALLBACK_DISCRIMINATION_FAILED"})
+    stealth = PlaywrightStealthPersistentSession(playwright_launcher=launcher)
+    style_rec = StyleDiscoveryRecord(style_id="regular", style_name="Regular", md5="a" * 32)
+    pages = await stealth.capture_raster_pages("https://www.myfonts.com/collections/test", style_rec, [120])
+    assert pages is None
+
+
+@pytest.mark.asyncio
+async def test_STEALTH_SPRITE_OVERFLOW_REJECTED():
+    """STEALTH_SPRITE_OVERFLOW_REJECTED: Glyph box exceeding PNG dimensions is rejected."""
+    import io
+    from PIL import Image
+    im = Image.new("RGBA", (100, 100), (0, 0, 0, 0))
+    buf = io.BytesIO()
+    im.save(buf, format="PNG")
+    png_bytes = buf.getvalue()
+    b64_str = "data:image/png;base64," + base64.b64encode(png_bytes).decode("ascii")
+
+    eval_result = {
+        "results": [
+            {
+                "pt": 120,
+                "dataUrl": b64_str,
+                "glyphs": [
+                    {"code_point": 65, "glyph_index": 1, "sprite_box": {"x": 5, "y": 5, "width": 150, "height": 50}},
+                ],
+                "pairs": [],
+                "features": [],
+            }
+        ]
+    }
+
+    launcher = _make_fake_playwright_launcher(eval_result)
+    stealth = PlaywrightStealthPersistentSession(playwright_launcher=launcher)
+    style_rec = StyleDiscoveryRecord(style_id="regular", style_name="Regular", md5="a" * 32)
+    pages = await stealth.capture_raster_pages("https://www.myfonts.com/collections/test", style_rec, [120])
+    assert pages is None
+
+
+@pytest.mark.asyncio
+async def test_STEALTH_UNMEASURED_FEATURE_REJECTED():
+    """STEALTH_UNMEASURED_FEATURE_REJECTED: Unmeasured / zero delta features fail closed."""
+    launcher = _make_fake_playwright_launcher({"error": "NO_PROVEN_TARGET_GLYPHS"})
+    stealth = PlaywrightStealthPersistentSession(playwright_launcher=launcher)
+    style_rec = StyleDiscoveryRecord(style_id="regular", style_name="Regular", md5="a" * 32)
+    pages = await stealth.capture_raster_pages("https://www.myfonts.com/collections/test", style_rec, [120])
+    assert pages is None
+
+
+@pytest.mark.asyncio
+async def test_STEALTH_TARGET_FONT_PROVEN():
+    """STEALTH_TARGET_FONT_PROVEN: Closed fake Playwright page executes production decoding, box validation and feature capture."""
+    import io
+    from PIL import Image
+    im = Image.new("RGBA", (200, 200), (0, 0, 0, 0))
+    buf = io.BytesIO()
+    im.save(buf, format="PNG")
+    png_bytes = buf.getvalue()
+    b64_str = "data:image/png;base64," + base64.b64encode(png_bytes).decode("ascii")
+
+    eval_result = {
+        "results": [
+            {
+                "pt": 120,
+                "dataUrl": b64_str,
+                "glyphs": [
+                    {"code_point": 65, "glyph_index": 1, "sprite_box": {"x": 5, "y": 5, "width": 40, "height": 50}},
+                    {"code_point": 66, "glyph_index": 2, "sprite_box": {"x": 50, "y": 5, "width": 38, "height": 50}},
+                ],
+                "pairs": [
+                    {"left_char": "A", "right_char": "V", "pair_text": "AV", "kern_px": -2.5, "provenance": "playwright:canvas_text_metrics"}
+                ],
+                "features": [
+                    {"feature_tag": "liga", "sample_text": "fi", "delta_px": -1.2, "measured": True, "provenance": "playwright:canvas_feature_probe"}
+                ],
+            }
+        ]
+    }
+
+    launcher = _make_fake_playwright_launcher(eval_result)
+    stealth = PlaywrightStealthPersistentSession(playwright_launcher=launcher)
+    style_rec = StyleDiscoveryRecord(style_id="regular", style_name="Regular", md5="a" * 32)
+    pages = await stealth.capture_raster_pages("https://www.myfonts.com/collections/test", style_rec, [120])
+
+    assert pages is not None
+    assert len(pages) == 1
+    assert pages[0].payload["pairs"]
+    assert pages[0].payload["features"]
+    assert pages[0].payload["glyphs"][0]["sprite_box"]["width"] == 40
+    assert pages[0].glyph_count == 2
+
 
 

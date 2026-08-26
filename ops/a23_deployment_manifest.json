@@ -1,8 +1,8 @@
 {
   "core_file_hashes": {
-    "agent/src/acquisition/adapters.py": "260b7a3dbf4d31b58da2659acbdf80d2d0d14b3e43ce9186e8c9fb209acdd46f",
+    "agent/src/acquisition/adapters.py": "e9e4048d3e723c01031ee21177aabd35758cb449c4cdbf584fbfd458a8926acc",
     "agent/src/acquisition/capability.py": "c9494c1ebf880e0c9cda1b2772e406561bc96df49f131f55c296c098afd65e54",
-    "agent/src/acquisition/models.py": "b81fa8e3f8c96aaef55366a32a6f8907a05ab0c0d063476813448ad24487e2bf",
+    "agent/src/acquisition/models.py": "d08d7fbcdcfef2dea71a064f3756f27c06da102bbcbc09f13665c0c49cbbb4f9",
     "agent/src/acquisition/pipeline.py": "e313fe8f70d88c246bb5d7af2d7007cde3e5b202ed9ecead045a5ccf34a29f64",
     "agent/src/acquisition/providers.py": "dd7e7cb723e242708bcb64e5cdd91af9c0c2957622df9873a0a9022a9cc2763c",
     "agent/src/acquisition/raster_ingest.py": "2d269d6399950f2a9a2f20df2b9a22ea89d1eda9b8838706aa81340253b84627",
@@ -64,14 +64,14 @@
   },
   "dependencies": {
     "fonttools": "4.63.0",
-    "freetype-py": "<function version at 0x00000189F47C1B10>",
+    "freetype-py": "<function version at 0x000001C53AE81B10>",
     "httpx": "0.28.1",
     "pillow": "12.3.0",
     "pydantic": "2.13.4",
     "uharfbuzz": "14.3.0"
   },
-  "main_commit_sha": "8532c069571cbdcaf6bb1d882482e76b7aa3c062",
-  "manifest_signature": "b9034359e22d1719ff9cba90d1426509853369c8130a2ec13d0e4cc6f14eed70",
+  "main_commit_sha": "1e860145cd307783e962ac81b2fba797ba47bf3b",
+  "manifest_signature": "204acb0a8e10bd6304a3fbe9486c6de21636734f3ea15601c47f4d6b17642f96",
   "observation_config_hash": "f4f7ee68ad81c6374b45a6ebca734a87a47e398354bc37b24b68ee19513d0364",
   "platform_machine": "AMD64",
   "platform_system": "Windows",
