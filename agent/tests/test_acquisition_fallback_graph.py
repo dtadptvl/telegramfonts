@@ -1809,6 +1809,9 @@ async def test_STEALTH_BROWSER_LOCAL_HTML_FIXTURE():
     md5_reg = "11111111111111111111111111111111"
     md5_bold = "22222222222222222222222222222222"
 
+    ttf_reg = _build_real_ttf("LocalTestFamily", "Regular")
+    ttf_bold = _build_real_ttf("LocalTestFamily", "Bold")
+
     html_content = f"""
     <!DOCTYPE html>
     <html>
@@ -1818,14 +1821,14 @@ async def test_STEALTH_BROWSER_LOCAL_HTML_FIXTURE():
         font-family: 'LocalTestFamily';
         font-weight: 400;
         font-style: normal;
-        src: url('https://fonts.example.com/{md5_reg}.woff2'), local('Arial');
+        src: url('https://fonts.example.com/{md5_reg}.woff2');
         unicode-range: U+0041-0043;
     }}
     @font-face {{
         font-family: 'LocalTestFamily';
         font-weight: 700;
         font-style: normal;
-        src: url('https://fonts.example.com/{md5_bold}.woff2'), local('Arial-Bold');
+        src: url('https://fonts.example.com/{md5_bold}.woff2');
         unicode-range: U+0041-0043;
     }}
     </style>
@@ -1838,33 +1841,192 @@ async def test_STEALTH_BROWSER_LOCAL_HTML_FIXTURE():
     """
 
     try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            try:
-                page = await browser.new_page()
-                await page.set_content(html_content)
-                await page.evaluate("document.fonts.ready")
-
-                # Execute production CANVAS_EVALUATOR_SCRIPT for Bold
-                eval_out_bold = await page.evaluate(
-                    CANVAS_EVALUATOR_SCRIPT,
-                    {"style_name": "LocalTestFamily Bold", "style_id": "bold", "requested_sizes": [120], "expected_md5": md5_bold},
-                )
-                assert eval_out_bold is not None
-                assert "results" in eval_out_bold
-                assert eval_out_bold["results"][0]["resolved_face"]["weight"] == "700"
-                assert eval_out_bold["results"][0]["resolved_face"]["resource_md5"] == md5_bold
-
-                # Execute production CANVAS_EVALUATOR_SCRIPT for Regular
-                eval_out_reg = await page.evaluate(
-                    CANVAS_EVALUATOR_SCRIPT,
-                    {"style_name": "LocalTestFamily Regular", "style_id": "regular", "requested_sizes": [120], "expected_md5": md5_reg},
-                )
-                assert eval_out_reg is not None
-                assert "results" in eval_out_reg
-                assert eval_out_reg["results"][0]["resolved_face"]["weight"] == "400"
-                assert eval_out_reg["results"][0]["resolved_face"]["resource_md5"] == md5_reg
-            finally:
-                await browser.close()
+        p_ctx = async_playwright()
+        p = await p_ctx.__aenter__()
+        browser = await p.chromium.launch(headless=True)
     except Exception as exc:
         pytest.skip(f"Browser launch unavailable in test environment: {exc}")
+
+    try:
+        page = await browser.new_page()
+        # Route font URLs to serve actual font binaries
+        await page.route(
+            f"**/{md5_reg}.woff2",
+            lambda route: route.fulfill(status=200, content_type="font/woff2", body=ttf_reg),
+        )
+        await page.route(
+            f"**/{md5_bold}.woff2",
+            lambda route: route.fulfill(status=200, content_type="font/woff2", body=ttf_bold),
+        )
+
+        observed_responses: list[dict[str, Any]] = []
+        page.on("response", lambda r: observed_responses.append({"url": r.url, "status": r.status}) if 200 <= r.status < 400 else None)
+
+        await page.set_content(html_content)
+        await page.evaluate("document.fonts.ready")
+
+        # Execute production CANVAS_EVALUATOR_SCRIPT for Bold
+        eval_out_bold = await page.evaluate(
+            CANVAS_EVALUATOR_SCRIPT,
+            {
+                "style_name": "LocalTestFamily Bold",
+                "style_id": "bold",
+                "requested_sizes": [120],
+                "expected_md5": md5_bold,
+                "observed_font_responses": observed_responses,
+            },
+        )
+        assert eval_out_bold is not None
+        assert "results" in eval_out_bold
+        assert eval_out_bold["results"][0]["resolved_face"]["weight"] == "700"
+        assert eval_out_bold["results"][0]["resolved_face"]["resource_md5"] == md5_bold
+
+        # Execute production CANVAS_EVALUATOR_SCRIPT for Regular
+        eval_out_reg = await page.evaluate(
+            CANVAS_EVALUATOR_SCRIPT,
+            {
+                "style_name": "LocalTestFamily Regular",
+                "style_id": "regular",
+                "requested_sizes": [120],
+                "expected_md5": md5_reg,
+                "observed_font_responses": observed_responses,
+            },
+        )
+        assert eval_out_reg is not None
+        assert "results" in eval_out_reg
+        assert eval_out_reg["results"][0]["resolved_face"]["weight"] == "400"
+        assert eval_out_reg["results"][0]["resolved_face"]["resource_md5"] == md5_reg
+    finally:
+        await browser.close()
+        await p_ctx.__aexit__(None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_STEALTH_CSS_MD5_WITH_LOCAL_FALLBACK_REJECTED():
+    """STEALTH_CSS_MD5_WITH_LOCAL_FALLBACK_REJECTED: CSS declares MD5 URL with local fallback, but URL 404s/fails -> rejected."""
+    from playwright.async_api import async_playwright
+
+    fake_md5 = "33333333333333333333333333333333"
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+    <style>
+    @font-face {{
+        font-family: 'LocalFallbackTest';
+        font-weight: 400;
+        font-style: normal;
+        src: url('https://fonts.example.com/{fake_md5}.woff2'), local('Arial');
+        unicode-range: U+0041-0043;
+    }}
+    </style>
+    </head>
+    <body>
+    <div style="font-family: 'LocalFallbackTest'; font-weight: 400;">Fallback ABC</div>
+    </body>
+    </html>
+    """
+
+    try:
+        p_ctx = async_playwright()
+        p = await p_ctx.__aenter__()
+        browser = await p.chromium.launch(headless=True)
+    except Exception as exc:
+        pytest.skip(f"Browser launch unavailable in test environment: {exc}")
+
+    try:
+        page = await browser.new_page()
+        # Route fake font URL to 404
+        await page.route(
+            f"**/{fake_md5}.woff2",
+            lambda route: route.fulfill(status=404, body=b"Not Found"),
+        )
+        observed_responses: list[dict[str, Any]] = []
+        page.on("response", lambda r: observed_responses.append({"url": r.url, "status": r.status}) if 200 <= r.status < 400 else None)
+
+        await page.set_content(html_content)
+        await page.evaluate("document.fonts.ready")
+
+        eval_out = await page.evaluate(
+            CANVAS_EVALUATOR_SCRIPT,
+            {
+                "style_name": "LocalFallbackTest Regular",
+                "style_id": "regular",
+                "requested_sizes": [120],
+                "expected_md5": fake_md5,
+                "observed_font_responses": observed_responses,
+            },
+        )
+        # Evaluator MUST fail closed with STEALTH_MD5_RESOURCE_NOT_LOADED
+        assert eval_out is not None
+        assert eval_out.get("error") == "STEALTH_MD5_RESOURCE_NOT_LOADED"
+    finally:
+        await browser.close()
+        await p_ctx.__aexit__(None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_STEALTH_OBSERVED_FONT_RESPONSE_ACCEPTED():
+    """STEALTH_OBSERVED_FONT_RESPONSE_ACCEPTED: Exact font URL fulfilled with 200 and bytes -> accepted and bound."""
+    from playwright.async_api import async_playwright
+
+    valid_md5 = "44444444444444444444444444444444"
+    valid_ttf = _build_real_ttf("ObservedFamily", "Regular")
+
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+    <style>
+    @font-face {{
+        font-family: 'ObservedFamily';
+        font-weight: 400;
+        font-style: normal;
+        src: url('https://fonts.example.com/{valid_md5}.woff2');
+        unicode-range: U+0041-0043;
+    }}
+    </style>
+    </head>
+    <body>
+    <div style="font-family: 'ObservedFamily'; font-weight: 400;">Observed ABC</div>
+    </body>
+    </html>
+    """
+
+    try:
+        p_ctx = async_playwright()
+        p = await p_ctx.__aenter__()
+        browser = await p.chromium.launch(headless=True)
+    except Exception as exc:
+        pytest.skip(f"Browser launch unavailable in test environment: {exc}")
+
+    try:
+        page = await browser.new_page()
+        await page.route(
+            f"**/{valid_md5}.woff2",
+            lambda route: route.fulfill(status=200, content_type="font/woff2", body=valid_ttf),
+        )
+        observed_responses: list[dict[str, Any]] = []
+        page.on("response", lambda r: observed_responses.append({"url": r.url, "status": r.status}) if 200 <= r.status < 400 else None)
+
+        await page.set_content(html_content)
+        await page.evaluate("document.fonts.ready")
+
+        eval_out = await page.evaluate(
+            CANVAS_EVALUATOR_SCRIPT,
+            {
+                "style_name": "ObservedFamily Regular",
+                "style_id": "regular",
+                "requested_sizes": [120],
+                "expected_md5": valid_md5,
+                "observed_font_responses": observed_responses,
+            },
+        )
+        assert eval_out is not None
+        assert "results" in eval_out
+        res = eval_out["results"][0]
+        assert res["resolved_face"]["resource_md5"] == valid_md5
+        assert res["resolved_face"]["weight"] == "400"
+    finally:
+        await browser.close()
+        await p_ctx.__aexit__(None, None, None)

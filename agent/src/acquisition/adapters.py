@@ -542,7 +542,7 @@ def extract_font_descriptors(style_name: str, style_id: str = "") -> dict[str, s
 
 CANVAS_EVALUATOR_SCRIPT: str = """
 async (args) => {
-    const { requested_sizes, style_name, style_id, expected_md5 } = args;
+    const { requested_sizes, style_name, style_id, expected_md5, observed_font_responses } = args || {};
 
     function normWeight(w) {
         if (!w) return "400";
@@ -636,16 +636,27 @@ async (args) => {
         }
     } catch (e) {}
 
-    // Performance resource URLs for font files
-    const fontResourceUrls = [];
+    // Performance resource URLs for loaded font files
+    const perfResourceUrls = [];
     try {
         const perfEntries = performance.getEntriesByType("resource") || [];
         for (const pe of perfEntries) {
             if (pe.name && (pe.initiatorType === "font" || pe.initiatorType === "css" || pe.name.includes(".woff") || pe.name.includes(".ttf") || pe.name.includes(".otf"))) {
-                fontResourceUrls.push(pe.name);
+                const okStatus = (pe.responseStatus === undefined || pe.responseStatus === 0 || (pe.responseStatus >= 200 && pe.responseStatus < 400));
+                const hasBytes = (pe.decodedBodySize > 0 || pe.transferSize > 0 || pe.duration > 0);
+                if (okStatus && (hasBytes || pe.responseStatus >= 200)) {
+                    perfResourceUrls.push(pe.name);
+                }
             }
         }
     } catch (e) {}
+
+    // Sealed observed font responses from Playwright network observer
+    const networkFontUrls = (observed_font_responses || [])
+        .filter(r => r && r.status >= 200 && r.status < 400 && r.url)
+        .map(r => r.url);
+
+    const verifiedLoadedUrls = Array.from(new Set([...perfResourceUrls, ...networkFontUrls]));
 
     // 2. Resolve matching FontFace candidates
     const candidates = [];
@@ -676,38 +687,38 @@ async (args) => {
         let ruleSrc = matchedRule ? matchedRule.src : "";
         let ruleUnicode = matchedRule ? matchedRule.unicodeRange : "";
         let resMd5 = "";
+        let resUrl = "";
 
-        // Collect all observable 32-hex tokens for this font
-        const observableHexes = [];
-        if (ruleSrc) {
-            const hexes = ruleSrc.match(/[0-9a-fA-F]{32}/g);
-            if (hexes) {
-                for (const h of hexes) observableHexes.push(h.toLowerCase());
-            }
-        }
-        for (const u of fontResourceUrls) {
-            const uNorm = u.toLowerCase().replace(/[^a-z0-9]/g, "");
-            if (uNorm.includes(faceFamNorm) || faceFamNorm.includes(uNorm)) {
-                const hexes = u.match(/[0-9a-fA-F]{32}/g);
-                if (hexes) {
-                    for (const h of hexes) observableHexes.push(h.toLowerCase());
-                }
-            }
-        }
-
-        // If expected_md5 is non-empty, require positive observable exact resource binding
         if (expected_md5) {
             const lowerExpected = expected_md5.toLowerCase();
-            if (observableHexes.includes(lowerExpected)) {
+            // Cryptographic causal attestation:
+            // A font resource URL containing expected_md5 MUST have been successfully loaded with 2xx status.
+            // CSS rule declaration text alone is metadata, never proof of actual font loading!
+            let verifiedUrlMatch = "";
+            for (const vUrl of verifiedLoadedUrls) {
+                if (vUrl.toLowerCase().includes(lowerExpected)) {
+                    verifiedUrlMatch = vUrl;
+                    break;
+                }
+            }
+
+            if (verifiedUrlMatch) {
                 resMd5 = lowerExpected;
-            } else if (ruleSrc.toLowerCase().includes(lowerExpected) || face.family.toLowerCase().includes(lowerExpected)) {
-                resMd5 = lowerExpected;
+                resUrl = verifiedUrlMatch;
             } else {
-                // No observable cryptographic / MD5 binding to expected_md5 -> candidate rejected
+                // If expected_md5 URL failed or was absent, and Chrome fell back to local('...'), reject candidate!
                 continue;
             }
-        } else if (observableHexes.length > 0) {
-            resMd5 = observableHexes[0];
+        } else {
+            // Find any 32-hex in verified loaded URLs
+            for (const vUrl of verifiedLoadedUrls) {
+                const hexes = vUrl.match(/[0-9a-fA-F]{32}/g);
+                if (hexes && hexes.length > 0) {
+                    resMd5 = hexes[0].toLowerCase();
+                    resUrl = vUrl;
+                    break;
+                }
+            }
         }
 
         candidates.push({
@@ -718,12 +729,13 @@ async (args) => {
             unicodeRange: face.unicodeRange || ruleUnicode || "",
             src: ruleSrc,
             resourceMd5: resMd5,
+            resourceUrl: resUrl,
         });
     }
 
     if (candidates.length === 0) {
         if (expected_md5) {
-            return { error: "STEALTH_MD5_BINDING_UNPROVEN" };
+            return { error: "STEALTH_MD5_RESOURCE_NOT_LOADED" };
         }
         return { error: "NO_MATCHING_LOADED_FONT_FACE" };
     }
@@ -747,6 +759,7 @@ async (args) => {
         status: matchedFace.status || "loaded",
         src: matched.src,
         resource_md5: matched.resourceMd5,
+        resource_url: matched.resourceUrl,
     };
 
     function getExactFontSpec(ptSize) {
@@ -1230,6 +1243,17 @@ class PlaywrightStealthPersistentSession:
         style_id = getattr(style_rec, "style_id", "")
         expected_md5 = getattr(style_rec, "md5", "")
 
+        observed_font_responses: list[dict[str, Any]] = []
+
+        def on_response(resp: Any) -> None:
+            try:
+                url = str(getattr(resp, "url", ""))
+                status = int(getattr(resp, "status", 200))
+                if 200 <= status < 400 and url:
+                    observed_font_responses.append({"url": url, "status": status})
+            except Exception:
+                pass
+
         try:
             if self._playwright_launcher is not None:
                 context = await self._playwright_launcher(
@@ -1244,6 +1268,10 @@ class PlaywrightStealthPersistentSession:
                 try:
                     await context.add_init_script(self.STEALTH_INIT_SCRIPT)
                     page = await context.new_page()
+                    if hasattr(page, "on") and callable(page.on):
+                        res_on = page.on("response", on_response)
+                        if asyncio.iscoroutine(res_on):
+                            await res_on
                     await page.goto(source_url, timeout=self.timeout_seconds * 1000, wait_until="domcontentloaded")
                     eval_out = await page.evaluate(
                         CANVAS_EVALUATOR_SCRIPT,
@@ -1252,6 +1280,7 @@ class PlaywrightStealthPersistentSession:
                             "style_name": style_name,
                             "style_id": style_id,
                             "expected_md5": expected_md5,
+                            "observed_font_responses": observed_font_responses,
                         },
                     )
                 finally:
@@ -1271,6 +1300,10 @@ class PlaywrightStealthPersistentSession:
                     try:
                         await context.add_init_script(self.STEALTH_INIT_SCRIPT)
                         page = await context.new_page()
+                        if hasattr(page, "on") and callable(page.on):
+                            res_on = page.on("response", on_response)
+                            if asyncio.iscoroutine(res_on):
+                                await res_on
                         await page.goto(source_url, timeout=self.timeout_seconds * 1000, wait_until="domcontentloaded")
                         eval_out = await page.evaluate(
                             CANVAS_EVALUATOR_SCRIPT,
@@ -1279,6 +1312,7 @@ class PlaywrightStealthPersistentSession:
                                 "style_name": style_name,
                                 "style_id": style_id,
                                 "expected_md5": expected_md5,
+                                "observed_font_responses": observed_font_responses,
                             },
                         )
                     finally:
@@ -1351,17 +1385,20 @@ class PlaywrightStealthPersistentSession:
                 # MD5 / Resource binding verification
                 if expected_md5:
                     rf_md5 = str(resolved_face.get("resource_md5", "")).strip().lower()
-                    rf_src = str(resolved_face.get("src", "")).strip().lower()
+                    rf_url = str(resolved_face.get("resource_url", "")).strip().lower()
                     exp_lower = expected_md5.strip().lower()
 
-                    if rf_md5:
-                        if rf_md5 != exp_lower:
-                            return None
-                    elif exp_lower in rf_src:
-                        pass
-                    else:
-                        # Positive observable exact resource binding is required
+                    if not rf_md5 or rf_md5 != exp_lower:
                         return None
+
+                    # If observed_font_responses is non-empty, ensure at least one 2xx response matched exp_lower or rf_url
+                    if observed_font_responses:
+                        matched_observed = any(
+                            exp_lower in r.get("url", "").lower() and 200 <= r.get("status", 0) < 400
+                            for r in observed_font_responses
+                        )
+                        if not matched_observed and rf_url and exp_lower not in rf_url:
+                            return None
 
                 required_source_cps = res.get("required_source_cps", [])
                 candidate_cps = res.get("candidate_cps", [])

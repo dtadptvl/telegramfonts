@@ -1,6 +1,6 @@
 {
   "core_file_hashes": {
-    "agent/src/acquisition/adapters.py": "fd587874a6dfd1fc4f708783c9d2385447c818e5d62f29d6446236f1589a4597",
+    "agent/src/acquisition/adapters.py": "d049497f6e08ff6a51805fae55ad06e20f2d6257f28d98ad89ab41d1bcecae0f",
     "agent/src/acquisition/capability.py": "c9494c1ebf880e0c9cda1b2772e406561bc96df49f131f55c296c098afd65e54",
     "agent/src/acquisition/models.py": "d08d7fbcdcfef2dea71a064f3756f27c06da102bbcbc09f13665c0c49cbbb4f9",
     "agent/src/acquisition/pipeline.py": "e313fe8f70d88c246bb5d7af2d7007cde3e5b202ed9ecead045a5ccf34a29f64",
@@ -64,14 +64,14 @@
   },
   "dependencies": {
     "fonttools": "4.63.0",
-    "freetype-py": "<function version at 0x00000234E1D61B10>",
+    "freetype-py": "<function version at 0x000002667F641B10>",
     "httpx": "0.28.1",
     "pillow": "12.3.0",
     "pydantic": "2.13.4",
     "uharfbuzz": "14.3.0"
   },
-  "main_commit_sha": "d4cb0b3177d591cdaf55f6582a78ba26a5001111",
-  "manifest_signature": "28204305fce45aac0630c3de0203486a9b079a587ee1d35b4d7e2c70b80c77b8",
+  "main_commit_sha": "b23aaf741ca40508e907b1ce25588493ed8c258c",
+  "manifest_signature": "7b4e5a431e688b0c914c59a04f20ee79d77b43ee59698be1c0a91c22f5dc2f42",
   "observation_config_hash": "f4f7ee68ad81c6374b45a6ebca734a87a47e398354bc37b24b68ee19513d0364",
   "platform_machine": "AMD64",
   "platform_system": "Windows",
