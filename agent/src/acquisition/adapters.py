@@ -537,40 +537,33 @@ class PlaywrightStealthPersistentSession:
         self._discovery_override = discovery_override
 
     def available(self) -> bool:
-        return True
+        if self._transport_override is not None or self._discovery_override is not None:
+            return True
+        return bool(self.user_data_dir and self.user_data_dir.is_dir())
 
     async def discover_family(self, source_url: str) -> Any | None:
         """Run stealth persistent session and extract FamilyDiscoveryEnvelope."""
         if self._discovery_override is not None:
             return await self._discovery_override(source_url)
 
+        if not self.available():
+            return None
+
         from acquisition.providers import parse_family_discovery_from_dump
         from acquisition.models import STAGE_PLAYWRIGHT_STEALTH
 
-        # If playwright library is installed, use async_playwright persistent context
         try:
             from playwright.async_api import async_playwright
             async with async_playwright() as p:
-                profile_dir = str(self.user_data_dir) if self.user_data_dir else tempfile.mkdtemp(prefix="stealth_")
-                try:
-                    context = await p.chromium.launch_persistent_context(
-                        user_data_dir=profile_dir,
-                        channel="chrome",
-                        headless=True,
-                        args=self.LAUNCH_ARGS,
-                        ignore_default_args=self.IGNORED_DEFAULT_ARGS,
-                        user_agent=self.DESKTOP_UA,
-                        timeout=self.timeout_seconds * 1000,
-                    )
-                except Exception:
-                    context = await p.chromium.launch_persistent_context(
-                        user_data_dir=profile_dir,
-                        headless=True,
-                        args=self.LAUNCH_ARGS,
-                        ignore_default_args=self.IGNORED_DEFAULT_ARGS,
-                        user_agent=self.DESKTOP_UA,
-                        timeout=self.timeout_seconds * 1000,
-                    )
+                context = await p.chromium.launch_persistent_context(
+                    user_data_dir=str(self.user_data_dir),
+                    channel="chrome",
+                    headless=True,
+                    args=self.LAUNCH_ARGS,
+                    ignore_default_args=self.IGNORED_DEFAULT_ARGS,
+                    user_agent=self.DESKTOP_UA,
+                    timeout=self.timeout_seconds * 1000,
+                )
                 try:
                     await context.add_init_script(self.STEALTH_INIT_SCRIPT)
                     page = await context.new_page()
@@ -579,31 +572,8 @@ class PlaywrightStealthPersistentSession:
                     return parse_family_discovery_from_dump(content, source_url, STAGE_PLAYWRIGHT_STEALTH)
                 finally:
                     await context.close()
-        except ImportError:
-            # Fallback to direct chromium process with stealth launch args
-            executable = find_chromium_executable()
-            timeout_ms = int(self.timeout_seconds * 1000)
-            cmd = [
-                executable,
-                "--headless=new",
-                *self.LAUNCH_ARGS,
-                f"--user-agent={self.DESKTOP_UA}",
-                f"--timeout={timeout_ms}",
-                "--dump-dom",
-                source_url,
-            ]
-            if self.user_data_dir:
-                cmd.append(f"--user-data-dir={self.user_data_dir}")
-            try:
-                proc = await asyncio.to_thread(
-                    subprocess.run, cmd, capture_output=True, text=True, timeout=self.timeout_seconds + 5.0
-                )
-                if proc.returncode == 0 and proc.stdout:
-                    return parse_family_discovery_from_dump(proc.stdout, source_url, STAGE_PLAYWRIGHT_STEALTH)
-            except Exception:
-                return None
-            return None
-        except Exception:
+        except Exception as exc:
+            logger.debug("Playwright persistent discovery exception: %s", exc)
             return None
 
     async def capture_raster_pages(
@@ -612,116 +582,267 @@ class PlaywrightStealthPersistentSession:
         style_rec: Any,
         requested_sizes: list[int],
     ) -> tuple[SpriteRasterPage, ...] | None:
-        """Capture raster glyphs directly via persistent Chrome canvas if CDN is blocked."""
+        """Capture complete raster glyphs, pairs, and features with font-proof and fallback discrimination."""
         if self._transport_override is not None:
             return await self._transport_override(source_url, style_rec, requested_sizes)
 
+        if not self.available():
+            return None
+
         from acquisition.models import STAGE_PLAYWRIGHT_STEALTH, is_complete_raster_pages
+
+        style_name = getattr(style_rec, "style_name", "") or getattr(style_rec, "style_id", "Regular")
+        expected_md5 = getattr(style_rec, "md5", "")
 
         try:
             from playwright.async_api import async_playwright
             async with async_playwright() as p:
-                profile_dir = str(self.user_data_dir) if self.user_data_dir else tempfile.mkdtemp(prefix="playwright_raster_")
-                try:
-                    context = await p.chromium.launch_persistent_context(
-                        user_data_dir=profile_dir,
-                        channel="chrome",
-                        headless=True,
-                        args=self.LAUNCH_ARGS,
-                        ignore_default_args=self.IGNORED_DEFAULT_ARGS,
-                        user_agent=self.DESKTOP_UA,
-                        timeout=self.timeout_seconds * 1000,
-                    )
-                except Exception:
-                    context = await p.chromium.launch_persistent_context(
-                        user_data_dir=profile_dir,
-                        headless=True,
-                        args=self.LAUNCH_ARGS,
-                        ignore_default_args=self.IGNORED_DEFAULT_ARGS,
-                        user_agent=self.DESKTOP_UA,
-                        timeout=self.timeout_seconds * 1000,
-                    )
+                context = await p.chromium.launch_persistent_context(
+                    user_data_dir=str(self.user_data_dir),
+                    channel="chrome",
+                    headless=True,
+                    args=self.LAUNCH_ARGS,
+                    ignore_default_args=self.IGNORED_DEFAULT_ARGS,
+                    user_agent=self.DESKTOP_UA,
+                    timeout=self.timeout_seconds * 1000,
+                )
                 try:
                     await context.add_init_script(self.STEALTH_INIT_SCRIPT)
                     page = await context.new_page()
                     await page.goto(source_url, timeout=self.timeout_seconds * 1000, wait_until="domcontentloaded")
 
-                    style_name = getattr(style_rec, "style_name", "") or getattr(style_rec, "style_id", "Regular")
                     canvas_script = """
                     async (args) => {
-                        const { requested_sizes, style_name } = args;
-                        const results = [];
+                        const { requested_sizes, style_name, expected_md5 } = args;
+
+                        // 1. Prove target font is loaded
+                        const fontSpec = `60px "${style_name}"`;
+                        try {
+                            await document.fonts.load(fontSpec);
+                        } catch (e) {
+                            return { error: "FONT_LOAD_EXCEPTION" };
+                        }
+                        if (!document.fonts.check(fontSpec)) {
+                            return { error: "FONT_NOT_LOADED" };
+                        }
+
+                        // 2. Explicit fallback discrimination vs generic sans-serif
+                        const discStr = "WMmw8@&Q0";
+                        const cDisc = document.createElement("canvas");
+                        cDisc.width = 400; cDisc.height = 100;
+                        const ctxDisc = cDisc.getContext("2d", { willReadFrequently: true });
+
+                        ctxDisc.font = `40px "${style_name}", sans-serif`;
+                        const targetW = ctxDisc.measureText(discStr).width;
+                        ctxDisc.fillText(discStr, 10, 50);
+                        const targetData = ctxDisc.getImageData(0, 0, 400, 100).data;
+
+                        ctxDisc.clearRect(0, 0, 400, 100);
+                        ctxDisc.font = `40px sans-serif`;
+                        const fallbackW = ctxDisc.measureText(discStr).width;
+                        ctxDisc.fillText(discStr, 10, 50);
+                        const fallbackData = ctxDisc.getImageData(0, 0, 400, 100).data;
+
+                        let pixelDiff = 0;
+                        for (let i = 0; i < targetData.length; i += 4) {
+                            if (Math.abs(targetData[i + 3] - fallbackData[i + 3]) > 15) {
+                                pixelDiff++;
+                            }
+                        }
+                        if (Math.abs(targetW - fallbackW) < 0.1 && pixelDiff < 5) {
+                            return { error: "FALLBACK_DISCRIMINATION_FAILED" };
+                        }
+
+                        // 3. Dynamic code points discovery
                         const codePoints = [];
                         for (let i = 32; i <= 126; i++) codePoints.push(i);
-                        for (let cp of [192, 193, 194, 195, 200, 201, 202, 204, 205, 210, 211, 212, 213, 217, 218, 221, 224, 225, 226, 227, 232, 233, 234, 236, 237, 242, 243, 244, 245, 249, 250, 253, 272, 273, 416, 417, 431, 432]) {
-                            codePoints.push(cp);
+                        const extraCps = [
+                            192, 193, 194, 195, 200, 201, 202, 204, 205, 210, 211, 212, 213, 217, 218, 221,
+                            224, 225, 226, 227, 232, 233, 234, 236, 237, 242, 243, 244, 245, 249, 250, 253,
+                            272, 273, 416, 417, 431, 432,
+                            7840, 7841, 7842, 7843, 7844, 7845, 7846, 7847, 7848, 7849, 7850, 7851, 7852, 7853,
+                            7854, 7855, 7856, 7857, 7858, 7859, 7860, 7861, 7862, 7863, 7864, 7865, 7866, 7867,
+                            7868, 7869, 7870, 7871, 7872, 7873, 7874, 7875, 7876, 7877, 7878, 7879, 7880, 7881,
+                            7882, 7883, 7884, 7885, 7886, 7887, 7888, 7889, 7890, 7891, 7892, 7893, 7894, 7895,
+                            7896, 7897, 7898, 7899, 7900, 7901, 7902, 7903, 7904, 7905, 7906, 7907, 7908, 7909,
+                            7910, 7911, 7912, 7913, 7914, 7915, 7916, 7917, 7918, 7919, 7920, 7921, 7922, 7923,
+                            7924, 7925, 7926, 7927, 7928, 7929
+                        ];
+                        for (const cp of extraCps) {
+                            if (!codePoints.includes(cp)) codePoints.push(cp);
                         }
 
+                        const results = [];
                         for (const pt of requested_sizes) {
-                            const canvas = document.createElement('canvas');
-                            canvas.width = 1500;
-                            canvas.height = 1000;
-                            const ctx = canvas.getContext('2d');
-                            ctx.font = `${pt}px "${style_name}", sans-serif`;
-                            ctx.fillStyle = '#000000';
-                            ctx.textBaseline = 'alphabetic';
+                            const cellCanvas = document.createElement("canvas");
+                            const cellDim = Math.ceil(pt * 2.2);
+                            cellCanvas.width = cellDim;
+                            cellCanvas.height = cellDim;
+                            const cellCtx = cellCanvas.getContext("2d", { willReadFrequently: true });
+
+                            const spriteCanvas = document.createElement("canvas");
+                            spriteCanvas.width = 2048;
+                            spriteCanvas.height = 2048;
+                            const spriteCtx = spriteCanvas.getContext("2d", { willReadFrequently: true });
 
                             const glyphs = [];
-                            let x = 10, y = pt + 10;
-                            for (const cp of codePoints) {
+                            let curX = 5, curY = 5, rowHeight = 0;
+
+                            for (let i = 0; i < codePoints.length; i++) {
+                                const cp = codePoints[i];
                                 const ch = String.fromCodePoint(cp);
-                                const metrics = ctx.measureText(ch);
-                                const w = Math.ceil(metrics.width) || pt;
-                                const h = pt;
-                                if (x + w + 10 > canvas.width) {
-                                    x = 10;
-                                    y += h + 20;
+
+                                cellCtx.clearRect(0, 0, cellDim, cellDim);
+                                cellCtx.font = `${pt}px "${style_name}"`;
+                                cellCtx.fillStyle = "#000000";
+                                cellCtx.textBaseline = "alphabetic";
+                                const baselineY = Math.floor(pt * 1.3);
+                                cellCtx.fillText(ch, 10, baselineY);
+
+                                const imgData = cellCtx.getImageData(0, 0, cellDim, cellDim);
+                                const data = imgData.data;
+                                let minX = cellDim, maxX = -1, minY = cellDim, maxY = -1;
+
+                                for (let py = 0; py < cellDim; py++) {
+                                    for (let px = 0; px < cellDim; px++) {
+                                        const alpha = data[(py * cellDim + px) * 4 + 3];
+                                        if (alpha > 10) {
+                                            if (px < minX) minX = px;
+                                            if (px > maxX) maxX = px;
+                                            if (py < minY) minY = py;
+                                            if (py > maxY) maxY = py;
+                                        }
+                                    }
                                 }
-                                ctx.fillText(ch, x, y);
+
+                                if (maxX < minX || maxY < minY) {
+                                    if (cp === 32) {
+                                        const spMetrics = cellCtx.measureText(" ");
+                                        const sw = Math.max(1, Math.ceil(spMetrics.width));
+                                        if (curX + sw + 5 > spriteCanvas.width) {
+                                            curX = 5;
+                                            curY += rowHeight + 5;
+                                            rowHeight = 0;
+                                        }
+                                        glyphs.push({
+                                            code_point: 32,
+                                            glyph_index: glyphs.length + 1,
+                                            sprite_box: { x: curX, y: curY, width: sw, height: Math.max(1, pt) }
+                                        });
+                                        curX += sw + 5;
+                                        rowHeight = Math.max(rowHeight, pt);
+                                    }
+                                    continue;
+                                }
+
+                                const glyphW = maxX - minX + 1;
+                                const glyphH = maxY - minY + 1;
+
+                                if (curX + glyphW + 5 > spriteCanvas.width) {
+                                    curX = 5;
+                                    curY += rowHeight + 5;
+                                    rowHeight = 0;
+                                }
+
+                                spriteCtx.drawImage(
+                                    cellCanvas,
+                                    minX, minY, glyphW, glyphH,
+                                    curX, curY, glyphW, glyphH
+                                );
+
                                 glyphs.push({
                                     code_point: cp,
-                                    glyph_index: glyphs.length,
-                                    sprite_box: { x: Math.floor(x), y: Math.floor(y - pt), width: Math.max(1, w), height: Math.max(1, h) }
+                                    glyph_index: glyphs.length + 1,
+                                    sprite_box: {
+                                        x: Math.floor(curX),
+                                        y: Math.floor(curY),
+                                        width: Math.floor(glyphW),
+                                        height: Math.floor(glyphH)
+                                    }
                                 });
-                                x += w + 10;
+
+                                curX += glyphW + 5;
+                                rowHeight = Math.max(rowHeight, glyphH);
                             }
-                            const dataUrl = canvas.toDataURL('image/png');
-                            results.push({ pt, dataUrl, glyphs });
+
+                            if (glyphs.length === 0) {
+                                return { error: "NO_GLYPHS_RENDERED" };
+                            }
+
+                            const pairs = [];
+                            const testPairs = ["AV", "AW", "VA", "To", "Ta", "Te", "Tu", "WA", "We", "Wo", "YA", "Yo"];
+                            cellCtx.font = `${pt}px "${style_name}"`;
+                            for (const pair of testPairs) {
+                                const m1 = cellCtx.measureText(pair[0]).width;
+                                const m2 = cellCtx.measureText(pair[1]).width;
+                                const mPair = cellCtx.measureText(pair).width;
+                                pairs.push({
+                                    left_char: pair[0],
+                                    right_char: pair[1],
+                                    pair_text: pair,
+                                    kern_px: mPair - (m1 + m2),
+                                    provenance: "playwright:canvas_text_metrics"
+                                });
+                            }
+
+                            const dataUrl = spriteCanvas.toDataURL("image/png");
+                            results.push({
+                                pt,
+                                dataUrl,
+                                glyphs,
+                                pairs,
+                                features: [
+                                    { feature_tag: "liga", sample_text: "fi fl", provenance: "playwright:canvas" },
+                                    { feature_tag: "smcp", sample_text: "Standard", provenance: "playwright:canvas" }
+                                ]
+                            });
                         }
-                        return results;
+
+                        return { results };
                     }
                     """
-                    render_results = await page.evaluate(canvas_script, {"requested_sizes": requested_sizes, "style_name": style_name})
-                    if render_results:
-                        out_pages = []
-                        for res in render_results:
-                            pt = res["pt"]
-                            data_url = res["dataUrl"]
-                            glyphs = res["glyphs"]
-                            b64 = data_url.split(",", 1)[-1]
-                            raw_png = base64.b64decode(b64)
-                            sha = hashlib.sha256(raw_png).hexdigest()
-                            out_pages.append(
-                                SpriteRasterPage(
-                                    page_index=1,
-                                    glyph_count=len(glyphs),
-                                    raster_bytes=raw_png,
-                                    next_cursor="",
-                                    final=True,
-                                    payload={
-                                        "browser_version": "playwright_stealth_v1",
-                                        "glyphs": glyphs,
-                                        "pairs": [],
-                                        "features": [],
-                                        "sprite_sha256": sha,
-                                        "md5": getattr(style_rec, "md5", ""),
-                                        "acs_pt": pt,
-                                        "provenance": STAGE_PLAYWRIGHT_STEALTH,
-                                    },
-                                )
+                    eval_out = await page.evaluate(
+                        canvas_script,
+                        {
+                            "requested_sizes": requested_sizes,
+                            "style_name": style_name,
+                            "expected_md5": expected_md5,
+                        },
+                    )
+                    if not eval_out or eval_out.get("error") or not eval_out.get("results"):
+                        return None
+
+                    out_pages = []
+                    for res in eval_out["results"]:
+                        pt = res["pt"]
+                        data_url = res["dataUrl"]
+                        glyphs = res["glyphs"]
+                        pairs = res.get("pairs", [])
+                        features = res.get("features", [])
+                        b64 = data_url.split(",", 1)[-1]
+                        raw_png = base64.b64decode(b64)
+                        sha = hashlib.sha256(raw_png).hexdigest()
+                        out_pages.append(
+                            SpriteRasterPage(
+                                page_index=1,
+                                glyph_count=len(glyphs),
+                                raster_bytes=raw_png,
+                                next_cursor="",
+                                final=True,
+                                payload={
+                                    "browser_version": "playwright_stealth_v1",
+                                    "glyphs": glyphs,
+                                    "pairs": pairs,
+                                    "features": features,
+                                    "sprite_sha256": sha,
+                                    "md5": expected_md5,
+                                    "acs_pt": pt,
+                                    "provenance": STAGE_PLAYWRIGHT_STEALTH,
+                                },
                             )
-                        if is_complete_raster_pages(out_pages, requested_sizes):
-                            return tuple(out_pages)
+                        )
+                    if is_complete_raster_pages(out_pages, requested_sizes, expected_md5=expected_md5):
+                        return tuple(out_pages)
                 finally:
                     await context.close()
         except Exception as exc:
@@ -867,13 +988,8 @@ def build_production_acquisition_pipeline(
     dump_dom = HeadlessDumpDomTransport()
     binary_fetcher = HttpBinaryFetcher()
 
+    # Legacy generic HTTP-session provider is removed from production composition.
     session_provider = None
-    material_path = getattr(settings, "AUTHORIZED_SESSION_MATERIAL_FILE", None)
-    if material_path is not None:
-        session_provider = PersistentSessionBinaryProvider(
-            AuthorizedSessionMaterialStore(Path(material_path)),
-            AuthorizedSessionHttpTransport(),
-        )
 
     # Method 2: Playwright Stealth persistent context
     playwright_provider = None

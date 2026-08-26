@@ -115,24 +115,6 @@ class AcquisitionPipeline:
             except Exception as exc:
                 logger.debug("Playwright stealth family preflight exception: %s", exc)
 
-        # Lane 4: Algolia Metadata Search
-        if self.algolia_provider is not None and self.policy.algolia_enabled and self.algolia_provider.available():
-            fam_query = expected_family or (best_envelope.family_name if best_envelope else "")
-            if not fam_query:
-                # Derive from URL slug
-                slug = source_url.rstrip("/").rsplit("/", 1)[-1].split("?", 1)[0]
-                fam_query = slug.replace("-", " ").replace("_", " ")
-            try:
-                env4 = await self.algolia_provider.discover_family(fam_query, source_url)
-                if env4 is not None:
-                    if best_envelope is None or len(env4.styles) > len(best_envelope.styles):
-                        best_envelope = env4
-                    if expected_styles is None or env4.has_complete_map_for(expected_styles):
-                        self._cached_family_envelopes[source_url] = env4
-                        return env4
-            except Exception as exc:
-                logger.debug("Algolia metadata discovery exception: %s", exc)
-
         final_env = best_envelope or FamilyDiscoveryEnvelope(
             family_name=expected_family, family_url=source_url, provenance="none"
         )
@@ -285,7 +267,7 @@ class AcquisitionPipeline:
                 logger.debug("Playwright raster capture exception: %s", exc)
                 pages = ()
 
-            if pages and is_complete_raster_pages(pages, req_pts):
+            if pages and is_complete_raster_pages(pages, req_pts, expected_md5=style_rec.md5 if (style_rec and style_rec.md5) else ""):
                 records.append(
                     AcquisitionStageRecord(
                         stage=STAGE_PLAYWRIGHT_STEALTH,

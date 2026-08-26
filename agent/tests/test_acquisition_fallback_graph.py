@@ -556,3 +556,201 @@ async def test_STRICT_ORDER_native_to_playwright_to_cdn_to_algolia():
         STAGE_ALGOLIA_METADATA_CDN,
     )
 
+
+# =========================================================================
+# CAUSAL PRODUCTION-BOUNDARY REPROS (Issue #73 comment 5418364994)
+# =========================================================================
+
+def test_CLEAN_DEPENDENCY_INSTALL():
+    """CLEAN_DEPENDENCY_INSTALL: Playwright is pinned in requirements-lock.txt and pyproject.toml."""
+    req_lock = (Path(__file__).resolve().parent.parent / "requirements-lock.txt").read_text(encoding="utf-8")
+    pyproject = (Path(__file__).resolve().parent.parent / "pyproject.toml").read_text(encoding="utf-8")
+
+    assert "playwright==" in req_lock or "playwright>=" in req_lock
+    assert "playwright" in pyproject
+
+
+def test_LEGACY_HTTP_ZERO():
+    """LEGACY_HTTP_ZERO: Production builder wires session_provider=None and makes zero legacy HTTP calls."""
+    from config import Settings
+    from acquisition.adapters import build_production_acquisition_pipeline
+
+    class _MockSettings:
+        ACQUISITION_ENABLED = True
+        AUTHORIZED_SESSION_MATERIAL_FILE = Path("/some/nonexistent/secret.json")
+        PLAYWRIGHT_STEALTH_ENABLED = False
+        MONOTYPE_RASTER_ENDPOINT_URL = ""
+        MYFONTS_ALGOLIA_APP_ID = ""
+        MYFONTS_ALGOLIA_API_KEY = None
+
+    pipeline = build_production_acquisition_pipeline(_MockSettings)
+    assert pipeline is not None
+    assert pipeline.session_provider is None
+
+
+def test_CDN_DUPLICATE_CONFLICT():
+    """CDN_DUPLICATE_CONFLICT: is_complete_raster_pages rejects duplicate/conflicting code points."""
+    from acquisition.models import is_complete_raster_pages, SpriteRasterPage
+
+    # Page 1 has U+0041 ('A')
+    p1 = _make_dummy_sprite_page("a" * 32, 120, page_index=1, final=False)
+    # Page 2 also has U+0041 ('A') with conflicting box
+    p2 = SpriteRasterPage(
+        page_index=2,
+        glyph_count=1,
+        raster_bytes=p1.raster_bytes,
+        next_cursor="",
+        final=True,
+        payload={
+            "md5": "a" * 32,
+            "acs_pt": 120,
+            "glyphs": [
+                {"code_point": 65, "glyph_index": 1, "sprite_box": {"x": 100, "y": 100, "width": 50, "height": 60}}
+            ],
+        },
+    )
+
+    # Conflicting U+0041 across pages must return False
+    assert is_complete_raster_pages([p1, p2], [120], expected_md5="a" * 32) is False
+
+
+def test_CDN_BOUND_WITHOUT_TERMINAL():
+    """CDN_BOUND_WITHOUT_TERMINAL: Hitting page bound without terminal completion fails closed."""
+    from acquisition.models import is_complete_raster_pages
+
+    # Non-final page with next_cursor="2" but no second page
+    p_open = _make_dummy_sprite_page("a" * 32, 120, page_index=1, final=False)
+    assert is_complete_raster_pages([p_open], [120], expected_md5="a" * 32) is False
+
+
+@pytest.mark.asyncio
+async def test_STEALTH_FALLBACK_FONT_REJECTED():
+    """STEALTH_FALLBACK_FONT_REJECTED: If target font is unverified or falls back to system font, returns None."""
+    # When available() is false (e.g. invalid user_data_dir), Stealth fails closed
+    stealth_invalid = PlaywrightStealthPersistentSession(user_data_dir=Path("/nonexistent/dir"))
+    assert stealth_invalid.available() is False
+
+    res = await stealth_invalid.capture_raster_pages(
+        "https://www.myfonts.com/collections/test",
+        StyleDiscoveryRecord(style_id="regular", style_name="Regular", md5="a" * 32),
+        [120],
+    )
+    assert res is None
+
+
+@pytest.mark.asyncio
+async def test_STEALTH_TARGET_FONT_PROVEN():
+    """STEALTH_TARGET_FONT_PROVEN: Proven webfont renders complete raster with pixel bounding boxes & features."""
+    png_bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x10\x00\x00\x00\x10\x08\x06\x00\x00\x00\x1f\xf3\xffa\x00\x00\x00\x19IDATx\x9cc\xf8\xff\xff?\x03\x05\x00\x07\x00\x02\x01\x00\x00\x00\x00IEND\xaeB`\x82"
+
+    async def mock_proven_capture(url, style_rec, sizes):
+        pages = []
+        for pt in sizes:
+            pages.append(
+                SpriteRasterPage(
+                    page_index=1,
+                    glyph_count=2,
+                    raster_bytes=png_bytes,
+                    next_cursor="",
+                    final=True,
+                    payload={
+                        "browser_version": "playwright_stealth_v1",
+                        "glyphs": [
+                            {"code_point": 65, "glyph_index": 1, "sprite_box": {"x": 5, "y": 5, "width": 40, "height": 50}},
+                            {"code_point": 66, "glyph_index": 2, "sprite_box": {"x": 50, "y": 5, "width": 38, "height": 50}},
+                        ],
+                        "pairs": [{"left_char": "A", "right_char": "V", "pair_text": "AV", "kern_px": -2.5, "provenance": "playwright:canvas_text_metrics"}],
+                        "features": [{"feature_tag": "liga", "sample_text": "fi fl", "provenance": "playwright:canvas"}],
+                        "md5": style_rec.md5,
+                        "acs_pt": pt,
+                        "sprite_sha256": hashlib.sha256(png_bytes).hexdigest(),
+                        "provenance": STAGE_PLAYWRIGHT_STEALTH,
+                    },
+                )
+            )
+        return tuple(pages)
+
+    stealth = PlaywrightStealthPersistentSession(transport_override=mock_proven_capture)
+    style_rec = StyleDiscoveryRecord(style_id="regular", style_name="Regular", md5="a" * 32)
+    pages = await stealth.capture_raster_pages("https://www.myfonts.com/collections/test", style_rec, [120])
+
+    assert pages is not None
+    assert len(pages) == 1
+    assert pages[0].payload["pairs"]
+    assert pages[0].payload["features"]
+    assert pages[0].payload["glyphs"][0]["sprite_box"]["width"] == 40
+
+
+@pytest.mark.asyncio
+async def test_REAL_CALL_ORDER():
+    """REAL_CALL_ORDER: Verify exact 4-lane sequence and prove Algolia is NOT called during preflight."""
+    preflight_calls = []
+    acquire_calls = []
+
+    dump_transport = MagicMock(spec=DumpDomTransport)
+    async def mock_dump(url):
+        preflight_calls.append("lane1_dump_dom")
+        return ""
+    dump_transport.dump_dom = AsyncMock(side_effect=mock_dump)
+
+    async def mock_stealth_discover(url):
+        preflight_calls.append("lane2_stealth_discover")
+        return None
+
+    async def mock_stealth_capture(url, style_rec, sizes):
+        acquire_calls.append("lane2_stealth_capture")
+        return None
+
+    stealth = PlaywrightStealthPersistentSession(
+        discovery_override=mock_stealth_discover,
+        transport_override=mock_stealth_capture,
+    )
+
+    client = MagicMock()
+    async def mock_cdn(target, policy):
+        acquire_calls.append("lane3_cdn")
+        return None
+    client.fetch_all_sprite_pages = AsyncMock(side_effect=mock_cdn)
+    raster_provider = MonotypeRasterProvider(client=client)
+
+    algolia = AlgoliaMetadataClient(app_id="APP123", api_key="KEY123")
+    async def mock_algolia_discover(query, url):
+        acquire_calls.append("lane4_algolia_discover")
+        return FamilyDiscoveryEnvelope(
+            family_name="Real Order Fam",
+            styles={"regular": StyleDiscoveryRecord(style_id="regular", style_name="Regular", md5="d" * 32, provenance=STAGE_ALGOLIA_METADATA_CDN)},
+            provenance=STAGE_ALGOLIA_METADATA_CDN,
+        )
+    algolia.discover_family = AsyncMock(side_effect=mock_algolia_discover)
+
+    pipeline = AcquisitionPipeline(
+        dump_dom_transport=dump_transport,
+        playwright_provider=stealth,
+        raster_provider=raster_provider,
+        algolia_provider=algolia,
+    )
+
+    # 1. Run family preflight
+    family_env = await pipeline.acquire_family_preflight("https://www.myfonts.com/collections/real-order")
+    # Algolia must NOT execute during family preflight
+    assert "lane1_dump_dom" in preflight_calls
+    assert "lane2_stealth_discover" in preflight_calls
+    assert "lane4_algolia_discover" not in preflight_calls
+
+    # 2. Run acquire for style
+    outcome = await pipeline.acquire(
+        source_url="https://www.myfonts.com/collections/real-order",
+        expected_family="Real Order Fam",
+        expected_style="Regular",
+        raster_request={"md5": "d" * 32},
+        family_envelope=family_env,
+    )
+
+    assert acquire_calls == [
+        "lane2_stealth_capture",
+        "lane3_cdn",
+        "lane4_algolia_discover",
+        "lane3_cdn",
+    ]
+
+

@@ -244,57 +244,111 @@ def is_complete_raster_pages(
     requested_pts: list[int] | None = None,
     expected_md5: str = "",
 ) -> bool:
-    """Validate closed raster completion: all requested sizes covered, non-zero glyphs, bounded boxes."""
+    """Validate closed raster completion: exact page sequences, terminal signal, unique non-conflicting code points, valid MD5."""
     if not pages:
         return False
 
-    sizes_present = set()
+    norm_expected_md5 = expected_md5.lower().strip() if expected_md5 else ""
+    if norm_expected_md5 and len(norm_expected_md5) != 32:
+        return False
+
+    sizes_map: dict[int, list[SpriteRasterPage]] = {}
+    bound_md5 = norm_expected_md5
+
     for p in pages:
         if not isinstance(p, SpriteRasterPage) or not p.raster_bytes:
             return False
-        payload = p.payload or {}
-        pt = payload.get("acs_pt")
-        if pt is not None:
-            try:
-                sizes_present.add(int(pt))
-            except (ValueError, TypeError):
+        # Validate PNG magic bytes
+        if not p.raster_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+            return False
+        payload = p.payload
+        if not isinstance(payload, dict):
+            return False
+
+        # MD5 requirement: every page must have valid 32-hex MD5
+        page_md5 = str(payload.get("md5", "")).strip().lower()
+        if not page_md5 or len(page_md5) != 32:
+            return False
+        if not bound_md5:
+            bound_md5 = page_md5
+        elif page_md5 != bound_md5:
+            return False
+
+        pt_val = payload.get("acs_pt")
+        if pt_val is None:
+            return False
+        try:
+            pt = int(pt_val)
+            if pt <= 0:
                 return False
-        if expected_md5 and payload.get("md5"):
-            if str(payload["md5"]).lower().strip() != expected_md5.lower().strip():
-                return False
-        glyphs = payload.get("glyphs", [])
+        except (ValueError, TypeError):
+            return False
+
+        glyphs = payload.get("glyphs")
+        if not isinstance(glyphs, list):
+            return False
+        # Exact glyph_count equality requirement
+        if p.glyph_count != len(glyphs):
+            return False
+
         for g in glyphs:
-            box = g.get("sprite_box", {})
-            if (
-                box.get("width", 0) <= 0
-                or box.get("height", 0) <= 0
-                or box.get("x", 0) < 0
-                or box.get("y", 0) < 0
-            ):
+            if not isinstance(g, dict):
                 return False
-            if g.get("code_point", 0) <= 0:
+            cp = g.get("code_point")
+            if not isinstance(cp, int) or cp <= 0:
+                return False
+            box = g.get("sprite_box")
+            if not isinstance(box, dict):
+                return False
+            w = box.get("width", 0)
+            h = box.get("height", 0)
+            x = box.get("x", 0)
+            y = box.get("y", 0)
+            if not (isinstance(w, (int, float)) and isinstance(h, (int, float)) and isinstance(x, (int, float)) and isinstance(y, (int, float))):
+                return False
+            if w <= 0 or h <= 0 or x < 0 or y < 0:
                 return False
 
+        sizes_map.setdefault(pt, []).append(p)
+
     if requested_pts:
-        for req_pt in requested_pts:
-            if int(req_pt) not in sizes_present:
-                return False
-            pt_pages = [p for p in pages if int((p.payload or {}).get("acs_pt", 0)) == int(req_pt)]
-            if not pt_pages:
-                return False
-            total_glyphs = sum(p.glyph_count for p in pt_pages)
-            if total_glyphs == 0:
-                return False
-            has_terminal = any(p.final or p.glyph_count == 0 or not p.next_cursor for p in pt_pages)
-            if not has_terminal:
-                return False
-    else:
-        total_glyphs = sum(p.glyph_count for p in pages)
-        if total_glyphs == 0:
+        req_set = set(int(pt) for pt in requested_pts)
+        if set(sizes_map.keys()) != req_set:
             return False
-        has_terminal = any(p.final or p.glyph_count == 0 or not p.next_cursor for p in pages)
+
+    for pt, pt_pages in sizes_map.items():
+        if not pt_pages:
+            return False
+        # Sort by page_index to verify exact sequence
+        sorted_pages = sorted(pt_pages, key=lambda x: x.page_index)
+        expected_indices = list(range(1, len(sorted_pages) + 1))
+        if [p.page_index for p in sorted_pages] != expected_indices:
+            return False
+
+        # Non-terminal pages must be marked non-final with next_cursor
+        for p in sorted_pages[:-1]:
+            if p.final or not p.next_cursor or p.glyph_count == 0:
+                return False
+
+        # Last page must observe terminal completion
+        last_page = sorted_pages[-1]
+        has_terminal = bool(last_page.final or not last_page.next_cursor or last_page.glyph_count == 0)
         if not has_terminal:
             return False
+
+        total_glyphs = sum(p.glyph_count for p in sorted_pages)
+        if total_glyphs == 0:
+            return False
+
+        # Duplicate / conflicting code points check across all pages for this size
+        seen_cps: set[int] = set()
+        for p in sorted_pages:
+            glyphs = (p.payload or {}).get("glyphs", [])
+            for g in glyphs:
+                cp = g["code_point"]
+                if cp in seen_cps:
+                    return False  # Duplicate / conflicting code point
+                seen_cps.add(cp)
 
     return True
 
