@@ -940,9 +940,19 @@ async def test_STEALTH_SPRITE_OVERFLOW_REJECTED():
         "results": [
             {
                 "pt": 120,
-                "dataUrl": b64_str,
-                "glyphs": [
-                    {"code_point": 65, "glyph_index": 1, "sprite_box": {"x": 5, "y": 5, "width": 150, "height": 50}},
+                "candidate_cps": [65],
+                "proven_cps": [65],
+                "rejected_cps": [],
+                "pages": [
+                    {
+                        "page_index": 1,
+                        "dataUrl": b64_str,
+                        "glyphs": [
+                            {"code_point": 65, "glyph_index": 1, "sprite_box": {"x": 5, "y": 5, "width": 150, "height": 50}},
+                        ],
+                        "final": True,
+                        "next_cursor": "",
+                    }
                 ],
                 "pairs": [],
                 "features": [],
@@ -982,10 +992,20 @@ async def test_STEALTH_TARGET_FONT_PROVEN():
         "results": [
             {
                 "pt": 120,
-                "dataUrl": b64_str,
-                "glyphs": [
-                    {"code_point": 65, "glyph_index": 1, "sprite_box": {"x": 5, "y": 5, "width": 40, "height": 50}},
-                    {"code_point": 66, "glyph_index": 2, "sprite_box": {"x": 50, "y": 5, "width": 38, "height": 50}},
+                "candidate_cps": [65, 66, 67],
+                "proven_cps": [65, 66],
+                "rejected_cps": [67],
+                "pages": [
+                    {
+                        "page_index": 1,
+                        "dataUrl": b64_str,
+                        "glyphs": [
+                            {"code_point": 65, "glyph_index": 1, "sprite_box": {"x": 5, "y": 5, "width": 40, "height": 50}},
+                            {"code_point": 66, "glyph_index": 2, "sprite_box": {"x": 50, "y": 5, "width": 38, "height": 50}},
+                        ],
+                        "final": True,
+                        "next_cursor": "",
+                    }
                 ],
                 "pairs": [
                     {"left_char": "A", "right_char": "V", "pair_text": "AV", "kern_px": -2.5, "provenance": "playwright:canvas_text_metrics"}
@@ -1008,6 +1028,175 @@ async def test_STEALTH_TARGET_FONT_PROVEN():
     assert pages[0].payload["features"]
     assert pages[0].payload["glyphs"][0]["sprite_box"]["width"] == 40
     assert pages[0].glyph_count == 2
+
+
+@pytest.mark.asyncio
+async def test_STEALTH_TRUNCATION_CONTINUES_PAGES():
+    """STEALTH_TRUNCATION_CONTINUES_PAGES: Sprite overflow paginates sequentially instead of truncating."""
+    import io
+    from PIL import Image
+    im = Image.new("RGBA", (200, 200), (0, 0, 0, 0))
+    buf = io.BytesIO()
+    im.save(buf, format="PNG")
+    png_bytes = buf.getvalue()
+    b64_str = "data:image/png;base64," + base64.b64encode(png_bytes).decode("ascii")
+
+    eval_result = {
+        "results": [
+            {
+                "pt": 120,
+                "candidate_cps": [65, 66, 67, 68],
+                "proven_cps": [65, 66, 67, 68],
+                "rejected_cps": [],
+                "pages": [
+                    {
+                        "page_index": 1,
+                        "dataUrl": b64_str,
+                        "glyphs": [
+                            {"code_point": 65, "glyph_index": 1, "sprite_box": {"x": 5, "y": 5, "width": 40, "height": 50}},
+                            {"code_point": 66, "glyph_index": 2, "sprite_box": {"x": 50, "y": 5, "width": 38, "height": 50}},
+                        ],
+                        "final": False,
+                        "next_cursor": "2",
+                    },
+                    {
+                        "page_index": 2,
+                        "dataUrl": b64_str,
+                        "glyphs": [
+                            {"code_point": 67, "glyph_index": 1, "sprite_box": {"x": 5, "y": 5, "width": 40, "height": 50}},
+                            {"code_point": 68, "glyph_index": 2, "sprite_box": {"x": 50, "y": 5, "width": 38, "height": 50}},
+                        ],
+                        "final": True,
+                        "next_cursor": "",
+                    },
+                ],
+                "pairs": [],
+                "features": [],
+            }
+        ]
+    }
+
+    launcher = _make_fake_playwright_launcher(eval_result)
+    stealth = PlaywrightStealthPersistentSession(playwright_launcher=launcher)
+    style_rec = StyleDiscoveryRecord(style_id="regular", style_name="Regular", md5="a" * 32)
+    pages = await stealth.capture_raster_pages("https://www.myfonts.com/collections/test", style_rec, [120])
+
+    assert pages is not None
+    assert len(pages) == 2
+    assert pages[0].page_index == 1
+    assert pages[0].final is False
+    assert pages[0].next_cursor == "2"
+    assert pages[1].page_index == 2
+    assert pages[1].final is True
+    assert pages[1].next_cursor == ""
+    assert sum(p.glyph_count for p in pages) == 4
+
+
+@pytest.mark.asyncio
+async def test_STEALTH_DECLARED_PROVEN_SET_EQUALITY():
+    """STEALTH_DECLARED_PROVEN_SET_EQUALITY: Discrepancy between declared proven set and actual page glyphs fails closed."""
+    import io
+    from PIL import Image
+    im = Image.new("RGBA", (200, 200), (0, 0, 0, 0))
+    buf = io.BytesIO()
+    im.save(buf, format="PNG")
+    png_bytes = buf.getvalue()
+    b64_str = "data:image/png;base64," + base64.b64encode(png_bytes).decode("ascii")
+
+    # Declared proven: [65, 66, 67], but page only has [65, 66] (truncated/dropped glyph 67)
+    eval_result = {
+        "results": [
+            {
+                "pt": 120,
+                "candidate_cps": [65, 66, 67],
+                "proven_cps": [65, 66, 67],
+                "rejected_cps": [],
+                "pages": [
+                    {
+                        "page_index": 1,
+                        "dataUrl": b64_str,
+                        "glyphs": [
+                            {"code_point": 65, "glyph_index": 1, "sprite_box": {"x": 5, "y": 5, "width": 40, "height": 50}},
+                            {"code_point": 66, "glyph_index": 2, "sprite_box": {"x": 50, "y": 5, "width": 38, "height": 50}},
+                        ],
+                        "final": True,
+                        "next_cursor": "",
+                    }
+                ],
+                "pairs": [],
+                "features": [],
+            }
+        ]
+    }
+
+    launcher = _make_fake_playwright_launcher(eval_result)
+    stealth = PlaywrightStealthPersistentSession(playwright_launcher=launcher)
+    style_rec = StyleDiscoveryRecord(style_id="regular", style_name="Regular", md5="a" * 32)
+    pages = await stealth.capture_raster_pages("https://www.myfonts.com/collections/test", style_rec, [120])
+    # Must fail closed because declared proven set [65, 66, 67] != page glyphs [65, 66]
+    assert pages is None
+
+
+@pytest.mark.asyncio
+async def test_STEALTH_EXACT_FACE_BINDING():
+    """STEALTH_EXACT_FACE_BINDING: If loaded FontFace cannot be matched/resolved, fails closed."""
+    launcher = _make_fake_playwright_launcher({"error": "NO_MATCHING_LOADED_FONT_FACE"})
+    stealth = PlaywrightStealthPersistentSession(playwright_launcher=launcher)
+    style_rec = StyleDiscoveryRecord(style_id="regular", style_name="Regular", md5="a" * 32)
+    pages = await stealth.capture_raster_pages("https://www.myfonts.com/collections/test", style_rec, [120])
+    assert pages is None
+
+
+@pytest.mark.asyncio
+async def test_STEALTH_FEATURE_ON_OFF():
+    """STEALTH_FEATURE_ON_OFF: Unmeasured features (delta=0 or unmeasured) are omitted from payload."""
+    import io
+    from PIL import Image
+    im = Image.new("RGBA", (200, 200), (0, 0, 0, 0))
+    buf = io.BytesIO()
+    im.save(buf, format="PNG")
+    png_bytes = buf.getvalue()
+    b64_str = "data:image/png;base64," + base64.b64encode(png_bytes).decode("ascii")
+
+    # Has one measured liga (delta=-1.2) and one unmeasured/dummy smcp (delta=0.0)
+    eval_result = {
+        "results": [
+            {
+                "pt": 120,
+                "candidate_cps": [65],
+                "proven_cps": [65],
+                "rejected_cps": [],
+                "pages": [
+                    {
+                        "page_index": 1,
+                        "dataUrl": b64_str,
+                        "glyphs": [
+                            {"code_point": 65, "glyph_index": 1, "sprite_box": {"x": 5, "y": 5, "width": 40, "height": 50}},
+                        ],
+                        "final": True,
+                        "next_cursor": "",
+                    }
+                ],
+                "pairs": [],
+                "features": [
+                    {"feature_tag": "liga", "sample_text": "fi", "delta_px": -1.2, "measured": True, "provenance": "playwright:canvas_feature_probe"},
+                    {"feature_tag": "smcp", "sample_text": "Standard", "delta_px": 0.0, "measured": False, "provenance": "playwright:canvas_feature_probe"},
+                ],
+            }
+        ]
+    }
+
+    launcher = _make_fake_playwright_launcher(eval_result)
+    stealth = PlaywrightStealthPersistentSession(playwright_launcher=launcher)
+    style_rec = StyleDiscoveryRecord(style_id="regular", style_name="Regular", md5="a" * 32)
+    pages = await stealth.capture_raster_pages("https://www.myfonts.com/collections/test", style_rec, [120])
+
+    assert pages is not None
+    assert len(pages) == 1
+    # Only measured liga is kept; unmeasured smcp is rejected/omitted
+    assert len(pages[0].payload["features"]) == 1
+    assert pages[0].payload["features"][0]["feature_tag"] == "liga"
+
 
 
 

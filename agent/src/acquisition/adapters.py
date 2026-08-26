@@ -617,45 +617,58 @@ class PlaywrightStealthPersistentSession:
         async (args) => {
             const { requested_sizes, style_name, expected_md5 } = args;
 
-            // 1. Prove target font is loaded
-            const fontSpec = `60px "${style_name}"`;
+            // 1. Resolve and bind exact loaded FontFace
+            let matchedFace = null;
+            const normTarget = style_name.toLowerCase().replace(/[^a-z0-9]/g, "");
+            for (const face of document.fonts) {
+                const normFamily = face.family.toLowerCase().replace(/['"]/g, "").replace(/[^a-z0-9]/g, "");
+                if (normFamily === normTarget || normTarget.includes(normFamily) || normFamily.includes(normTarget)) {
+                    matchedFace = face;
+                    break;
+                }
+            }
+            if (!matchedFace) {
+                return { error: "NO_MATCHING_LOADED_FONT_FACE" };
+            }
+
+            const fontStyle = matchedFace.style || "normal";
+            const fontWeight = matchedFace.weight || "normal";
+            const fontStretch = matchedFace.stretch || "normal";
+            const fontFamily = matchedFace.family.replace(/['"]/g, "");
+
+            function getExactFontSpec(ptSize) {
+                return `${fontStyle} ${fontWeight} ${ptSize}px "${fontFamily}"`;
+            }
+
+            const fontSpec60 = getExactFontSpec(60);
             try {
-                await document.fonts.load(fontSpec);
+                await document.fonts.load(fontSpec60);
             } catch (e) {
                 return { error: "FONT_LOAD_EXCEPTION" };
             }
-            if (!document.fonts.check(fontSpec)) {
+            if (!document.fonts.check(fontSpec60)) {
                 return { error: "FONT_NOT_LOADED" };
             }
 
-            // 2. Dynamic target coverage discovery from page/document.fonts metadata
+            // 2. Discover target coverage from FontFace unicodeRange + standard Latin/specimen
             const codePointSet = new Set();
-            try {
-                // Inspect loaded FontFace objects
-                for (const face of document.fonts) {
-                    if (face.family.toLowerCase().includes(style_name.toLowerCase()) || style_name.toLowerCase().includes(face.family.toLowerCase())) {
-                        if (face.unicodeRange) {
-                            const ranges = face.unicodeRange.split(",");
-                            for (const r of ranges) {
-                                const clean = r.trim().replace(/^U\\+/i, "");
-                                if (clean.includes("-")) {
-                                    const [start, end] = clean.split("-").map(h => parseInt(h, 16));
-                                    if (!isNaN(start) && !isNaN(end)) {
-                                        for (let cp = start; cp <= Math.min(end, start + 500); cp++) {
-                                            codePointSet.add(cp);
-                                        }
-                                    }
-                                } else {
-                                    const cp = parseInt(clean, 16);
-                                    if (!isNaN(cp)) codePointSet.add(cp);
-                                }
+            if (matchedFace.unicodeRange) {
+                const ranges = matchedFace.unicodeRange.split(",");
+                for (const r of ranges) {
+                    const clean = r.trim().replace(/^U\\+/i, "");
+                    if (clean.includes("-")) {
+                        const [start, end] = clean.split("-").map(h => parseInt(h, 16));
+                        if (!isNaN(start) && !isNaN(end)) {
+                            for (let cp = start; cp <= Math.min(end, start + 1000); cp++) {
+                                codePointSet.add(cp);
                             }
                         }
+                    } else {
+                        const cp = parseInt(clean, 16);
+                        if (!isNaN(cp)) codePointSet.add(cp);
                     }
                 }
-            } catch (e) {}
-
-            // Add standard printable ASCII and Latin-1 repertoire
+            }
             for (let i = 32; i <= 126; i++) codePointSet.add(i);
             const extraCps = [
                 192, 193, 194, 195, 200, 201, 202, 204, 205, 210, 211, 212, 213, 217, 218, 221,
@@ -670,7 +683,7 @@ class PlaywrightStealthPersistentSession:
                 7924, 7925, 7926, 7927, 7928, 7929
             ];
             for (const cp of extraCps) codePointSet.add(cp);
-            const codePoints = Array.from(codePointSet).sort((a, b) => a - b);
+            const candidateCodePoints = Array.from(codePointSet).sort((a, b) => a - b);
 
             const results = [];
             for (const pt of requested_sizes) {
@@ -680,15 +693,21 @@ class PlaywrightStealthPersistentSession:
                 cellCanvas.height = cellDim;
                 const cellCtx = cellCanvas.getContext("2d", { willReadFrequently: true });
 
-                // Render test single glyphs to measure and discriminate
+                const exactFontSpec = getExactFontSpec(pt);
+                const sansFontSpec = `${fontStyle} ${fontWeight} ${pt}px sans-serif`;
+                const monoFontSpec = `${fontStyle} ${fontWeight} ${pt}px monospace`;
+
                 const provenGlyphs = [];
-                for (let i = 0; i < codePoints.length; i++) {
-                    const cp = codePoints[i];
+                const provenCodePoints = [];
+                const rejectedCodePoints = [];
+
+                for (let i = 0; i < candidateCodePoints.length; i++) {
+                    const cp = candidateCodePoints[i];
                     const ch = String.fromCodePoint(cp);
 
                     // 1. Render in target font
                     cellCtx.clearRect(0, 0, cellDim, cellDim);
-                    cellCtx.font = `${pt}px "${style_name}"`;
+                    cellCtx.font = exactFontSpec;
                     cellCtx.fillStyle = "#000000";
                     cellCtx.textBaseline = "alphabetic";
                     const baselineY = Math.floor(pt * 1.3);
@@ -698,19 +717,18 @@ class PlaywrightStealthPersistentSession:
 
                     // 2. Render in fallback sans-serif
                     cellCtx.clearRect(0, 0, cellDim, cellDim);
-                    cellCtx.font = `${pt}px sans-serif`;
+                    cellCtx.font = sansFontSpec;
                     const mSans = cellCtx.measureText(ch);
                     cellCtx.fillText(ch, 10, baselineY);
                     const sansData = cellCtx.getImageData(0, 0, cellDim, cellDim).data;
 
                     // 3. Render in fallback monospace
                     cellCtx.clearRect(0, 0, cellDim, cellDim);
-                    cellCtx.font = `${pt}px monospace`;
+                    cellCtx.font = monoFontSpec;
                     const mMono = cellCtx.measureText(ch);
                     cellCtx.fillText(ch, 10, baselineY);
                     const monoData = cellCtx.getImageData(0, 0, cellDim, cellDim).data;
 
-                    // Compute pixel differences
                     let diffSans = 0, diffMono = 0;
                     let minX = cellDim, maxX = -1, minY = cellDim, maxY = -1;
 
@@ -729,12 +747,12 @@ class PlaywrightStealthPersistentSession:
                         }
                     }
 
-                    // Per-glyph fallback & tofu discrimination:
+                    // Fallback / tofu discrimination
                     if (cp !== 32) {
                         const isSansFallback = (Math.abs(mTarget.width - mSans.width) < 0.01 && diffSans < 5);
                         const isMonoFallback = (Math.abs(mTarget.width - mMono.width) < 0.01 && diffMono < 5);
                         if (isSansFallback || isMonoFallback) {
-                            // Tofu or fallback glyph! Exclude from target glyphs
+                            rejectedCodePoints.push(cp);
                             continue;
                         }
                     }
@@ -748,6 +766,9 @@ class PlaywrightStealthPersistentSession:
                                 glyph_h: Math.max(1, pt),
                                 is_space: true,
                             });
+                            provenCodePoints.push(32);
+                        } else {
+                            rejectedCodePoints.push(cp);
                         }
                         continue;
                     }
@@ -755,74 +776,77 @@ class PlaywrightStealthPersistentSession:
                     const glyphW = maxX - minX + 1;
                     const glyphH = maxY - minY + 1;
 
-                    // Re-render to capture clean cell image
-                    cellCtx.clearRect(0, 0, cellDim, cellDim);
-                    cellCtx.font = `${pt}px "${style_name}"`;
-                    cellCtx.fillStyle = "#000000";
-                    cellCtx.textBaseline = "alphabetic";
-                    cellCtx.fillText(ch, 10, baselineY);
-
                     provenGlyphs.push({
                         code_point: cp,
                         glyph_w: glyphW,
                         glyph_h: glyphH,
                         src_min_x: minX,
                         src_min_y: minY,
-                        cell_canvas: cellCanvas,
                         is_space: false,
                     });
+                    provenCodePoints.push(cp);
                 }
 
                 if (provenGlyphs.length === 0) {
                     return { error: "NO_PROVEN_TARGET_GLYPHS" };
                 }
 
-                // Dynamic sprite canvas sizing
-                const maxCols = Math.max(10, Math.floor(2048 / Math.ceil(pt * 1.5)));
-                const rowH = Math.ceil(pt * 1.6);
-                const totalRows = Math.ceil(provenGlyphs.length / maxCols);
-                const spriteW = 2048;
-                const spriteH = Math.min(4096, Math.max(512, (totalRows + 1) * (rowH + 10)));
+                // 3. Multi-page pagination
+                const PAGE_W = 2048;
+                const PAGE_H = 2048;
+                const pages = [];
 
-                const spriteCanvas = document.createElement("canvas");
-                spriteCanvas.width = spriteW;
-                spriteCanvas.height = spriteH;
-                const spriteCtx = spriteCanvas.getContext("2d", { willReadFrequently: true });
-
-                const glyphs = [];
+                let currentCanvas = document.createElement("canvas");
+                currentCanvas.width = PAGE_W;
+                currentCanvas.height = PAGE_H;
+                let currentCtx = currentCanvas.getContext("2d", { willReadFrequently: true });
+                let currentPageGlyphs = [];
                 let curX = 5, curY = 5, currentRowMaxH = 0;
 
                 for (let i = 0; i < provenGlyphs.length; i++) {
                     const pg = provenGlyphs[i];
-                    if (curX + pg.glyph_w + 5 > spriteW) {
+                    if (curX + pg.glyph_w + 5 > PAGE_W) {
                         curX = 5;
                         curY += currentRowMaxH + 5;
                         currentRowMaxH = 0;
                     }
 
-                    if (curY + pg.glyph_h + 5 > spriteH) {
-                        // Bounded sprite height safety check
-                        break;
+                    if (curY + pg.glyph_h + 5 > PAGE_H) {
+                        const pIdx = pages.length + 1;
+                        pages.push({
+                            page_index: pIdx,
+                            dataUrl: currentCanvas.toDataURL("image/png"),
+                            glyphs: currentPageGlyphs,
+                            final: false,
+                            next_cursor: String(pIdx + 1),
+                        });
+                        currentCanvas = document.createElement("canvas");
+                        currentCanvas.width = PAGE_W;
+                        currentCanvas.height = PAGE_H;
+                        currentCtx = currentCanvas.getContext("2d", { willReadFrequently: true });
+                        currentPageGlyphs = [];
+                        curX = 5;
+                        curY = 5;
+                        currentRowMaxH = 0;
                     }
 
                     if (!pg.is_space) {
-                        // Re-render cell canvas to draw onto sprite
                         cellCtx.clearRect(0, 0, cellDim, cellDim);
-                        cellCtx.font = `${pt}px "${style_name}"`;
+                        cellCtx.font = exactFontSpec;
                         cellCtx.fillStyle = "#000000";
                         cellCtx.textBaseline = "alphabetic";
                         cellCtx.fillText(String.fromCodePoint(pg.code_point), 10, Math.floor(pt * 1.3));
 
-                        spriteCtx.drawImage(
+                        currentCtx.drawImage(
                             cellCanvas,
                             pg.src_min_x, pg.src_min_y, pg.glyph_w, pg.glyph_h,
                             curX, curY, pg.glyph_w, pg.glyph_h
                         );
                     }
 
-                    glyphs.push({
+                    currentPageGlyphs.push({
                         code_point: pg.code_point,
-                        glyph_index: glyphs.length + 1,
+                        glyph_index: currentPageGlyphs.length + 1,
                         sprite_box: {
                             x: Math.floor(curX),
                             y: Math.floor(curY),
@@ -835,14 +859,21 @@ class PlaywrightStealthPersistentSession:
                     currentRowMaxH = Math.max(currentRowMaxH, pg.glyph_h);
                 }
 
-                if (glyphs.length === 0) {
-                    return { error: "NO_GLYPHS_RENDERED" };
+                if (currentPageGlyphs.length > 0) {
+                    const pIdx = pages.length + 1;
+                    pages.push({
+                        page_index: pIdx,
+                        dataUrl: currentCanvas.toDataURL("image/png"),
+                        glyphs: currentPageGlyphs,
+                        final: true,
+                        next_cursor: "",
+                    });
                 }
 
-                // 3. Kerning pairs measurement
+                // 4. Measure kerning pairs
                 const pairs = [];
                 const testPairs = ["AV", "AW", "VA", "To", "Ta", "Te", "Tu", "WA", "We", "Wo", "YA", "Yo"];
-                cellCtx.font = `${pt}px "${style_name}"`;
+                cellCtx.font = exactFontSpec;
                 for (const pair of testPairs) {
                     const m1 = cellCtx.measureText(pair[0]).width;
                     const m2 = cellCtx.measureText(pair[1]).width;
@@ -859,13 +890,17 @@ class PlaywrightStealthPersistentSession:
                     }
                 }
 
-                // 4. OpenType features: measure and record ONLY if actually active
+                // 5. Measure OpenType features with explicit ON vs OFF probes
                 const features = [];
                 // Test liga (fi)
-                const mNormFi = cellCtx.measureText("fi").width;
-                const mSepFi = cellCtx.measureText("f").width + cellCtx.measureText("i").width;
-                const ligaDelta = mNormFi - mSepFi;
-                if (Math.abs(ligaDelta) > 0.1) {
+                cellCtx.font = exactFontSpec;
+                cellCtx.canvas.style.fontFeatureSettings = '"liga" 1';
+                const wLigaOn = cellCtx.measureText("fi").width;
+                cellCtx.canvas.style.fontFeatureSettings = '"liga" 0';
+                const wLigaOff = cellCtx.measureText("fi").width;
+                cellCtx.canvas.style.fontFeatureSettings = 'normal';
+                const ligaDelta = wLigaOn - wLigaOff;
+                if (Math.abs(ligaDelta) > 0.05) {
                     features.push({
                         feature_tag: "liga",
                         sample_text: "fi",
@@ -875,11 +910,29 @@ class PlaywrightStealthPersistentSession:
                     });
                 }
 
-                const dataUrl = spriteCanvas.toDataURL("image/png");
+                // Test smcp (Standard)
+                cellCtx.canvas.style.fontFeatureSettings = '"smcp" 1';
+                const wSmcpOn = cellCtx.measureText("Standard").width;
+                cellCtx.canvas.style.fontFeatureSettings = '"smcp" 0';
+                const wSmcpOff = cellCtx.measureText("Standard").width;
+                cellCtx.canvas.style.fontFeatureSettings = 'normal';
+                const smcpDelta = wSmcpOn - wSmcpOff;
+                if (Math.abs(smcpDelta) > 0.05) {
+                    features.push({
+                        feature_tag: "smcp",
+                        sample_text: "Standard",
+                        delta_px: smcpDelta,
+                        measured: true,
+                        provenance: "playwright:canvas_feature_probe"
+                    });
+                }
+
                 results.push({
                     pt,
-                    dataUrl,
-                    glyphs,
+                    candidate_cps: candidateCodePoints,
+                    proven_cps: provenCodePoints,
+                    rejected_cps: rejectedCodePoints,
+                    pages,
                     pairs,
                     features,
                 });
@@ -944,50 +997,103 @@ class PlaywrightStealthPersistentSession:
             if not eval_out or not isinstance(eval_out, dict) or eval_out.get("error") or not eval_out.get("results"):
                 return None
 
-            out_pages = []
+            out_pages: list[SpriteRasterPage] = []
             for res in eval_out["results"]:
-                pt = res["pt"]
-                data_url = res["dataUrl"]
-                glyphs = res["glyphs"]
+                pt = res.get("pt")
+                if pt is None or int(pt) not in requested_sizes:
+                    return None
+                candidate_cps = res.get("candidate_cps", [])
+                proven_cps = res.get("proven_cps", [])
+                rejected_cps = res.get("rejected_cps", [])
+                raw_pages = res.get("pages", [])
                 pairs = res.get("pairs", [])
                 features = res.get("features", [])
-                b64 = data_url.split(",", 1)[-1]
-                raw_png = base64.b64decode(b64)
-                if not raw_png.startswith(b"\x89PNG\r\n\x1a\n") or len(raw_png) < 24:
-                    return None
-                png_w = int.from_bytes(raw_png[16:20], "big")
-                png_h = int.from_bytes(raw_png[20:24], "big")
 
-                # Verify every bounding box is inside decoded PNG dimensions
-                for g in glyphs:
-                    box = g.get("sprite_box", {})
-                    x = box.get("x", 0)
-                    y = box.get("y", 0)
-                    w = box.get("width", 0)
-                    h = box.get("height", 0)
-                    if x < 0 or y < 0 or w <= 0 or h <= 0 or x + w > png_w or y + h > png_h:
+                if not candidate_cps or not proven_cps or not raw_pages:
+                    return None
+
+                # Exact set equality & disjointness checks
+                set_cand = set(int(c) for c in candidate_cps)
+                set_prov = set(int(c) for c in proven_cps)
+                set_rej = set(int(c) for c in rejected_cps)
+
+                if set_cand != (set_prov | set_rej):
+                    return None
+                if set_prov & set_rej:
+                    return None
+
+                # Validate page sequences and glyph containment
+                expected_indices = list(range(1, len(raw_pages) + 1))
+                if [p.get("page_index") for p in raw_pages] != expected_indices:
+                    return None
+
+                size_collected_cps: list[int] = []
+                for p_idx, page_dict in enumerate(raw_pages, start=1):
+                    is_last = (p_idx == len(raw_pages))
+                    if is_last:
+                        if not page_dict.get("final") or page_dict.get("next_cursor"):
+                            return None
+                    else:
+                        if page_dict.get("final") or not page_dict.get("next_cursor"):
+                            return None
+
+                    data_url = page_dict.get("dataUrl", "")
+                    glyphs = page_dict.get("glyphs", [])
+                    if not data_url or not isinstance(glyphs, list):
+                        return None
+                    if is_last and len(glyphs) == 0 and len(raw_pages) == 1:
                         return None
 
-                sha = hashlib.sha256(raw_png).hexdigest()
-                out_pages.append(
-                    SpriteRasterPage(
-                        page_index=1,
-                        glyph_count=len(glyphs),
-                        raster_bytes=raw_png,
-                        next_cursor="",
-                        final=True,
-                        payload={
-                            "browser_version": "playwright_stealth_v1",
-                            "glyphs": glyphs,
-                            "pairs": pairs,
-                            "features": features,
-                            "sprite_sha256": sha,
-                            "md5": expected_md5,
-                            "acs_pt": pt,
-                            "provenance": STAGE_PLAYWRIGHT_STEALTH,
-                        },
+                    b64 = data_url.split(",", 1)[-1]
+                    try:
+                        raw_png = base64.b64decode(b64)
+                    except Exception:
+                        return None
+                    if not raw_png.startswith(b"\x89PNG\r\n\x1a\n") or len(raw_png) < 24:
+                        return None
+                    png_w = int.from_bytes(raw_png[16:20], "big")
+                    png_h = int.from_bytes(raw_png[20:24], "big")
+                    if png_w <= 0 or png_h <= 0:
+                        return None
+
+                    for g in glyphs:
+                        cp = g.get("code_point")
+                        if cp is None or int(cp) not in set_prov:
+                            return None
+                        size_collected_cps.append(int(cp))
+                        box = g.get("sprite_box", {})
+                        x = box.get("x", 0)
+                        y = box.get("y", 0)
+                        w = box.get("width", 0)
+                        h = box.get("height", 0)
+                        if x < 0 or y < 0 or w <= 0 or h <= 0 or x + w > png_w or y + h > png_h:
+                            return None
+
+                    sha = hashlib.sha256(raw_png).hexdigest()
+                    out_pages.append(
+                        SpriteRasterPage(
+                            page_index=p_idx,
+                            glyph_count=len(glyphs),
+                            raster_bytes=raw_png,
+                            next_cursor=page_dict.get("next_cursor", ""),
+                            final=bool(page_dict.get("final")),
+                            payload={
+                                "browser_version": "playwright_stealth_v1",
+                                "glyphs": glyphs,
+                                "pairs": pairs,
+                                "features": [f for f in features if f.get("measured") is True and abs(f.get("delta_px", 0)) > 0.01],
+                                "sprite_sha256": sha,
+                                "md5": expected_md5,
+                                "acs_pt": pt,
+                                "provenance": STAGE_PLAYWRIGHT_STEALTH,
+                            },
+                        )
                     )
-                )
+
+                # Verify all declared proven code points appear exactly once across all pages
+                if sorted(size_collected_cps) != sorted(list(set_prov)):
+                    return None
+
             if is_complete_raster_pages(out_pages, requested_sizes, expected_md5=expected_md5):
                 return tuple(out_pages)
         except Exception as exc:
