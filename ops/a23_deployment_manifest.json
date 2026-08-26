@@ -64,14 +64,14 @@
   },
   "dependencies": {
     "fonttools": "4.63.0",
-    "freetype-py": "<function version at 0x000002A9E9971B10>",
+    "freetype-py": "<function version at 0x000002AE7FB01B10>",
     "httpx": "0.28.1",
     "pillow": "12.3.0",
     "pydantic": "2.13.4",
     "uharfbuzz": "14.3.0"
   },
-  "main_commit_sha": "f634ec065fb9736375fe29fb83f6ca432c671313",
-  "manifest_signature": "f2e671d1bddf548237341ffc144f004b5b75969d5b3e5ba5239c87e6fa4abb23",
+  "main_commit_sha": "4dbc5097e854e5a88d95688d2d4b4a704b7401f5",
+  "manifest_signature": "633600d0ae42948a02a3c8a7c1923dfb9d65d2e8447db109d25a031245ab8908",
   "observation_config_hash": "f4f7ee68ad81c6374b45a6ebca734a87a47e398354bc37b24b68ee19513d0364",
   "platform_machine": "AMD64",
   "platform_system": "Windows",
