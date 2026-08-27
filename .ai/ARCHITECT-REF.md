@@ -386,15 +386,36 @@ UPDATED
 Do not recap the Issue/project.
 Do not prescribe exact commands/tool sequences unless core Delegation Boundary permits it.
 
-If satisfied:
+If satisfied, authorize only the exact reviewed PR identity:
 
 ```text
-ARCHITECT | MERGE_READY
-REF: <Executor report/ref>
+ARCHITECT | MERGE_AUTHORIZED
+REF: <Executor report/review ref>
 
-REVIEW_TIER: <LIGHT|TARGETED|FULL>
+PR: #N
+REVIEWED_HEAD: <exact reviewed PR head SHA>
+BASE: <exact base branch>
+MERGE_METHOD: <allowed repository merge method>
+
+GATE
+- current PR head == REVIEWED_HEAD
+- required checks/evidence remain valid
+- no unresolved material review
+- no material base/mergeability drift
+
+ACTION
+Exactly one merge of this PR.
+
 STOP
+- PR HEAD changed
+- base changed materially
+- required check regressed
+- merge conflict
+- branch protection prevents merge
+- repository state is ambiguous
 ```
+
+Architect does not merge; it delegates this exact authorization as a new Executor task boundary.
 
 Do not request speculative cleanup, elegance, generic abstractions, unrelated improvements, or method conformity not required by the contract.
 
@@ -444,7 +465,7 @@ Architect review is required when the bounded method-substitution allowance is e
 
 ## R7. Production and Authorization Detail
 
-Use only for consequential execution or when authorization state is ambiguous.
+Use only for consequential execution, reviewed-PR merge authorization, or when authorization state is ambiguous.
 
 Consequential examples:
 
@@ -456,7 +477,7 @@ Consequential examples:
 - user-visible delivery;
 - hardware/boot-critical/destructive actions.
 
-Core rule: Human approval is a decision event, not executable authority. Only a later exact `ARCHITECT | EXECUTING_AUTHORIZED` GitHub envelope unlocks the scoped action.
+Core rule: Human approval is a decision event, not executable authority. A Human-reserved consequential action is unlocked only by a later exact `ARCHITECT | EXECUTING_AUTHORIZED` GitHub envelope. A reviewed PR merge is unlocked only by an exact `ARCHITECT | MERGE_AUTHORIZED` envelope bound to the reviewed PR identity.
 
 Execution envelope:
 
@@ -497,6 +518,39 @@ The envelope is action-scoped. It does not authorize:
 - adjacent mutation;
 - rollback unless included;
 - package/source/config changes not included.
+
+### Reviewed PR merge authorization
+
+A PR merge does not require Human approval after Architect has completed review, but it is still fail-closed and identity-bound. Required envelope:
+
+```text
+ARCHITECT | MERGE_AUTHORIZED
+REF: <review/ref>
+
+PR: #N
+REVIEWED_HEAD: <exact SHA>
+BASE: <base branch>
+MERGE_METHOD: <allowed repository merge method>
+
+GATE
+- current PR head == REVIEWED_HEAD
+- required checks/evidence remain valid
+- no unresolved material review
+- no material base/mergeability drift
+
+ACTION
+Exactly one merge of this PR.
+
+STOP
+- PR HEAD changed
+- base changed materially
+- required check regressed
+- merge conflict
+- branch protection prevents merge
+- repository state is ambiguous
+```
+
+This envelope authorizes no source/config changes, retry, repair-forward, alternate merge target, or second merge. One attempted merge consumes the authorization unless authoritative GitHub evidence proves `NOT_ATTEMPTED`; timeout/ambiguity does not restore it.
 
 ### Consumption
 
@@ -708,7 +762,7 @@ R3  evidence reuse, invalidation, fix binding
 R4  review tier selection/detail
 R5  correction delta / review decision detail
 R6  uncertain causal diagnosis
-R7  production/consequential authorization
+R7  production/consequential/merge authorization
 R8  contract macro/example ambiguity
 R9  scope growth / over-engineering / execution budget
 R10 skills or extra agents
