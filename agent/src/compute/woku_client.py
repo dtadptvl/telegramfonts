@@ -8,12 +8,15 @@ Fixed routing (exact models, no substitution, bounded, fail-closed):
              (unchanged) is invoked at most once as the downstream fallback.
 
 Each Woku model is attempted at most once per generation request: no retry
-loops, no model substitution, no schema/validator bypass. The identical closed
-prompt schema and candidate parser of the OpenRouter route are reused, so every
-candidate still passes the exact deterministic validators.
+loops, no model substitution, no schema/validator bypass. On every attempt, the
+serving model identity returned by the Woku endpoint is verified against the
+exact requested model. Any missing, unverifiable, or substituted model is
+deterministically rejected as INVALID and falls through to the next stage.
+The identical closed prompt schema and candidate parser of the OpenRouter route
+are reused, so every candidate still passes the exact deterministic validators.
 
 Runtime secret only (key name ``wokushop_api_key`` at the composition
-boundary); sanitized provenance: provider/model/route/fallback-reason/call
+boundary); sanitized provenance: provider/model/served_model/route/fallback-reason/call
 statuses are recorded without secret values or raw transport details.
 """
 from __future__ import annotations
@@ -21,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from typing import Any
 
 import httpx
 
@@ -40,10 +44,20 @@ WOKU_ROUTING_VERSION = "woku-cascade-v1"
 # Bounded sanitized fallback reasons (fixed vocabulary; bound into provenance).
 REASON_UNAVAILABLE = "unavailable"
 REASON_INVALID = "invalid"
+REASON_MODEL_MISMATCH = "model_mismatch"
+REASON_MODEL_UNVERIFIABLE = "model_unverifiable"
 
 ROUTE_WOKU_PRIMARY = "woku-primary"
 ROUTE_WOKU_FALLBACK = "woku-fallback"
 ROUTE_OPENROUTER = "openrouter-route"
+
+
+def _sanitize_model_name(val: Any) -> str:
+    """Sanitize model identifier string: printable ASCII/safe chars, bounded length."""
+    if not isinstance(val, str):
+        return ""
+    cleaned = "".join(c for c in val if c.isprintable() and not c.isspace())
+    return cleaned[:100]
 
 
 @dataclass(frozen=True)
@@ -51,9 +65,10 @@ class CascadeCallRecord:
     """Sanitized provenance for one cascade call (never includes secrets)."""
 
     provider: str  # woku | openrouter
-    model: str
+    model: str  # requested model
     role: str  # woku-primary | woku-fallback | downstream-route
     status: str  # OK | UNAVAILABLE | INVALID
+    served_model: str = ""  # authoritative echoed model from endpoint (sanitized)
 
 
 @dataclass(frozen=True)
@@ -74,6 +89,7 @@ class CascadeRouteTrace:
                     "model": c.model,
                     "role": c.role,
                     "status": c.status,
+                    "served_model": c.served_model,
                 }
                 for c in self.calls
             ],
@@ -116,7 +132,16 @@ class WokuCascadeAIClient:
             identity += self._downstream.prompt_hash()
         return hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
-    async def _http(self, model: str, prompt: str) -> str | None:
+    async def _http(self, model: str, prompt: str) -> tuple[str | None, str, str]:
+        """Perform HTTP call to Woku chat completions endpoint.
+
+        Returns (raw_content, served_model, reason_if_failed):
+        - On success: (content_str, verified_served_model, "")
+        - On transport / non-200 failure: (None, "", REASON_UNAVAILABLE)
+        - On missing/unverifiable model identity: (None, "", REASON_MODEL_UNVERIFIABLE)
+        - On model mismatch (substitution): (None, sanitized_served_model, REASON_MODEL_MISMATCH)
+        - On malformed payload: (None, served_model, REASON_INVALID)
+        """
         client = self._client or httpx.AsyncClient(timeout=120.0)
         try:
             resp = await client.post(
@@ -128,12 +153,39 @@ class WokuCascadeAIClient:
                 },
             )
             if resp.status_code != 200:
-                return None
-            data = resp.json()
-            return str(data["choices"][0]["message"]["content"])
+                return None, "", REASON_UNAVAILABLE
+            try:
+                data = resp.json()
+            except Exception:
+                return None, "", REASON_INVALID
+            if not isinstance(data, dict):
+                return None, "", REASON_INVALID
+
+            raw_served_model = data.get("model")
+            if not isinstance(raw_served_model, str) or not raw_served_model.strip():
+                return None, "", REASON_MODEL_UNVERIFIABLE
+
+            served_model = _sanitize_model_name(raw_served_model)
+            if served_model != model:
+                # Structural enforcement: no model substitution permitted.
+                return None, served_model, REASON_MODEL_MISMATCH
+
+            choices = data.get("choices")
+            if not isinstance(choices, list) or not choices:
+                return None, served_model, REASON_INVALID
+            first_choice = choices[0]
+            if not isinstance(first_choice, dict):
+                return None, served_model, REASON_INVALID
+            message = first_choice.get("message")
+            if not isinstance(message, dict):
+                return None, served_model, REASON_INVALID
+            content = message.get("content")
+            if content is None:
+                return None, served_model, REASON_INVALID
+            return str(content), served_model, ""
         except Exception:
             # Sanitized: transport details never surface (may echo headers/env).
-            return None
+            return None, "", REASON_UNAVAILABLE
         finally:
             if self._owns_client and self._client is None:
                 await client.aclose()
@@ -155,20 +207,22 @@ class WokuCascadeAIClient:
 
     async def _woku_attempt(
         self, model: str, prompt: str, missing: list[int]
-    ) -> tuple[list[AICandidateSpec] | None, str]:
+    ) -> tuple[list[AICandidateSpec] | None, str, str]:
         """Exactly one bounded attempt against one exact Woku model.
 
-        Returns (specs, "") on success or (None, sanitized_reason): the closed
-        schema/validator is never bypassed; any parse/validation failure is a
-        deterministic rejection, any transport/non-200 failure is unavailable.
+        Returns (specs, "", served_model) on success or (None, sanitized_reason, served_model):
+        the serving model identity echoed by the endpoint must exactly match
+        the requested model; the closed schema/validator is never bypassed.
         """
-        raw = await self._http(model, prompt)
-        if raw is None:
-            return None, REASON_UNAVAILABLE
-        specs = OpenRouterAIClient._parse_candidates(raw, missing)
+        raw_content, served_model, http_reason = await self._http(model, prompt)
+        if http_reason != "":
+            return None, http_reason, served_model
+        if raw_content is None:
+            return None, REASON_INVALID, served_model
+        specs = OpenRouterAIClient._parse_candidates(raw_content, missing)
         if specs is None:
-            return None, REASON_INVALID
-        return specs, ""
+            return None, REASON_INVALID, served_model
+        return specs, "", served_model
 
     async def generate_candidates(self, request: dict) -> list[AICandidateSpec]:
         missing = list(request["missing_codepoints"])
@@ -179,10 +233,14 @@ class WokuCascadeAIClient:
         prompt = self._build_prompt(request)
 
         # Stage 1: exact Woku PRIMARY, one bounded attempt.
-        specs, reason = await self._woku_attempt(WOKU_MODEL_PRIMARY, prompt, missing)
+        specs, reason, served1 = await self._woku_attempt(WOKU_MODEL_PRIMARY, prompt, missing)
         calls.append(
             CascadeCallRecord(
-                "woku", WOKU_MODEL_PRIMARY, "woku-primary", "OK" if specs else reason.upper()
+                "woku",
+                WOKU_MODEL_PRIMARY,
+                "woku-primary",
+                "OK" if specs else ("UNAVAILABLE" if reason == REASON_UNAVAILABLE else "INVALID"),
+                served_model=served1,
             )
         )
         if specs is not None:
@@ -194,10 +252,14 @@ class WokuCascadeAIClient:
         fallback_reason = f"woku_primary_{reason}"
 
         # Stage 2: exact Woku FALLBACK, one bounded attempt.
-        specs2, reason2 = await self._woku_attempt(WOKU_MODEL_FALLBACK, prompt, missing)
+        specs2, reason2, served2 = await self._woku_attempt(WOKU_MODEL_FALLBACK, prompt, missing)
         calls.append(
             CascadeCallRecord(
-                "woku", WOKU_MODEL_FALLBACK, "woku-fallback", "OK" if specs2 else reason2.upper()
+                "woku",
+                WOKU_MODEL_FALLBACK,
+                "woku-fallback",
+                "OK" if specs2 else ("UNAVAILABLE" if reason2 == REASON_UNAVAILABLE else "INVALID"),
+                served_model=served2,
             )
         )
         if specs2 is not None:
@@ -220,7 +282,13 @@ class WokuCascadeAIClient:
         except VietnameseAIIntegrityError:
             downstream_trace = getattr(self._downstream, "last_route_trace", None)
             downstream_calls = tuple(
-                CascadeCallRecord("openrouter", c.model, "downstream-route", c.status)
+                CascadeCallRecord(
+                    "openrouter",
+                    c.model,
+                    "downstream-route",
+                    c.status,
+                    served_model=getattr(c, "served_model", c.model),
+                )
                 for c in getattr(downstream_trace, "calls", ())
             )
             self.last_route_trace = CascadeRouteTrace(
@@ -232,7 +300,13 @@ class WokuCascadeAIClient:
             raise
         downstream_trace = getattr(self._downstream, "last_route_trace", None)
         downstream_calls = tuple(
-            CascadeCallRecord("openrouter", c.model, "downstream-route", c.status)
+            CascadeCallRecord(
+                "openrouter",
+                c.model,
+                "downstream-route",
+                c.status,
+                served_model=getattr(c, "served_model", c.model),
+            )
             for c in getattr(downstream_trace, "calls", ())
         )
         calls.extend(downstream_calls)

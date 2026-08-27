@@ -5,8 +5,9 @@ dev.vars reads=0):
 - exact Woku `gpt-5.6-luna` PRIMARY -> exact `gemini-3.7-flash` FALLBACK
   -> existing OpenRouter route unchanged as downstream fallback;
 - one bounded attempt per exact model, no retry, no substitution;
+- serving model identity verified against requested model on every Woku call;
 - closed schema/validator fail-closed at every stage;
-- provider/model/route/fallback-reason identities bind provenance;
+- provider/model/served_model/route/fallback-reason identities bind provenance;
 - ORIGINAL/complete-coverage zero-call paths preserved.
 """
 import hashlib
@@ -29,6 +30,10 @@ from compute.vietnamese import (
     VietnameseExtensionService,
 )
 from compute.woku_client import (
+    REASON_INVALID,
+    REASON_MODEL_MISMATCH,
+    REASON_MODEL_UNVERIFIABLE,
+    REASON_UNAVAILABLE,
     ROUTE_OPENROUTER,
     ROUTE_WOKU_FALLBACK,
     ROUTE_WOKU_PRIMARY,
@@ -74,7 +79,7 @@ def _request(missing):
 
 
 def _make_woku_handler(responses, calls, prompts):
-    """responses: model -> content str | int status | Exception instance/class."""
+    """responses: model -> content str | int status | Exception instance/class | dict."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert str(request.url) == WOKU_CHAT_ENDPOINT
@@ -94,7 +99,15 @@ def _make_woku_handler(responses, calls, prompts):
             spec = spec(missing)
         if isinstance(spec, int):
             return httpx.Response(spec, json={"error": "fake"})
-        return httpx.Response(200, json={"choices": [{"message": {"content": spec}}]})
+        if isinstance(spec, dict):
+            return httpx.Response(200, json=spec)
+        return httpx.Response(
+            200,
+            json={
+                "model": model,
+                "choices": [{"message": {"content": spec}}],
+            },
+        )
 
     return handler
 
@@ -147,6 +160,8 @@ async def test_ISSUE80_WOKU_CASCADE_primary_exact_model_single_bounded_call():
     assert trace.route == ROUTE_WOKU_PRIMARY
     assert trace.fallback_reason == ""
     assert cascade.route_model_identities() == (WOKU_MODEL_PRIMARY,)
+    assert trace.calls[0].served_model == WOKU_MODEL_PRIMARY
+    assert trace.calls[0].status == "OK"
 
 
 @pytest.mark.asyncio
@@ -167,6 +182,9 @@ async def test_ISSUE80_WOKU_CASCADE_primary_unavailable_exact_fallback():
     assert trace.route == ROUTE_WOKU_FALLBACK
     assert trace.fallback_reason == "woku_primary_unavailable"
     assert cascade.route_model_identities() == (WOKU_MODEL_PRIMARY, WOKU_MODEL_FALLBACK)
+    assert trace.calls[0].status == "UNAVAILABLE"
+    assert trace.calls[1].status == "OK"
+    assert trace.calls[1].served_model == WOKU_MODEL_FALLBACK
 
 
 @pytest.mark.asyncio
@@ -254,7 +272,11 @@ async def test_ISSUE80_WOKU_CASCADE_bounded_no_retry_no_substitution():
         if body["model"] == WOKU_MODEL_PRIMARY:
             return httpx.Response(500, json={})
         return httpx.Response(
-            200, json={"choices": [{"message": {"content": _valid_candidate_payload(MISSING)}}]}
+            200,
+            json={
+                "model": body["model"],
+                "choices": [{"message": {"content": _valid_candidate_payload(MISSING)}}],
+            },
         )
 
     cascade = WokuCascadeAIClient(
@@ -564,3 +586,111 @@ def test_ISSUE80_SETTINGS_DEFAULT_NO_WOKU_DEV_VARS_READ(tmp_path, monkeypatch):
     assert settings.WOKUSHOP_API_KEY is None
     assert settings.OPENROUTER_API_KEY is None
     assert settings.VIETNAMESE_AI_ENABLED is False
+
+
+# =========================================================================
+# Architect review repros (response_model verification / mismatch rejection)
+# =========================================================================
+
+
+@pytest.mark.asyncio
+async def test_ISSUE80_WOKU_REPRO_response_model_mismatch_rejects_and_falls_through():
+    """Repro (a): endpoint substitutes model (e.g. returns gpt-5.6-terra when
+    gpt-5.6-luna was requested). PRIMARY must be deterministically rejected as
+    INVALID, recording served_model and falling through to FALLBACK."""
+    # PRIMARY echoes substituted model "gpt-5.6-terra"; FALLBACK echoes exact "gemini-3.7-flash".
+    primary_substituted_response = {
+        "model": "gpt-5.6-terra",
+        "choices": [{"message": {"content": _valid_candidate_payload(MISSING)}}],
+    }
+    fallback_exact_response = {
+        "model": WOKU_MODEL_FALLBACK,
+        "choices": [{"message": {"content": _valid_candidate_payload(MISSING)}}],
+    }
+
+    cascade, calls, _ = _make_cascade(
+        {
+            WOKU_MODEL_PRIMARY: primary_substituted_response,
+            WOKU_MODEL_FALLBACK: fallback_exact_response,
+        }
+    )
+
+    specs = await cascade.generate_candidates(_request(MISSING))
+
+    assert len(specs) == 2
+    assert calls == [WOKU_MODEL_PRIMARY, WOKU_MODEL_FALLBACK]
+    trace = cascade.last_route_trace
+    assert trace is not None
+    assert trace.route == ROUTE_WOKU_FALLBACK
+    assert trace.fallback_reason == "woku_primary_model_mismatch"
+    assert len(trace.calls) == 2
+    assert trace.calls[0].status == "INVALID"
+    assert trace.calls[0].model == WOKU_MODEL_PRIMARY
+    assert trace.calls[0].served_model == "gpt-5.6-terra"
+    assert trace.calls[1].status == "OK"
+    assert trace.calls[1].model == WOKU_MODEL_FALLBACK
+    assert trace.calls[1].served_model == WOKU_MODEL_FALLBACK
+
+
+@pytest.mark.asyncio
+async def test_ISSUE80_WOKU_REPRO_missing_unverifiable_model_field_rejects():
+    """Repro (b): endpoint response omits `model` field or has empty/non-string
+    model. Both cases must reject as INVALID (model_unverifiable) and fall through."""
+    # Case 1: missing model field entirely in PRIMARY; FALLBACK succeeds.
+    primary_missing_model = {
+        "choices": [{"message": {"content": _valid_candidate_payload(MISSING)}}],
+    }
+    cascade, calls, _ = _make_cascade(
+        {
+            WOKU_MODEL_PRIMARY: primary_missing_model,
+            WOKU_MODEL_FALLBACK: _valid_candidate_payload(MISSING),
+        }
+    )
+    specs = await cascade.generate_candidates(_request(MISSING))
+    assert len(specs) == 2
+    assert calls == [WOKU_MODEL_PRIMARY, WOKU_MODEL_FALLBACK]
+    trace = cascade.last_route_trace
+    assert trace.route == ROUTE_WOKU_FALLBACK
+    assert trace.fallback_reason == "woku_primary_model_unverifiable"
+    assert trace.calls[0].status == "INVALID"
+    assert trace.calls[0].served_model == ""
+
+    # Case 2: empty/whitespace model field in PRIMARY; FALLBACK succeeds.
+    primary_empty_model = {
+        "model": "   ",
+        "choices": [{"message": {"content": _valid_candidate_payload(MISSING)}}],
+    }
+    cascade2, calls2, _ = _make_cascade(
+        {
+            WOKU_MODEL_PRIMARY: primary_empty_model,
+            WOKU_MODEL_FALLBACK: _valid_candidate_payload(MISSING),
+        }
+    )
+    specs2 = await cascade2.generate_candidates(_request(MISSING))
+    assert len(specs2) == 2
+    assert calls2 == [WOKU_MODEL_PRIMARY, WOKU_MODEL_FALLBACK]
+    assert cascade2.last_route_trace.fallback_reason == "woku_primary_model_unverifiable"
+
+
+@pytest.mark.asyncio
+async def test_ISSUE80_WOKU_REPRO_exact_match_accepts():
+    """Repro (c): endpoint returns exact requested model name. Request succeeds
+    at PRIMARY stage; served_model is recorded and matches requested model."""
+    primary_exact_response = {
+        "model": WOKU_MODEL_PRIMARY,
+        "choices": [{"message": {"content": _valid_candidate_payload(MISSING)}}],
+    }
+    cascade, calls, _ = _make_cascade({WOKU_MODEL_PRIMARY: primary_exact_response})
+
+    specs = await cascade.generate_candidates(_request(MISSING))
+
+    assert len(specs) == 2
+    assert calls == [WOKU_MODEL_PRIMARY]
+    trace = cascade.last_route_trace
+    assert trace is not None
+    assert trace.route == ROUTE_WOKU_PRIMARY
+    assert trace.fallback_reason == ""
+    assert len(trace.calls) == 1
+    assert trace.calls[0].status == "OK"
+    assert trace.calls[0].model == WOKU_MODEL_PRIMARY
+    assert trace.calls[0].served_model == WOKU_MODEL_PRIMARY
