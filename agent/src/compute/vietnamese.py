@@ -130,9 +130,16 @@ class VietnameseExtensionBinding:
     extended_codepoints: tuple[int, ...]
     preserved_codepoints: tuple[int, ...]
     deterministic_codepoints: tuple[int, ...] = ()
+    # Cascade route identity (Woku-primary cascade). Empty for non-cascade
+    # providers so legacy binding hashes are preserved exactly; non-empty
+    # values bind provider/model/route/fallback-reason identities into the
+    # binding hash (and thus cache/provenance identity).
+    ai_route: str = ""
+    ai_fallback_reason: str = ""
+    ai_route_models: tuple[str, ...] = ()
 
     def to_dict(self) -> dict:
-        return {
+        payload = {
             "mode": self.mode,
             "ai_model_id": self.ai_model_id,
             "ai_model_version": self.ai_model_version,
@@ -143,6 +150,13 @@ class VietnameseExtensionBinding:
             "preserved_codepoints": list(self.preserved_codepoints),
             "deterministic_codepoints": list(self.deterministic_codepoints),
         }
+        if self.ai_route:
+            payload["ai_route"] = self.ai_route
+        if self.ai_fallback_reason:
+            payload["ai_fallback_reason"] = self.ai_fallback_reason
+        if self.ai_route_models:
+            payload["ai_route_models"] = list(self.ai_route_models)
+        return payload
 
     def compute_binding_hash(self) -> str:
         serialized = json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
@@ -432,6 +446,19 @@ class VietnameseExtensionService:
         extended_glyphs.update(deterministic_glyphs)
         extended_glyphs.update(ai_glyphs)
 
+        # Cascade route identity (bounded, sanitized): only cascade-shaped
+        # traces carry route/fallback dimensions; non-cascade providers keep
+        # the exact legacy binding shape/hash.
+        trace = getattr(self.ai_provider, "last_route_trace", None) if unresolved else None
+        if trace is not None and hasattr(trace, "route"):
+            ai_route = trace.route
+            ai_fallback_reason = trace.fallback_reason
+            ai_route_models = tuple(c.model for c in trace.calls)
+        else:
+            ai_route = ""
+            ai_fallback_reason = ""
+            ai_route_models = ()
+
         extended_model = replace(model, glyphs=extended_glyphs)
         final_binding = VietnameseExtensionBinding(
             mode="VIETNAMESE",
@@ -443,6 +470,9 @@ class VietnameseExtensionService:
             extended_codepoints=tuple(sorted(list(deterministic_glyphs) + list(ai_glyphs))),
             preserved_codepoints=preserved,
             deterministic_codepoints=tuple(sorted(deterministic_glyphs)),
+            ai_route=ai_route,
+            ai_fallback_reason=ai_fallback_reason,
+            ai_route_models=ai_route_models,
         )
         return extended_model, final_binding
 

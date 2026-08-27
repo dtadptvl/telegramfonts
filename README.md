@@ -327,16 +327,22 @@ The Vietnamese branch runs after the canonical model exists:
 - synthesize only missing glyphs from measured components;
 - preserve measured metrics and OpenType truth;
 - validate `ccmp`, `mark`, `mkmk`, collisions, clipping, spacing, and corpus behavior;
-- for missing coverage only, the OpenRouter runtime client may generate/rank
-  candidates under fixed routing: PRIMARY `google/gemma-3-12b-it` for every
-  case, DIFFICULT `google/gemma-3-27b-it` only on deterministic escalation,
-  and a rare ARBITER `google/gemini-3.1-flash-lite` at most once after an
-  unresolved deterministic disagreement; no other model or substitution.
-  Exact hits and complete-source/ORIGINAL paths make zero calls. The extension
-  binds provider/model/role/prompt/schema/config/source/target provenance
-  hashes into immutable provenance. ORIGINAL mode never constructs the service.
-  The runtime API key is a runtime secret; responses are sanitized closed
-  schema only.
+- for missing coverage only, the bounded Woku-primary cascade may generate
+  candidates under fixed routing: Woku base `https://llm.wokushop.com/v1`
+  exact model `gpt-5.6-luna` PRIMARY, then exact model `gemini-3.7-flash`
+  FALLBACK (each attempted at most once); if Woku is unavailable, invalid, or
+  deterministically rejected, the existing OpenRouter route is used unchanged
+  as the downstream fallback: PRIMARY `google/gemma-3-12b-it` for every case,
+  DIFFICULT `google/gemma-3-27b-it` only on deterministic escalation, and a
+  rare ARBITER `google/gemini-3.1-flash-lite` at most once after an
+  unresolved deterministic disagreement; no other model or substitution, no
+  retry loops, no schema/validator bypass. Exact hits and
+  complete-source/ORIGINAL paths make zero calls. The extension binds
+  provider/model/route/fallback-reason/prompt/schema/config/source/target
+  provenance identities into immutable provenance. ORIGINAL mode never
+  constructs the service. The runtime API keys (key names `wokushop_api_key`
+  and `openrouter_api_key`) are runtime secrets consumed only at the
+  composition boundary; responses are sanitized closed schema only.
 
 AI cannot invent mappings, alter observed glyphs, author PASS, weaken thresholds,
 or bypass FontTools/FreeType/HarfBuzz/Chromium/held-out validators. Forged,

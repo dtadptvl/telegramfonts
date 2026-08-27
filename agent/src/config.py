@@ -129,6 +129,10 @@ class Settings(BaseSettings):
         default=None,
         description="OpenRouter runtime API key (runtime secret; never logged)",
     )
+    WOKUSHOP_API_KEY: SecretStr | None = Field(
+        default=None,
+        description="Woku runtime API key (runtime secret; never logged)",
+    )
 
     @field_validator("EDGE_BASE_URL")
     @classmethod

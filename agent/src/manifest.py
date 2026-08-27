@@ -55,6 +55,7 @@ CORE_SOURCE_PATHS = [
     "agent/src/compute/source.py",
     "agent/src/compute/validator.py",
     "agent/src/compute/vietnamese.py",
+    "agent/src/compute/woku_client.py",
     "agent/src/fidelity/evaluator.py",
     "agent/src/fidelity/pipeline.py",
     "agent/src/fidelity/producers.py",
