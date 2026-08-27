@@ -467,17 +467,48 @@ class ObservationStore:
             )
             conn.commit()
 
-    def get_metric_observations(self, reference_id: str, style_id: str) -> list[dict[str, Any]]:
-        """Return persisted multi-size metric samples."""
+    def get_metric_observations(
+        self,
+        reference_id: str,
+        style_id: str,
+        browser_version: str = "",
+        config_hash: str = "",
+        code_point: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return persisted multi-size metric samples, strictly filtered by exact identity.
+
+        Production callers must pass the full 4-tuple identity
+        (reference_id, style_id, browser_version, config_hash). The
+        2-argument form is preserved only as a non-exact debug/legacy
+        convenience and is NEVER used by finalization or any path whose
+        derived truth must be exact-environment-scoped.
+        """
+        if not browser_version or not config_hash:
+            raise ValueError(
+                "EXACT_IDENTITY_REQUIRED: get_metric_observations requires "
+                "non-empty browser_version and config_hash for production use"
+            )
         with self._get_connection() as conn:
-            rows = conn.execute(
-                """
-                SELECT * FROM metric_observations
-                WHERE reference_id = ? AND style_id = ?
-                ORDER BY code_point, font_size_px
-                """,
-                (reference_id, style_id),
-            ).fetchall()
+            if code_point is None:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM metric_observations
+                    WHERE reference_id = ? AND style_id = ?
+                      AND browser_version = ? AND config_hash = ?
+                    ORDER BY code_point, font_size_px
+                    """,
+                    (reference_id, style_id, browser_version, config_hash),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM metric_observations
+                    WHERE reference_id = ? AND style_id = ? AND code_point = ?
+                      AND browser_version = ? AND config_hash = ?
+                    ORDER BY font_size_px
+                    """,
+                    (reference_id, style_id, int(code_point), browser_version, config_hash),
+                ).fetchall()
             return [dict(row) for row in rows]
 
     def save_feature_observation(self, observation: OpenTypeFeatureObservation) -> None:

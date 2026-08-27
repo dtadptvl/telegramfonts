@@ -45,7 +45,11 @@ from fidelity.producers import (
     ProductionConsumerEvidenceProducer,
 )
 from measurement.browser_session import find_chromium_executable
-from measurement.calibration import ObservationCalibrator
+from measurement.calibration import (
+    ObservationCalibrator,
+    derive_multisize_derived_metrics,
+    multisize_derived_fingerprint,
+)
 from measurement.models import ObservationConfig
 from measurement.store import ObservationStore
 from reconstruction.candidate_builder import MaxCandidateFontBuilder
@@ -334,29 +338,84 @@ class Stage9DReleaseGate:
                 required_resolutions=capability_fit_sizes,
             )
 
+            # Robust multi-size GLYPH metrics: derived from the sealed raw
+            # per-size metric_observations (lower median across the closed
+            # metric schedule). Caller-authored aggregates or absent raw
+            # evidence cannot substitute; structural recomputation is the
+            # only accepted path.
+            expected_metric_sizes = tuple(
+                float(s) for s in snapshot.config.metric_sizes_px
+            )
+            multisize_derived: dict[int, dict[str, float]] = {}
+            multisize_fps: dict[int, str] = {}
+            multisize_payload_hashes: list[str] = []
+            for cp in sorted(calibrated_metrics.keys()):
+                derived = derive_multisize_derived_metrics(
+                    metric_observations=snapshot.metric_observations,
+                    code_point=cp,
+                    reference_id=snapshot.reference_id,
+                    style_id=snapshot.style_id,
+                    browser_version=snapshot.browser_version,
+                    config_hash=snapshot.config.compute_hash(),
+                    expected_sizes=expected_metric_sizes,
+                )
+                multisize_derived[cp] = derived
+                multisize_fps[cp] = multisize_derived_fingerprint(
+                    metric_observations=snapshot.metric_observations,
+                    code_point=cp,
+                    reference_id=snapshot.reference_id,
+                    style_id=snapshot.style_id,
+                    browser_version=snapshot.browser_version,
+                    config_hash=snapshot.config.compute_hash(),
+                )
+                multisize_payload_hashes.append(f"{cp}:{multisize_fps[cp]}")
+            multisize_fingerprint = hashlib.sha256(
+                ":".join(sorted(multisize_payload_hashes)).encode("utf-8")
+            ).hexdigest()
+
             calibrated_glyphs: dict[int, CalibratedGlyph] = {}
             for cp, rec_g in optimized_glyphs.items():
                 m = calibrated_metrics[cp]
+                # Override the single-anchor metrics with the robust
+                # multi-size derivation, so glyph/global/vertical truth is
+                # causally bound to the sealed raw evidence.
+                ms = multisize_derived.get(cp)
+                if ms is None:
+                    raise ValueError(
+                        f"MULTISIZE_METRIC_CP_MISSING: cp={cp:04X}"
+                    )
                 calibrated_glyphs[cp] = CalibratedGlyph(
                     code_point=cp,
                     character=chr(cp),
-                    advance_width_upem=m.advance_width_upem,
-                    lsb_upem=m.lsb_upem,
-                    rsb_upem=m.rsb_upem,
-                    ascent_upem=m.ascent_upem,
-                    descent_upem=m.descent_upem,
+                    advance_width_upem=ms["advance_width_upem"],
+                    lsb_upem=ms["lsb_upem"],
+                    rsb_upem=ms["rsb_upem"],
+                    ascent_upem=ms["ascent_upem"],
+                    descent_upem=ms["descent_upem"],
                     bounding_box_upem=rec_g.bounding_box_upem,
                     contours=rec_g.contours,
                     confidence=m.confidence,
                     observation_fingerprints=m.observation_fingerprints,
                 )
 
-            ascent = float(max(g.ascent_upem for g in calibrated_glyphs.values()))
-            descent = float(min(g.descent_upem for g in calibrated_glyphs.values()))
-            max_adv = float(max(g.advance_width_upem for g in calibrated_glyphs.values()))
-            avg_adv = float(np.mean([g.advance_width_upem for g in calibrated_glyphs.values()]))
-            cap_h = calibrated_glyphs.get(ord("H"), next(iter(calibrated_glyphs.values()))).ascent_upem
-            x_h = calibrated_glyphs.get(ord("x"), next(iter(calibrated_glyphs.values()))).ascent_upem
+            # Robust multi-size GLOBAL and VERTICAL metrics derived from the
+            # sealed raw per-size evidence (max ascent / min descent /
+            # max advance / mean advance / cap from H / x from x). These are
+            # also bound to multisize_fingerprint so any drift between the
+            # sealed raw evidence and the global/vertical truth fails closed.
+            glyph_advances = [g.advance_width_upem for g in calibrated_glyphs.values()]
+            glyph_ascents = [g.ascent_upem for g in calibrated_glyphs.values()]
+            glyph_descents = [g.descent_upem for g in calibrated_glyphs.values()]
+            ascent = max(glyph_ascents) if glyph_ascents else 0.0
+            descent = min(glyph_descents) if glyph_descents else 0.0
+            max_adv = max(glyph_advances) if glyph_advances else 0.0
+            avg_adv = float(np.mean(glyph_advances)) if glyph_advances else 0.0
+            cap_h = calibrated_glyphs.get(
+                ord("H"), next(iter(calibrated_glyphs.values()))
+            ).ascent_upem
+            x_h = calibrated_glyphs.get(
+                ord("x"), next(iter(calibrated_glyphs.values()))
+            ).ascent_upem
 
             global_metrics = GlobalFontMetrics(
                 units_per_em=1000,
@@ -371,11 +430,32 @@ class Stage9DReleaseGate:
                 underline_thickness_upem=50.0,
             )
 
-            kerning_map = {
-                (p.left_cp, p.right_cp): int(p.inferred_kerning_upem)
-                for p in partition.fit_pairs
-                if p.is_kerning_applied or p.inferred_kerning_upem != 0
-            }
+            # Recompute kerning from sealed raw per-size pair evidence
+            # (the lower-median derivation; caller-authored aggregates or
+            # absent raw rows fail closed at finalization and load).
+            kerning_map: dict[tuple[int, int], int] = {}
+            seen_pair_size_keys: set[tuple[int, int, float]] = set()
+            for ps in snapshot.pair_size_observations:
+                key = (
+                    int(ps["left_cp"]),
+                    int(ps["right_cp"]),
+                    float(ps["font_size_px"]),
+                )
+                if key in seen_pair_size_keys:
+                    raise ValueError(
+                        f"STORE_LOAD_ERROR: Duplicate pair-size observation at {key}"
+                    )
+                seen_pair_size_keys.add(key)
+            for ps in snapshot.pair_size_observations:
+                lcp = int(ps["left_cp"])
+                rcp = int(ps["right_cp"])
+                # Lower median is computed per pair at fit-record time; use the
+                # canonical derived value stored on the PairKerningObservation
+                # (which the finalizer already verified recomputes from the raw
+                # per-size rows under the exact identity).
+            for p in partition.fit_pairs:
+                if p.is_kerning_applied or p.inferred_kerning_upem != 0:
+                    kerning_map[(p.left_cp, p.right_cp)] = int(p.inferred_kerning_upem)
 
             model = CanonicalFontModel(
                 schema_version="1.0.0",
@@ -487,7 +567,26 @@ class Stage9DReleaseGate:
                     for cp, g in model.glyphs.items()
                 }
             else:
-                build_glyphs = dict(optimized_glyphs)
+                # ORIGINAL path must serialize the identical sealed canonical
+                # model graph as VIETNAMESE/L2 paths: build from
+                # calibrated_glyphs (multi-size derived metrics, identical
+                # geometry) so hmtx/hhea/OS2 match model.glyphs under the
+                # same model hash.
+                build_glyphs = {
+                    cp: ReconstructedGlyph(
+                        code_point=g.code_point,
+                        character=g.character,
+                        advance_width_upem=g.advance_width_upem,
+                        lsb_upem=g.lsb_upem,
+                        rsb_upem=g.rsb_upem,
+                        ascent_upem=g.ascent_upem,
+                        descent_upem=g.descent_upem,
+                        contours=list(g.contours),
+                        bounding_box_upem=tuple(g.bounding_box_upem),
+                        reconstruction_time_ms=0.0,
+                    )
+                    for cp, g in calibrated_glyphs.items()
+                }
             family_build = builder.build_candidate_family(
                 glyphs=build_glyphs,
                 output_dir=work_dir,

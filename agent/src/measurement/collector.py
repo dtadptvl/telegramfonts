@@ -42,6 +42,25 @@ def validate_pair_size_schedule(
         raise ValueError(
             f"MULTISIZE_KERNING_SCHEDULE_MISMATCH:missing={missing}:extra={extra}"
         )
+
+
+def validate_metric_size_schedule(
+    rows: "Sequence[Mapping[str, Any]]",
+    expected_sizes: "Sequence[float]",
+) -> None:
+    """Reject missing/extra/duplicate raw per-size metric evidence against the
+    closed metric schedule (raw evidence identity is closed for one code
+    point)."""
+    observed = [float(r["font_size_px"]) for r in rows]
+    if len(observed) != len(set(observed)):
+        raise ValueError("MULTISIZE_METRIC_DUPLICATE_SIZE")
+    expected = [float(s) for s in expected_sizes]
+    if sorted(observed) != sorted(expected):
+        missing = sorted(set(expected) - set(observed))
+        extra = sorted(set(observed) - set(expected))
+        raise ValueError(
+            f"MULTISIZE_METRIC_SCHEDULE_MISMATCH:missing={missing}:extra={extra}"
+        )
 from measurement.models import (
     BrowserFontSelection,
     MetricObservation,
@@ -516,6 +535,12 @@ class ObservationCollector:
         else:
             target_pairs = list(expected_pairs)
 
+        # Closed raw per-size pair schedule (adaptive multi-size kerning).
+        # Every declared pair must have raw per-size evidence across the exact
+        # declared metric schedule under the sealed exact collection identity.
+        # Absence is fail-closed; caller-authored aggregates cannot substitute.
+        expected_pair_sizes = tuple(float(s) for s in self.config.metric_sizes_px)
+
         stored_pairs = self.store.get_pair_observations(
             reference_id=reference_id,
             style_id=style_id,
@@ -535,34 +560,71 @@ class ObservationCollector:
                 raise ValueError(
                     f"FINALIZATION_FAILED: untrusted or mismatched pair provenance '{p.get('provenance')}' != '{expected_pair_prov}' for {reference_id}:{style_id}"
                 )
-            # Adaptive multi-size kerning binding: whenever raw per-size
-            # evidence exists for a pair, the stored derived kerning must
-            # recompute exactly from that raw evidence (no caller-authored
-            # aggregates).
+            # Raw per-size pair evidence is REQUIRED for every declared pair
+            # under the exact collection identity. The stored derived kerning
+            # must recompute exactly from that raw evidence; absence or
+            # mismatched sizes fail closed (caller-authored aggregates and
+            # missing evidence never substitute for the raw rows).
             size_rows = self.store.get_pair_size_observations(
                 reference_id, style_id,
                 int(p["left_cp"]), int(p["right_cp"]),
                 browser_version=bv, config_hash=cfg_h,
             )
-            if size_rows:
-                recomputed = derive_multisize_kerning(
-                    [
-                        {
-                            "font_size_px": float(r["font_size_px"]),
-                            "left_advance_upem": float(r["left_advance_upem"]),
-                            "right_advance_upem": float(r["right_advance_upem"]),
-                            "pair_advance_upem": float(r["pair_advance_upem"]),
-                            "inferred_kerning_upem": int(r["inferred_kerning_upem"]),
-                        }
-                        for r in size_rows
-                    ]
+            if not size_rows:
+                raise ValueError(
+                    f"FINALIZATION_FAILED: missing raw per-size pair evidence "
+                    f"for ({p['left_cp']},{p['right_cp']}) under ({bv}, {cfg_h}) "
+                    f"in {reference_id}:{style_id}"
                 )
-                if int(p.get("inferred_kerning_upem", 0)) != recomputed:
-                    raise ValueError(
-                        f"FINALIZATION_FAILED: pair ({p['left_cp']},{p['right_cp']}) derived kerning "
-                        f"{p.get('inferred_kerning_upem')} does not recompute from raw multi-size "
-                        f"evidence ({recomputed}) for {reference_id}:{style_id}"
-                    )
+            try:
+                validate_pair_size_schedule(size_rows, expected_pair_sizes)
+            except ValueError as exc:
+                raise ValueError(
+                    f"FINALIZATION_FAILED: {exc} for ({p['left_cp']},{p['right_cp']}) "
+                    f"in {reference_id}:{style_id}"
+                ) from exc
+            recomputed = derive_multisize_kerning(
+                [
+                    {
+                        "font_size_px": float(r["font_size_px"]),
+                        "left_advance_upem": float(r["left_advance_upem"]),
+                        "right_advance_upem": float(r["right_advance_upem"]),
+                        "pair_advance_upem": float(r["pair_advance_upem"]),
+                        "inferred_kerning_upem": int(r["inferred_kerning_upem"]),
+                    }
+                    for r in size_rows
+                ]
+            )
+            if int(p.get("inferred_kerning_upem", 0)) != recomputed:
+                raise ValueError(
+                    f"FINALIZATION_FAILED: pair ({p['left_cp']},{p['right_cp']}) derived kerning "
+                    f"{p.get('inferred_kerning_upem')} does not recompute from raw multi-size "
+                    f"evidence ({recomputed}) for {reference_id}:{style_id}"
+                )
+
+        # 3b. Closed raw per-size METRIC evidence identity: for every declared
+        # coverage code point, the stored metric_observations must equal the
+        # exact declared metric schedule under the sealed collection identity.
+        # Absence/extra/duplicate/cross-env rows reject (no caller-authored
+        # aggregate may substitute for the sealed raw evidence).
+        expected_metric_sizes = tuple(float(s) for s in self.config.metric_sizes_px)
+        for cp in coverage:
+            metric_rows = self.store.get_metric_observations(
+                reference_id, style_id,
+                browser_version=bv, config_hash=cfg_h,
+                code_point=cp,
+            )
+            if not metric_rows:
+                raise ValueError(
+                    f"FINALIZATION_FAILED: missing raw per-size metric evidence "
+                    f"for U+{cp:04X} under ({bv}, {cfg_h}) in {reference_id}:{style_id}"
+                )
+            try:
+                validate_metric_size_schedule(metric_rows, expected_metric_sizes)
+            except ValueError as exc:
+                raise ValueError(
+                    f"FINALIZATION_FAILED: {exc} for U+{cp:04X} in {reference_id}:{style_id}"
+                ) from exc
 
         # 4. Scoped OpenType feature probe observation verification (exact (tag, sample_text) set equality)
         features = self.store.get_feature_observations(

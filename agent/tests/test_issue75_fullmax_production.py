@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -234,13 +235,15 @@ def test_FULLMAX_FINALIZE_ROUNDTRIP_exact_key_set_equality(tmp_path: Path):
             assert set(config.resolutions) | set(config.effective_held_out_sizes()) == resolutions_seen
 
         # Metric observations never exceed the closed metric schedule.
-        metric_rows = store.get_metric_observations("max_fam", "regular")
+        metric_rows = store.get_metric_observations(
+            "max_fam", "regular", browser_version=bv, config_hash=cfg_h
+        )
         sizes_seen: set[float] = set()
         for row in metric_rows:
-            rec = row[0] if isinstance(row, tuple) else row
-            metrics_obj = getattr(rec, "metrics", None)
-            if metrics_obj is not None:
-                sizes_seen.add(float(metrics_obj.font_size_px))
+            # metric_observations rows carry a JSON blob in metrics_json; sizes
+            # come from the font_size_px column (the schedule member used to
+            # capture them).
+            sizes_seen.add(float(row["font_size_px"]))
         assert sizes_seen.issubset({float(s) for s in config.metric_sizes_px})
 
     asyncio.run(run())
@@ -793,5 +796,323 @@ def test_VI_DETERMINISTIC_FIRST_zero_ai_for_constructible_and_anchor_retention()
         _extended2, binding2 = await service2.extend(extended)
         assert provider2.calls == 0
         assert binding2.extended_codepoints == ()
+
+    asyncio.run(run())
+
+
+# =========================================================================
+# TYPOGRAPHY_RAW_SET_CLOSED  (issue:75#issuecomment-5437156952 / 5437573207)
+# =========================================================================
+
+
+def test_TYPOGRAPHY_RAW_SET_CLOSED_metric_and_pair_size_identity_closed(tmp_path: Path):
+    """TYPOGRAPHY_RAW_SET_CLOSED: raw per-size metric and pair-size evidence
+    are sealed identities; deleting rows, removing one declared size, adding
+    one undeclared size, cross-environment rows, and aggregate-only rows
+    reject before completion/snapshot/PASS.
+
+    Direct reproduction of the architect's evidence-bypass case
+    (delete 22 metric_observations rows + 11 pair_size_observations rows;
+    finalize again must NOT pass).
+    """
+    import json
+
+    async def run():
+        store, config, bv = await _collect_max(tmp_path / "ok")
+        cfg_h = config.compute_hash()
+
+        # Sanity: a correct full collection finalizes.
+        # (The fixture was already finalized by _collect_max.)
+
+        # CASE A: delete ALL metric rows + ALL pair-size rows; finalization
+        # on a fresh store with the same covered schedule must fail closed.
+        for sub in ("a", "b", "c", "d", "e"):
+            (tmp_path / sub).mkdir(parents=True, exist_ok=True)
+        store_a, config_a, bv_a = await _collect_max(tmp_path / "a")
+        cfg_h_a = config_a.compute_hash()
+        with store_a._get_connection() as conn:
+            conn.execute(
+                "DELETE FROM metric_observations WHERE reference_id='max_fam' "
+                "AND style_id='regular' AND browser_version=? AND config_hash=?",
+                (bv_a, cfg_h_a),
+            )
+            conn.execute(
+                "DELETE FROM pair_size_observations WHERE reference_id='max_fam' "
+                "AND style_id='regular' AND browser_version=? AND config_hash=?",
+                (bv_a, cfg_h_a),
+            )
+            conn.commit()
+        collector_a = ObservationCollector(_MaxFixtureSession(), store_a, config_a)
+        with pytest.raises(ValueError, match="FINALIZATION_FAILED"):
+            collector_a.finalize_source_collection("max_fam", "regular")
+
+        # CASE B: drop one declared size on a metric row -> fail closed.
+        store_b, config_b, bv_b = await _collect_max(tmp_path / "b")
+        cfg_h_b = config_b.compute_hash()
+        with store_b._get_connection() as conn:
+            conn.execute(
+                "DELETE FROM metric_observations WHERE reference_id='max_fam' "
+                "AND style_id='regular' AND font_size_px=4096 "
+                "AND browser_version=? AND config_hash=?",
+                (bv_b, cfg_h_b),
+            )
+            conn.commit()
+        collector_b = ObservationCollector(_MaxFixtureSession(), store_b, config_b)
+        with pytest.raises(ValueError, match="FINALIZATION_FAILED"):
+            collector_b.finalize_source_collection("max_fam", "regular")
+
+        # CASE C: add an undeclared size row -> fail closed.
+        store_c, config_c, bv_c = await _collect_max(tmp_path / "c")
+        cfg_h_c = config_c.compute_hash()
+        with store_c._get_connection() as conn:
+            # Pick a JSON blob from an existing row to preserve shape.
+            existing = conn.execute(
+                "SELECT metrics_json FROM metric_observations "
+                "WHERE reference_id='max_fam' AND style_id='regular' "
+                "AND code_point=65 LIMIT 1"
+            ).fetchone()
+            assert existing is not None
+            payload = existing["metrics_json"]
+            conn.execute(
+                "INSERT OR REPLACE INTO metric_observations ("
+                "reference_id, style_id, code_point, font_size_px, "
+                "browser_version, config_hash, metrics_json, created_at"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                ("max_fam", "regular", 65, 999.0, bv_c, cfg_h_c, payload, "2026-01-01T00:00:00+00:00"),
+            )
+            conn.commit()
+        collector_c = ObservationCollector(_MaxFixtureSession(), store_c, config_c)
+        with pytest.raises(ValueError, match="FINALIZATION_FAILED"):
+            collector_c.finalize_source_collection("max_fam", "regular")
+
+        # CASE D: cross-environment row (different browser_version) injected
+        # under the same ref/style -> exact-identity filter excludes it but
+        # the closed schedule still requires the canonical environment rows,
+        # which are intact; finalization should still pass for the canonical
+        # env, but the cross-env row must not be visible to derivation.
+        # We verify both: the cross-env row is NOT mixed into the canonical
+        # derivation, and a finalization that ONLY has the cross-env row
+        # fails closed.
+        store_d, config_d, bv_d = await _collect_max(tmp_path / "d")
+        cfg_h_d = config_d.compute_hash()
+        with store_d._get_connection() as conn:
+            existing = conn.execute(
+                "SELECT metrics_json FROM metric_observations "
+                "WHERE reference_id='max_fam' AND style_id='regular' "
+                "AND code_point=65 LIMIT 1"
+            ).fetchone()
+            payload = existing["metrics_json"]
+            # Inject a row under a foreign browser_version: this row is
+            # invisible to exact-identity consumers.
+            conn.execute(
+                "INSERT OR REPLACE INTO metric_observations ("
+                "reference_id, style_id, code_point, font_size_px, "
+                "browser_version, config_hash, metrics_json, created_at"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                ("max_fam", "regular", 65, 256.0, "chromium_foreign_v1", cfg_h_d, payload, "2026-01-01T00:00:00+00:00"),
+            )
+            conn.commit()
+        # Canonical finalization still works (the cross-env row is excluded
+        # by exact-identity filtering).
+        collector_d = ObservationCollector(_MaxFixtureSession(), store_d, config_d)
+        collector_d.finalize_source_collection("max_fam", "regular")
+        # The exact-identity scoped read must NOT include the foreign row.
+        rows_d = store_d.get_metric_observations(
+            "max_fam", "regular", browser_version=bv_d, config_hash=cfg_h_d
+        )
+        assert all(r["browser_version"] == bv_d for r in rows_d)
+
+        # CASE E: a fresh collection that ONLY has the foreign-env rows for
+        # one coverage code point must fail closed under the canonical env.
+        store_e, config_e, bv_e = await _collect_max(tmp_path / "e")
+        cfg_h_e = config_e.compute_hash()
+        with store_e._get_connection() as conn:
+            # Wipe canonical-env metric rows for cp=65; keep foreign-env rows.
+            conn.execute(
+                "DELETE FROM metric_observations WHERE reference_id='max_fam' "
+                "AND style_id='regular' AND code_point=65 AND browser_version=? AND config_hash=?",
+                (bv_e, cfg_h_e),
+            )
+            conn.execute(
+                "UPDATE metric_observations SET browser_version='chromium_foreign_v1' "
+                "WHERE reference_id='max_fam' AND style_id='regular' AND code_point=66 "
+                "AND browser_version=? AND config_hash=?",
+                (bv_e, cfg_h_e),
+            )
+            conn.commit()
+        collector_e = ObservationCollector(_MaxFixtureSession(), store_e, config_e)
+        with pytest.raises(ValueError, match="FINALIZATION_FAILED"):
+            collector_e.finalize_source_collection("max_fam", "regular")
+
+        # The exact-identity scoped store read must reject unauthenticated
+        # use: get_metric_observations without the env tuple raises.
+        with pytest.raises(ValueError, match="EXACT_IDENTITY_REQUIRED"):
+            store_e.get_metric_observations("max_fam", "regular")
+
+    asyncio.run(run())
+
+
+def test_TYPOGRAPHY_MULTI_SIZE_DERIVATION_CAUSAL_sealed_raw_drift_changes_derived(tmp_path: Path):
+    """TYPOGRAPHY_MULTI_SIZE_DERIVATION_CAUSAL: a controlled change to the
+    sealed raw per-size metric_observations deterministically changes the
+    derived glyph/global/vertical metrics; caller-authored aggregate rows
+    cannot substitute for the sealed raw evidence.
+    """
+    from measurement.calibration import (
+        derive_multisize_derived_metrics,
+        multisize_derived_fingerprint,
+    )
+
+    async def run():
+        store, config, bv = await _collect_max(tmp_path / "causal")
+        cfg_h = config.compute_hash()
+        rows = store.get_metric_observations(
+            "max_fam", "regular", browser_version=bv, config_hash=cfg_h
+        )
+        # Both glyphs (65, 66) carry the full schedule.
+        sizes = [float(s) for s in config.metric_sizes_px]
+        derived_65_a = derive_multisize_derived_metrics(
+            metric_observations=rows,
+            code_point=65,
+            reference_id="max_fam",
+            style_id="regular",
+            browser_version=bv,
+            config_hash=cfg_h,
+            expected_sizes=sizes,
+        )
+        fp_65_a = multisize_derived_fingerprint(
+            metric_observations=rows,
+            code_point=65,
+            reference_id="max_fam",
+            style_id="regular",
+            browser_version=bv,
+            config_hash=cfg_h,
+        )
+        # Controlled drift: shift the inner range of cp=65 ascent by +5 upem
+        # on every row so the lower median of 11 sorted values is causally
+        # moved (any single-row shift that doesn't displace the median does
+        # not satisfy the contract).
+        drifted = [dict(r) for r in rows]
+        for r in drifted:
+            if int(r["code_point"]) == 65:
+                payload = json.loads(r["metrics_json"])
+                payload["ascent_upem"] = float(payload.get("ascent_upem", 0.0)) + 5.0
+                r["metrics_json"] = json.dumps(payload, sort_keys=True)
+        derived_65_b = derive_multisize_derived_metrics(
+            metric_observations=drifted,
+            code_point=65,
+            reference_id="max_fam",
+            style_id="regular",
+            browser_version=bv,
+            config_hash=cfg_h,
+            expected_sizes=sizes,
+        )
+        fp_65_b = multisize_derived_fingerprint(
+            metric_observations=drifted,
+            code_point=65,
+            reference_id="max_fam",
+            style_id="regular",
+            browser_version=bv,
+            config_hash=cfg_h,
+        )
+        assert derived_65_a != derived_65_b
+        assert fp_65_a != fp_65_b
+
+        # Aggregate-only change: drop the raw rows and store a synthetic
+        # aggregate. The derivation must fail closed because the raw
+        # evidence is gone.
+        with store._get_connection() as conn:
+            conn.execute(
+                "DELETE FROM metric_observations WHERE reference_id='max_fam' "
+                "AND style_id='regular' AND browser_version=? AND config_hash=?",
+                (bv, cfg_h),
+            )
+            conn.commit()
+        rows_agg = store.get_metric_observations(
+            "max_fam", "regular", browser_version=bv, config_hash=cfg_h
+        )
+        assert rows_agg == []
+        with pytest.raises(ValueError, match="MULTISIZE_METRIC_NO_EVIDENCE"):
+            derive_multisize_derived_metrics(
+                metric_observations=rows_agg,
+                code_point=65,
+                reference_id="max_fam",
+                style_id="regular",
+                browser_version=bv,
+                config_hash=cfg_h,
+                expected_sizes=sizes,
+            )
+
+    asyncio.run(run())
+
+
+def test_TYPOGRAPHY_RAW_SNAPSHOT_BOUND_metric_and_pair_size_bound_to_fingerprint(tmp_path: Path):
+    """TYPOGRAPHY_RAW_SNAPSHOT_BOUND: metric_observations and
+    pair_size_observations are loaded, validated, and bound into the
+    snapshot fingerprint; tampering with a raw row changes the snapshot
+    identity so Stage 9D and Stage 9C detect drift fail-closed.
+    """
+    from fidelity.pipeline import ObservationStoreSnapshot
+
+    async def run():
+        store, config, bv = await _collect_max(tmp_path / "snap")
+        cfg_h = config.compute_hash()
+
+        snap = ObservationStoreSnapshot.load_from_store(
+            store=store,
+            reference_id="max_fam",
+            style_id="regular",
+            family_name="MaxFam",
+            style_name="Regular",
+            config=config,
+            browser_version=bv,
+        )
+        assert snap.metric_observations
+        assert snap.pair_size_observations
+        fp_a = snap.snapshot_fingerprint
+
+        # Mutate one metric row's metrics_json (rebind a derived value).
+        with store._get_connection() as conn:
+            row = conn.execute(
+                "SELECT code_point, font_size_px FROM metric_observations "
+                "WHERE reference_id='max_fam' AND style_id='regular' "
+                "AND browser_version=? AND config_hash=? "
+                "ORDER BY code_point, font_size_px LIMIT 1",
+                (bv, cfg_h),
+            ).fetchone()
+            assert row is not None
+            cp = int(row["code_point"])
+            size = float(row["font_size_px"])
+            existing = conn.execute(
+                "SELECT metrics_json FROM metric_observations "
+                "WHERE reference_id='max_fam' AND style_id='regular' "
+                "AND code_point=? AND font_size_px=? "
+                "AND browser_version=? AND config_hash=?",
+                (cp, size, bv, cfg_h),
+            ).fetchone()
+            payload = json.loads(existing["metrics_json"])
+            payload["advance_width_upem"] = float(payload.get("advance_width_upem", 0.0)) + 17.0
+            conn.execute(
+                "UPDATE metric_observations SET metrics_json=? "
+                "WHERE reference_id='max_fam' AND style_id='regular' "
+                "AND code_point=? AND font_size_px=? "
+                "AND browser_version=? AND config_hash=?",
+                (json.dumps(payload, sort_keys=True), cp, size, bv, cfg_h),
+            )
+            conn.commit()
+
+        snap_b = ObservationStoreSnapshot.load_from_store(
+            store=store,
+            reference_id="max_fam",
+            style_id="regular",
+            family_name="MaxFam",
+            style_name="Regular",
+            config=config,
+            browser_version=bv,
+        )
+        assert snap_b.snapshot_fingerprint != fp_a
+        # Drift in the sealed raw evidence must be detected by a verifier
+        # comparing the cached fingerprint.
+        assert snap.snapshot_fingerprint != snap_b.snapshot_fingerprint
 
     asyncio.run(run())

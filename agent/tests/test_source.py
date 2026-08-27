@@ -188,7 +188,7 @@ async def test_production_cache_miss_collects_persists_and_reconstructs_without_
     assert browser.observe_count == 1
     cfg_h = acquirer.observation_config.compute_hash()
     bv = browser.browser_version
-    assert len(acquirer.store.get_metric_observations("unknown_font", "reg")) == 6
+    assert len(acquirer.store.get_metric_observations("unknown_font", "reg", browser_version=bv, config_hash=cfg_h)) == 6
     assert len(acquirer.store.get_pair_observations("unknown_font", "reg", browser_version=bv, config_hash=cfg_h)) > 0
     assert len(acquirer.store.get_feature_observations("unknown_font", "reg", browser_version=bv, config_hash=cfg_h)) == 1
     assert not hasattr(browser, "load_font_data")
