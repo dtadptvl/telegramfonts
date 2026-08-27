@@ -1,6 +1,6 @@
 # EXECUTOR.md — Canonical Executor Policy
 
-CORE_REV: `E-20260827.1`
+CORE_REV: `E-20260827.2`
 
 ## 0. Purpose
 
@@ -15,7 +15,7 @@ Roles:
 ```text
 Architect = WHAT / WHY / invariants / contract / evidence / risk gates / review
 Executor  = HOW inside contract + implementation + bounded diagnosis + validation + raw evidence
-Human     = trigger/routing + consequential approval + final merge
+Human     = intent + reserved consequential authorization
 GitHub    = durable technical control plane
 ```
 
@@ -26,15 +26,15 @@ Human is not a technical message bus.
 ## 1. Operating Model, Source of Truth, and Task-Boundary Refresh
 
 ```text
-Human trigger
+Architect delegation (native Kilo Task)
 -> read current EXECUTOR.md
--> read active Issue/latest Architect review
+-> read active Issue/latest Architect review or exact MERGE_AUTHORIZED record
 -> resolve explicit REFS + mandatory safety REF loads
 -> reconcile Git/PR/worktree
--> execute smallest sufficient delta
+-> execute smallest sufficient authorized delta
 -> produce authoritative evidence
 -> PR/Issue terminal report
--> Human routing marker only
+-> return result directly to Architect
 ```
 
 Source priority:
@@ -67,8 +67,9 @@ At every **Executor task boundary**, re-read the current `EXECUTOR.md` from the 
 
 Task boundaries include:
 
-- a Human trigger to execute a new Issue/contract;
-- a Human trigger to address a new Architect review delta;
+- an Architect native Kilo delegation to execute a new Issue/contract;
+- an Architect native Kilo delegation to address a new review delta;
+- an Architect native Kilo delegation to execute an exact `MERGE_AUTHORIZED` record;
 - continuation after a new `ARCHITECT | EXECUTING_AUTHORIZED` record;
 - replacement Executor agent/model/account/session/process;
 - resume after compaction/context reset;
@@ -87,7 +88,7 @@ After refreshing the core:
 6. execute
 ```
 
-A bootstrap trigger from Human should explicitly say `Read EXECUTOR.md; ...`. If it does not, this section still requires the refresh once `EXECUTOR.md` is opened.
+A native delegation should explicitly say `Read EXECUTOR.md; ...`. If it does not, this section still requires the refresh once `EXECUTOR.md` is opened.
 
 ---
 
@@ -118,7 +119,7 @@ Every Executor-authored terminal GitHub status begins:
 ```text
 EXECUTOR | <STATUS>
 REF: <Architect issue/review/comment id>
-POLICY: E-20260827.1 | REFS: <NONE | Rn[,Rn...]>
+POLICY: E-20260827.2 | REFS: <NONE | Rn[,Rn...]>
 ```
 
 Canonical statuses:
@@ -129,6 +130,7 @@ NO_CHANGE
 UPDATED
 BLOCKED
 READY_HUMAN_AUTH
+MERGED
 SECURITY_BLOCKED
 ```
 
@@ -357,7 +359,7 @@ If Architect omitted one of these but the condition becomes materially true duri
 Before any mutation:
 
 ```text
-1. current EXECUTOR.md refreshed and CORE_REV == E-20260827.1?
+1. current EXECUTOR.md refreshed and CORE_REV == E-20260827.2?
 2. active contract + latest unresolved Architect review known?
 3. contract/review REFS resolved and required sections loaded?
 4. current local/remote HEAD, branch, worktree ownership reconciled?
@@ -387,7 +389,9 @@ For a successful logical code change:
 inspect -> implement -> verify -> inspect actual diff -> commit -> push task branch -> create/update PR
 ```
 
-Never merge.
+Never merge without an exact current `ARCHITECT | MERGE_AUTHORIZED` record bound to the current PR identity.
+
+Merge execution is a separate Executor task boundary. Before an authorized merge, refresh `EXECUTOR.md`, load effective R2/R5/R7, verify the exact PR/head/base/check/gate from authoritative GitHub state, perform at most the one authorized merge, verify the resulting merged state, and return `EXECUTOR | MERGED` or `BLOCKED` to Architect.
 
 Preserve unrelated work; commit only intended task delta; never commit secrets or temporary/reverted artifacts.
 
@@ -401,13 +405,16 @@ Load R5 when Git/PR/review procedure needs detail.
 
 ## 9. Consequential Authorization Is Fail-Closed
 
-Human approval text, `HUMAN_AUTH`, an approval request, a prior similar authorization, or `READY_HUMAN_AUTH` is **never executable authority**.
+Human approval text, `HUMAN_AUTH`, an approval request, a prior similar authorization, or `READY_HUMAN_AUTH` is **never executable authority** for a Human-reserved consequential action.
 
-Any consequential mutation requires a current exact GitHub record:
+Consequential mutation authority has exactly two canonical envelope types:
 
 ```text
-ARCHITECT | EXECUTING_AUTHORIZED
+Human-reserved consequential action -> ARCHITECT | EXECUTING_AUTHORIZED
+reviewed PR merge                    -> ARCHITECT | MERGE_AUTHORIZED
 ```
+
+No DONE status, green test, PR existence, positive prose review, inferred merge readiness, or other text substitutes for the applicable exact envelope.
 
 A continuation after new authorization is a task boundary: refresh `EXECUTOR.md` again before acting on the authorization.
 
@@ -415,6 +422,12 @@ Before **every consequential mutation**:
 
 ```text
 R7 MUST be loaded
+```
+
+For an authorized PR merge:
+
+```text
+R2 + R5 + R7 MUST be loaded
 ```
 
 For runtime/production consequential work:
@@ -425,7 +438,7 @@ R6 + R7 MUST be loaded
 
 These mandatory safety loads apply even when contract `REFS` says `NONE`, omits them, or is stale. Add them to effective REFS and report them in `POLICY`.
 
-Then verify the current authorization binds all applicable:
+For `EXECUTING_AUTHORIZED`, verify all applicable:
 
 ```text
 action
@@ -437,6 +450,18 @@ STOP conditions
 Human authorization reference
 ```
 
+For `MERGE_AUTHORIZED`, verify all applicable from authoritative GitHub state:
+
+```text
+PR
+REVIEWED_HEAD
+BASE
+MERGE_METHOD
+GATE
+ACTION
+STOP
+```
+
 Missing, stale, ambiguous, or drifted binding:
 
 ```text
@@ -445,6 +470,8 @@ BLOCKED -> ARCHITECT_REVIEW
 ```
 
 Authorization is action-scoped. Never infer retry, repair-forward, alternate transport, adjacent mutation, different target, package/config/source change, or rollback authority.
+
+`MERGE_AUTHORIZED` authorizes exactly one merge of the bound reviewed PR and no source/config modification. One attempted merge consumes that authorization unless authoritative GitHub evidence proves `NOT_ATTEMPTED`. Timeout/ambiguity does not restore it or authorize retry.
 
 For `PROD_SINGLE_SHOT`, an attempted consequential action consumes the allowance unless authoritative evidence proves `NOT_ATTEMPTED`. Timeout/ambiguity does not restore it or authorize retry.
 
@@ -579,7 +606,7 @@ If uncertain after allowed bounded execution:
 ```text
 EXECUTOR | BLOCKED
 REF: <active Architect ref>
-POLICY: E-20260827.1 | REFS: <effective refs>
+POLICY: E-20260827.2 | REFS: <effective refs>
 NEXT: ARCHITECT_REVIEW
 ```
 
@@ -587,28 +614,34 @@ A false success report is worse than a correct conservative `BLOCKED`.
 
 ---
 
-## 15. Human Routing and Canonical Principle
+## 15. Architect Return and Canonical Principle
 
-Human-facing routing contains no technical duplicate detail, but MUST bootstrap the next agent's core refresh.
+Executor returns technical status/evidence directly to the parent Architect through the native Kilo Task result. Do not route technical messages through Human.
 
 Examples:
 
 ```text
 DONE
 PR #N
-NEXT: Read ARCHITECT.md; review PR #N.
+NEXT: ARCHITECT_REVIEW
 ```
 
 ```text
 UPDATED
 PR #N
-NEXT: Read ARCHITECT.md; re-review PR #N.
+NEXT: ARCHITECT_REVIEW
 ```
 
 ```text
 BLOCKED
 ISSUE #N
-NEXT: Read ARCHITECT.md; review blocker on Issue #N.
+NEXT: ARCHITECT_REVIEW
+```
+
+```text
+MERGED
+PR #N
+NEXT: ARCHITECT_VERIFY_MERGE
 ```
 
 Canonical principle:
@@ -631,6 +664,6 @@ Only exact ARCHITECT | EXECUTING_AUTHORIZED unlocks consequential execution.
 R7 is mandatory before every consequential mutation; R6+R7 for runtime/production consequential work.
 Never silently repair-forward.
 Terminal reports include current CORE_REV + effective REFS.
-Human routing bootstraps ARCHITECT.md refresh.
-Never merge.
+Native Kilo return creates the next Architect review/recovery task boundary.
+Never merge without an exact current MERGE_AUTHORIZED record.
 ```

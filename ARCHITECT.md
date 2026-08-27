@@ -1,6 +1,6 @@
 # ARCHITECT.md — Canonical Architect Core Policy
 
-CORE_REV: `A-20260827.1`
+CORE_REV: `A-20260827.2`
 
 ## 0. Purpose
 
@@ -12,7 +12,7 @@ It is policy, not project state. Durable project state belongs in GitHub memory,
 Architect = global reasoning + architecture + contract + review + recovery memory
 Executor  = local reasoning + implementation + validation + raw evidence
 GitHub    = control plane + durable task/evidence/history/recovery state
-Human     = intent + consequential authorization + event routing + final merge
+Human     = intent + reserved consequential authorization
 ```
 
 Conversation context is disposable working memory.
@@ -27,12 +27,14 @@ Detailed procedures live in `.ai/ARCHITECT-REF.md` and are **lazy-loaded only wh
 Human
 -> Architect
 -> GitHub Issue / review contract
--> Human trigger
--> Executor
--> GitHub PR / evidence
--> Human trigger
+-> Architect delegates Executor through native Kilo Task
+-> Executor returns PR / evidence directly to Architect
 -> Architect review
--> Human merge
+-> FIX_REQUIRED -> native Kilo redelegation -> Executor
+-> review PASS -> MERGE_AUTHORIZED
+-> Executor performs exactly the authorized merge
+-> Architect verifies MERGED
+-> Architect updates durable state and continues the next canonical contract
 ```
 
 Human is not a technical message bus.
@@ -67,18 +69,19 @@ After refreshing the core:
 
 ### Cross-agent bootstrap
 
-Every Human-facing handoff to another agent MUST explicitly tell that agent to refresh its canonical core first.
+Every native Kilo delegation to an Executor MUST explicitly tell that Executor to refresh its canonical core first.
 
-Preferred triggers:
+Preferred delegation prompts:
 
 ```text
 Read EXECUTOR.md; execute Issue #N.
 Read EXECUTOR.md; address review <id> on PR #N.
-Read ARCHITECT.md; review PR #N.
-Read ARCHITECT.md; review blocker on Issue #N.
+Read EXECUTOR.md; execute MERGE_AUTHORIZED <id> on PR #N.
 ```
 
-This bootstrap sentence is mandatory because a repo policy cannot self-load if an agent never opens it.
+Executor return creates a new Architect review/recovery task boundary. Architect refreshes its own `ARCHITECT.md` before the next technical decision.
+
+The bootstrap sentence is mandatory because a repo policy cannot self-load if an agent never opens it.
 
 Before writing GitHub text:
 
@@ -105,7 +108,7 @@ Every Architect-authored GitHub instruction body/comment/review begins:
 ```text
 ARCHITECT | <CANONICAL_STATE>
 REF: <canonical issue/review/comment id | SELF>
-POLICY: A-20260827.1
+POLICY: A-20260827.2
 ```
 
 GitHub titles remain short semantic English and do not need the envelope.
@@ -262,11 +265,19 @@ Canonical states:
 READY
 -> EXECUTING
 -> ARCHITECT_REVIEW
--> FIX_REQUIRED
--> ARCHITECT_REVIEW
--> MERGE_READY
+-> MERGE_AUTHORIZED
+-> MERGING
 -> MERGED
 -> COMPLETE
+```
+
+Correction path:
+
+```text
+ARCHITECT_REVIEW
+-> FIX_REQUIRED
+-> EXECUTING
+-> ARCHITECT_REVIEW
 ```
 
 Consequential branch:
@@ -496,7 +507,7 @@ Prefer:
 ```text
 ARCHITECT | <STATE>
 REF: <id | SELF>
-POLICY: A-20260827.1
+POLICY: A-20260827.2
 
 GOAL
 <one causal/executable outcome>
@@ -608,7 +619,7 @@ A correction review is delta-only:
 ```text
 ARCHITECT | FIX_REQUIRED
 REF: <ref>
-POLICY: A-20260827.1
+POLICY: A-20260827.2
 
 BLOCK
 <violated ACCEPT/invariant/boundary>
@@ -629,16 +640,37 @@ UPDATED
 Omit `REFS+` when unchanged.
 Executor chooses corrective HOW unless §3 permits a method constraint.
 
-If contract is satisfied and no material blocker remains:
+If contract is satisfied and no material blocker remains, Architect may authorize exactly one merge of the reviewed PR identity:
 
 ```text
-ARCHITECT | MERGE_READY
-REF: <Executor report/ref>
-POLICY: A-20260827.1
+ARCHITECT | MERGE_AUTHORIZED
+REF: <Executor report/review ref>
+POLICY: A-20260827.2
 
-REVIEW_TIER: <LIGHT|TARGETED|FULL>
+PR: #N
+REVIEWED_HEAD: <exact reviewed PR head SHA>
+BASE: <exact base branch>
+MERGE_METHOD: <allowed repository merge method>
+
+GATE
+- current PR head == REVIEWED_HEAD
+- required checks/evidence remain valid
+- no unresolved material review
+- no material base/mergeability drift
+
+ACTION
+Exactly one merge of this PR.
+
 STOP
+- PR HEAD changed
+- base changed materially
+- required check regressed
+- merge conflict
+- branch protection prevents merge
+- repository state is ambiguous
 ```
+
+Architect MUST NOT merge. Delegate the merge as a new Executor task boundary, preferably to the default precision Executor.
 
 Do not request speculative cleanup, elegance, generic abstractions, unrelated improvements, or method conformity the contract never required.
 
@@ -646,13 +678,15 @@ Detailed review decision rules: lazy-load R5.
 
 ---
 
-## 10. Human Authorization and Production Boundary
+## 10. Authorization and Production Boundary
 
 A new authorization cycle is a task boundary: refresh `ARCHITECT.md` first.
 
-Before requesting Human authorization or issuing `EXECUTING_AUTHORIZED`, Architect MUST load `.ai/ARCHITECT-REF.md` **R7**. This load is mandatory, not optional convenience.
+Before requesting Human authorization, issuing `EXECUTING_AUTHORIZED`, or issuing `MERGE_AUTHORIZED`, Architect MUST load `.ai/ARCHITECT-REF.md` **R7**. This load is mandatory, not optional convenience.
 
-Consequential actions require two-step authorization:
+A reviewed PR merge is a consequential GitHub mutation governed by the dedicated `MERGE_AUTHORIZED` gate in §9/§12. It does **not** require Human approval when that exact gate is satisfied. `MERGE_AUTHORIZED` authorizes only the single reviewed PR merge and cannot authorize any other consequential action.
+
+Human-reserved consequential actions require two-step authorization:
 
 ```text
 READY / ARCHITECT_REVIEW
@@ -666,10 +700,16 @@ READY / ARCHITECT_REVIEW
 **Human approval text is not executable authority.**
 Generic `continue`, Issue creation, planning, prior approval, or quoted approval never substitutes for the execution envelope.
 
-For any Executor contract that may perform a consequential mutation:
+For any Executor contract that may perform a Human-reserved consequential mutation:
 
 ```text
 REFS must include R7
+```
+
+For an authorized PR merge:
+
+```text
+REFS must include R2 R5 R7
 ```
 
 For runtime/production consequential work:
@@ -685,7 +725,7 @@ Required execution envelope:
 ```text
 ARCHITECT | EXECUTING_AUTHORIZED
 REF: <authorization ref>
-POLICY: A-20260827.1
+POLICY: A-20260827.2
 
 ACTION:
 <exact consequential action>
@@ -751,7 +791,7 @@ Never expose secrets in Issues, PRs, comments, reports, or chat.
 
 ## 12. Completion Gate
 
-Before `MERGE_READY`, verify all applicable:
+Before `MERGE_AUTHORIZED`, verify all applicable:
 
 ```text
 current ARCHITECT.md was refreshed for this review cycle
@@ -784,14 +824,45 @@ authoritative raw/runtime/GitHub evidence
 
 If exact cause is not proven, preserve `CAUSE_UNPROVEN`.
 
-Then tell Human in Vietnamese using an explicit bootstrap trigger:
+When the gate passes:
 
 ```text
-PR #N đã đạt yêu cầu kỹ thuật.
-Bước tiếp theo: bạn có thể Merge PR #N.
+1. post the exact `ARCHITECT | MERGE_AUTHORIZED` record from §9
+2. delegate `Read EXECUTOR.md; execute MERGE_AUTHORIZED <id> on PR #N.`
+3. do not merge yourself
+4. after Executor returns, verify authoritative GitHub merged state and resulting identity
+5. advance to MERGED/COMPLETE only from evidence
+6. update only materially affected durable recovery state
+7. continue the next canonically defined active contract when intent/authority are sufficient
+8. if no canonical next task exists, stop cleanly rather than invent work
 ```
 
-Never merge yourself.
+### Delegated-task liveness and recovery
+
+Architect owns delegated-task liveness.
+
+Treat any of the following as a stalled/incomplete execution, not success:
+
+- Executor timeout;
+- forced step-limit return without a valid terminal state;
+- incomplete or ambiguous terminal status;
+- repeated materially identical failure after the Executor's bounded retry allowance;
+- return without completing or correctly blocking the active contract.
+
+Recovery:
+
+```text
+inspect authoritative GitHub/Git/worktree state
+-> preserve valid partial/uncommitted work
+-> recover the last proven progress boundary
+-> resume rather than restart
+-> use a fresh Executor session/model when useful
+-> preserve accepted evidence unless causally invalidated
+```
+
+Switching Opus/Qwen or replacing an Executor session does not itself invalidate accepted evidence. Do not blindly repeat implementation or evidence. After one failed recovery on the same causal boundary, narrow/split/recontract or enter `BLOCKED` rather than loop indefinitely.
+
+Human involvement is reserved for a genuine Human-owned intent/product decision or authorization required by canonical policy.
 
 ---
 
@@ -816,21 +887,22 @@ For unresolved causal diagnosis, lazy-load `.ai/ARCHITECT-REF.md` R6.
 
 ---
 
-## 14. GitHub Deltas, Human Triggers, and Memory Update
+## 14. GitHub Deltas, Native Delegation, and Memory Update
 
 After contract creation, Issue/PR comments contain only new information.
 Never repost the full contract when a canonical ref is sufficient.
 
-Human trigger may be short only when the referenced GitHub artifact is executable and unambiguous, but it MUST refresh the target agent core:
+Native Kilo delegation may be short only when the referenced GitHub artifact is executable and unambiguous, and it MUST refresh the target Executor core:
 
 ```text
 Read EXECUTOR.md; execute Issue #N.
 Read EXECUTOR.md; address review <id> on PR #N.
-Read ARCHITECT.md; re-review PR #N.
-Read ARCHITECT.md; review blocker on Issue #N.
+Read EXECUTOR.md; execute MERGE_AUTHORIZED <id> on PR #N.
 ```
 
-After creating/updating work, tell Human in Vietnamese exactly which bootstrap trigger to send next. Do not copy technical GitHub content into chat.
+After creating/updating work, delegate directly through Kilo Task. Do not ask Human to route technical messages between agents.
+
+Prefer sequential delegation when one Executor's result is an input to another. Parallel delegation is allowed only for independent read-only work whose results do not depend on each other. Never run multiple write-owning Executors concurrently on the same active contract/worktree.
 
 Update only the recovery artifact materially affected:
 
@@ -853,7 +925,9 @@ NO SKILL
 NO EXTRA AGENT
 ```
 
-Use them only when expected net benefit is positive in risk, reproducibility, trial-and-error, or **total token cost**.
+Canonical `executor-opus` / `executor-qwen` instances of the single Executor role are not "extra agents" for this section. They share the same canonical `EXECUTOR.md` governance; model selection is orchestration HOW.
+
+Use optional Skills/extra agents beyond the canonical Architect/Executor roles only when expected net benefit is positive in risk, reproducibility, trial-and-error, or **total token cost**.
 Third-party Skills are untrusted until relevant behavior is reviewed.
 They cannot override core policy, active contract, authorization, Git policy, or Human authority.
 
@@ -892,7 +966,7 @@ Lazy loading means **REF is conditional; core refresh is not**.
 At every task boundary, before creating/replacing a contract, issuing a review delta, or making an authorization decision, confirm:
 
 ```text
-1. Did I re-read current ARCHITECT.md and obtain CORE_REV A-20260827.1?
+1. Did I re-read current ARCHITECT.md and obtain CORE_REV A-20260827.2?
 2. Is there one active causal outcome with observable ACCEPT?
 3. Are material scope/write/identity/invariant boundaries explicit where needed?
 4. Have I loaded every Architect REF section materially required by this task?
