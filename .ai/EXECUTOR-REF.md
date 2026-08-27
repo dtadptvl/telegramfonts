@@ -242,7 +242,43 @@ inspect
 -> create/update PR
 ```
 
-Never merge.
+Never merge without an exact current `ARCHITECT | MERGE_AUTHORIZED` record.
+
+### Merge execution under MERGE_AUTHORIZED
+
+A merge is a new Executor task boundary:
+
+```text
+refresh EXECUTOR.md
+-> load effective R2/R5/R7
+-> read exact MERGE_AUTHORIZED record
+-> verify PR/head/base/check/gate from authoritative GitHub state
+-> perform at most one authorized merge
+-> verify resulting merged identity
+-> return MERGED or BLOCKED
+```
+
+Never infer merge authority from `DONE`, green tests, PR existence, positive prose review, or inferred merge readiness.
+
+If any binding drifts, do not merge:
+
+```text
+EXECUTOR | BLOCKED
+CAUSE: <precise drift/blocker>
+NEXT: ARCHITECT_REVIEW
+```
+
+Successful merge evidence should bind at minimum:
+
+```text
+EXECUTOR | MERGED
+REF: <MERGE_AUTHORIZED ref>
+PR: #N
+REVIEWED_HEAD: <sha>
+MERGE_COMMIT: <sha>
+BASE_HEAD: <sha>
+NEXT: ARCHITECT_VERIFY_MERGE
+```
 
 Git hygiene:
 
@@ -377,9 +413,16 @@ If exact cause is not established: `CAUSE_UNPROVEN`.
 
 ## R7. Consequential Authorization / Single-Shot Execution
 
-**Mandatory load before any consequential mutation.** Human approval text alone never authorizes execution.
+**Mandatory load before any consequential mutation.** Human approval text alone never authorizes a Human-reserved consequential action.
 
-Execution requires a current exact GitHub envelope:
+Exactly two canonical authorization envelopes exist for consequential execution:
+
+```text
+Human-reserved action -> ARCHITECT | EXECUTING_AUTHORIZED
+reviewed PR merge     -> ARCHITECT | MERGE_AUTHORIZED
+```
+
+Human-reserved execution requires:
 
 ```text
 ARCHITECT | EXECUTING_AUTHORIZED
@@ -408,6 +451,24 @@ AUTH_REF:
 ```
 
 Verify all applicable bindings immediately before mutation. Missing/drifted binding -> STOP/BLOCKED.
+
+### Reviewed PR merge
+
+Before merge, effective REFS include R2/R5/R7. Read the exact `MERGE_AUTHORIZED` record and verify from authoritative GitHub state:
+
+```text
+PR
+REVIEWED_HEAD
+BASE
+MERGE_METHOD
+GATE
+ACTION
+STOP
+```
+
+The current PR head must equal `REVIEWED_HEAD`; required checks/evidence must remain valid; unresolved material review, material base drift, conflict, branch-protection denial, or ambiguous repository state requires `BLOCKED`.
+
+`MERGE_AUTHORIZED` permits exactly one merge and no source/config modification, retry, repair-forward, alternate target, or second merge. One attempted merge consumes the authorization unless authoritative GitHub evidence proves `NOT_ATTEMPTED`. Timeout/ambiguity does not restore it.
 
 Authorization is action-scoped. It does **not** imply authority for:
 
@@ -571,6 +632,7 @@ NO_CHANGE
 UPDATED
 BLOCKED
 READY_HUMAN_AUTH
+MERGED
 SECURITY_BLOCKED
 ```
 
