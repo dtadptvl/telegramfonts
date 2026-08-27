@@ -290,6 +290,32 @@ class ObservationStore:
                 )
                 """
             )
+            # Raw per-size pair evidence identity table: created eagerly so
+            # snapshot loads over stores without saved pair-size rows read
+            # zero rows instead of crashing on a missing table.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS pair_size_observations (
+                    reference_id TEXT NOT NULL,
+                    style_id TEXT NOT NULL,
+                    left_cp INTEGER NOT NULL,
+                    right_cp INTEGER NOT NULL,
+                    font_size_px REAL NOT NULL,
+                    left_advance_upem REAL NOT NULL,
+                    right_advance_upem REAL NOT NULL,
+                    pair_advance_upem REAL NOT NULL,
+                    inferred_kerning_upem INTEGER NOT NULL,
+                    browser_version TEXT NOT NULL,
+                    config_hash TEXT NOT NULL,
+                    provenance TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (
+                        reference_id, style_id, left_cp, right_cp,
+                        font_size_px, browser_version, config_hash
+                    )
+                )
+                """
+            )
             # Create or migrate feature_observations table to 6-column composite primary key
             cur = conn.execute("PRAGMA table_info(feature_observations)")
             feat_columns = {row[1]: row for row in cur.fetchall()}

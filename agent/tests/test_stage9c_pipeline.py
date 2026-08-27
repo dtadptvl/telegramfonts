@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import io
+import json
 import logging
 import math
 import os
@@ -108,8 +109,16 @@ def _make_dummy_metrics(
     bbox_upem: tuple[float, float, float, float] = (50, 50, 550, 700),
     confidence: float = 1.0,
     fractional: bool = False,
+    font_size_px: float | None = None,
 ) -> DirectMetrics:
-    f_size_px = float(math.floor(resolution * 0.72))
+    # font_size_px override carries the exact requested metric size for
+    # sealed metric-schedule rows; the resolution-derived default is for
+    # raster-resolution contexts only.
+    f_size_px = (
+        float(font_size_px)
+        if font_size_px is not None
+        else float(math.floor(resolution * 0.72))
+    )
     scale = f_size_px / 1000.0
     adv_px = advance_width_upem * scale
     ascent_px = bbox_upem[3] * scale
@@ -257,6 +266,35 @@ def _build_valid_snapshot(
         reference_id=reference_id, style_id=style_id, browser_version=browser_version, config_hash=cfg_hash,
     )
 
+    # Sealed raw per-size metric evidence across the closed metric
+    # schedule under the exact collection identity: Stage 9C derives glyph
+    # metrics only from these rows (fail-closed).
+    metric_rows = []
+    for cp, adv, bbox in (
+        (65, 650.0, (50, 50, 550, 700)),
+        (66, 600.0, (40, 50, 560, 700)),
+    ):
+        for size in config.metric_sizes_px:
+            m = _make_dummy_metrics(
+                code_point=cp,
+                resolution=128,
+                advance_width_upem=adv,
+                bbox_upem=bbox,
+                font_size_px=float(size),
+            )
+            metric_rows.append(
+                {
+                    "reference_id": reference_id,
+                    "style_id": style_id,
+                    "code_point": cp,
+                    "font_size_px": float(size),
+                    "browser_version": browser_version,
+                    "config_hash": cfg_hash,
+                    "metrics_json": json.dumps(m.__dict__, sort_keys=True),
+                    "created_at": "2026-08-25T00:00:00Z",
+                }
+            )
+
     return ObservationStoreSnapshot(
         reference_id=reference_id,
         style_id=style_id,
@@ -267,6 +305,7 @@ def _build_valid_snapshot(
         records=tuple(records_list),
         raster_bytes_map=raster_map,
         pairs=(pair1, pair2),
+        metric_observations=tuple(metric_rows),
     )
 
 
@@ -293,7 +332,7 @@ async def test_e2e_real_collector_to_store_to_snapshot_pipeline_execution() -> N
 
         def fake_measure_glyph(font_family, code_point, font_size_px, upem):
             adv_upem = 650.0 if code_point == 65 else 600.0
-            return _make_dummy_metrics(code_point=code_point, resolution=int(font_size_px), advance_width_upem=adv_upem)
+            return _make_dummy_metrics(code_point=code_point, resolution=int(font_size_px), advance_width_upem=adv_upem, font_size_px=float(font_size_px))
 
         def fake_capture_raster(font_family, code_point, resolution_px, subpixel_offset=(0.0, 0.0)):
             adv_upem = 650.0 if code_point == 65 else 600.0
