@@ -176,6 +176,8 @@ async def test_production_cache_miss_collects_persists_and_reconstructs_without_
         observation_store_dir=tmp_path / "runtime_observations",
         browser_session_factory=lambda: browser,
         observation_config=config,
+        # Exhaustive authoritative enumeration over the fixture candidate set.
+        discovery_miss_budget=5000,
     )
 
     payload = await acquirer.acquire_source(
@@ -186,7 +188,7 @@ async def test_production_cache_miss_collects_persists_and_reconstructs_without_
     assert browser.observe_count == 1
     cfg_h = acquirer.observation_config.compute_hash()
     bv = browser.browser_version
-    assert len(acquirer.store.get_metric_observations("unknown_font", "reg")) == 6
+    assert len(acquirer.store.get_metric_observations("unknown_font", "reg", browser_version=bv, config_hash=cfg_h)) == 6
     assert len(acquirer.store.get_pair_observations("unknown_font", "reg", browser_version=bv, config_hash=cfg_h)) > 0
     assert len(acquirer.store.get_feature_observations("unknown_font", "reg", browser_version=bv, config_hash=cfg_h)) == 1
     assert not hasattr(browser, "load_font_data")
@@ -270,6 +272,7 @@ async def test_completed_source_collection_reuses_cache_without_browser_recrawl(
         observation_store_dir=store_dir,
         browser_session_factory=lambda: browser,
         observation_config=config,
+        discovery_miss_budget=5000,
     )
     await first.acquire_source("https://www.myfonts.com/collections/cache-font", styles)
 

@@ -118,7 +118,7 @@ async def _seed_store(store_dir: Path, reference_id: str, style_id: str, code_po
 
     def fake_measure_glyph(font_family, code_point, font_size_px, upem):
         adv = 650.0 if code_point == 65 else 600.0
-        return _make_dummy_metrics(code_point=code_point, resolution=int(font_size_px), advance_width_upem=adv)
+        return _make_dummy_metrics(code_point=code_point, resolution=int(font_size_px), advance_width_upem=adv, font_size_px=float(font_size_px))
 
     def fake_capture_raster(font_family, code_point, resolution_px, subpixel_offset=(0.0, 0.0)):
         adv = 650.0 if code_point == 65 else 600.0

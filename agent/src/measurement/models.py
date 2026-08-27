@@ -23,6 +23,7 @@ class ObservationConfig:
         (0.0, 0.75),
     )
     held_out_subpixel_phases: tuple[tuple[float, float], ...] = ((0.25, 0.25),)
+    held_out_sizes_px: tuple[int, ...] = ()
     adaptive_expansion_threshold: float = 0.05
     font_size_px: float = 200.0
     metric_sizes_px: tuple[float, ...] = (32.0, 64.0, 128.0, 200.0)
@@ -35,6 +36,61 @@ class ObservationConfig:
     timeout_seconds: float = 10.0
     max_retries: int = 3
     config_version: str = "1.1.0"
+
+    @classmethod
+    def max_profile(cls) -> "ObservationConfig":
+        """Canonical FULL MAX RECONSTRUCTION PROFILE observation config.
+
+        Exact closed schedules (measurement.max_profile): fit raster sizes
+        256..4096, metric sizes 128..4096, sealed held-out sizes
+        144..2560, full 4x4 browser phase grid with deterministic 8x8 hard
+        expansion, disjoint held-out midpoint phase grid, and the full causal
+        feature probe tag set. Validated fail-closed by
+        validate_observation_config_max.
+        """
+        from measurement.max_profile import (
+            MAX_BROWSER_PHASES_4X4,
+            MAX_CONFIG_VERSION,
+            MAX_FEATURE_PROBES,
+            MAX_HARD_PHASES_8X8,
+            MAX_HELDOUT_PHASES,
+            MAX_HELDOUT_SIZES_PX,
+            MAX_METRIC_SIZES_PX,
+            MAX_RASTER_SIZES_PX,
+            validate_observation_config_max,
+        )
+
+        config = cls(
+            resolutions=MAX_RASTER_SIZES_PX,
+            base_subpixel_phases=MAX_BROWSER_PHASES_4X4,
+            expanded_subpixel_phases=MAX_HARD_PHASES_8X8,
+            held_out_subpixel_phases=MAX_HELDOUT_PHASES,
+            held_out_sizes_px=MAX_HELDOUT_SIZES_PX,
+            # Closed metric anchor: inside the exact metric schedule, so no
+            # undeclared metric-size observation is ever performed.
+            font_size_px=256.0,
+            metric_sizes_px=tuple(float(s) for s in MAX_METRIC_SIZES_PX),
+            feature_probes=MAX_FEATURE_PROBES,
+            config_version=MAX_CONFIG_VERSION,
+        )
+        # Structural production validation: the canonical config itself must
+        # satisfy the closed schedule (exact entries, disjointness invariants,
+        # closed metric anchor, config version), never merely instantiate it.
+        validate_observation_config_max(config)
+        return config
+
+    def effective_held_out_sizes(self) -> tuple[int, ...]:
+        """Single canonical source for the held-out render-size schedule.
+
+        Declared held-out sizes when present; otherwise the legacy single
+        held-out size (max fit resolution). Capture, finalization,
+        completion, snapshot and partition consumers must all derive
+        held-out keys from this method.
+        """
+        declared = tuple(int(s) for s in self.held_out_sizes_px)
+        if declared:
+            return declared
+        return (int(max(self.resolutions)),)
 
     def get_phases_for_metrics(self, metrics: DirectMetrics) -> tuple[tuple[float, float], ...]:
         """Determine adaptive subpixel phases based on fractional metric uncertainty/boundary alignment."""
@@ -51,6 +107,7 @@ class ObservationConfig:
             "base_subpixel_phases": [list(p) for p in self.base_subpixel_phases],
             "expanded_subpixel_phases": [list(p) for p in self.expanded_subpixel_phases],
             "held_out_subpixel_phases": [list(p) for p in self.held_out_subpixel_phases],
+            "held_out_sizes_px": [int(s) for s in self.held_out_sizes_px],
             "adaptive_expansion_threshold": self.adaptive_expansion_threshold,
             "font_size_px": self.font_size_px,
             "metric_sizes_px": list(self.metric_sizes_px),

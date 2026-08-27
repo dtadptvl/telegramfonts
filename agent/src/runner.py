@@ -47,6 +47,7 @@ from compute.models import ArchiveSourceContext, GeneratedFontFile, JobPackageMa
 from compute.model_cache import CanonicalFontModelCache, FontModelCacheIdentity
 from compute.packager import PackagerService
 from compute.source import SourceAcquirer
+from measurement.models import ObservationConfig
 from compute.validator import validate_font_file
 from config import Settings
 from fidelity.release_gate import STAGE9D_ATTESTATION_SCHEMA_VERSION, Stage9DAttestation, Stage9DReleaseGate
@@ -162,6 +163,9 @@ class JobRunner:
         self.source_acquirer = source_acquirer or SourceAcquirer(
             timeout=settings.HTTP_TIMEOUT_SECONDS,
             cache_dir=self.scratch_manager.root / "source_cache",
+            # Production FULL MAX RECONSTRUCTION PROFILE: the exact canonical
+            # observation schedule (measurement.max_profile), never legacy.
+            observation_config=ObservationConfig.max_profile(),
         )
         self.font_builder = font_builder or FontBuilderService(
             observation_store_dir=getattr(self.source_acquirer, "store_dir", None)

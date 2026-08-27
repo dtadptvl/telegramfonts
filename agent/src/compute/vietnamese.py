@@ -20,7 +20,7 @@ from dataclasses import dataclass, field, replace
 from typing import Protocol, Sequence
 
 from reconstruction.font_model import CalibratedGlyph, CanonicalFontModel
-from reconstruction.models import Contour, LineSegment, Point2D
+from reconstruction.models import Contour, CubicSegment, LineSegment, Point2D
 
 # Canonical Vietnamese extension set: precomposed Latin Extended Additional,
 # D-stroke, and the combining marks used by Vietnamese tone/diacritic stacks.
@@ -129,6 +129,7 @@ class VietnameseExtensionBinding:
     source_hash: str
     extended_codepoints: tuple[int, ...]
     preserved_codepoints: tuple[int, ...]
+    deterministic_codepoints: tuple[int, ...] = ()
 
     def to_dict(self) -> dict:
         return {
@@ -140,6 +141,7 @@ class VietnameseExtensionBinding:
             "source_hash": self.source_hash,
             "extended_codepoints": list(self.extended_codepoints),
             "preserved_codepoints": list(self.preserved_codepoints),
+            "deterministic_codepoints": list(self.deterministic_codepoints),
         }
 
     def compute_binding_hash(self) -> str:
@@ -219,6 +221,133 @@ class VietnameseExtensionService:
         }
 
 
+    @staticmethod
+    def _translate_contours(contours: Sequence[Contour], dx: float, dy: float) -> list[Contour]:
+        def tp(p: Point2D) -> Point2D:
+            return Point2D(p.x + dx, p.y + dy)
+
+        moved: list[Contour] = []
+        for c in contours:
+            segments = []
+            for s in c.segments:
+                if isinstance(s, CubicSegment):
+                    segments.append(CubicSegment(p0=tp(s.p0), p1=tp(s.p1), p2=tp(s.p2), p3=tp(s.p3)))
+                else:
+                    segments.append(LineSegment(p0=tp(s.p0), p1=tp(s.p1)))
+            moved.append(
+                Contour(segments=segments, is_hole=c.is_hole, parent_index=c.parent_index, area_upem=c.area_upem)
+            )
+        return moved
+
+    @staticmethod
+    def _contour_bbox(contours: Sequence[Contour]) -> tuple[float, float, float, float]:
+        xs: list[float] = []
+        ys: list[float] = []
+        for c in contours:
+            for s in c.segments:
+                pts = (s.p0, s.p1, s.p2, s.p3) if isinstance(s, CubicSegment) else (s.p0, s.p1)
+                for p in pts:
+                    xs.append(p.x)
+                    ys.append(p.y)
+        if not xs:
+            return (0.0, 0.0, 0.0, 0.0)
+        return (min(xs), min(ys), max(xs), max(ys))
+
+    def _deterministic_glyph(
+        self, model: CanonicalFontModel, cp: int
+    ) -> CalibratedGlyph | None:
+        """Deterministic first construction from existing glyph/mark evidence.
+
+        Transplants the exact mark contours carried by an existing donor
+        composite (NFD decomposition with the identical mark multiset) onto
+        the existing base glyph, or extracts standalone combining-mark
+        geometry. Purely evidence-driven: returns None (-> AI gate) whenever
+        the source model does not observably contain the required evidence.
+        """
+        if cp in MARK_CODEPOINT_SET:
+            marks_needed: tuple[int, ...] = (cp,)
+            base_cp: int | None = None
+        else:
+            decomposed = [ord(c) for c in unicodedata.normalize("NFD", chr(cp))]
+            if len(decomposed) < 2:
+                return None
+            base_cp = decomposed[0]
+            marks_needed = tuple(decomposed[1:])
+            if base_cp not in model.glyphs:
+                return None
+
+        donor: CalibratedGlyph | None = None
+        donor_base: CalibratedGlyph | None = None
+        for d_cp in sorted(model.glyphs):
+            if d_cp == cp:
+                continue
+            d_dec = [ord(c) for c in unicodedata.normalize("NFD", chr(d_cp))]
+            if len(d_dec) < 2:
+                continue
+            if tuple(d_dec[1:]) != marks_needed:
+                continue
+            if d_dec[0] not in model.glyphs:
+                continue
+            if base_cp is not None and d_dec[0] == base_cp:
+                continue
+            donor = model.glyphs[d_cp]
+            donor_base = model.glyphs[d_dec[0]]
+            break
+        if donor is None or donor_base is None:
+            return None
+        base_contour_count = len(donor_base.contours)
+        if len(donor.contours) <= base_contour_count:
+            return None
+        mark_contours = donor.contours[base_contour_count:]
+        fingerprint = hashlib.sha256(
+            f"vi_det:{cp}:{self.source_hash}".encode("utf-8")
+        ).hexdigest()
+
+        if cp in MARK_CODEPOINT_SET:
+            bbox = self._contour_bbox(mark_contours)
+            anchor_x = round((bbox[0] + bbox[2]) / 2.0, 2)
+            anchor_y = round(bbox[1], 2)
+            glyph = CalibratedGlyph(
+                code_point=cp,
+                character=chr(cp),
+                # Standalone combining marks carry zero advance (attachment
+                # geometry is anchor-driven); the closed VI spacing gate
+                # accepts zero advance for combining marks only.
+                advance_width_upem=0.0,
+                lsb_upem=0.0,
+                rsb_upem=0.0,
+                ascent_upem=round(bbox[3], 2),
+                descent_upem=round(bbox[1], 2),
+                bounding_box_upem=bbox,
+                contours=list(mark_contours),
+                confidence=1.0,
+                observation_fingerprints=(fingerprint,),
+                anchors=(("mark", anchor_x, anchor_y),),
+            )
+        else:
+            base_glyph = model.glyphs[base_cp]  # type: ignore[index]
+            dx = round((base_glyph.advance_width_upem - donor_base.advance_width_upem) / 2.0, 2)  # type: ignore[union-attr]
+            dy = round(base_glyph.ascent_upem - donor_base.ascent_upem, 2)  # type: ignore[union-attr]
+            moved_marks = self._translate_contours(mark_contours, dx, dy)
+            combined = list(base_glyph.contours) + moved_marks
+            combined_bbox = self._contour_bbox(combined)
+            glyph = CalibratedGlyph(
+                code_point=cp,
+                character=chr(cp),
+                advance_width_upem=base_glyph.advance_width_upem,
+                lsb_upem=base_glyph.lsb_upem,
+                rsb_upem=base_glyph.rsb_upem,
+                ascent_upem=base_glyph.ascent_upem,
+                descent_upem=base_glyph.descent_upem,
+                bounding_box_upem=combined_bbox,
+                contours=combined,
+                confidence=1.0,
+                observation_fingerprints=(fingerprint,),
+                anchors=base_glyph.anchors,
+            )
+        glyph.validate()
+        return glyph
+
     async def extend(self, model: CanonicalFontModel) -> tuple[CanonicalFontModel, VietnameseExtensionBinding]:
         missing = missing_vietnamese_codepoints(model)
         preserved = tuple(cp for cp in VIETNAMESE_REQUIRED_CODEPOINTS if cp in model.glyphs)
@@ -238,63 +367,82 @@ class VietnameseExtensionService:
             # zero AI work.
             return model, binding
 
-        if self.ai_provider is None:
-            raise VietnameseAIIntegrityError("VI_AI_PROVIDER_UNAVAILABLE")
+        # Deterministic-first: construct every missing glyph that the source
+        # evidence can deterministically prove, BEFORE any AI contact.
+        deterministic_glyphs: dict[int, CalibratedGlyph] = {}
+        unresolved: list[int] = []
+        for cp in sorted(missing):
+            det_glyph = self._deterministic_glyph(model, cp)
+            if det_glyph is not None:
+                deterministic_glyphs[cp] = det_glyph
+            else:
+                unresolved.append(cp)
 
-        request = {
-            "mode": "VIETNAMESE",
-            "family_name": model.family_name,
-            "style_name": model.style_name,
-            "config_hash": self.config_hash,
-            "source_hash": self.source_hash,
-            "missing_codepoints": list(missing),
-            "units_per_em": model.metrics.units_per_em,
-            "style_evidence": self._build_style_evidence(model),
-        }
-        candidates = await self.ai_provider.generate_candidates(request)
-        produced = {c.code_point for c in candidates}
-        if produced != set(missing):
-            raise VietnameseAIIntegrityError("VI_AI_INCOMPLETE_COVERAGE")
+        ai_glyphs: dict[int, CalibratedGlyph] = {}
+        if unresolved:
+            if self.ai_provider is None:
+                raise VietnameseAIIntegrityError("VI_AI_PROVIDER_UNAVAILABLE")
+
+            request = {
+                "mode": "VIETNAMESE",
+                "family_name": model.family_name,
+                "style_name": model.style_name,
+                "config_hash": self.config_hash,
+                "source_hash": self.source_hash,
+                "missing_codepoints": list(unresolved),
+                "units_per_em": model.metrics.units_per_em,
+                "style_evidence": self._build_style_evidence(model),
+            }
+            candidates = await self.ai_provider.generate_candidates(request)
+            produced = {c.code_point for c in candidates}
+            if produced != set(unresolved):
+                raise VietnameseAIIntegrityError("VI_AI_INCOMPLETE_COVERAGE")
+
+            for spec in sorted(candidates, key=lambda c: c.code_point):
+                spec.validate()
+                contours: list[Contour] = []
+                for contour_points in spec.contours:
+                    pts = [Point2D(float(x), float(y)) for x, y in contour_points]
+                    segments = [
+                        LineSegment(pts[i], pts[(i + 1) % len(pts)]) for i in range(len(pts))
+                    ]
+                    contours.append(Contour(segments=segments, is_hole=False))
+                xs = [p.x for c in contours for s in c.segments for p in (s.p0, s.p1)]
+                ys = [p.y for c in contours for s in c.segments for p in (s.p0, s.p1)]
+                bbox = (min(xs), min(ys), max(xs), max(ys)) if xs else (0.0, 0.0, 0.0, 0.0)
+                ai_glyphs[spec.code_point] = CalibratedGlyph(
+                    code_point=spec.code_point,
+                    character=chr(spec.code_point),
+                    advance_width_upem=spec.advance_width_upem,
+                    lsb_upem=spec.lsb_upem,
+                    rsb_upem=spec.rsb_upem,
+                    ascent_upem=spec.ascent_upem,
+                    descent_upem=spec.descent_upem,
+                    bounding_box_upem=bbox,
+                    contours=contours,
+                    confidence=1.0,
+                    observation_fingerprints=(
+                        hashlib.sha256(f"vi_ai:{spec.code_point}:{self.source_hash}".encode("utf-8")).hexdigest(),
+                    ),
+                    # Anchors survive into the built glyph/OpenType behavior.
+                    anchors=tuple(spec.anchors),
+                )
 
         extended_glyphs = dict(model.glyphs)
-        for spec in sorted(candidates, key=lambda c: c.code_point):
-            spec.validate()
-            contours: list[Contour] = []
-            for contour_points in spec.contours:
-                pts = [Point2D(float(x), float(y)) for x, y in contour_points]
-                segments = [
-                    LineSegment(pts[i], pts[(i + 1) % len(pts)]) for i in range(len(pts))
-                ]
-                contours.append(Contour(segments=segments, is_hole=False))
-            xs = [p.x for c in contours for s in c.segments for p in (s.p0, s.p1)]
-            ys = [p.y for c in contours for s in c.segments for p in (s.p0, s.p1)]
-            bbox = (min(xs), min(ys), max(xs), max(ys)) if xs else (0.0, 0.0, 0.0, 0.0)
-            extended_glyphs[spec.code_point] = CalibratedGlyph(
-                code_point=spec.code_point,
-                character=chr(spec.code_point),
-                advance_width_upem=spec.advance_width_upem,
-                lsb_upem=spec.lsb_upem,
-                rsb_upem=spec.rsb_upem,
-                ascent_upem=spec.ascent_upem,
-                descent_upem=spec.descent_upem,
-                bounding_box_upem=bbox,
-                contours=contours,
-                confidence=1.0,
-                observation_fingerprints=(
-                    hashlib.sha256(f"vi_ai:{spec.code_point}:{self.source_hash}".encode("utf-8")).hexdigest(),
-                ),
-            )
+        extended_glyphs.update(deterministic_glyphs)
+        extended_glyphs.update(ai_glyphs)
 
         extended_model = replace(model, glyphs=extended_glyphs)
         final_binding = VietnameseExtensionBinding(
             mode="VIETNAMESE",
-            ai_model_id=self.ai_provider.model_id,
-            ai_model_version=self.ai_provider.model_version,
-            ai_prompt_hash=self.ai_provider.prompt_hash(),
+            ai_model_id=self.ai_provider.model_id if unresolved else "",
+            ai_model_version=self.ai_provider.model_version if unresolved else "",
+            ai_prompt_hash=self.ai_provider.prompt_hash() if unresolved else "",
             config_hash=self.config_hash,
             source_hash=self.source_hash,
-            extended_codepoints=tuple(sorted(produced)),
+            extended_codepoints=tuple(sorted(list(deterministic_glyphs) + list(ai_glyphs))),
             preserved_codepoints=preserved,
+            deterministic_codepoints=tuple(sorted(deterministic_glyphs)),
         )
         return extended_model, final_binding
 
@@ -345,6 +493,18 @@ def validate_candidate_font_bytes(font_bytes: bytes, model: CanonicalFontModel) 
         x0, y0, x1, y1 = glyph.bounding_box_upem
         if abs(y1) > clip_limit or abs(y0) > clip_limit:
             failures.append(f"VI_CLIPPING_CP_{cp:04X}")
-        if not (math.isfinite(glyph.advance_width_upem) and 0.0 < glyph.advance_width_upem <= 4.0 * upem):
+        adv = glyph.advance_width_upem
+        # Combining marks legitimately carry zero advance (attachment is
+        # anchor/GPOS-driven, and direct browser metrics quantize sub-pixel
+        # standalone-mark advances to zero px); every other glyph requires a
+        # strictly positive, bounded advance. Negative/non-finite/oversized
+        # advances always fail closed.
+        combining_mark = unicodedata.combining(chr(cp)) != 0
+        if (
+            not math.isfinite(adv)
+            or adv < 0.0
+            or adv > 4.0 * upem
+            or (adv == 0.0 and not combining_mark)
+        ):
             failures.append(f"VI_SPACING_CP_{cp:04X}")
     return failures

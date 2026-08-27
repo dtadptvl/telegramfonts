@@ -40,7 +40,11 @@ from fidelity.producers import (
 )
 from acquisition.capability import ProviderRasterCapability
 from measurement.browser_session import find_chromium_executable
-from measurement.calibration import CalibratedGlyphMetrics, ObservationCalibrator
+from measurement.calibration import (
+    CalibratedGlyphMetrics,
+    ObservationCalibrator,
+    derive_multisize_derived_metrics,
+)
 from measurement.models import DirectMetrics, ObservationConfig, ObservationRecord
 from measurement.store import ObservationStore
 from reconstruction.candidate_builder import MaxCandidateFontBuilder
@@ -54,7 +58,13 @@ logger = logging.getLogger("telegramfonts.agent.fidelity.pipeline")
 
 @dataclass(frozen=True)
 class ObservationStoreSnapshot:
-    """Immutable, cryptographic snapshot of observations, pairs, and raster bytes."""
+    """Immutable, cryptographic snapshot of observations, pairs, and raster bytes.
+
+    The sealed raw per-size METRIC and PAIR evidence is part of the snapshot
+    identity: every derived typography truth the model consumes must be
+    recomputable from this sealed raw evidence; the snapshot fingerprint
+    binds it so any drift/missing/extra/cross-identity row fails closed.
+    """
 
     reference_id: str
     style_id: str
@@ -65,6 +75,13 @@ class ObservationStoreSnapshot:
     records: tuple[ObservationRecord, ...]
     raster_bytes_map: Mapping[str, bytes]
     pairs: tuple[PairKerningObservation, ...]
+    # Raw per-size metric evidence: one row per (code_point × font_size_px)
+    # in the closed metric schedule under the exact collection identity.
+    # Each row is the decoded JSON metrics payload (DirectMetrics dict).
+    metric_observations: tuple[Mapping[str, Any], ...] = ()
+    # Raw per-size pair evidence: one row per (left_cp, right_cp, font_size_px)
+    # under the exact collection identity.
+    pair_size_observations: tuple[Mapping[str, Any], ...] = ()
     snapshot_fingerprint: str = ""
     provider_capability: Any = None
 
@@ -90,7 +107,13 @@ class ObservationStoreSnapshot:
             object.__setattr__(self, "snapshot_fingerprint", computed_fp)
 
     def _compute_fingerprint(self) -> str:
-        """Compute authoritative deterministic SHA-256 fingerprint for this snapshot."""
+        """Compute authoritative deterministic SHA-256 fingerprint for this snapshot.
+
+        Raw per-size metric and pair evidence are part of the identity: any
+        drift, missing/extra row, or cross-identity leak fails closed at
+        load time and at any consumer that derives typography truth from
+        the snapshot.
+        """
         cfg_hash = self.config.compute_hash() if self.config else ""
         capability_hash = (
             self.provider_capability.compute_hash() if self.provider_capability is not None else ""
@@ -105,6 +128,18 @@ class ObservationStoreSnapshot:
             "capability_hash": capability_hash,
             "records": sorted([r.to_dict() for r in self.records], key=lambda x: x["cache_key"]),
             "pairs": sorted([p.to_dict() for p in self.pairs], key=lambda x: (x["left_cp"], x["right_cp"])),
+            "metric_observations": sorted(
+                [dict(m) for m in self.metric_observations],
+                key=lambda x: (int(x.get("code_point", 0)), float(x.get("font_size_px", 0.0))),
+            ),
+            "pair_size_observations": sorted(
+                [dict(p) for p in self.pair_size_observations],
+                key=lambda x: (
+                    int(x.get("left_cp", 0)),
+                    int(x.get("right_cp", 0)),
+                    float(x.get("font_size_px", 0.0)),
+                ),
+            ),
             "raster_hashes": sorted(
                 [(k, hashlib.sha256(v).hexdigest()) for k, v in self.raster_bytes_map.items()]
             ),
@@ -444,6 +479,91 @@ class ObservationStoreSnapshot:
                 )
                 pairs.append(pair_obs)
 
+            # 7. Query raw per-size METRIC evidence strictly matching snapshot
+            # identity. Required for every declared code point: the exact
+            # declared metric schedule under the sealed collection identity.
+            metric_rows = conn.execute(
+                """
+                SELECT * FROM metric_observations
+                WHERE reference_id = ? AND style_id = ? AND browser_version = ? AND config_hash = ?
+                ORDER BY code_point ASC, font_size_px ASC
+                """,
+                (reference_id, style_id, browser_version, cfg_hash),
+            ).fetchall()
+            metric_observations: list[dict[str, Any]] = []
+            seen_metric_keys: set[tuple[int, float]] = set()
+            for m_row in metric_rows:
+                m_dict = dict(m_row)
+                row_ref = str(m_dict.get("reference_id") or "")
+                row_style = str(m_dict.get("style_id") or "")
+                row_browser = str(m_dict.get("browser_version") or "")
+                row_cfg = str(m_dict.get("config_hash") or "")
+                if not row_ref or not row_style or not row_browser or not row_cfg:
+                    raise ValueError(
+                        f"STORE_LOAD_ERROR: Metric row cp={m_dict.get('code_point')} "
+                        f"size={m_dict.get('font_size_px')} lacks non-empty identity: "
+                        f"ref='{row_ref}', style='{row_style}', "
+                        f"browser='{row_browser}', config='{row_cfg}'"
+                    )
+                if row_ref != reference_id or row_style != style_id:
+                    raise ValueError(
+                        f"STORE_LOAD_ERROR: Metric row identity drift "
+                        f"({row_ref},{row_style}) != snapshot "
+                        f"({reference_id},{style_id})"
+                    )
+                m_key = (int(m_dict["code_point"]), float(m_dict["font_size_px"]))
+                if m_key in seen_metric_keys:
+                    raise ValueError(
+                        f"STORE_LOAD_ERROR: Duplicate metric observation at "
+                        f"cp={m_key[0]:04X} size={m_key[1]}"
+                    )
+                seen_metric_keys.add(m_key)
+                metric_observations.append(m_dict)
+
+            # 8. Query raw per-size PAIR evidence strictly matching snapshot
+            # identity. Required for every declared pair: the exact declared
+            # metric schedule under the sealed collection identity.
+            pair_size_rows = conn.execute(
+                """
+                SELECT * FROM pair_size_observations
+                WHERE reference_id = ? AND style_id = ? AND browser_version = ? AND config_hash = ?
+                ORDER BY left_cp ASC, right_cp ASC, font_size_px ASC
+                """,
+                (reference_id, style_id, browser_version, cfg_hash),
+            ).fetchall()
+            pair_size_observations: list[dict[str, Any]] = []
+            seen_pair_size_keys: set[tuple[int, int, float]] = set()
+            for ps_row in pair_size_rows:
+                ps_dict = dict(ps_row)
+                row_ref = str(ps_dict.get("reference_id") or "")
+                row_style = str(ps_dict.get("style_id") or "")
+                row_browser = str(ps_dict.get("browser_version") or "")
+                row_cfg = str(ps_dict.get("config_hash") or "")
+                if not row_ref or not row_style or not row_browser or not row_cfg:
+                    raise ValueError(
+                        f"STORE_LOAD_ERROR: Pair-size row "
+                        f"({ps_dict.get('left_cp')},{ps_dict.get('right_cp')}) "
+                        f"size={ps_dict.get('font_size_px')} lacks non-empty identity"
+                    )
+                if row_ref != reference_id or row_style != style_id:
+                    raise ValueError(
+                        f"STORE_LOAD_ERROR: Pair-size row identity drift "
+                        f"({row_ref},{row_style}) != snapshot "
+                        f"({reference_id},{style_id})"
+                    )
+                ps_key = (
+                    int(ps_dict["left_cp"]),
+                    int(ps_dict["right_cp"]),
+                    float(ps_dict["font_size_px"]),
+                )
+                if ps_key in seen_pair_size_keys:
+                    raise ValueError(
+                        f"STORE_LOAD_ERROR: Duplicate pair-size observation at "
+                        f"({ps_key[0]},{ps_key[1]}) size={ps_key[2]}"
+                    )
+                seen_pair_size_keys.add(ps_key)
+                pair_size_observations.append(ps_dict)
+
         return cls(
             reference_id=reference_id,
             style_id=style_id,
@@ -454,6 +574,8 @@ class ObservationStoreSnapshot:
             records=tuple(records),
             raster_bytes_map=raster_map,
             pairs=tuple(pairs),
+            metric_observations=tuple(metric_observations),
+            pair_size_observations=tuple(pair_size_observations),
             provider_capability=loaded_capability,
         )
 
@@ -750,29 +872,64 @@ class LocalFidelityIntegrationPipeline:
                 units_per_em=1000,
             )
 
+            # Robust multi-size GLYPH metrics: derived from the sealed raw
+            # per-size metric_observations (lower median across the closed
+            # metric schedule). The single-anchor metrics on the fit record
+            # cannot substitute; structural recomputation is the only
+            # accepted path.
+            expected_metric_sizes = tuple(
+                float(s) for s in snapshot.config.metric_sizes_px
+            )
+            multisize_derived: dict[int, dict[str, float]] = {}
+            for cp in sorted(calibrated_metrics.keys()):
+                multisize_derived[cp] = derive_multisize_derived_metrics(
+                    metric_observations=snapshot.metric_observations,
+                    code_point=cp,
+                    reference_id=snapshot.reference_id,
+                    style_id=snapshot.style_id,
+                    browser_version=snapshot.browser_version,
+                    config_hash=snapshot.config.compute_hash(),
+                    expected_sizes=expected_metric_sizes,
+                )
+
             calibrated_glyphs: dict[int, CalibratedGlyph] = {}
             for cp, rec_g in reconstructed_glyphs.items():
                 m = calibrated_metrics[cp]
+                ms = multisize_derived.get(cp)
+                if ms is None:
+                    raise ValueError(
+                        f"MULTISIZE_METRIC_CP_MISSING: cp={cp:04X}"
+                    )
                 calibrated_glyphs[cp] = CalibratedGlyph(
                     code_point=cp,
                     character=chr(cp),
-                    advance_width_upem=m.advance_width_upem,
-                    lsb_upem=m.lsb_upem,
-                    rsb_upem=m.rsb_upem,
-                    ascent_upem=m.ascent_upem,
-                    descent_upem=m.descent_upem,
+                    advance_width_upem=ms["advance_width_upem"],
+                    lsb_upem=ms["lsb_upem"],
+                    rsb_upem=ms["rsb_upem"],
+                    ascent_upem=ms["ascent_upem"],
+                    descent_upem=ms["descent_upem"],
                     bounding_box_upem=rec_g.bounding_box_upem,
                     contours=rec_g.contours,
                     confidence=m.confidence,
                     observation_fingerprints=m.observation_fingerprints,
                 )
 
-            ascent = float(max(g.ascent_upem for g in calibrated_glyphs.values()))
-            descent = float(min(g.descent_upem for g in calibrated_glyphs.values()))
-            max_adv = float(max(g.advance_width_upem for g in calibrated_glyphs.values()))
-            avg_adv = float(np.mean([g.advance_width_upem for g in calibrated_glyphs.values()]))
-            cap_h = calibrated_glyphs.get(ord("H"), next(iter(calibrated_glyphs.values()))).ascent_upem
-            x_h = calibrated_glyphs.get(ord("x"), next(iter(calibrated_glyphs.values()))).ascent_upem
+            # Robust multi-size GLOBAL and VERTICAL metrics derived from the
+            # sealed raw per-size evidence (max ascent / min descent / max
+            # advance / mean advance / cap from H / x from x).
+            glyph_advances = [g.advance_width_upem for g in calibrated_glyphs.values()]
+            glyph_ascents = [g.ascent_upem for g in calibrated_glyphs.values()]
+            glyph_descents = [g.descent_upem for g in calibrated_glyphs.values()]
+            ascent = max(glyph_ascents) if glyph_ascents else 0.0
+            descent = min(glyph_descents) if glyph_descents else 0.0
+            max_adv = max(glyph_advances) if glyph_advances else 0.0
+            avg_adv = float(np.mean(glyph_advances)) if glyph_advances else 0.0
+            cap_h = calibrated_glyphs.get(
+                ord("H"), next(iter(calibrated_glyphs.values()))
+            ).ascent_upem
+            x_h = calibrated_glyphs.get(
+                ord("x"), next(iter(calibrated_glyphs.values()))
+            ).ascent_upem
 
             global_metrics = GlobalFontMetrics(
                 units_per_em=1000,
@@ -840,8 +997,29 @@ class LocalFidelityIntegrationPipeline:
                 style_name=snapshot.style_name,
                 units_per_em=1000,
             )
+            # Build the candidate font from the sealed canonical model graph
+            # (calibrated_glyphs carry the multi-size derived metrics; the
+            # contours and geometry are identical to reconstructed_glyphs).
+            # This is the same path L2/VIETNAMESE use; original must serialize
+            # the identical sealed model so hmtx/hhea/OS2 match model.glyphs
+            # under the same model hash.
+            build_glyphs: dict[int, ReconstructedGlyph] = {
+                cp: ReconstructedGlyph(
+                    code_point=g.code_point,
+                    character=g.character,
+                    advance_width_upem=g.advance_width_upem,
+                    lsb_upem=g.lsb_upem,
+                    rsb_upem=g.rsb_upem,
+                    ascent_upem=g.ascent_upem,
+                    descent_upem=g.descent_upem,
+                    contours=list(g.contours),
+                    bounding_box_upem=tuple(g.bounding_box_upem),
+                    reconstruction_time_ms=0.0,
+                )
+                for cp, g in calibrated_glyphs.items()
+            }
             family_build = builder.build_candidate_family(
-                glyphs=reconstructed_glyphs,
+                glyphs=build_glyphs,
                 output_dir=work_dir,
                 typography=TypographyDataset(
                     family_name=snapshot.family_name,

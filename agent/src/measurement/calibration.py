@@ -379,3 +379,116 @@ class ObservationCalibrator:
             for cp in sorted(calibrated_map.keys())
         )
         return hashlib.sha256(combined_payload.encode("utf-8")).hexdigest()
+
+
+def derive_multisize_derived_metrics(
+    metric_observations: Sequence[Mapping[str, Any]],
+    code_point: int,
+    reference_id: str,
+    style_id: str,
+    browser_version: str,
+    config_hash: str,
+    expected_sizes: Sequence[float],
+) -> Mapping[str, float]:
+    """Robust multi-size derivation of one glyph's design-space metrics from
+    the sealed raw per-size metric_observations under exact collection
+    identity. Caller-authored aggregates cannot substitute: this helper
+    consumes ONLY the sealed raw rows; missing/extra/cross-identity rows
+    fail closed.
+
+    Returns a mapping of metric fields. Robust = lower median across the
+    declared schedule (deterministic, stable, recomputable from the raw
+    evidence). The schedule identity is closed to ``expected_sizes``.
+    """
+    if not metric_observations:
+        raise ValueError("MULTISIZE_METRIC_NO_EVIDENCE")
+    rows = [dict(r) for r in metric_observations if int(r["code_point"]) == int(code_point)]
+    if not rows:
+        raise ValueError(
+            f"MULTISIZE_METRIC_CP_MISSING: cp={int(code_point):04X}"
+        )
+    # Exact-environment scoping on the raw rows (no caller is allowed to
+    # substitute cross-env or un-scoped data).
+    for r in rows:
+        if (
+            str(r.get("reference_id", "")) != str(reference_id)
+            or str(r.get("style_id", "")) != str(style_id)
+            or str(r.get("browser_version", "")) != str(browser_version)
+            or str(r.get("config_hash", "")) != str(config_hash)
+        ):
+            raise ValueError(
+                f"MULTISIZE_METRIC_CROSS_IDENTITY: cp={int(code_point):04X}"
+            )
+    observed_sizes = sorted(float(r["font_size_px"]) for r in rows)
+    expected_sorted = sorted(float(s) for s in expected_sizes)
+    if observed_sizes != expected_sorted:
+        missing = sorted(set(expected_sorted) - set(observed_sizes))
+        extra = sorted(set(observed_sizes) - set(expected_sorted))
+        raise ValueError(
+            f"MULTISIZE_METRIC_SCHEDULE_MISMATCH:missing={missing}:extra={extra}"
+        )
+    if len(set(observed_sizes)) != len(observed_sizes):
+        raise ValueError("MULTISIZE_METRIC_DUPLICATE_SIZE")
+
+    decoded: list[dict[str, Any]] = []
+    for r in rows:
+        payload = r.get("metrics_json")
+        if not payload:
+            raise ValueError(
+                f"MULTISIZE_METRIC_MISSING_PAYLOAD: cp={int(code_point):04X}"
+            )
+        try:
+            obj = json.loads(payload)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"MULTISIZE_METRIC_BAD_PAYLOAD: cp={int(code_point):04X}: {exc}"
+            ) from exc
+        decoded.append(obj)
+
+    fields = (
+        "advance_width_upem",
+        "lsb_upem",
+        "rsb_upem",
+        "ascent_upem",
+        "descent_upem",
+    )
+    derived: dict[str, float] = {}
+    for f in fields:
+        vals: list[float] = []
+        for obj in decoded:
+            v = obj.get(f)
+            if v is None or not isinstance(v, (int, float)) or not math.isfinite(float(v)):
+                raise ValueError(
+                    f"MULTISIZE_METRIC_NONFINITE_FIELD: cp={int(code_point):04X} {f}"
+                )
+            vals.append(float(v))
+        vals.sort()
+        # Lower median for stable robust consensus.
+        derived[f] = vals[(len(vals) - 1) // 2]
+    return derived
+
+
+def multisize_derived_fingerprint(
+    metric_observations: Sequence[Mapping[str, Any]],
+    code_point: int,
+    reference_id: str,
+    style_id: str,
+    browser_version: str,
+    config_hash: str,
+) -> str:
+    """Deterministic fingerprint of the derived multi-size metrics for one
+    code point, bound to the sealed raw evidence and exact collection
+    identity. Used to detect drift between sealed evidence and the
+    canonical model."""
+    rows = [
+        dict(r)
+        for r in metric_observations
+        if int(r["code_point"]) == int(code_point)
+        and str(r.get("reference_id", "")) == str(reference_id)
+        and str(r.get("style_id", "")) == str(style_id)
+        and str(r.get("browser_version", "")) == str(browser_version)
+        and str(r.get("config_hash", "")) == str(config_hash)
+    ]
+    rows.sort(key=lambda r: float(r["font_size_px"]))
+    payload = json.dumps(rows, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()

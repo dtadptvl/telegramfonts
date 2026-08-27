@@ -419,7 +419,13 @@ async def test_controlled_start_and_close_are_single_pass(monkeypatch):
     cleanup = await session.aclose()
     assert cleanup.ok
     assert websocket.close_calls == 1
-    assert process.terminate_calls == 1
+    if browser_session.launch_is_cdp_owned():
+        # CDP-owned (detached) launch: the transient wrapper handle is
+        # dropped without termination; the browser is closed through CDP.
+        assert process.terminate_calls == 0
+        assert "Browser.close" in calls
+    else:
+        assert process.terminate_calls == 1
     assert session.process is None
     assert session.user_data_dir is None
 

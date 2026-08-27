@@ -178,21 +178,24 @@ def _browser_supplement_for_seed(browser_version: str, config=ISSUE71_CONFIG):
 
     Carries exactly what the production ChromiumSession canvas path
     produces: per-glyph DirectMetrics, bounded-fit pairs within coverage,
-    and feature probes. Never raster pixels.
+    feature probes, and the sealed raw per-size metric/pair evidence
+    across the exact declared metric schedule under the exact collection
+    identity. Never raster pixels.
     """
     from acquisition.raster_ingest import BrowserSupplementalEvidence
     from measurement.models import DirectMetrics
 
     advs = {65: 650.0, 66: 600.0}
     bboxes = {65: (50, 50, 550, 700), 66: (40, 50, 560, 700)}
-    scale = float(config.font_size_px) / float(config.upem)
-    metrics: dict[int, DirectMetrics] = {}
-    for cp, adv in advs.items():
+
+    def _direct_metrics(cp: int, size_px: float) -> DirectMetrics:
+        adv = advs[cp]
         bbox = bboxes[cp]
-        metrics[cp] = DirectMetrics(
+        scale = float(size_px) / float(config.upem)
+        return DirectMetrics(
             code_point=cp,
             character=chr(cp),
-            font_size_px=float(config.font_size_px),
+            font_size_px=float(size_px),
             raw_advance_width=adv * scale,
             raw_actual_left=float(bbox[0]) * scale,
             raw_actual_right=float(bbox[2]) * scale,
@@ -208,12 +211,37 @@ def _browser_supplement_for_seed(browser_version: str, config=ISSUE71_CONFIG):
             bbox_width_upem=float(bbox[2] - bbox[0]),
             bbox_height_upem=float(bbox[3] - bbox[1]),
         )
+
+    metrics = {cp: _direct_metrics(cp, float(config.font_size_px)) for cp in advs}
+    # Sealed raw per-size metric evidence across the closed metric schedule
+    # under the exact collection identity (finalization fails closed on any
+    # missing/extra/duplicate size).
+    metric_schedule = {
+        cp: {float(size): _direct_metrics(cp, float(size)) for size in config.metric_sizes_px}
+        for cp in advs
+    }
+
+    pair_defs = ((65, 66, 1230.0), (66, 65, 1240.0))
     pairs = [
-        {"left_cp": 65, "right_cp": 66, "left_advance_upem": 650.0,
-         "right_advance_upem": 600.0, "pair_advance_upem": 1230.0},
-        {"left_cp": 66, "right_cp": 65, "left_advance_upem": 600.0,
-         "right_advance_upem": 650.0, "pair_advance_upem": 1240.0},
+        {"left_cp": left, "right_cp": right, "left_advance_upem": advs[left],
+         "right_advance_upem": advs[right], "pair_advance_upem": pair_adv}
+        for left, right, pair_adv in pair_defs
     ]
+    # Sealed raw per-size pair evidence across the closed metric schedule;
+    # the stored derived kerning recomputes from these rows.
+    pair_schedule = {
+        (left, right): [
+            {
+                "font_size_px": float(size),
+                "left_advance_upem": advs[left],
+                "right_advance_upem": advs[right],
+                "pair_advance_upem": pair_adv,
+                "inferred_kerning_upem": int(round(pair_adv - (advs[left] + advs[right]))),
+            }
+            for size in config.metric_sizes_px
+        ]
+        for left, right, pair_adv in pair_defs
+    }
     features = [
         {
             "feature_tag": tag,
@@ -227,6 +255,7 @@ def _browser_supplement_for_seed(browser_version: str, config=ISSUE71_CONFIG):
     ]
     return BrowserSupplementalEvidence(
         browser_version=browser_version, metrics=metrics, pairs=pairs, features=features,
+        metric_schedule=metric_schedule, pair_schedule=pair_schedule,
     )
 
 

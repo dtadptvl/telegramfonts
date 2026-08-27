@@ -8,8 +8,59 @@ import time
 from typing import Any, Callable
 
 from measurement.browser_session import ChromiumSession
-from measurement.discovery import ObservableGlyphDiscovery
+from measurement.discovery import DiscoveryBudgetExhaustedError, ObservableGlyphDiscovery
 from measurement.manifest import create_reproducibility_manifest
+
+
+def derive_multisize_kerning(evidence: "Sequence[Mapping[str, Any]]") -> int:
+    """Deterministic robust kerning derivation from raw per-size evidence.
+
+    The derived value is the lower-median of the per-size inferred kerning;
+    caller-authored aggregates are never accepted — consumers must recompute
+    from the raw rows.
+    """
+    rows = list(evidence)
+    if not rows:
+        raise ValueError("MULTISIZE_KERNING_NO_EVIDENCE")
+    values = sorted(int(r["inferred_kerning_upem"]) for r in rows)
+    return values[(len(values) - 1) // 2]
+
+
+def validate_pair_size_schedule(
+    evidence: "Sequence[Mapping[str, Any]]",
+    expected_sizes: "Sequence[float]",
+) -> None:
+    """Reject missing/extra/duplicate per-size evidence against the declared
+    metric schedule (raw evidence identity is closed)."""
+    observed = [float(r["font_size_px"]) for r in evidence]
+    if len(observed) != len(set(observed)):
+        raise ValueError("MULTISIZE_KERNING_DUPLICATE_SIZE")
+    expected = [float(s) for s in expected_sizes]
+    if sorted(observed) != sorted(expected):
+        missing = sorted(set(expected) - set(observed))
+        extra = sorted(set(observed) - set(expected))
+        raise ValueError(
+            f"MULTISIZE_KERNING_SCHEDULE_MISMATCH:missing={missing}:extra={extra}"
+        )
+
+
+def validate_metric_size_schedule(
+    rows: "Sequence[Mapping[str, Any]]",
+    expected_sizes: "Sequence[float]",
+) -> None:
+    """Reject missing/extra/duplicate raw per-size metric evidence against the
+    closed metric schedule (raw evidence identity is closed for one code
+    point)."""
+    observed = [float(r["font_size_px"]) for r in rows]
+    if len(observed) != len(set(observed)):
+        raise ValueError("MULTISIZE_METRIC_DUPLICATE_SIZE")
+    expected = [float(s) for s in expected_sizes]
+    if sorted(observed) != sorted(expected):
+        missing = sorted(set(expected) - set(observed))
+        extra = sorted(set(observed) - set(expected))
+        raise ValueError(
+            f"MULTISIZE_METRIC_SCHEDULE_MISMATCH:missing={missing}:extra={extra}"
+        )
 from measurement.models import (
     BrowserFontSelection,
     MetricObservation,
@@ -51,6 +102,7 @@ class ObservationCollector:
         font_family: str | BrowserFontSelection,
         code_points: list[int] | None = None,
         progress_cb: Callable[[int, int], None] | None = None,
+        max_consecutive_misses: int = 500,
     ) -> tuple[int, int, float]:
         """Collect direct browser metrics and multi-resolution raster observations for a font style.
         
@@ -62,9 +114,16 @@ class ObservationCollector:
 
         # If code_points not explicitly supplied, discover observable glyphs dynamically using authoritative discovery
         if code_points is None:
-            code_points = await ObservableGlyphDiscovery.discover_observable_glyphs(
+            code_points, termination = await ObservableGlyphDiscovery.discover_with_termination(
                 measure_fn=lambda cp: self.session.is_glyph_supported_in_font(font_family, cp),
+                max_consecutive_misses=max_consecutive_misses,
             )
+            if termination in ObservableGlyphDiscovery.TERMINAL_BLOCKED:
+                # Safety-budget exhaustion is never successful completion:
+                # fail closed with partial coverage, never save it as complete.
+                raise DiscoveryBudgetExhaustedError(
+                    f"DISCOVERY_BUDGET_EXHAUSTED: partial coverage {len(code_points)} glyphs"
+                )
 
         self.store.save_coverage(
             reference_id=reference_id,
@@ -164,55 +223,56 @@ class ObservationCollector:
                     total_rasters += 1
 
             # 4. Multi-resolution disjoint held-out evaluation schedule captures (Evaluation Evidence)
-            eval_res = max(self.config.resolutions)
-            for sub_x, sub_y in self.config.held_out_subpixel_phases:
-                cache_key = ObservationRecord.build_cache_key(
-                    reference_id=reference_id,
-                    style_id=style_id,
-                    code_point=cp,
-                    browser_version=self.session.browser_version,
-                    resolution=eval_res,
-                    subpixel_x=sub_x,
-                    subpixel_y=sub_y,
-                    config_hash=config_hash,
-                )
+            held_out_sizes = self.config.effective_held_out_sizes()
+            for eval_res in held_out_sizes:
+                for sub_x, sub_y in self.config.held_out_subpixel_phases:
+                    cache_key = ObservationRecord.build_cache_key(
+                        reference_id=reference_id,
+                        style_id=style_id,
+                        code_point=cp,
+                        browser_version=self.session.browser_version,
+                        resolution=eval_res,
+                        subpixel_x=sub_x,
+                        subpixel_y=sub_y,
+                        config_hash=config_hash,
+                    )
 
-                if self.store.has_observation(cache_key):
+                    if self.store.has_observation(cache_key):
+                        total_rasters += 1
+                        continue
+
+                    png_bytes = await self.session.capture_lossless_raster(
+                        font_family=font_family,
+                        code_point=cp,
+                        resolution_px=eval_res,
+                        subpixel_offset=(sub_x, sub_y),
+                    )
+
+                    png_sha256 = hashlib.sha256(png_bytes).hexdigest()
+                    browser_hash = hashlib.sha256(self.session.browser_version.encode("utf-8")).hexdigest()
+                    env_tag = f"{config_hash}_{browser_hash}"
+                    rel_path = f"{reference_id}/{style_id}/{env_tag}/{cp:04X}/{eval_res}px_heldout_{cache_key}.png"
+                    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+                    record = ObservationRecord(
+                        cache_key=cache_key,
+                        reference_id=reference_id,
+                        style_id=style_id,
+                        code_point=cp,
+                        resolution=eval_res,
+                        subpixel_x=sub_x,
+                        subpixel_y=sub_y,
+                        raster_relative_path=rel_path,
+                        raster_sha256=png_sha256,
+                        raster_size_bytes=len(png_bytes),
+                        metrics=direct_metrics,
+                        created_at=now_iso,
+                        browser_version=self.session.browser_version,
+                        config_hash=config_hash,
+                    )
+
+                    self.store.save_observation(record, png_bytes)
                     total_rasters += 1
-                    continue
-
-                png_bytes = await self.session.capture_lossless_raster(
-                    font_family=font_family,
-                    code_point=cp,
-                    resolution_px=eval_res,
-                    subpixel_offset=(sub_x, sub_y),
-                )
-
-                png_sha256 = hashlib.sha256(png_bytes).hexdigest()
-                browser_hash = hashlib.sha256(self.session.browser_version.encode("utf-8")).hexdigest()
-                env_tag = f"{config_hash}_{browser_hash}"
-                rel_path = f"{reference_id}/{style_id}/{env_tag}/{cp:04X}/{eval_res}px_heldout_{cache_key}.png"
-                now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
-
-                record = ObservationRecord(
-                    cache_key=cache_key,
-                    reference_id=reference_id,
-                    style_id=style_id,
-                    code_point=cp,
-                    resolution=eval_res,
-                    subpixel_x=sub_x,
-                    subpixel_y=sub_y,
-                    raster_relative_path=rel_path,
-                    raster_sha256=png_sha256,
-                    raster_size_bytes=len(png_bytes),
-                    metrics=direct_metrics,
-                    created_at=now_iso,
-                    browser_version=self.session.browser_version,
-                    config_hash=config_hash,
-                )
-
-                self.store.save_observation(record, png_bytes)
-                total_rasters += 1
 
             if progress_cb:
                 progress_cb(idx, total_glyphs)
@@ -245,50 +305,61 @@ class ObservationCollector:
 
         target_family = font_family or reference_id
         captured = 0
+        # Adaptive multi-size kerning: raw per-size evidence across the exact
+        # metric schedule; the derived kerning is the deterministic median of
+        # per-size inferences and must recompute from these raw rows.
+        pair_sizes = tuple(float(s) for s in self.config.metric_sizes_px)
+        if not pair_sizes:
+            pair_sizes = (float(self.config.font_size_px),)
 
-        # Retrieve direct metrics from store for advance width context
         for left_cp, right_cp in target_pairs:
-            # Measure composite text advance in browser with exact provenance
             text = chr(left_cp) + chr(right_cp)
-            pair_adv = await self.session.measure_text_advance(
-                target_family,
-                text,
-                font_size_px=self.config.font_size_px,
-                upem=self.config.upem,
-            )
-
-            # Retrieve unadjusted metrics from store observations for left & right glyphs under exact tuple
-            obs_left = self.store.get_glyph_observations(
-                reference_id, style_id, left_cp, browser_version=bv, config_hash=cfg_h
-            )
-            obs_right = self.store.get_glyph_observations(
-                reference_id, style_id, right_cp, browser_version=bv, config_hash=cfg_h
-            )
-
-            if obs_left:
-                l_adv = obs_left[0][0].metrics.advance_width_upem
-            else:
-                m_left = await self.session.measure_glyph_direct(
+            evidence: list[dict[str, float]] = []
+            for size in pair_sizes:
+                pair_adv = await self.session.measure_text_advance(
                     target_family,
-                    left_cp,
-                    font_size_px=self.config.font_size_px,
+                    text,
+                    font_size_px=size,
                     upem=self.config.upem,
+                )
+                m_left = await self.session.measure_glyph_direct(
+                    target_family, left_cp, font_size_px=size, upem=self.config.upem,
+                )
+                m_right = await self.session.measure_glyph_direct(
+                    target_family, right_cp, font_size_px=size, upem=self.config.upem,
                 )
                 l_adv = m_left.advance_width_upem
-
-            if obs_right:
-                r_adv = obs_right[0][0].metrics.advance_width_upem
-            else:
-                m_right = await self.session.measure_glyph_direct(
-                    target_family,
-                    right_cp,
-                    font_size_px=self.config.font_size_px,
-                    upem=self.config.upem,
-                )
                 r_adv = m_right.advance_width_upem
+                inferred = int(round(pair_adv - (l_adv + r_adv)))
+                evidence.append(
+                    {
+                        "font_size_px": size,
+                        "left_advance_upem": l_adv,
+                        "right_advance_upem": r_adv,
+                        "pair_advance_upem": pair_adv,
+                        "inferred_kerning_upem": inferred,
+                    }
+                )
+                self.store.save_pair_size_observation(
+                    reference_id=reference_id,
+                    style_id=style_id,
+                    left_cp=left_cp,
+                    right_cp=right_cp,
+                    font_size_px=size,
+                    left_advance_upem=l_adv,
+                    right_advance_upem=r_adv,
+                    pair_advance_upem=pair_adv,
+                    inferred_kerning_upem=inferred,
+                    browser_version=bv,
+                    config_hash=cfg_h,
+                    provenance=f"chromium:{bv}:canvas_text_metrics",
+                )
 
-            # Inferred kerning adjustment = pair_adv - (left_adv + right_adv)
-            inferred = int(round(pair_adv - (l_adv + r_adv)))
+            derived = derive_multisize_kerning(evidence)
+            anchor = next(
+                (e for e in evidence if abs(e["font_size_px"] - float(self.config.font_size_px)) < 1e-9),
+                evidence[0],
+            )
 
             self.store.save_pair_observation(
                 reference_id=reference_id,
@@ -297,10 +368,10 @@ class ObservationCollector:
                 right_cp=right_cp,
                 left_char=chr(left_cp),
                 right_char=chr(right_cp),
-                left_advance_upem=round(l_adv, 2),
-                right_advance_upem=round(r_adv, 2),
-                pair_advance_upem=round(pair_adv, 2),
-                inferred_kerning_upem=inferred,
+                left_advance_upem=round(anchor["left_advance_upem"], 2),
+                right_advance_upem=round(anchor["right_advance_upem"], 2),
+                pair_advance_upem=round(anchor["pair_advance_upem"], 2),
+                inferred_kerning_upem=derived,
                 confidence=1.0,
                 provenance=f"chromium:{bv}:canvas_text_metrics",
                 browser_version=bv,
@@ -394,7 +465,7 @@ class ObservationCollector:
             )
 
         expected_obs_keys: set[str] = set()
-        eval_res = max(self.config.resolutions)
+        held_out_sizes = self.config.effective_held_out_sizes()
 
         for cp in coverage:
             obs = self.store.get_glyph_observations(
@@ -419,9 +490,11 @@ class ObservationCollector:
                 for res in self.config.resolutions:
                     for sub_x, sub_y in phases:
                         schedule_tuples.append((res, sub_x, sub_y))
-                # Held-out schedule keys
-                for sub_x, sub_y in self.config.held_out_subpixel_phases:
-                    schedule_tuples.append((eval_res, sub_x, sub_y))
+                # Held-out schedule keys: the exact canonical held-out size
+                # schedule (single source), never a derived single size.
+                for held_res in held_out_sizes:
+                    for sub_x, sub_y in self.config.held_out_subpixel_phases:
+                        schedule_tuples.append((held_res, sub_x, sub_y))
             for res, sub_x, sub_y in schedule_tuples:
                 k = ObservationRecord.build_cache_key(
                     reference_id=reference_id,
@@ -462,6 +535,12 @@ class ObservationCollector:
         else:
             target_pairs = list(expected_pairs)
 
+        # Closed raw per-size pair schedule (adaptive multi-size kerning).
+        # Every declared pair must have raw per-size evidence across the exact
+        # declared metric schedule under the sealed exact collection identity.
+        # Absence is fail-closed; caller-authored aggregates cannot substitute.
+        expected_pair_sizes = tuple(float(s) for s in self.config.metric_sizes_px)
+
         stored_pairs = self.store.get_pair_observations(
             reference_id=reference_id,
             style_id=style_id,
@@ -481,6 +560,71 @@ class ObservationCollector:
                 raise ValueError(
                     f"FINALIZATION_FAILED: untrusted or mismatched pair provenance '{p.get('provenance')}' != '{expected_pair_prov}' for {reference_id}:{style_id}"
                 )
+            # Raw per-size pair evidence is REQUIRED for every declared pair
+            # under the exact collection identity. The stored derived kerning
+            # must recompute exactly from that raw evidence; absence or
+            # mismatched sizes fail closed (caller-authored aggregates and
+            # missing evidence never substitute for the raw rows).
+            size_rows = self.store.get_pair_size_observations(
+                reference_id, style_id,
+                int(p["left_cp"]), int(p["right_cp"]),
+                browser_version=bv, config_hash=cfg_h,
+            )
+            if not size_rows:
+                raise ValueError(
+                    f"FINALIZATION_FAILED: missing raw per-size pair evidence "
+                    f"for ({p['left_cp']},{p['right_cp']}) under ({bv}, {cfg_h}) "
+                    f"in {reference_id}:{style_id}"
+                )
+            try:
+                validate_pair_size_schedule(size_rows, expected_pair_sizes)
+            except ValueError as exc:
+                raise ValueError(
+                    f"FINALIZATION_FAILED: {exc} for ({p['left_cp']},{p['right_cp']}) "
+                    f"in {reference_id}:{style_id}"
+                ) from exc
+            recomputed = derive_multisize_kerning(
+                [
+                    {
+                        "font_size_px": float(r["font_size_px"]),
+                        "left_advance_upem": float(r["left_advance_upem"]),
+                        "right_advance_upem": float(r["right_advance_upem"]),
+                        "pair_advance_upem": float(r["pair_advance_upem"]),
+                        "inferred_kerning_upem": int(r["inferred_kerning_upem"]),
+                    }
+                    for r in size_rows
+                ]
+            )
+            if int(p.get("inferred_kerning_upem", 0)) != recomputed:
+                raise ValueError(
+                    f"FINALIZATION_FAILED: pair ({p['left_cp']},{p['right_cp']}) derived kerning "
+                    f"{p.get('inferred_kerning_upem')} does not recompute from raw multi-size "
+                    f"evidence ({recomputed}) for {reference_id}:{style_id}"
+                )
+
+        # 3b. Closed raw per-size METRIC evidence identity: for every declared
+        # coverage code point, the stored metric_observations must equal the
+        # exact declared metric schedule under the sealed collection identity.
+        # Absence/extra/duplicate/cross-env rows reject (no caller-authored
+        # aggregate may substitute for the sealed raw evidence).
+        expected_metric_sizes = tuple(float(s) for s in self.config.metric_sizes_px)
+        for cp in coverage:
+            metric_rows = self.store.get_metric_observations(
+                reference_id, style_id,
+                browser_version=bv, config_hash=cfg_h,
+                code_point=cp,
+            )
+            if not metric_rows:
+                raise ValueError(
+                    f"FINALIZATION_FAILED: missing raw per-size metric evidence "
+                    f"for U+{cp:04X} under ({bv}, {cfg_h}) in {reference_id}:{style_id}"
+                )
+            try:
+                validate_metric_size_schedule(metric_rows, expected_metric_sizes)
+            except ValueError as exc:
+                raise ValueError(
+                    f"FINALIZATION_FAILED: {exc} for U+{cp:04X} in {reference_id}:{style_id}"
+                ) from exc
 
         # 4. Scoped OpenType feature probe observation verification (exact (tag, sample_text) set equality)
         features = self.store.get_feature_observations(
