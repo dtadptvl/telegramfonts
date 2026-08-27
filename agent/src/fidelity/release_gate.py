@@ -48,7 +48,10 @@ from measurement.browser_session import find_chromium_executable
 from measurement.calibration import (
     ObservationCalibrator,
     derive_multisize_derived_metrics,
-    multisize_derived_fingerprint,
+)
+from measurement.collector import (
+    derive_multisize_kerning,
+    validate_pair_size_schedule,
 )
 from measurement.models import ObservationConfig
 from measurement.store import ObservationStore
@@ -347,10 +350,8 @@ class Stage9DReleaseGate:
                 float(s) for s in snapshot.config.metric_sizes_px
             )
             multisize_derived: dict[int, dict[str, float]] = {}
-            multisize_fps: dict[int, str] = {}
-            multisize_payload_hashes: list[str] = []
             for cp in sorted(calibrated_metrics.keys()):
-                derived = derive_multisize_derived_metrics(
+                multisize_derived[cp] = derive_multisize_derived_metrics(
                     metric_observations=snapshot.metric_observations,
                     code_point=cp,
                     reference_id=snapshot.reference_id,
@@ -359,19 +360,6 @@ class Stage9DReleaseGate:
                     config_hash=snapshot.config.compute_hash(),
                     expected_sizes=expected_metric_sizes,
                 )
-                multisize_derived[cp] = derived
-                multisize_fps[cp] = multisize_derived_fingerprint(
-                    metric_observations=snapshot.metric_observations,
-                    code_point=cp,
-                    reference_id=snapshot.reference_id,
-                    style_id=snapshot.style_id,
-                    browser_version=snapshot.browser_version,
-                    config_hash=snapshot.config.compute_hash(),
-                )
-                multisize_payload_hashes.append(f"{cp}:{multisize_fps[cp]}")
-            multisize_fingerprint = hashlib.sha256(
-                ":".join(sorted(multisize_payload_hashes)).encode("utf-8")
-            ).hexdigest()
 
             calibrated_glyphs: dict[int, CalibratedGlyph] = {}
             for cp, rec_g in optimized_glyphs.items():
@@ -400,9 +388,9 @@ class Stage9DReleaseGate:
 
             # Robust multi-size GLOBAL and VERTICAL metrics derived from the
             # sealed raw per-size evidence (max ascent / min descent /
-            # max advance / mean advance / cap from H / x from x). These are
-            # also bound to multisize_fingerprint so any drift between the
-            # sealed raw evidence and the global/vertical truth fails closed.
+            # max advance / mean advance / cap from H / x from x), via the
+            # per-glyph multi-size derivations above. Any drift in the sealed
+            # raw rows changes these values and the sealed snapshot identity.
             glyph_advances = [g.advance_width_upem for g in calibrated_glyphs.values()]
             glyph_ascents = [g.ascent_upem for g in calibrated_glyphs.values()]
             glyph_descents = [g.descent_upem for g in calibrated_glyphs.values()]
@@ -430,32 +418,42 @@ class Stage9DReleaseGate:
                 underline_thickness_upem=50.0,
             )
 
-            # Recompute kerning from sealed raw per-size pair evidence
-            # (the lower-median derivation; caller-authored aggregates or
-            # absent raw rows fail closed at finalization and load).
+            # Kerning truth consumed by the model: recomputed fresh from the
+            # sealed raw per-size pair evidence under the exact collection
+            # identity (lower-median across the closed metric schedule), the
+            # same causal path as glyph/global/vertical above. Absent raw
+            # rows, schedule mismatch, duplicate sizes, or drift against the
+            # stored derived pair value fail closed. Caller-authored
+            # aggregate values are never consumed.
+            expected_pair_sizes = tuple(
+                float(s) for s in snapshot.config.metric_sizes_px
+            )
+            raw_pair_rows: dict[tuple[int, int], list[dict[str, Any]]] = {}
+            for ps in snapshot.pair_size_observations:
+                raw_pair_rows.setdefault(
+                    (int(ps["left_cp"]), int(ps["right_cp"])), []
+                ).append(dict(ps))
             kerning_map: dict[tuple[int, int], int] = {}
-            seen_pair_size_keys: set[tuple[int, int, float]] = set()
-            for ps in snapshot.pair_size_observations:
-                key = (
-                    int(ps["left_cp"]),
-                    int(ps["right_cp"]),
-                    float(ps["font_size_px"]),
-                )
-                if key in seen_pair_size_keys:
-                    raise ValueError(
-                        f"STORE_LOAD_ERROR: Duplicate pair-size observation at {key}"
-                    )
-                seen_pair_size_keys.add(key)
-            for ps in snapshot.pair_size_observations:
-                lcp = int(ps["left_cp"])
-                rcp = int(ps["right_cp"])
-                # Lower median is computed per pair at fit-record time; use the
-                # canonical derived value stored on the PairKerningObservation
-                # (which the finalizer already verified recomputes from the raw
-                # per-size rows under the exact identity).
             for p in partition.fit_pairs:
-                if p.is_kerning_applied or p.inferred_kerning_upem != 0:
-                    kerning_map[(p.left_cp, p.right_cp)] = int(p.inferred_kerning_upem)
+                if not (p.is_kerning_applied or p.inferred_kerning_upem != 0):
+                    continue
+                pair_key = (int(p.left_cp), int(p.right_cp))
+                rows = raw_pair_rows.get(pair_key)
+                if not rows:
+                    raise ValueError(
+                        f"MULTISIZE_KERNING_NO_EVIDENCE: ({pair_key[0]},{pair_key[1]}) "
+                        f"in {snapshot.reference_id}:{snapshot.style_id}"
+                    )
+                validate_pair_size_schedule(rows, expected_pair_sizes)
+                recomputed = derive_multisize_kerning(rows)
+                if recomputed != int(p.inferred_kerning_upem):
+                    raise ValueError(
+                        f"MULTISIZE_KERNING_DRIFT: ({pair_key[0]},{pair_key[1]}) "
+                        f"stored={int(p.inferred_kerning_upem)} "
+                        f"recomputed={recomputed} in "
+                        f"{snapshot.reference_id}:{snapshot.style_id}"
+                    )
+                kerning_map[pair_key] = recomputed
 
             model = CanonicalFontModel(
                 schema_version="1.0.0",

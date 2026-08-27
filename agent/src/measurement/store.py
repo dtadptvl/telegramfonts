@@ -475,13 +475,13 @@ class ObservationStore:
         config_hash: str = "",
         code_point: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Return persisted multi-size metric samples, strictly filtered by exact identity.
+        """Return persisted multi-size metric samples, strictly filtered by
+        exact collection identity.
 
-        Production callers must pass the full 4-tuple identity
-        (reference_id, style_id, browser_version, config_hash). The
-        2-argument form is preserved only as a non-exact debug/legacy
-        convenience and is NEVER used by finalization or any path whose
-        derived truth must be exact-environment-scoped.
+        Callers MUST pass the full 4-tuple identity (reference_id, style_id,
+        browser_version, config_hash); any call missing the exact-environment
+        tuple raises EXACT_IDENTITY_REQUIRED (fail-closed). There is no
+        unscoped production read path.
         """
         if not browser_version or not config_hash:
             raise ValueError(
