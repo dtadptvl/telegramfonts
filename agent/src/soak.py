@@ -119,8 +119,16 @@ def _make_dummy_metrics(
     resolution: int = 256,
     advance_width_upem: float = 650.0,
     bbox_upem: tuple[float, float, float, float] = (50, 50, 550, 700),
+    font_size_px: float | None = None,
 ) -> DirectMetrics:
-    f_size_px = float(math.floor(resolution * 0.72))
+    # font_size_px override carries the exact requested metric size for
+    # sealed metric-schedule rows; the resolution-derived default is for
+    # raster-resolution contexts only.
+    f_size_px = (
+        float(font_size_px)
+        if font_size_px is not None
+        else float(math.floor(resolution * 0.72))
+    )
     scale = f_size_px / 1000.0
     adv_px = advance_width_upem * scale
     ascent_px = bbox_upem[3] * scale
@@ -389,7 +397,7 @@ async def run_a23_soak_harness(
 
     def fake_measure_glyph(font_family=None, code_point=65, font_size_px=200, upem=1000, **kw):
         adv = 650.0 if code_point == 65 else 600.0
-        return _make_dummy_metrics(code_point=code_point, resolution=int(font_size_px), advance_width_upem=adv)
+        return _make_dummy_metrics(code_point=code_point, resolution=int(font_size_px), advance_width_upem=adv, font_size_px=float(font_size_px))
 
     def fake_capture_raster(font_family=None, code_point=65, resolution_px=256, subpixel_offset=(0.0, 0.0), **kw):
         adv = 650.0 if code_point == 65 else 600.0

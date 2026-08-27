@@ -35,8 +35,14 @@ from PIL import Image
 from acquisition.capability import KNOWN_RASTER_PROVIDERS, resolve_raster_provider
 from acquisition.capability import ProviderRasterCapability
 from acquisition.models import SpriteRasterPage
-from measurement.collector import ObservationCollector
-from measurement.models import DirectMetrics, ObservationConfig, ObservationRecord, OpenTypeFeatureObservation
+from measurement.collector import ObservationCollector, derive_multisize_kerning
+from measurement.models import (
+    DirectMetrics,
+    MetricObservation,
+    ObservationConfig,
+    ObservationRecord,
+    OpenTypeFeatureObservation,
+)
 from measurement.store import ObservationStore
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
@@ -123,6 +129,17 @@ class BrowserSupplementalEvidence:
     metrics: Mapping[int, DirectMetrics]
     pairs: Sequence[Mapping[str, Any]] = field(default_factory=tuple)
     features: Sequence[Mapping[str, Any]] = field(default_factory=tuple)
+    # Sealed raw per-size METRIC evidence: one browser-measured DirectMetrics
+    # row per coverage code point per declared metric size (cp -> size ->
+    # metrics). Persisted as metric_observations under the exact collection
+    # identity; finalization enforces the closed schedule (fail-closed).
+    metric_schedule: Mapping[int, Mapping[float, DirectMetrics]] = field(default_factory=dict)
+    # Sealed raw per-size PAIR evidence: one row per declared pair per
+    # declared metric size carrying font_size_px, left/right/pair advances
+    # and the per-size inferred kerning ((left, right) -> rows). Persisted as
+    # pair_size_observations under the exact collection identity; the stored
+    # derived kerning must recompute from these rows (finalization enforces).
+    pair_schedule: Mapping[tuple[int, int], Sequence[Mapping[str, Any]]] = field(default_factory=dict)
 
 
 def _slice_sprite_cells(
@@ -365,6 +382,28 @@ def ingest_raster_pages(
         browser_version=browser_version, config_hash=cfg_h,
     )
 
+    # 4b. Closed raw per-size METRIC evidence carried by the approved browser
+    #     path: one sealed DirectMetrics row per coverage code point per
+    #     declared metric size under the exact collection identity.
+    #     Finalization enforces the closed schedule (missing/extra/duplicate
+    #     rows fail closed); nothing here relaxes that closure.
+    for cp in coverage_cdn:
+        per_size = (supplement.metric_schedule or {}).get(int(cp)) or {}
+        for size in sorted(per_size):
+            dm = per_size[size]
+            if not isinstance(dm, DirectMetrics):
+                raise ValueError(f"RASTER_INGEST_BROWSER_METRICS_MISSING_CP_{cp}")
+            store.save_metric_observation(
+                MetricObservation(
+                    reference_id=reference_id,
+                    style_id=style_id,
+                    browser_version=browser_version,
+                    config_hash=cfg_h,
+                    metrics=dm,
+                    created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                )
+            )
+
     # 5. Supplemental pairs/features: browser-measured only, provenance
     #    verified by finalization below.
     pair_tuples: list[tuple[int, int]] = []
@@ -374,6 +413,30 @@ def ingest_raster_pages(
         left_adv = float(p["left_advance_upem"])
         right_adv = float(p["right_advance_upem"])
         pair_adv = float(p["pair_advance_upem"])
+        # Closed raw per-size pair evidence carried by the approved browser
+        # path: persisted under the exact collection identity. The stored
+        # derived kerning recomputes from these sealed rows; finalization
+        # enforces the closed schedule and the exact recompute (fail-closed).
+        size_rows = list((supplement.pair_schedule or {}).get((left_cp, right_cp)) or ())
+        for row in size_rows:
+            store.save_pair_size_observation(
+                reference_id=reference_id,
+                style_id=style_id,
+                left_cp=left_cp,
+                right_cp=right_cp,
+                font_size_px=float(row["font_size_px"]),
+                left_advance_upem=float(row["left_advance_upem"]),
+                right_advance_upem=float(row["right_advance_upem"]),
+                pair_advance_upem=float(row["pair_advance_upem"]),
+                inferred_kerning_upem=int(row["inferred_kerning_upem"]),
+                browser_version=browser_version,
+                config_hash=cfg_h,
+                provenance=f"chromium:{browser_version}:canvas_text_metrics",
+            )
+        if size_rows:
+            inferred_kerning = derive_multisize_kerning(size_rows)
+        else:
+            inferred_kerning = int(round(pair_adv - (left_adv + right_adv)))
         store.save_pair_observation(
             reference_id=reference_id,
             style_id=style_id,
@@ -384,7 +447,7 @@ def ingest_raster_pages(
             left_advance_upem=round(left_adv, 2),
             right_advance_upem=round(right_adv, 2),
             pair_advance_upem=round(pair_adv, 2),
-            inferred_kerning_upem=int(round(pair_adv - (left_adv + right_adv))),
+            inferred_kerning_upem=inferred_kerning,
             confidence=1.0,
             provenance=f"chromium:{browser_version}:canvas_text_metrics",
             browser_version=browser_version,
@@ -460,11 +523,28 @@ async def collect_browser_measurement(
         font = await session.observe_source_font(source_url, style_name, family_name)
         browser_version = session.browser_version
 
+        # Sealed raw per-size metric evidence: every coverage code point is
+        # measured across the exact declared metric schedule (plus the anchor
+        # size when it is not itself a schedule size). The raw rows are
+        # carried for persistence under the exact collection identity;
+        # caller-authored aggregates never substitute (fail-closed).
+        metric_sizes = tuple(float(s) for s in config.metric_sizes_px)
+        anchor_size = float(config.font_size_px)
         metrics: dict[int, DirectMetrics] = {}
+        metric_schedule: dict[int, dict[float, DirectMetrics]] = {}
         for cp in code_points:
-            metrics[cp] = await session.measure_glyph_direct(
-                font, cp, font_size_px=config.font_size_px, upem=config.upem
-            )
+            per_size: dict[float, DirectMetrics] = {}
+            for size in metric_sizes:
+                per_size[size] = await session.measure_glyph_direct(
+                    font, cp, font_size_px=size, upem=config.upem
+                )
+            anchor = per_size.get(anchor_size)
+            if anchor is None:
+                anchor = await session.measure_glyph_direct(
+                    font, cp, font_size_px=anchor_size, upem=config.upem
+                )
+            metrics[cp] = anchor
+            metric_schedule[cp] = per_size
 
         coverage = set(code_points)
         # Browser-measured pair set: bounded fit pairs within coverage plus
@@ -484,17 +564,42 @@ async def collect_browser_measurement(
                 if pair not in target_pairs:
                     target_pairs.append(pair)
         pairs: list[dict[str, Any]] = []
+        pair_schedule: dict[tuple[int, int], list[dict[str, Any]]] = {}
         for left_cp, right_cp in target_pairs:
-            pair_adv = await session.measure_text_advance(
-                font, chr(left_cp) + chr(right_cp), config.font_size_px, config.upem
-            )
+            text = chr(left_cp) + chr(right_cp)
+            # Sealed raw per-size pair evidence across the exact metric
+            # schedule; the derived kerning must recompute from these rows.
+            size_rows: list[dict[str, Any]] = []
+            anchor_pair_adv: float | None = None
+            for size in metric_sizes:
+                pair_adv_size = await session.measure_text_advance(
+                    font, text, size, config.upem
+                )
+                if abs(size - anchor_size) < 1e-9:
+                    anchor_pair_adv = pair_adv_size
+                l_adv = metric_schedule[left_cp][size].advance_width_upem
+                r_adv = metric_schedule[right_cp][size].advance_width_upem
+                size_rows.append(
+                    {
+                        "font_size_px": size,
+                        "left_advance_upem": l_adv,
+                        "right_advance_upem": r_adv,
+                        "pair_advance_upem": pair_adv_size,
+                        "inferred_kerning_upem": int(round(pair_adv_size - (l_adv + r_adv))),
+                    }
+                )
+            if anchor_pair_adv is None:
+                anchor_pair_adv = await session.measure_text_advance(
+                    font, text, anchor_size, config.upem
+                )
+            pair_schedule[(left_cp, right_cp)] = size_rows
             pairs.append(
                 {
                     "left_cp": left_cp,
                     "right_cp": right_cp,
                     "left_advance_upem": metrics[left_cp].advance_width_upem,
                     "right_advance_upem": metrics[right_cp].advance_width_upem,
-                    "pair_advance_upem": pair_adv,
+                    "pair_advance_upem": anchor_pair_adv,
                 }
             )
 
@@ -510,6 +615,8 @@ async def collect_browser_measurement(
             metrics=metrics,
             pairs=pairs,
             features=features,
+            metric_schedule=metric_schedule,
+            pair_schedule=pair_schedule,
         )
     finally:
         await close_browser_session(session)

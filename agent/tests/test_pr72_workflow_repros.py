@@ -1143,14 +1143,17 @@ def test_RASTER_REQUEST_BINDING_VALUE_MISMATCH_REJECTED():
     )
 
 
-def _handoff_direct_metrics(cp: int, config, adv: float):
+def _handoff_direct_metrics(cp: int, config, adv: float, font_size_px: float | None = None):
     from measurement.models import DirectMetrics
 
-    scale = float(config.font_size_px) / float(config.upem)
+    # font_size_px override carries the exact requested metric size for
+    # sealed metric-schedule rows; the config anchor size is the default.
+    size_px = float(font_size_px) if font_size_px is not None else float(config.font_size_px)
+    scale = size_px / float(config.upem)
     return DirectMetrics(
         code_point=cp,
         character=chr(cp),
-        font_size_px=float(config.font_size_px),
+        font_size_px=size_px,
         raw_advance_width=adv * scale,
         raw_actual_left=50.0 * scale,
         raw_actual_right=550.0 * scale,
@@ -1310,6 +1313,17 @@ def test_RASTER_ZERO_INK_SEMANTICS(tmp_path: Path):
         },
         pairs=(),
         features=supplement66.features,
+        # Sealed raw per-size metric evidence across the closed metric
+        # schedule for every coverage code point (finalization fails closed).
+        metric_schedule={
+            cp: {
+                float(size): _handoff_direct_metrics(
+                    cp, RASTER_ONLY_CONFIG, adv, font_size_px=float(size)
+                )
+                for size in RASTER_ONLY_CONFIG.metric_sizes_px
+            }
+            for cp, adv in ((32, 250.0), (65, 650.0))
+        },
     )
     attestation = page_slice_attestation(space_pages)
     assert attestation["bindings"]["32"]["zero_ink_proven"] is True
