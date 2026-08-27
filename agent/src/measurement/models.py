@@ -44,7 +44,7 @@ class ObservationConfig:
         Exact closed schedules (measurement.max_profile): fit raster sizes
         256..4096, metric sizes 128..4096, sealed held-out sizes
         144..2560, full 4x4 browser phase grid with deterministic 8x8 hard
-        expansion, disjoint held-out phase complement, and the full causal
+        expansion, disjoint held-out midpoint phase grid, and the full causal
         feature probe tag set. Validated fail-closed by
         validate_observation_config_max.
         """
@@ -57,18 +57,40 @@ class ObservationConfig:
             MAX_HELDOUT_SIZES_PX,
             MAX_METRIC_SIZES_PX,
             MAX_RASTER_SIZES_PX,
+            validate_observation_config_max,
         )
 
-        return cls(
+        config = cls(
             resolutions=MAX_RASTER_SIZES_PX,
             base_subpixel_phases=MAX_BROWSER_PHASES_4X4,
             expanded_subpixel_phases=MAX_HARD_PHASES_8X8,
             held_out_subpixel_phases=MAX_HELDOUT_PHASES,
             held_out_sizes_px=MAX_HELDOUT_SIZES_PX,
+            # Closed metric anchor: inside the exact metric schedule, so no
+            # undeclared metric-size observation is ever performed.
+            font_size_px=256.0,
             metric_sizes_px=tuple(float(s) for s in MAX_METRIC_SIZES_PX),
             feature_probes=MAX_FEATURE_PROBES,
             config_version=MAX_CONFIG_VERSION,
         )
+        # Structural production validation: the canonical config itself must
+        # satisfy the closed schedule (exact entries, disjointness invariants,
+        # closed metric anchor, config version), never merely instantiate it.
+        validate_observation_config_max(config)
+        return config
+
+    def effective_held_out_sizes(self) -> tuple[int, ...]:
+        """Single canonical source for the held-out render-size schedule.
+
+        Declared held-out sizes when present; otherwise the legacy single
+        held-out size (max fit resolution). Capture, finalization,
+        completion, snapshot and partition consumers must all derive
+        held-out keys from this method.
+        """
+        declared = tuple(int(s) for s in self.held_out_sizes_px)
+        if declared:
+            return declared
+        return (int(max(self.resolutions)),)
 
     def get_phases_for_metrics(self, metrics: DirectMetrics) -> tuple[tuple[float, float], ...]:
         """Determine adaptive subpixel phases based on fractional metric uncertainty/boundary alignment."""

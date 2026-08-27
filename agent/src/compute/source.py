@@ -312,8 +312,10 @@ class SourceAcquirer:
         observation_store_dir: Path | str | None = None,
         browser_session_factory: Callable[[], ChromiumSession] | None = None,
         observation_config: ObservationConfig | None = None,
+        discovery_miss_budget: int = 500,
     ) -> None:
         self.timeout = timeout
+        self.discovery_miss_budget = int(discovery_miss_budget)
         self._external_client = client is not None
         self.client = client or httpx.AsyncClient(timeout=timeout)
         self.cache_dir = Path(cache_dir).resolve() if cache_dir else None
@@ -535,7 +537,8 @@ class SourceAcquirer:
                             source_url.strip(), s.display_name, family_name
                         )
                         await collector.collect_font_observations(
-                            family_key, style_key, selected_font
+                            family_key, style_key, selected_font,
+                            max_consecutive_misses=self.discovery_miss_budget,
                         )
                         await collector.collect_pair_observations(
                             family_key, style_key, selected_font

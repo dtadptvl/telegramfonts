@@ -41,6 +41,7 @@ from measurement.max_profile import (
     MAX_FEATURE_PROBE_TAGS,
     MAX_HARD_PHASES_8X8,
     MAX_HELDOUT_PHASES,
+    MAX_HELDOUT_PHASE_GRID,
     MAX_HELDOUT_SIZES_PX,
     MAX_METRIC_SIZES_PX,
     MAX_RASTER_SIZES_PX,
@@ -95,9 +96,13 @@ def test_MAX_SCHEDULE_EXACT_missing_extra_duplicate_wrong_rejected():
     # Wrong (reordered) metric schedule.
     with pytest.raises(ValueError, match="MAX_SCHEDULE_MISMATCH:METRIC_SIZES"):
         validate_max_schedule(**_canonical_schedule_kwargs(metric_sizes=tuple(reversed(MAX_METRIC_SIZES_PX))))
-    # Wrong core subset.
-    with pytest.raises(ValueError, match="MAX_SCHEDULE_MISMATCH:CORE_RASTER_SIZES"):
+    # Wrong core subset: a core schedule that is not a subset of the raster
+    # schedule rejects via the subset invariant (checked first); a subset that
+    # merely differs from the canonical core rejects via exact closure.
+    with pytest.raises(ValueError, match="MAX_SCHEDULE_CORE_NOT_SUBSET"):
         validate_max_schedule(**_canonical_schedule_kwargs(core_sizes=(128, 256)))
+    with pytest.raises(ValueError, match="MAX_SCHEDULE_MISMATCH:CORE_RASTER_SIZES"):
+        validate_max_schedule(**_canonical_schedule_kwargs(core_sizes=(512, 1024, 2048)))
     # Missing phase.
     with pytest.raises(ValueError, match="MAX_SCHEDULE_MISMATCH:FIT_PHASES"):
         validate_max_schedule(**_canonical_schedule_kwargs(fit_phases=MAX_BROWSER_PHASES_4X4[1:]))
@@ -160,40 +165,55 @@ def test_DISCOVERY_TERMINATION_observable_signals_complete():
     candidates = [65, 66, 67]
 
     async def run():
-        # Exhaustion with full observability.
+        # Exhaustion with full observability: grounded completion.
         cov, reason = await ObservableGlyphDiscovery.discover_with_termination(
             lambda cp: True, candidate_code_points=candidates
         )
         assert cov == [65, 66, 67] and reason == "EXHAUSTED"
 
-        # Empty source.
+        # Empty source after exhaustive enumeration.
         cov, reason = await ObservableGlyphDiscovery.discover_with_termination(
             lambda cp: False, candidate_code_points=candidates, max_consecutive_misses=10
         )
         assert cov == [] and reason == "EMPTY"
 
-        # Trailing no-new convergence window closes: NO_NEW completion.
-        cov, reason = await ObservableGlyphDiscovery.discover_with_termination(
-            lambda cp: cp == 65,
-            candidate_code_points=[65] + list(range(1000, 1012)),
-            max_consecutive_misses=10,
-        )
-        assert cov == [65] and reason == "NO_NEW"
-
-        # Full scan ending before the window closes: EXHAUSTED completion.
+        # Trailing gap below the miss window: exhaustive scan still completes.
         cov, reason = await ObservableGlyphDiscovery.discover_with_termination(
             lambda cp: cp == 65, candidate_code_points=candidates, max_consecutive_misses=10
         )
         assert cov == [65] and reason == "EXHAUSTED"
 
-        # Repeated observable signal terminates deterministically.
+        # Duplicated caller-owned candidates never fabricate a REPEATED
+        # completion signal; enumeration stays grounded.
         cov, reason = await ObservableGlyphDiscovery.discover_with_termination(
             lambda cp: True, candidate_code_points=[65, 66, 65]
         )
-        assert cov == [65, 66] and reason == "REPEATED"
+        assert cov == [65, 66] and reason == "EXHAUSTED"
 
-        for r in ("EXHAUSTED", "EMPTY", "NO_NEW", "REPEATED"):
+        for r in ("EXHAUSTED", "EMPTY"):
             assert r in ObservableGlyphDiscovery.TERMINAL_COMPLETE
+
+    asyncio.run(run())
+
+
+def test_LATE_GLYPH_DISCOVERY_gap_never_silently_completed():
+    """LATE_GLYPH_DISCOVERY: a supported glyph after >500 unsupported
+    candidates cannot be silently completed away; the miss window is a
+    safety budget and yields BLOCKED, never completion."""
+
+    async def run():
+        late = {65, 700}
+        cov, reason = await ObservableGlyphDiscovery.discover_with_termination(
+            lambda cp: cp in late,
+            candidate_code_points=list(range(65, 800)),
+            max_consecutive_misses=500,
+        )
+        assert reason == "BUDGET_EXHAUSTED"
+        assert reason in ObservableGlyphDiscovery.TERMINAL_BLOCKED
+        assert reason not in ObservableGlyphDiscovery.TERMINAL_COMPLETE
+        # Only the pre-gap glyph was gathered; the late glyph is never
+        # silently included under a completion claim.
+        assert cov == [65]
 
     asyncio.run(run())
 
@@ -292,14 +312,17 @@ def test_LOSS_VECTOR_COMPLETE_all_components_real_and_required():
 
 
 def test_LOSS_VECTOR_COMPLETE_validation_rejects_missing_or_non_finite():
+    from fidelity.optimizer import recompute_objective_from_components
+
+    components_ok = tuple((n, 0.1) for n in REQUIRED_OPTIMIZATION_LOSSES)
     record = GlyphOptimizationRecord(
         code_point=65,
         initial_objective=1.0,
-        final_objective=0.5,
+        final_objective=recompute_objective_from_components(dict(components_ok)),
         iterations=1,
         stop_reason="CONVERGED",
         accepted_objective_trace=(1.0, 0.5),
-        loss_components=tuple((n, 0.1) for n in REQUIRED_OPTIMIZATION_LOSSES),
+        loss_components=components_ok,
     )
     validate_loss_vector_complete(record)
 
@@ -312,13 +335,13 @@ def test_LOSS_VECTOR_COMPLETE_validation_rejects_missing_or_non_finite():
         accepted_objective_trace=(1.0, 0.5),
         loss_components=tuple((n, 0.1) for n in REQUIRED_OPTIMIZATION_LOSSES if n != "sdf"),
     )
-    with pytest.raises(ValueError, match="OPTIMIZER_LOSS_VECTOR_INCOMPLETE:sdf"):
+    with pytest.raises(ValueError, match=r"OPTIMIZER_LOSS_VECTOR_INCOMPLETE:missing=\['sdf'\]"):
         validate_loss_vector_complete(missing)
 
     non_finite = GlyphOptimizationRecord(
         code_point=65,
         initial_objective=1.0,
-        final_objective=0.5,
+        final_objective=0.181,
         iterations=1,
         stop_reason="CONVERGED",
         accepted_objective_trace=(1.0, 0.5),
@@ -328,6 +351,34 @@ def test_LOSS_VECTOR_COMPLETE_validation_rejects_missing_or_non_finite():
     )
     with pytest.raises(ValueError, match="OPTIMIZER_LOSS_NON_FINITE:edge"):
         validate_loss_vector_complete(non_finite)
+
+    # Forged total: components valid but recorded objective differs from the
+    # recomputed weighted sum.
+    forged_total = GlyphOptimizationRecord(
+        code_point=65,
+        initial_objective=1.0,
+        final_objective=0.999,
+        iterations=1,
+        stop_reason="CONVERGED",
+        accepted_objective_trace=(1.0, 0.5),
+        loss_components=components_ok,
+    )
+    with pytest.raises(ValueError, match="OPTIMIZER_LOSS_TOTAL_FORGED"):
+        validate_loss_vector_complete(forged_total)
+
+    # Duplicate term rejects.
+    duplicated = GlyphOptimizationRecord(
+        code_point=65,
+        initial_objective=1.0,
+        final_objective=0.5,
+        iterations=1,
+        stop_reason="CONVERGED",
+        accepted_objective_trace=(1.0, 0.5),
+        loss_components=(("coverage", 0.1), ("coverage", 0.1), ("edge", 0.1),
+                         ("sdf", 0.1), ("curvature", 0.1), ("complexity", 0.1)),
+    )
+    with pytest.raises(ValueError, match="OPTIMIZER_LOSS_VECTOR_DUPLICATE_TERM"):
+        validate_loss_vector_complete(duplicated)
 
 
 # =========================================================================
@@ -377,11 +428,14 @@ def test_HELDOUT_SEALED_disjoint_canonical_schedules():
     assert not (set(MAX_HELDOUT_SIZES_PX) & set(MAX_RASTER_SIZES_PX))
     assert not (set(MAX_HELDOUT_SIZES_PX) & set(MAX_METRIC_SIZES_PX))
     assert set(MAX_CORE_RASTER_SIZES_PX).issubset(set(MAX_RASTER_SIZES_PX))
+    # Held-out phases are disjoint from the ACTUAL maximum per-glyph fit set
+    # (the hard 8x8 expansion grid), and therefore also from the base grid.
+    assert not (set(MAX_HELDOUT_PHASES) & set(MAX_HARD_PHASES_8X8))
     assert not (set(MAX_HELDOUT_PHASES) & set(MAX_BROWSER_PHASES_4X4))
     assert set(MAX_BROWSER_PHASES_4X4).issubset(set(MAX_HARD_PHASES_8X8))
     assert len(MAX_BROWSER_PHASES_4X4) == 16
     assert len(MAX_HARD_PHASES_8X8) == 64
-    assert len(MAX_HELDOUT_PHASES) == 48
+    assert len(MAX_HELDOUT_PHASES) == 16
 
 
 def test_FEATURE_PROBE_TAGS_closed_identity_and_causal_samples():

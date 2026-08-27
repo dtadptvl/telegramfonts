@@ -23,12 +23,14 @@ UNICODE_BLOCK_RANGES: list[tuple[int, int]] = [
 class ObservableGlyphDiscovery:
     """Dynamic discovery of observable font glyphs without hardcoded page/glyph count caps.
 
-    Termination semantics (FULL MAX profile): discovery completes only on an
-    observable termination signal — candidate source exhaustion
-    (``EXHAUSTED``), empty result (``EMPTY``), or convergence with no new
-    observable glyphs (``NO_NEW``/``REPEATED``). A safety budget stopping
-    execution early is ``BUDGET_EXHAUSTED`` and must never be counted as
-    successful completion by callers.
+    Termination semantics (FULL MAX profile): discovery completes ONLY on
+    an authoritative grounded signal — exhaustive enumeration of the full
+    candidate source finished (``EXHAUSTED``) with an empty result reported
+    as ``EMPTY``. ``REPEATED`` remains reserved for authoritative
+    source/page/cursor repetition signals (e.g. provider crawl loops) and
+    is never inferred from caller-owned candidate lists. Every safety,
+    miss-window, or probe limit stops execution as ``BUDGET_EXHAUSTED``
+    (BLOCKED) and must never be counted as successful completion.
     """
 
     TERMINAL_COMPLETE = frozenset({"EXHAUSTED", "EMPTY", "NO_NEW", "REPEATED"})
@@ -74,13 +76,11 @@ class ObservableGlyphDiscovery:
     ) -> tuple[list[int], str]:
         """Discover observable glyphs and report the exact termination reason.
 
-        Returns ``(coverage, reason)``. Completion reasons (observable
-        signals): EXHAUSTED (candidate source fully scanned), EMPTY (nothing
-        observable), NO_NEW (deterministic convergence: the consecutive-miss
-        window closed with no new glyphs), REPEATED (observable repeated
-        signal). BUDGET_EXHAUSTED means the safety probe budget stopped
-        execution before any observable termination signal — it is a BLOCKED
-        outcome and must never be counted as successful completion.
+        Grounded completion: EXHAUSTED (the authoritative candidate source
+        was enumerated in full) or EMPTY (full enumeration observed nothing).
+        Any miss-window or probe-budget limit stopping execution early is
+        BUDGET_EXHAUSTED — a BLOCKED outcome, never successful completion;
+        supported glyphs beyond a gap can never be silently completed away.
         """
         candidates = candidate_code_points or cls.get_candidate_code_points()
         discovered: list[int] = []
@@ -91,10 +91,10 @@ class ObservableGlyphDiscovery:
 
         for cp in candidates:
             if probed >= max_candidates:
-                # Safety probe budget stopped execution before any observable
-                # termination signal: BLOCKED, never completion.
+                # Safety probe budget stopped execution before exhaustive
+                # enumeration: BLOCKED, never completion.
                 reason = "BUDGET_EXHAUSTED"
-                logger.info(f"Glyph discovery stopped by safety budget after {probed} probes")
+                logger.info(f"Glyph discovery stopped by probe budget after {probed} probes")
                 break
             probed += 1
             try:
@@ -110,12 +110,9 @@ class ObservableGlyphDiscovery:
                     is_observable = float(result) > 0.0
 
                 if is_observable:
-                    if cp in seen:
-                        # Observable repeated signal: deterministic end.
-                        reason = "REPEATED"
-                        break
-                    discovered.append(cp)
-                    seen.add(cp)
+                    if cp not in seen:
+                        discovered.append(cp)
+                        seen.add(cp)
                     consecutive_misses = 0
                 else:
                     consecutive_misses += 1
@@ -124,16 +121,18 @@ class ObservableGlyphDiscovery:
                 logger.debug(f"Candidate U+{cp:04X} measurement failed: {exc}")
 
             if consecutive_misses >= max_consecutive_misses:
-                # Observable no-new convergence window closed: deterministic
-                # completion (never budget semantics).
-                reason = "NO_NEW"
-                logger.info(f"Glyph discovery converged: {consecutive_misses} consecutive misses with no new glyphs")
+                # Miss-window safety limit: partial evidence only. This is a
+                # BLOCKED outcome — never an observable completion signal.
+                reason = "BUDGET_EXHAUSTED"
+                logger.info(
+                    f"Glyph discovery stopped by miss budget after {consecutive_misses} consecutive misses"
+                )
                 break
         else:
             reason = "EXHAUSTED"
 
         canonical_coverage = sorted(set(discovered))
-        if reason != "BUDGET_EXHAUSTED" and not canonical_coverage:
+        if reason == "EXHAUSTED" and not canonical_coverage:
             reason = "EMPTY"
         logger.info(
             f"Discovered {len(canonical_coverage)} canonical observable glyphs (termination={reason})"

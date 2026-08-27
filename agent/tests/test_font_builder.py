@@ -554,6 +554,7 @@ async def test_observation_collector_and_source_acquirer_exact_lifecycle_and_cac
         browser_session_factory=lambda: FakeSession(real_browser_ver),
         observation_store_dir=store_dir,
         observation_config=config,
+        discovery_miss_budget=5000,
     )
     payload_new = await acquirer.acquire_source(
         source_url="https://www.myfonts.com/collections/test-family-new",

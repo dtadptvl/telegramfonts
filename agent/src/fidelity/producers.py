@@ -465,11 +465,24 @@ class FreeTypeEvidenceProducer:
                     if src_x1 > src_x0 and src_y1 > src_y0 and c_dst_x1 > c_dst_x0 and c_dst_y1 > c_dst_y0:
                         cand_mask[c_dst_y0:c_dst_y1, c_dst_x0:c_dst_x1] = cand_ink[src_y0:src_y1, src_x0:src_x1]
 
-                # 3. Compute exact binary IoU and pixel delta count
-                intersection = int(np.logical_and(cand_mask, ref_mask).sum())
-                union = int(np.logical_or(cand_mask, ref_mask).sum())
-                iou = float(intersection) / max(union, 1)
-                pixel_deltas = int(np.abs(cand_mask.astype(int) - ref_mask.astype(int)).sum())
+                # 3. Compute exact binary IoU and pixel delta count.
+                # Zero-ink semantics (production families always contain
+                # blank glyphs, e.g. U+0020): a blank held-out raster and a
+                # blank consumer render are a PERFECT match; ink on exactly
+                # one side is a fail-closed mismatch (never a 0/0 pass).
+                ref_ink = int(ref_mask.sum())
+                cand_ink_count = int(cand_mask.sum())
+                if ref_ink == 0 and cand_ink_count == 0:
+                    iou = 1.0
+                    pixel_deltas = 0
+                elif ref_ink == 0 or cand_ink_count == 0:
+                    iou = 0.0
+                    pixel_deltas = max(ref_ink, cand_ink_count)
+                else:
+                    intersection = int(np.logical_and(cand_mask, ref_mask).sum())
+                    union = int(np.logical_or(cand_mask, ref_mask).sum())
+                    iou = float(intersection) / max(union, 1)
+                    pixel_deltas = int(np.abs(cand_mask.astype(int) - ref_mask.astype(int)).sum())
 
                 if not math.isfinite(iou):
                     iou = 0.0
@@ -734,8 +747,10 @@ class HarfBuzzEvidenceProducer:
             reference_glyph_count=2,
             candidate_total_advance_upem=int(round(primary_sample.candidate_total_advance_upem if primary_sample else 0)),
             reference_total_advance_upem=int(round(primary_sample.expected_total_advance_upem if primary_sample else 0)),
-            advance_delta_upem=int(round(max_adv_delta)),
-            max_position_delta_upem=int(round(max_pos_delta)),
+            # Exact (unrounded) aggregates: the consumer gate recomputes these
+            # from the raw samples and rejects any rounding drift.
+            advance_delta_upem=max_adv_delta,
+            max_position_delta_upem=max_pos_delta,
             samples=tuple(samples),
             all_in_cmap=all_in_cmap,
             all_sequence_match=all_seq_match,
@@ -813,12 +828,17 @@ class ChromiumEvidenceProducer:
             alias = f"CandidateMAX_{artifact.sha256_hex[:12]}"
             await sess.load_font_data(alias, artifact.raw_bytes)
 
-            # 1. Direct load & fallback rejection verification
-            measured_cps = [r.code_point for r in held_out_records if r.code_point in model.glyphs]
+            # 1. Direct load & fallback rejection verification.
+            # The direct-load probe must target an ink-carrying glyph:
+            # whitespace code points (e.g. U+0020, present in every real
+            # family) are metric-indistinguishable from fallback fonts and
+            # would falsify the support probe.
+            measured_cps = sorted({r.code_point for r in held_out_records if r.code_point in model.glyphs})
             if not measured_cps:
-                measured_cps = list(model.glyphs.keys())[:4]
+                measured_cps = sorted(model.glyphs.keys())[:4]
 
-            test_in_cp = measured_cps[0] if measured_cps else 65
+            ink_cps = [cp for cp in measured_cps if getattr(model.glyphs.get(cp), "contours", None)]
+            test_in_cp = ink_cps[0] if ink_cps else (measured_cps[0] if measured_cps else 65)
             test_out_cp = next(
                 (cp for cp in (ord("Z"), ord("Q"), ord("X"), ord("?"), 0x00D0, 0x1EA0) if cp not in model.glyphs),
                 0xFFFF,
@@ -829,6 +849,12 @@ class ChromiumEvidenceProducer:
             fallback_ok = bool(in_loaded and out_rejected)
 
             # 2. Direct browser metric measurements for held-out glyphs
+            # (one deterministic sample per unique held-out code point; the
+            # held-out schedule may carry many records per glyph).
+            measured_cps = sorted({r.code_point for r in held_out_records if r.code_point in model.glyphs})
+            if not measured_cps:
+                measured_cps = sorted(model.glyphs.keys())[:4]
+
             glyph_samples: list[ChromiumGlyphSampleEvidence] = []
             adv_deltas: list[float] = []
             for cp in measured_cps:

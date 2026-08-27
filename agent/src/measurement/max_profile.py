@@ -10,8 +10,11 @@ reconstruction:
   from fit raster and metric schedules).
 - Browser subpixel phases: full 4x4 Cartesian product {0,.25,.5,.75}^2;
   deterministically classified hard glyphs expand to the full 8x8
-  {0,.125,...,.875}^2 grid; held-out phases are the exact disjoint
-  complement of the fit grid inside the hard grid.
+  {0,.125,...,.875}^2 grid; held-out phases are the exact 4x4 midpoint
+  offset grid {0.0625,0.3125,0.5625,0.8125}^2 — observable subpixel phases
+  strictly disjoint from BOTH the base fit grid and the hard expansion
+  grid, so no per-glyph adaptive fit set can ever contain a held-out
+  phase.
 - Feature probe tags: kern, liga, clig, dlig, calt, case, frac, tnum,
   pnum, onum, lnum, zero, smcp, c2sc, ss01-ss20.
 
@@ -40,6 +43,11 @@ MAX_BROWSER_PHASE_GRID: tuple[float, ...] = (0.0, 0.25, 0.5, 0.75)
 MAX_HARD_PHASE_GRID: tuple[float, ...] = (
     0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875,
 )
+# Held-out phase grid: midpoints between hard-grid lines. Observable
+# subpixel phases that are provably outside BOTH the base 4x4 fit grid and
+# the full 8x8 hard expansion grid — per-glyph fit and held-out evidence
+# stay disjoint even for hard glyphs.
+MAX_HELDOUT_PHASE_GRID: tuple[float, ...] = (0.0625, 0.3125, 0.5625, 0.8125)
 MAX_BROWSER_PHASES_4X4: tuple[tuple[float, float], ...] = tuple(
     (float(x), float(y))
     for x, y in itertools.product(MAX_BROWSER_PHASE_GRID, MAX_BROWSER_PHASE_GRID)
@@ -48,10 +56,9 @@ MAX_HARD_PHASES_8X8: tuple[tuple[float, float], ...] = tuple(
     (float(x), float(y))
     for x, y in itertools.product(MAX_HARD_PHASE_GRID, MAX_HARD_PHASE_GRID)
 )
-# Held-out phases: exact disjoint complement of the fit grid inside the
-# hard grid. Fit/optimization can never observe these phases.
 MAX_HELDOUT_PHASES: tuple[tuple[float, float], ...] = tuple(
-    p for p in MAX_HARD_PHASES_8X8 if p not in set(MAX_BROWSER_PHASES_4X4)
+    (float(x), float(y))
+    for x, y in itertools.product(MAX_HELDOUT_PHASE_GRID, MAX_HELDOUT_PHASE_GRID)
 )
 
 MAX_FEATURE_PROBE_TAGS: tuple[str, ...] = (
@@ -117,9 +124,28 @@ def validate_max_schedule(
 
     Also enforces the closed invariants: core subset of raster sizes,
     held-out sizes disjoint from fit raster and metric sizes, held-out
-    phases disjoint from fit phases and contained in the hard grid, and
-    hard grid strictly expanding the fit grid.
+    phases disjoint from the actual maximum per-glyph fit set (base AND
+    hard expansion grids), and hard grid strictly expanding the fit grid.
     """
+    # Disjointness/subset invariants are checked FIRST so injected overlap is
+    # reported as overlap (not masked by the exact-tuple closure check).
+    if not set(core_sizes).issubset(set(raster_sizes)):
+        raise ValueError("MAX_SCHEDULE_CORE_NOT_SUBSET")
+    if set(heldout_sizes) & (set(raster_sizes) | set(metric_sizes)):
+        raise ValueError("MAX_SCHEDULE_HELDOUT_SIZE_OVERLAP")
+    fit_set = set(tuple(p) for p in fit_phases)
+    heldout_phase_set = set(tuple(p) for p in heldout_phases)
+    hard_set = set(tuple(p) for p in hard_phases)
+    # Held-out phases must be disjoint from the ACTUAL maximum per-glyph fit
+    # set (the hard expansion grid, which contains the base fit grid) —
+    # never merely disjoint from the base grid.
+    if hard_set & heldout_phase_set:
+        raise ValueError("MAX_SCHEDULE_HELDOUT_PHASE_OVERLAP")
+    if fit_set & heldout_phase_set:
+        raise ValueError("MAX_SCHEDULE_HELDOUT_PHASE_OVERLAP")
+    if not fit_set.issubset(hard_set):
+        raise ValueError("MAX_SCHEDULE_HARD_GRID_NOT_EXPANDING")
+
     _check_exact_tuple(metric_sizes, MAX_METRIC_SIZES_PX, "METRIC_SIZES")
     _check_exact_tuple(raster_sizes, MAX_RASTER_SIZES_PX, "RASTER_SIZES")
     _check_exact_tuple(core_sizes, MAX_CORE_RASTER_SIZES_PX, "CORE_RASTER_SIZES")
@@ -129,23 +155,13 @@ def validate_max_schedule(
     _check_exact_tuple(tuple(tuple(p) for p in heldout_phases), MAX_HELDOUT_PHASES, "HELDOUT_PHASES")
     _check_exact_tuple(feature_probe_tags, MAX_FEATURE_PROBE_TAGS, "FEATURE_PROBE_TAGS")
 
-    if not set(core_sizes).issubset(set(raster_sizes)):
-        raise ValueError("MAX_SCHEDULE_CORE_NOT_SUBSET")
-    if set(heldout_sizes) & (set(raster_sizes) | set(metric_sizes)):
-        raise ValueError("MAX_SCHEDULE_HELDOUT_SIZE_OVERLAP")
-    fit_set = set(tuple(p) for p in fit_phases)
-    heldout_phase_set = set(tuple(p) for p in heldout_phases)
-    hard_set = set(tuple(p) for p in hard_phases)
-    if fit_set & heldout_phase_set:
-        raise ValueError("MAX_SCHEDULE_HELDOUT_PHASE_OVERLAP")
-    if not heldout_phase_set.issubset(hard_set):
-        raise ValueError("MAX_SCHEDULE_HELDOUT_PHASE_OUTSIDE_HARD_GRID")
-    if not fit_set.issubset(hard_set):
-        raise ValueError("MAX_SCHEDULE_HARD_GRID_NOT_EXPANDING")
-
 
 def validate_observation_config_max(config) -> None:
-    """Validate one ObservationConfig against the canonical MAX profile."""
+    """Validate one ObservationConfig against the canonical MAX profile.
+
+    Structural production validation: exact closed schedules plus a closed
+    metric anchor — no undeclared metric-size observation is possible.
+    """
     validate_max_schedule(
         metric_sizes=tuple(int(s) for s in config.metric_sizes_px),
         raster_sizes=tuple(int(r) for r in config.resolutions),
@@ -156,6 +172,12 @@ def validate_observation_config_max(config) -> None:
         heldout_phases=config.held_out_subpixel_phases,
         feature_probe_tags=tuple(tag for tag, _sample in config.feature_probes),
     )
+    anchor = float(getattr(config, "font_size_px", 0.0))
+    if anchor not in {float(s) for s in config.metric_sizes_px}:
+        raise ValueError(
+            f"MAX_SCHEDULE_METRIC_ANCHOR_UNDECLARED: font_size_px {anchor} "
+            f"is not inside the exact metric schedule"
+        )
     if str(getattr(config, "config_version", "")) != MAX_CONFIG_VERSION:
         raise ValueError("MAX_SCHEDULE_CONFIG_VERSION_MISMATCH")
 
@@ -170,6 +192,7 @@ def max_schedule_identity_hash() -> str:
         "fit_phases": [list(p) for p in MAX_BROWSER_PHASES_4X4],
         "hard_phases": [list(p) for p in MAX_HARD_PHASES_8X8],
         "heldout_phases": [list(p) for p in MAX_HELDOUT_PHASES],
+        "heldout_phase_grid": list(MAX_HELDOUT_PHASE_GRID),
         "feature_probe_tags": list(MAX_FEATURE_PROBE_TAGS),
         "config_version": MAX_CONFIG_VERSION,
     }

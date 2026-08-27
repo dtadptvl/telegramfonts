@@ -391,11 +391,23 @@ class Stage9DReleaseGate:
                 calibration_fingerprint=calib_fp,
                 kerning_pairs=kerning_map,
             )
-            model_hash = model.compute_canonical_hash()
+            # Deep-immutability seal BEFORE the Vietnamese/build stages:
+            # the canonical model is sealed into a deeply immutable handle
+            # (frozen canonical bytes + SHA-256 seal). The build, consumer
+            # evidence and attestation bind this sealed model hash; any
+            # post-seal mutation of the model graph is detected fail-closed
+            # before use (drift guard below). TTF and OTF runs bind the
+            # identical sealed hash.
+            sealed = model.seal()
+            model_hash = sealed.model_hash
 
             # VIETNAMESE extension boundary: ORIGINAL never invokes AI work.
             gate_provenance = PROVENANCE_STAGE9D_RASTER
             gate_ai_binding = ""
+            # Code points constructed by the provenance-attested extension
+            # (deterministic + AI): they carry no fit observations by
+            # construction and are exempt from fit-evidence binding only.
+            extension_cps: frozenset[int] = frozenset()
             if mode.strip().upper() == "VIETNAMESE":
                 if vietnamese_service is None:
                     from compute.vietnamese import VietnameseExtensionService, missing_vietnamese_codepoints
@@ -413,9 +425,11 @@ class Stage9DReleaseGate:
                     if vi_binding.extended_codepoints:
                         gate_provenance = PROVENANCE_VIETNAMESE_AI
                         gate_ai_binding = vi_binding.compute_binding_hash()
+                        extension_cps = frozenset(vi_binding.extended_codepoints)
                     else:
                         gate_provenance = PROVENANCE_VIETNAMESE_PRESERVED
-                    model_hash = model.compute_canonical_hash()
+                    sealed = model.seal()
+                    model_hash = sealed.model_hash
         except Exception as exc:
             logger.error("Stage 9D model assembly failed: %s", type(exc).__name__)
             reason_code = "PIPELINE_ERROR: MODEL_FITTING_FAILED"
@@ -423,6 +437,16 @@ class Stage9DReleaseGate:
             if message.startswith("VI_"):
                 reason_code = f"PIPELINE_ERROR: {message}"
             return _fail_result("FAIL", snapshot, reason_code, clean_format, model_hash=model_hash, trace=trace)
+
+        # Post-attestation drift guard: the model was sealed above; any
+        # mutation of the model graph between seal and use fails closed
+        # before build/consumer evidence. The sealed handle itself is
+        # deeply immutable (frozen canonical bytes + hash), and TTF/OTF
+        # attestations bind the identical sealed model hash.
+        if model.compute_canonical_hash() != sealed.model_hash:
+            return _fail_result(
+                "FAIL", snapshot, "PIPELINE_ERROR: SEALED_FONT_MODEL_DRIFT", clean_format, model_hash=model_hash, trace=trace
+            )
 
         # 6. Candidate build + attestation + on-disk drift re-verification.
         temp_dir_obj: Any = None
@@ -442,8 +466,30 @@ class Stage9DReleaseGate:
                 style_name=snapshot.style_name,
                 units_per_em=1000,
             )
+            if mode.strip().upper() == "VIETNAMESE":
+                # The VIETNAMESE candidate must be built from the exact
+                # extended canonical model (base + deterministic + AI
+                # glyphs); building from the raw optimized base glyphs
+                # would leave the extension out of the cmap.
+                build_glyphs: dict[int, ReconstructedGlyph] = {
+                    cp: ReconstructedGlyph(
+                        code_point=g.code_point,
+                        character=g.character,
+                        advance_width_upem=g.advance_width_upem,
+                        lsb_upem=g.lsb_upem,
+                        rsb_upem=g.rsb_upem,
+                        ascent_upem=g.ascent_upem,
+                        descent_upem=g.descent_upem,
+                        contours=list(g.contours),
+                        bounding_box_upem=tuple(g.bounding_box_upem),
+                        reconstruction_time_ms=0.0,
+                    )
+                    for cp, g in model.glyphs.items()
+                }
+            else:
+                build_glyphs = dict(optimized_glyphs)
             family_build = builder.build_candidate_family(
-                glyphs=optimized_glyphs,
+                glyphs=build_glyphs,
                 output_dir=work_dir,
                 typography=TypographyDataset(
                     family_name=snapshot.family_name,
@@ -483,7 +529,7 @@ class Stage9DReleaseGate:
             if len(reread) != cand_size or hashlib.sha256(reread).hexdigest() != cand_sha:
                 raise ValueError("ARTIFACT_DRIFT_DETECTED")
         except Exception as exc:
-            logger.error("Stage 9D candidate build/attestation failed: %s", type(exc).__name__)
+            logger.error("Stage 9D candidate build/attestation failed: %s: %s", type(exc).__name__, exc)
             reason = (
                 "PIPELINE_ERROR: ARTIFACT_DRIFT_DETECTED"
                 if isinstance(exc, ValueError) and str(exc) == "ARTIFACT_DRIFT_DETECTED"
@@ -516,6 +562,7 @@ class Stage9DReleaseGate:
                 thresholds=thresholds,
                 raster_provider=lambda r: snapshot.get_raster_bytes(r.cache_key),
                 required_resolutions=capability_fit_sizes,
+                extension_codepoints=extension_cps,
             )
         except Exception as exc:
             logger.error(
@@ -710,12 +757,22 @@ class Stage9DReleaseGate:
             return _fail_result("FAIL", snapshot, "PIPELINE_ERROR: SNAPSHOT_PARTITION_FAILED", clean_format)
 
         model_hash = ""
+        sealed = None
         try:
-            model.validate()
-            model_hash = model.compute_canonical_hash()
+            # L2 reuse binds the identical sealed model identity: the cached
+            # model is sealed into a deeply immutable handle; build/consumer
+            # stages bind the sealed hash and any post-seal model drift
+            # fails closed before use.
+            sealed = model.seal()
+            model_hash = sealed.model_hash
         except Exception as exc:
             logger.error("Stage 9D L2 cached model invalid: %s", type(exc).__name__)
             return _fail_result("FAIL", snapshot, "PIPELINE_ERROR: L2_MODEL_INVALID", clean_format)
+
+        if model.compute_canonical_hash() != sealed.model_hash:
+            return _fail_result(
+                "FAIL", snapshot, "PIPELINE_ERROR: SEALED_FONT_MODEL_DRIFT", clean_format, model_hash=model_hash
+            )
 
         temp_dir_obj: Any = None
         cand_sha = ""

@@ -29,7 +29,7 @@ import io
 import json
 import math
 from dataclasses import dataclass, field
-from typing import Callable, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 from PIL import Image
@@ -60,6 +60,9 @@ OPTIMIZATION_LOSS_WEIGHTS: dict[str, float] = {
 # Canonical complexity normalization: segment counts above this bound saturate
 # the complexity penalty.
 CANONICAL_MAX_OUTLINE_SEGMENTS = 128
+# Deterministic pixel margin for precomputed reference crops and candidate
+# rasterization windows (closed constant; part of the objective identity).
+REFERENCE_CROP_MARGIN_PX = 2
 
 
 class OptimizerNonFiniteObjectiveError(RuntimeError):
@@ -74,7 +77,7 @@ class OptimizerNonConvergenceError(RuntimeError):
 class OptimizerPolicy:
     """Fixed, hashable optimizer constants bound into every convergence trace."""
 
-    max_iterations: int = 120
+    max_iterations: int = 240
     initial_translation_step_upem: float = 8.0
     initial_scale_step: float = 0.01
     min_translation_step_upem: float = 0.25
@@ -105,16 +108,44 @@ class GlyphOptimizationRecord:
     stop_reason: str
     accepted_objective_trace: tuple[float, ...]
     loss_components: tuple[tuple[str, float], ...] = ()
+    selected_variant: str = "original"
+    transform: tuple[float, float, float, float] = (0.0, 0.0, 1.0, 1.0)
+
+
+def recompute_objective_from_components(components: Mapping[str, float]) -> float:
+    """Recompute the canonical weighted total from loss components."""
+    return float(
+        sum(OPTIMIZATION_LOSS_WEIGHTS[name] * float(components[name]) for name in REQUIRED_OPTIMIZATION_LOSSES)
+    )
 
 
 def validate_loss_vector_complete(record: GlyphOptimizationRecord) -> None:
-    """Fail closed unless every required loss component is present and finite."""
+    """Fail closed unless the loss vector is exact, real, and recomputably bound.
+
+    Missing, extra, duplicate, non-finite, or no-op-substituted terms reject;
+    canonical weights must be non-zero finite; the recorded final objective
+    must equal the recomputed weighted total (no forged totals).
+    """
+    names = [name for name, _value in record.loss_components]
+    if len(names) != len(set(names)):
+        raise ValueError("OPTIMIZER_LOSS_VECTOR_DUPLICATE_TERM")
+    if set(names) != set(REQUIRED_OPTIMIZATION_LOSSES):
+        missing = set(REQUIRED_OPTIMIZATION_LOSSES) - set(names)
+        extra = set(names) - set(REQUIRED_OPTIMIZATION_LOSSES)
+        raise ValueError(
+            f"OPTIMIZER_LOSS_VECTOR_INCOMPLETE:missing={sorted(missing)}:extra={sorted(extra)}"
+        )
+    for name in REQUIRED_OPTIMIZATION_LOSSES:
+        weight = OPTIMIZATION_LOSS_WEIGHTS[name]
+        if not (math.isfinite(weight) and weight > 0.0):
+            raise ValueError(f"OPTIMIZER_LOSS_WEIGHT_INVALID:{name}")
     components = dict(record.loss_components)
     for name in REQUIRED_OPTIMIZATION_LOSSES:
-        if name not in components:
-            raise ValueError(f"OPTIMIZER_LOSS_VECTOR_INCOMPLETE:{name}")
         if not math.isfinite(float(components[name])):
             raise ValueError(f"OPTIMIZER_LOSS_NON_FINITE:{name}")
+    recomputed = recompute_objective_from_components(components)
+    if abs(recomputed - float(record.final_objective)) > 1e-9:
+        raise ValueError("OPTIMIZER_LOSS_TOTAL_FORGED")
 
 
 @dataclass(frozen=True)
@@ -144,6 +175,8 @@ class OptimizationTrace:
                     "stop_reason": r.stop_reason,
                     "accepted_objective_trace": [repr(v) for v in r.accepted_objective_trace],
                     "loss_components": [[name, repr(value)] for name, value in r.loss_components],
+                    "selected_variant": r.selected_variant,
+                    "transform": [repr(v) for v in r.transform],
                 }
                 for r in self.records
             ],
@@ -162,13 +195,20 @@ def _transform_contours(
     scale: float,
     center_x: float,
     center_y: float,
+    scale_y: float | None = None,
 ) -> list[Contour]:
-    """Apply deterministic translate + uniform scale about a fixed center."""
+    """Apply deterministic translate + (an)isotropic scale about a fixed center.
+
+    ``scale`` is the X-axis scale; ``scale_y`` defaults to ``scale``
+    (uniform). Anisotropic scaling is part of the causal search space: it
+    changes rasterized coverage/edge/SDF evidence AND the curvature term.
+    """
+    sy = scale if scale_y is None else scale_y
 
     def tp(p: Point2D) -> Point2D:
         return Point2D(
             center_x + scale * (p.x - center_x) + dx,
-            center_y + scale * (p.y - center_y) + dy,
+            center_y + sy * (p.y - center_y) + dy,
         )
 
     transformed: list[Contour] = []
@@ -184,10 +224,112 @@ def _transform_contours(
                 segments=new_segments,
                 is_hole=c.is_hole,
                 parent_index=c.parent_index,
-                area_upem=c.area_upem * scale * scale,
+                area_upem=c.area_upem * scale * sy,
             )
         )
     return transformed
+
+
+def _midpoint(a: Point2D, b: Point2D) -> Point2D:
+    return Point2D((a.x + b.x) / 2.0, (a.y + b.y) / 2.0)
+
+
+def _subdivide_contours(contours: Sequence[Contour]) -> list[Contour]:
+    """Deterministic segment subdivision (de Casteljau at t=0.5).
+
+    Doubles the segment count WITHOUT changing the represented shape:
+    identical raster evidence, strictly higher complexity, and a distinct
+    curvature sampling — the complexity/curvature terms therefore causally
+    participate in candidate selection.
+    """
+    subdivided: list[Contour] = []
+    for c in contours:
+        new_segments = []
+        for s in c.segments:
+            if isinstance(s, CubicSegment):
+                q0 = _midpoint(s.p0, s.p1)
+                q1 = _midpoint(s.p1, s.p2)
+                q2 = _midpoint(s.p2, s.p3)
+                r0 = _midpoint(q0, q1)
+                r1 = _midpoint(q1, q2)
+                m = _midpoint(r0, r1)
+                new_segments.append(CubicSegment(p0=s.p0, p1=q0, p2=r0, p3=m))
+                new_segments.append(CubicSegment(p0=m, p1=r1, p2=q2, p3=s.p3))
+            else:
+                m = _midpoint(s.p0, s.p1)
+                new_segments.append(LineSegment(p0=s.p0, p1=m))
+                new_segments.append(LineSegment(p0=m, p1=s.p1))
+        subdivided.append(
+            Contour(
+                segments=new_segments,
+                is_hole=c.is_hole,
+                parent_index=c.parent_index,
+                area_upem=c.area_upem,
+            )
+        )
+    return subdivided
+
+
+_SIMPLIFY_EPSILON_UPEM = 0.75
+
+
+def _point_segment_distance(p: Point2D, a: Point2D, b: Point2D) -> float:
+    abx = b.x - a.x
+    aby = b.y - a.y
+    denom = math.hypot(abx, aby)
+    if denom == 0.0:
+        return math.hypot(p.x - a.x, p.y - a.y)
+    t = max(0.0, min(1.0, ((p.x - a.x) * abx + (p.y - a.y) * aby) / (denom * denom)))
+    proj_x = a.x + t * abx
+    proj_y = a.y + t * aby
+    return math.hypot(p.x - proj_x, p.y - proj_y)
+
+
+def _simplify_contours(contours: Sequence[Contour]) -> list[Contour]:
+    """Deterministic simplification: merge near-collinear LINE segments.
+
+    Reduces segment count below the original when the source outline
+    contains redundant line corners; cubic segments are never altered.
+    The segment-count (complexity) term causally prefers the cheapest
+    shape-equal representation.
+    """
+    simplified: list[Contour] = []
+    for c in contours:
+        if any(isinstance(s, CubicSegment) for s in c.segments):
+            simplified.append(c)
+            continue
+        pts = [s.p0 for s in c.segments]
+        if len(pts) <= 3:
+            simplified.append(c)
+            continue
+        kept: list[Point2D] = [pts[0]]
+        i = 1
+        while i < len(pts):
+            if i + 1 < len(pts) and _point_segment_distance(pts[i], kept[-1], pts[i + 1]) < _SIMPLIFY_EPSILON_UPEM:
+                i += 1
+                continue
+            kept.append(pts[i])
+            i += 1
+        while len(kept) > 3 and _point_segment_distance(kept[0], kept[-1], kept[1]) < _SIMPLIFY_EPSILON_UPEM:
+            kept = kept[1:]
+        if len(kept) < 3:
+            simplified.append(c)
+            continue
+        segments = [
+            LineSegment(p0=kept[j], p1=kept[(j + 1) % len(kept)]) for j in range(len(kept))
+        ]
+        simplified.append(
+            Contour(
+                segments=segments,
+                is_hole=c.is_hole,
+                parent_index=c.parent_index,
+                area_upem=c.area_upem,
+            )
+        )
+    return simplified
+
+
+VARIANT_ORDER: tuple[str, ...] = ("original", "simplified", "subdivided")
 
 
 class FitOnlyGlyphOptimizer:
@@ -268,25 +410,120 @@ class FitOnlyGlyphOptimizer:
         return mask.astype(bool) & ~interior
 
     @staticmethod
-    def _distance_transform(mask: np.ndarray) -> np.ndarray:
-        """Exact deterministic L1 distance transform (BFS chamfer)."""
-        from collections import deque
+    def _prepare_reference_artifacts(
+        ref_mask: np.ndarray, margin: int = REFERENCE_CROP_MARGIN_PX
+    ) -> dict[str, Any]:
+        """Compute the exact reference-side artifacts once per observation.
 
-        h, w = mask.shape
-        dist = np.full((h, w), h + w, dtype=np.int32)
-        queue: deque = deque()
-        ys, xs = np.nonzero(mask)
-        for y, x in zip(ys.tolist(), xs.tolist()):
-            dist[y, x] = 0
-            queue.append((y, x))
-        while queue:
-            y, x = queue.popleft()
-            d = dist[y, x] + 1
-            for ny, nx in ((y + 1, x), (y - 1, x), (y, x + 1), (y, x - 1)):
-                if 0 <= ny < h and 0 <= nx < w and dist[ny, nx] > d:
-                    dist[ny, nx] = d
-                    queue.append((ny, nx))
-        return dist
+        The crop is the reference ink bounding box expanded by the closed
+        pixel margin; ref_edge / sd_ref / ref_count are derived from that
+        crop and never recomputed per candidate, so the objective stays
+        computable at MAX schedule scale while remaining exact on the
+        sampled region.
+        """
+        ref_bool = ref_mask.astype(bool)
+        ref_count = int(ref_bool.sum())
+        if ref_count == 0:
+            return {
+                "crop": (0, 0, 0, 0),
+                "ref_crop": ref_bool[0:0, 0:0],
+                "ref_edge": ref_bool[0:0, 0:0],
+                "sd_ref": np.zeros((0, 0), dtype=np.float64),
+                "ref_count": 0,
+            }
+        ys, xs = np.nonzero(ref_bool)
+        y0 = max(int(ys.min()) - margin, 0)
+        y1 = min(int(ys.max()) + margin + 1, ref_bool.shape[0])
+        x0 = max(int(xs.min()) - margin, 0)
+        x1 = min(int(xs.max()) + margin + 1, ref_bool.shape[1])
+        ref_crop = ref_bool[y0:y1, x0:x1]
+        return {
+            "crop": (y0, y1, x0, x1),
+            "ref_crop": ref_crop,
+            "ref_edge": FitOnlyGlyphOptimizer._boundary(ref_crop),
+            "sd_ref": FitOnlyGlyphOptimizer._signed_distance(ref_crop),
+            "ref_count": ref_count,
+        }
+
+    @classmethod
+    def _rasterize_model_crop(
+        cls,
+        contours: Sequence[Contour],
+        transform: CalibrationTransform,
+        resolution: int,
+        samples_per_segment: int,
+        crop: tuple[int, int, int, int],
+        margin: int = REFERENCE_CROP_MARGIN_PX,
+    ) -> tuple[np.ndarray, int]:
+        """Exact crop-window rasterization of transformed contours.
+
+        Renders into the smallest canvas covering the union of the reference
+        crop window and the exact transformed-contour pixel bounding box, so
+        the returned crop equals the full-canvas model mask restricted to the
+        reference window and the returned outside-crop ink count is exact.
+        Never allocates or converts a full scheduled canvas.
+        """
+        from PIL import ImageDraw
+
+        y0, y1, x0, x1 = crop
+        # Sample every contour exactly once; the affine image of the sampled
+        # point set bounds the transformed contour pixels, so its pixel
+        # bounding box is the exact render-window bound.
+        sampled_outer: list[list[tuple[float, float]]] = []
+        sampled_holes: list[list[tuple[float, float]]] = []
+        all_px: list[tuple[float, float]] = []
+        for c in contours:
+            pts = c.sample_points(samples_per_segment=samples_per_segment)
+            if len(pts) < 3:
+                continue
+            pix = [transform.inverse(p.x, p.y) for p in pts]
+            if c.is_hole:
+                sampled_holes.append(pix)
+            else:
+                sampled_outer.append(pix)
+            all_px.extend(pix)
+
+        if all_px:
+            mx0 = min(px for px, _py in all_px) - margin
+            mx1 = max(px for px, _py in all_px) + margin
+            my0 = min(py for _px, py in all_px) - margin
+            my1 = max(py for _px, py in all_px) + margin
+        else:
+            mx0, mx1, my0, my1 = float(x0), float(x1), float(y0), float(y1)
+
+        uy0 = max(int(math.floor(min(my0, float(y0)))), 0)
+        uy1 = min(int(math.ceil(max(my1, float(y1)))), resolution)
+        ux0 = max(int(math.floor(min(mx0, float(x0)))), 0)
+        ux1 = min(int(math.ceil(max(mx1, float(x1)))), resolution)
+        if uy1 <= uy0 or ux1 <= ux0:
+            crop_shape = (max(y1 - y0, 0), max(x1 - x0, 0))
+            return np.zeros(crop_shape, dtype=bool), 0
+
+        img = Image.new("L", (ux1 - ux0, uy1 - uy0), 0)
+        draw = ImageDraw.Draw(img)
+        for pix in sampled_outer:
+            draw.polygon([(px - ux0, py - uy0) for px, py in pix], fill=255)
+        for pix in sampled_holes:
+            draw.polygon([(px - ux0, py - uy0) for px, py in pix], fill=0)
+        canvas = (np.array(img, dtype=np.uint8) > 127)
+        model_total = int(canvas.sum())
+        model_crop = canvas[y0 - uy0 : y1 - uy0, x0 - ux0 : x1 - ux0]
+        return model_crop, model_total - int(model_crop.sum())
+
+    @staticmethod
+    def _signed_distance(mask: np.ndarray) -> np.ndarray:
+        """Signed distance field: negative inside, positive outside.
+
+        Deterministic exact chamfer (L2 3-4) distances via scipy; the sign
+        convention makes the SDF loss a real signed-distance mismatch, not
+        an unsigned foreground distance.
+        """
+        from scipy.ndimage import distance_transform_cdt
+
+        mask_bool = mask.astype(bool)
+        dist_to_foreground = distance_transform_cdt(~mask_bool)
+        dist_to_complement = distance_transform_cdt(mask_bool)
+        return np.where(mask_bool, -dist_to_complement, dist_to_foreground).astype(np.float64)
 
     def _curvature_loss(self, contours: Sequence[Contour]) -> float:
         """Outline turning-angle energy normalized to [0, 1]; shape-only term."""
@@ -318,15 +555,67 @@ class FitOnlyGlyphOptimizer:
     def _loss_components(
         self,
         contours: Sequence[Contour],
-        prepared: Sequence[tuple[CalibrationTransform, np.ndarray, int]],
+        prepared: Sequence[tuple],
     ) -> dict[str, float]:
-        """Compute the complete required loss vector; every component is real."""
+        """Compute the complete required loss vector; every component is real.
+
+        Prepared entries are ``(transform, ref_mask, resolution)`` or extended
+        ``(transform, ref_mask, resolution, precomputed)`` where the
+        precomputed dict carries the exact reference-side artifacts
+        (crop/ref_edge/sd_ref/ref_count) computed once per observation.
+        """
         if not prepared:
             raise ValueError("OPTIMIZER_NO_FIT_OBSERVATIONS")
         coverage_terms: list[float] = []
         edge_terms: list[float] = []
         sdf_terms: list[float] = []
-        for transform, ref_mask, resolution in prepared:
+        for entry in prepared:
+            transform, ref_mask, resolution = entry[0], entry[1], entry[2]
+            pre = entry[3] if len(entry) > 3 else None
+
+            if pre is not None:
+                # Precomputed reference artifacts: the model is rasterized
+                # only inside the exact union of the reference crop window
+                # and the candidate pixel bounding box (never a full
+                # scheduled canvas); outside-crop model ink stays counted
+                # exactly in the coverage union.
+                crop = pre["crop"]
+                ref_crop = pre["ref_crop"]
+                ref_edge = pre["ref_edge"]
+                sd_ref = pre["sd_ref"]
+                ref_count = pre["ref_count"]
+                model_crop, outside_model = self._rasterize_model_crop(
+                    contours,
+                    transform,
+                    resolution,
+                    self.policy.samples_per_segment,
+                    crop,
+                )
+                intersection = int(np.logical_and(model_crop, ref_crop).sum())
+                model_crop_count = int(model_crop.sum())
+                union = (
+                    intersection
+                    + (model_crop_count - intersection)
+                    + (ref_count - intersection)
+                    + outside_model
+                )
+                coverage_terms.append(1.0 - (float(intersection) / max(union, 1)))
+
+                model_edge = self._boundary(model_crop)
+                edge_mismatch = int(np.logical_xor(model_edge, ref_edge).sum())
+                edge_denom = max(int(np.logical_or(model_edge, ref_edge).sum()), 1)
+                edge_terms.append(min(1.0, float(edge_mismatch) / float(edge_denom)))
+
+                if model_crop_count == 0 and ref_count == 0:
+                    sdf_terms.append(0.0)
+                elif model_crop_count == 0 or ref_count == 0:
+                    sdf_terms.append(1.0)
+                else:
+                    sd_model = self._signed_distance(model_crop)
+                    mean_abs = float(np.abs(sd_model - sd_ref).mean())
+                    sdf_terms.append(min(1.0, mean_abs / float(max(resolution, 1))))
+                continue
+
             model_mask = self._rasterize_contours(
                 contours, transform, resolution, self.policy.samples_per_segment
             ).astype(bool)
@@ -346,13 +635,23 @@ class FitOnlyGlyphOptimizer:
             union_count = int(union_mask.sum())
             if union_count == 0:
                 sdf_terms.append(0.0)
+            elif not model_mask.any() or not ref_bool.any():
+                # One side empty: maximal signed-distance mismatch.
+                sdf_terms.append(1.0)
             else:
-                dist_ref = self._distance_transform(ref_bool)
-                dist_model = self._distance_transform(model_mask)
-                sdf_sum = float(dist_ref[model_mask & ~ref_bool].sum()) + float(
-                    dist_model[ref_bool & ~model_mask].sum()
-                )
-                sdf_terms.append(min(1.0, sdf_sum / (float(union_count) * float(max(resolution, 1)))))
+                # Signed-SDF mismatch over the union bounding region
+                # (interior sign flips are penalized, not only exterior
+                # foreground distance).
+                ys, xs = np.nonzero(union_mask)
+                margin = 2
+                y0 = max(int(ys.min()) - margin, 0)
+                y1 = min(int(ys.max()) + margin + 1, union_mask.shape[0])
+                x0 = max(int(xs.min()) - margin, 0)
+                x1 = min(int(xs.max()) + margin + 1, union_mask.shape[1])
+                sd_model = self._signed_distance(model_mask[y0:y1, x0:x1])
+                sd_ref = self._signed_distance(ref_bool[y0:y1, x0:x1])
+                mean_abs = float(np.abs(sd_model - sd_ref).mean())
+                sdf_terms.append(min(1.0, mean_abs / float(max(resolution, 1))))
 
         components = {
             "coverage": float(np.mean(coverage_terms)),
@@ -373,16 +672,40 @@ class FitOnlyGlyphOptimizer:
         glyph: ReconstructedGlyph,
         prepared: Sequence[tuple[CalibrationTransform, np.ndarray, int]],
     ) -> tuple[ReconstructedGlyph, GlyphOptimizationRecord]:
-        """Optimize one glyph's outline; fail-closed on non-convergence."""
+        """Optimize one glyph's outline; fail-closed on non-convergence.
+
+        Causal search space: the deterministic segment-variant lattice
+        (original / simplified / subdivided) crossed with translate +
+        anisotropic-scale coordinate descent, so every required loss term
+        (coverage, edge, signed SDF, curvature, complexity) can causally
+        affect candidate selection.
+        """
         x0, y0, x1, y1 = glyph.bounding_box_upem
         center_x = (x0 + x1) / 2.0
         center_y = (y0 + y1) / 2.0
 
+        variant_bases: dict[str, list[Contour]] = {
+            "original": list(glyph.contours),
+            "simplified": _simplify_contours(glyph.contours),
+            "subdivided": _subdivide_contours(glyph.contours),
+        }
+
+        # Deterministic variant start: best identity-transform objective.
+        best_variant = VARIANT_ORDER[0]
+        best_base = variant_bases[best_variant]
+        best = self._objective(best_base, prepared)
+        for name in VARIANT_ORDER[1:]:
+            obj = self._objective(variant_bases[name], prepared)
+            if obj < best:
+                best_variant = name
+                best_base = variant_bases[name]
+                best = obj
+
         dx = 0.0
         dy = 0.0
-        scale = 1.0
-        current_contours = list(glyph.contours)
-        best = self._objective(current_contours, prepared)
+        sx = 1.0
+        sy = 1.0
+        current_contours = best_base
         initial = best
         accepted_trace: list[float] = [best]
         iterations = 0
@@ -397,24 +720,27 @@ class FitOnlyGlyphOptimizer:
             for dim, delta_candidates in (
                 ("dx", (-step_t, step_t)),
                 ("dy", (-step_t, step_t)),
-                ("scale", (-step_s, step_s)),
+                ("sx", (-step_s, step_s)),
+                ("sy", (-step_s, step_s)),
             ):
                 for delta in delta_candidates:
                     if iterations >= self.policy.max_iterations:
                         break
                     cand_dx = dx + (delta if dim == "dx" else 0.0)
                     cand_dy = dy + (delta if dim == "dy" else 0.0)
-                    cand_scale = scale + (delta if dim == "scale" else 0.0)
-                    if cand_scale <= 0.0:
+                    cand_sx = sx + (delta if dim == "sx" else 0.0)
+                    cand_sy = sy + (delta if dim == "sy" else 0.0)
+                    if cand_sx <= 0.0 or cand_sy <= 0.0:
                         iterations += 1
                         continue
                     cand_contours = _transform_contours(
-                        glyph.contours, cand_dx, cand_dy, cand_scale, center_x, center_y
+                        best_base, cand_dx, cand_dy, cand_sx, center_x, center_y,
+                        scale_y=cand_sy,
                     )
                     iterations += 1
                     obj = self._objective(cand_contours, prepared)
                     if obj < best - tol:
-                        dx, dy, scale = cand_dx, cand_dy, cand_scale
+                        dx, dy, sx, sy = cand_dx, cand_dy, cand_sx, cand_sy
                         current_contours = cand_contours
                         best = obj
                         accepted_trace.append(best)
@@ -440,6 +766,8 @@ class FitOnlyGlyphOptimizer:
             loss_components=tuple(
                 (name, final_components[name]) for name in REQUIRED_OPTIMIZATION_LOSSES
             ),
+            selected_variant=best_variant,
+            transform=(dx, dy, sx, sy),
         )
         validate_loss_vector_complete(record)
         if not converged:
@@ -487,10 +815,18 @@ class FitOnlyGlyphOptimizer:
         for r in fit_records:
             by_cp.setdefault(r.code_point, []).append(r)
 
-        prepared_by_cp: dict[int, list[tuple[CalibrationTransform, np.ndarray, int]]] = {}
-        for cp in sorted(by_cp):
-            prepared: list[tuple[CalibrationTransform, np.ndarray, int]] = []
-            for r in sorted(by_cp[cp], key=lambda rec: rec.cache_key):
+        # Streaming preparation: each glyph's reference artifacts are built
+        # and consumed one glyph at a time so full-resolution reference
+        # masks never accumulate for the whole family at MAX schedule scale.
+        optimized_glyphs: dict[int, ReconstructedGlyph] = {}
+        records: list[GlyphOptimizationRecord] = []
+        total_iterations = 0
+        for cp in sorted(glyphs):
+            cp_records = by_cp.get(cp)
+            if not cp_records:
+                raise ValueError(f"OPTIMIZER_MISSING_FIT_EVIDENCE_CP_{cp}")
+            prepared: list[tuple[CalibrationTransform, np.ndarray | None, int]] = []
+            for r in sorted(cp_records, key=lambda rec: rec.cache_key):
                 png_bytes = raster_provider(r)
                 if not isinstance(png_bytes, bytes) or len(png_bytes) != r.raster_size_bytes:
                     raise ValueError("OPTIMIZER_RASTER_BYTES_MISMATCH")
@@ -503,19 +839,20 @@ class FitOnlyGlyphOptimizer:
                     subpixel_y=r.subpixel_y,
                     units_per_em=units_per_em,
                 )
-                prepared.append((transform, self._decode_mask(png_bytes, r.resolution), r.resolution))
-            prepared_by_cp[cp] = prepared
-
-        optimized_glyphs: dict[int, ReconstructedGlyph] = {}
-        records: list[GlyphOptimizationRecord] = []
-        total_iterations = 0
-        for cp in sorted(glyphs):
-            if cp not in prepared_by_cp:
-                raise ValueError(f"OPTIMIZER_MISSING_FIT_EVIDENCE_CP_{cp}")
-            optimized, record = self.optimize_glyph(glyphs[cp], prepared_by_cp[cp])
+                ref_mask = self._decode_mask(png_bytes, r.resolution)
+                # Production preparation: reference-side artifacts (crop,
+                # edge, signed distance, ink count) are computed exactly
+                # once per observation and bound into every objective
+                # evaluation of this glyph. The full-resolution mask is
+                # released immediately after preparation.
+                precomputed = self._prepare_reference_artifacts(ref_mask)
+                del ref_mask
+                prepared.append((transform, None, r.resolution, precomputed))
+            optimized, record = self.optimize_glyph(glyphs[cp], prepared)
             optimized_glyphs[cp] = optimized
             records.append(record)
             total_iterations += record.iterations
+            del prepared
 
         trace = OptimizationTrace(
             optimizer_version=OPTIMIZER_VERSION,

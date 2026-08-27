@@ -98,20 +98,33 @@ def fuse_observation_sdfs(
         if u_max_obs <= u_min_obs or v_max_obs <= v_min_obs:
             continue
 
-        d_in = ndi.distance_transform_edt(mask)
-        d_out = ndi.distance_transform_edt(~mask)
-        sdf_raw = d_in - d_out
-
-        # Subpixel anti-aliasing boundary refinement
-        boundary = (arr > 0.05) & (arr < 0.95)
-        sdf_raw[boundary] = arr[boundary] - 0.5
-
         # Metric affine mapping to raster pixel coordinates
         scale_u = (u_max_obs - u_min_obs) / max(x_max - x_min, 1.0)
         scale_v = (v_max_obs - v_min_obs) / max(y_max - y_min, 1.0)
 
-        U_map = u_min_obs + (X_grid - x_min) * scale_u
-        V_map = v_max_obs - (Y_grid - y_min) * scale_v
+        # Exact cropped distance fields: fusion only ever samples within the
+        # ink bounding region expanded by the UPEM pad mapped to pixels, so
+        # EDTs restricted to that crop are EXACT on the sampled region while
+        # avoiding full-canvas transforms at large scheduled resolutions.
+        pad_px = int(math.ceil(config.sdf_pad_upem * max(scale_u, scale_v))) + 6
+        h_full, w_full = mask.shape
+        y0 = max(int(v_min_obs) - pad_px, 0)
+        y1 = min(int(v_max_obs) + pad_px + 1, h_full)
+        x0 = max(int(u_min_obs) - pad_px, 0)
+        x1 = min(int(u_max_obs) + pad_px + 1, w_full)
+        mask_crop = mask[y0:y1, x0:x1]
+        arr_crop = arr[y0:y1, x0:x1]
+
+        d_in = ndi.distance_transform_edt(mask_crop)
+        d_out = ndi.distance_transform_edt(~mask_crop)
+        sdf_raw = d_in - d_out
+
+        # Subpixel anti-aliasing boundary refinement
+        boundary = (arr_crop > 0.05) & (arr_crop < 0.95)
+        sdf_raw[boundary] = arr_crop[boundary] - 0.5
+
+        U_map = u_min_obs + (X_grid - x_min) * scale_u - float(x0)
+        V_map = v_max_obs - (Y_grid - y_min) * scale_v - float(y0)
 
         sampled_pixel_sdf = ndi.map_coordinates(
             sdf_raw,

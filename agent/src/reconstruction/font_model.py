@@ -29,6 +29,7 @@ class CalibratedGlyph:
     contours: list[Contour] = field(default_factory=list)
     confidence: float = 1.0
     observation_fingerprints: tuple[str, ...] = ()
+    anchors: tuple[tuple[str, float, float], ...] = ()
 
     @property
     def total_contours(self) -> int:
@@ -77,6 +78,13 @@ class CalibratedGlyph:
             if not isinstance(fp, str) or len(fp) != 64 or not all(c in "0123456789abcdefABCDEF" for c in fp):
                 raise ValueError(f"Malformed observation fingerprint in glyph {self.code_point}: {fp}")
 
+        for anchor in self.anchors:
+            if not isinstance(anchor, tuple) or len(anchor) != 3:
+                raise ValueError(f"Malformed anchor entry in glyph {self.code_point}: {anchor!r}")
+            name, ax, ay = anchor
+            if not str(name).strip() or not (math.isfinite(float(ax)) and math.isfinite(float(ay))):
+                raise ValueError(f"Invalid anchor in glyph {self.code_point}: {anchor!r}")
+
         # Non-whitespace glyphs must have contours
         if self.code_point != 0x20 and not self.contours:
             raise ValueError(f"Non-whitespace glyph {self.code_point} must have at least one contour")
@@ -111,6 +119,9 @@ class CalibratedGlyph:
             "bounding_box_upem": [round(b, 2) for b in self.bounding_box_upem],
             "confidence": round(self.confidence, 4),
             "observation_fingerprints": sorted(list(self.observation_fingerprints)),
+            "anchors": sorted(
+                [[str(name), round(float(ax), 2), round(float(ay), 2)] for name, ax, ay in self.anchors]
+            ),
             "contours": [
                 {
                     "is_hole": c.is_hole,
@@ -177,6 +188,9 @@ class CalibratedGlyph:
             contours=contours,
             confidence=float(d.get("confidence", 1.0)),
             observation_fingerprints=tuple(d["observation_fingerprints"]),
+            anchors=tuple(
+                (str(a[0]), float(a[1]), float(a[2])) for a in d.get("anchors", [])
+            ),
         )
         glyph.validate()
         return glyph
@@ -401,3 +415,45 @@ class CanonicalFontModel:
         """Deserialize from canonical JSON string."""
         data = json.loads(raw_json)
         return cls.from_canonical_dict(data)
+
+    def seal(self) -> "SealedFontModel":
+        """Seal this model into a deeply immutable attested handle."""
+        return SealedFontModel.seal(self)
+
+
+@dataclass(frozen=True)
+class SealedFontModel:
+    """Deeply immutable attested canonical model handle.
+
+    Holds only the validated canonical JSON bytes and their SHA-256 seal.
+    ``unwrap()`` always materializes a FRESH validated model from the sealed
+    bytes: mutation of any unwrapped copy can never alter the seal, and any
+    tampering with the sealed bytes is detected by ``verify()`` before use.
+    TTF and OTF builds must bind to the identical sealed model hash.
+    """
+
+    canonical_json: str
+    model_hash: str
+    schema_version: str = "1.0.0"
+
+    @classmethod
+    def seal(cls, model: CanonicalFontModel) -> "SealedFontModel":
+        model.validate()
+        canonical = model.to_canonical_json()
+        return cls(
+            canonical_json=canonical,
+            model_hash=hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+            schema_version=model.schema_version,
+        )
+
+    def verify(self) -> str:
+        """Recompute the seal hash; raise on any drift (fail closed)."""
+        recomputed = hashlib.sha256(self.canonical_json.encode("utf-8")).hexdigest()
+        if recomputed != self.model_hash:
+            raise ValueError("SEALED_FONT_MODEL_HASH_DRIFT")
+        return recomputed
+
+    def unwrap(self) -> CanonicalFontModel:
+        """Materialize a fresh validated model from the sealed bytes."""
+        self.verify()
+        return CanonicalFontModel.from_canonical_json(self.canonical_json)

@@ -104,7 +104,10 @@ class FidelityEvaluator:
     ) -> float:
         """Compute Euclidean chamfer distance in font design space (UPEM units) between model contour and raster."""
         if not np.any(ref_mask):
-            return 1000.0
+            # Zero-ink evidence: a blank raster perfectly matches a
+            # contour-less glyph (e.g. U+0020); ink-carrying contours
+            # against blank evidence remain a maximal fail-closed mismatch.
+            return 0.0 if not glyph.contours else 1000.0
 
         dt_ref = scipy.ndimage.distance_transform_edt(1 - ref_mask)
         sample_distances_upem: list[float] = []
@@ -137,6 +140,7 @@ class FidelityEvaluator:
         thresholds: FidelityThresholds | None = None,
         raster_provider: Callable[[ObservationRecord], bytes] | None = None,
         required_resolutions: "tuple[int, ...] | None" = None,
+        extension_codepoints: "frozenset[int]" = frozenset(),
     ) -> FidelityReport:
         """Execute full fail-closed multi-gate evaluation and generate immutable FidelityReport."""
         if thresholds is None:
@@ -214,8 +218,13 @@ class FidelityEvaluator:
             if not r.validate_cache_key():
                 failure_reasons.append(f"INVALID_CACHE_KEY: Cache key mismatch for record: {r.cache_key}")
 
-        # Strict Model-to-Fit Evidence Binding
+        # Strict Model-to-Fit Evidence Binding. Glyphs constructed by a
+        # provenance-attested extension (VIETNAMESE deterministic/AI) carry
+        # no fit observations by construction; every other glyph must bind
+        # exactly to its fit raster evidence (fail closed).
         for cp, glyph in model.glyphs.items():
+            if cp in extension_codepoints:
+                continue
             glyph_fit_records = [r for r in fit_records if r.code_point == cp]
             if not glyph_fit_records:
                 failure_reasons.append(f"MISSING_FIT_EVIDENCE: Glyph {cp} in model has no corresponding fit observation records")
@@ -382,9 +391,20 @@ class FidelityEvaluator:
                 )
 
                 model_mask = cls._rasterize_glyph_contours(glyph, transform, r.resolution)
-                intersection = int(np.logical_and(model_mask, ref_mask).sum())
-                union = int(np.logical_or(model_mask, ref_mask).sum())
-                iou = float(intersection) / max(union, 1)
+                # Zero-ink semantics (production families always contain
+                # blank glyphs, e.g. U+0020): a blank held-out raster and a
+                # blank model render are a PERFECT match; ink on exactly one
+                # side is a fail-closed mismatch.
+                ref_ink = int(ref_mask.sum())
+                model_ink = int(model_mask.sum())
+                if ref_ink == 0 and model_ink == 0:
+                    iou = 1.0
+                elif ref_ink == 0 or model_ink == 0:
+                    iou = 0.0
+                else:
+                    intersection = int(np.logical_and(model_mask, ref_mask).sum())
+                    union = int(np.logical_or(model_mask, ref_mask).sum())
+                    iou = float(intersection) / max(union, 1)
                 ious.append(iou)
 
                 chamfer = cls._compute_chamfer_distance_upem(glyph, transform, ref_mask, r.resolution)

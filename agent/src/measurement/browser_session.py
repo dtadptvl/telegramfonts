@@ -20,7 +20,7 @@ import tempfile
 import threading
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 from urllib.parse import urlsplit
 
 import websockets
@@ -329,6 +329,99 @@ def find_chromium_executable() -> str:
     raise RuntimeError("CHROMIUM_EXECUTABLE_NOT_FOUND: no Chromium / Chrome binary found on host")
 
 
+def _ps_single_quoted(value: str) -> str:
+    """PowerShell single-quoted literal (only embedded quotes are doubled)."""
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _windows_arg_quote(arg: str) -> str:
+    """Quote one argument for a Windows CommandLine string (CommandLineToArgvW rules)."""
+    if arg and not any(c in arg for c in ' \t"'):
+        return arg
+    quoted = ['"']
+    backslashes = 0
+    for ch in arg:
+        if ch == "\\":
+            backslashes += 1
+            quoted.append(ch)
+        elif ch == '"':
+            quoted.append("\\" * (2 * backslashes + 1))
+            quoted.append(ch)
+            backslashes = 0
+        else:
+            backslashes = 0
+            quoted.append(ch)
+    quoted.append("\\" * (2 * backslashes))
+    quoted.append('"')
+    return "".join(quoted)
+
+
+def _windows_shell_launch_command(cmd: Sequence[str]) -> list[str]:
+    """Build the Windows detached-launch command for a Chromium browser.
+
+    Direct launches (and shell-mediated child launches) are unreliable on
+    Windows hosts: Chrome launcher delegation can swallow the launch when an
+    interactive browser session exists, and a browser spawned inside the
+    launching process tree dies when that tree exits. Creating the process
+    through WMI parents it under the WMI service, outside the session
+    process tree, so the headless browser survives independently and CDP is
+    the sole authoritative startup/shutdown channel. The wrapper's exit code
+    carries the WMI ``Create`` ReturnValue (0 = success).
+    """
+    cmdline = " ".join(_windows_arg_quote(str(a)) for a in cmd)
+    script = (
+        "$cl = " + _ps_single_quoted(cmdline) + "; "
+        "$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create "
+        "-Arguments @{CommandLine=$cl}; exit [int]$r.ReturnValue"
+    )
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    return [
+        "powershell.exe",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-EncodedCommand",
+        encoded,
+    ]
+
+
+def launch_is_cdp_owned() -> bool:
+    """True when the platform launch path yields a CDP-owned (detached) browser.
+
+    The Windows WMI-detached launch parents the browser under the WMI
+    service; the session's launched wrapper is transient and never owns the
+    browser process, so startup/shutdown must go through CDP.
+    """
+    return sys.platform == "win32" and shutil.which("powershell") is not None
+
+
+def launch_chromium_process(
+    cmd: Sequence[str],
+    stdout: Any,
+    stderr: Any,
+) -> subprocess.Popen[bytes]:
+    """Launch the Chromium browser process for a session.
+
+    Windows hosts use the WMI-detached launch (see
+    ``_windows_shell_launch_command``): the wrapper exits as soon as the WMI
+    creation returns, so session startup must rely on CDP discovery rather
+    than launcher-process liveness, and cleanup must close the browser
+    through CDP. Other platforms launch the browser directly.
+    """
+    if sys.platform == "win32":
+        powershell = shutil.which("powershell")
+        if powershell:
+            return subprocess.Popen(
+                _windows_shell_launch_command(list(cmd)),
+                stdout=stdout,
+                stderr=stderr,
+                text=False,
+                bufsize=0,
+            )
+    return subprocess.Popen(cmd, stdout=stdout, stderr=stderr, text=False, bufsize=0)
+
+
 async def close_browser_session(session: Any) -> Any:
     """Await owned browser cleanup while retaining compatibility with test doubles."""
     closer = getattr(session, "aclose", None)
@@ -369,6 +462,9 @@ class ChromiumSession:
         self.last_cleanup: ChromiumCleanup | None = None
         self.last_diagnostic: ChromiumSessionDiagnostics | None = None
         self._process_created = False
+        # True when the launched browser outlived its launcher process (host
+        # launcher delegation): the session then owns the browser via CDP only.
+        self._launcher_detached = False
         self.browser_version: str = "unknown"
         self.handshake_profile = _HANDSHAKE_PROFILE
         self.websockets_version_class = _websockets_version_class()
@@ -382,9 +478,11 @@ class ChromiumSession:
             await pending_close
 
         if (
-            self.process is not None
-            and self.process.poll() is None
-            and self._is_connected()
+            self._is_connected()
+            and (
+                self._launcher_detached
+                or (self.process is not None and self.process.poll() is None)
+            )
         ):
             return
 
@@ -400,11 +498,21 @@ class ChromiumSession:
             self.last_cleanup = None
             self.last_diagnostic = None
             self._process_created = False
+            self._launcher_detached = False
             self.ws_url = None
             self.endpoint = None
             self.cdp_port = None
 
             self.user_data_dir = tempfile.TemporaryDirectory(prefix="telefont_chrome_")
+            if sys.platform == "win32":
+                # WMI-detached Chrome startup silently fails against a
+                # pre-existing profile directory; the browser must create
+                # the profile itself. The tracked path stays registered
+                # for cleanup.
+                try:
+                    os.rmdir(self.user_data_dir.name)
+                except OSError:
+                    pass
             if self.port > 0:
                 target_port = self.port
             else:
@@ -430,12 +538,11 @@ class ChromiumSession:
 
             stage = "launch"
             logger.info("Launching persistent Chromium session on selected CDP port")
-            self.process = subprocess.Popen(
+            cdp_owned_launch = launch_is_cdp_owned()
+            self.process = launch_chromium_process(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=False,
-                bufsize=0,
             )
             self._process_created = self.process is not None
             self._stdout_capture = _BoundedPipeCapture(self.process.stdout)
@@ -448,6 +555,7 @@ class ChromiumSession:
             http_url = f"http://127.0.0.1:{target_port}"
             loop = asyncio.get_running_loop()
             startup_deadline = loop.time() + max(0.0, float(self.timeout_seconds))
+            launcher_exit_code: int | None = None
 
             async def fetch_discovery_json(url: str, method: str = "GET") -> Any:
                 remaining = startup_deadline - loop.time()
@@ -464,8 +572,18 @@ class ChromiumSession:
 
             version_discovered = False
             while loop.time() < startup_deadline:
-                if self.process.poll() is not None:
-                    raise RuntimeError("CHROMIUM_PROCESS_EXITED_DURING_CDP_DISCOVERY")
+                exit_code = self.process.poll()
+                if exit_code is not None and launcher_exit_code is None:
+                    # Host launcher delegation: some Chromium distributions
+                    # (e.g. Windows Chrome launcher) spawn the real browser as
+                    # a separate process and exit the launched process
+                    # immediately. Completion is proven only by an observed
+                    # CDP endpoint, never by launcher process liveness.
+                    launcher_exit_code = exit_code
+                    logger.info(
+                        "Chromium launcher exited early (code %s); continuing CDP discovery for a detached browser",
+                        exit_code,
+                    )
                 try:
                     vdata = await fetch_discovery_json(f"{http_url}/json/version")
                     if not isinstance(vdata, dict):
@@ -481,6 +599,16 @@ class ChromiumSession:
                 await asyncio.sleep(min(0.1, remaining))
 
             if not version_discovered:
+                if launcher_exit_code is not None:
+                    # The launcher exited AND no CDP endpoint ever answered:
+                    # fail closed with the observable process evidence.
+                    if last_discovery_error is not None:
+                        raise RuntimeError(
+                            f"CHROMIUM_PROCESS_EXITED_DURING_CDP_DISCOVERY:launcher_exit={launcher_exit_code}"
+                        ) from last_discovery_error
+                    raise RuntimeError(
+                        f"CHROMIUM_PROCESS_EXITED_DURING_CDP_DISCOVERY:launcher_exit={launcher_exit_code}"
+                    )
                 if last_discovery_error is not None:
                     raise RuntimeError("CHROMIUM_CDP_DISCOVERY_TIMEOUT") from last_discovery_error
                 raise RuntimeError("CHROMIUM_CDP_DISCOVERY_TIMEOUT")
@@ -503,6 +631,14 @@ class ChromiumSession:
             await self.evaluate_script("void 0")
             if not self._is_connected():
                 raise RuntimeError("CDP_CONNECTION_NOT_READY")
+
+            if launcher_exit_code is not None or cdp_owned_launch:
+                # The browser demonstrably outlives (or is never owned by)
+                # the launched process: drop the launcher/wrapper handle;
+                # ownership is CDP-only and cleanup must close the browser
+                # through CDP.
+                self._launcher_detached = True
+                self.process = None
 
             stage = "font_restore"
             if self._loaded_font_blobs:
@@ -612,7 +748,7 @@ class ChromiumSession:
 
     def _process_state(self) -> str:
         if self.process is None:
-            return "not_started"
+            return "detached" if self._launcher_detached else "not_started"
         try:
             code = self.process.poll()
         except Exception:
@@ -677,6 +813,48 @@ class ChromiumSession:
         if inspect.isawaitable(close_result):
             await asyncio.wait_for(close_result, timeout=2.0)
 
+    async def _close_detached_browser(self) -> bool:
+        """Close a launcher-detached browser through CDP and verify the exit.
+
+        The launched process is already gone (host launcher delegation), so
+        the only authoritative shutdown path is CDP ``Browser.close`` plus
+        observed CDP-endpoint refusal. A loopback probe that cannot reach
+        any listener (refused/aborted/reset/timeout) proves the endpoint is
+        gone. The endpoint still accepting connections after the bounded
+        deadline reports False so cleanup fails closed instead of silently
+        orphaning a host browser process.
+        """
+        port = self.cdp_port
+        ack = False
+        try:
+            await asyncio.wait_for(self.send_command("Browser.close"), timeout=3.0)
+            ack = True
+        except Exception:
+            ack = False
+        if port is None:
+            return ack
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 5.0
+        serving = False
+        while loop.time() < deadline:
+            try:
+                _reader, writer = await asyncio.wait_for(
+                    asyncio.open_connection("127.0.0.1", port), timeout=0.5
+                )
+                serving = True
+                try:
+                    writer.close()
+                    await asyncio.wait_for(writer.wait_closed(), timeout=1.0)
+                except Exception:
+                    pass
+                await asyncio.sleep(0.2)
+            except (ConnectionRefusedError, ConnectionAbortedError, ConnectionResetError):
+                return True
+            except (OSError, asyncio.TimeoutError):
+                # No listener answered on loopback: the endpoint is gone.
+                return True
+        return ack and not serving
+
     async def aclose(
         self,
         clear_fonts: bool = True,
@@ -689,6 +867,18 @@ class ChromiumSession:
 
         process_state = self._process_state()
         cleanup_error: Exception | None = None
+
+        # A launcher-detached browser has no process handle: it must be
+        # closed through CDP BEFORE the transport is torn down, otherwise
+        # the browser survives the session as an orphaned host process.
+        detached_browser_closed = True
+        if self._launcher_detached and self.ws is not None and self.read_task is not None:
+            detached_browser_closed = await self._close_detached_browser()
+            if not detached_browser_closed:
+                cleanup_error = cleanup_error or RuntimeError(
+                    "CHROMIUM_DETACHED_BROWSER_NOT_CLOSED"
+                )
+        self._launcher_detached = False
 
         if self.read_task is not None:
             self.read_task.cancel()
@@ -737,6 +927,9 @@ class ChromiumSession:
             cleanup_error = cleanup_error or process_error
             if process_closed:
                 self.process = None
+        if not detached_browser_closed:
+            # A session-owned browser is still running: cleanup is incomplete.
+            process_closed = False
 
         captures = [capture for capture in (self._stdout_capture, self._stderr_capture) if capture]
         output_drained = True
@@ -762,11 +955,22 @@ class ChromiumSession:
         profile = self.user_data_dir
         if profile is not None:
             profile_name = profile.name
-            try:
-                await asyncio.to_thread(profile.cleanup)
-            except Exception as exc:
+            # Bounded retry: after a CDP browser close, Windows releases
+            # profile file handles asynchronously (process tree exit plus
+            # filesystem filter drivers); under load this can take tens of
+            # seconds before the directory is removable.
+            profile_error: Exception | None = None
+            for _attempt in range(40):
+                try:
+                    await asyncio.to_thread(profile.cleanup)
+                    profile_error = None
+                    break
+                except Exception as exc:
+                    profile_error = exc
+                    await asyncio.sleep(1.5)
+            if profile_error is not None:
                 profile_removed = False
-                cleanup_error = cleanup_error or exc
+                cleanup_error = cleanup_error or profile_error
             try:
                 profile_removed = profile_removed and not os.path.exists(profile_name)
             except Exception as exc:

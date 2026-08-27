@@ -989,6 +989,120 @@ class ObservationStore:
             rows = cur.fetchall()
             return [dict(r) for r in rows]
 
+    def save_pair_size_observation(
+        self,
+        reference_id: str,
+        style_id: str,
+        left_cp: int,
+        right_cp: int,
+        font_size_px: float,
+        left_advance_upem: float,
+        right_advance_upem: float,
+        pair_advance_upem: float,
+        inferred_kerning_upem: int,
+        browser_version: str,
+        config_hash: str,
+        provenance: str,
+    ) -> None:
+        """Persist one raw per-size pair evidence row (adaptive multi-size kerning).
+
+        Raw per-size evidence is the authoritative identity for derived
+        kerning; aggregates must recompute from these rows.
+        """
+        if not browser_version or not config_hash:
+            raise ValueError("EXACT_IDENTITY_REQUIRED: browser_version and config_hash must be non-empty strings")
+        import datetime as _dt
+
+        created_at = _dt.datetime.now(_dt.timezone.utc).isoformat()
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS pair_size_observations (
+                    reference_id TEXT NOT NULL,
+                    style_id TEXT NOT NULL,
+                    left_cp INTEGER NOT NULL,
+                    right_cp INTEGER NOT NULL,
+                    font_size_px REAL NOT NULL,
+                    left_advance_upem REAL NOT NULL,
+                    right_advance_upem REAL NOT NULL,
+                    pair_advance_upem REAL NOT NULL,
+                    inferred_kerning_upem INTEGER NOT NULL,
+                    browser_version TEXT NOT NULL,
+                    config_hash TEXT NOT NULL,
+                    provenance TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (
+                        reference_id, style_id, left_cp, right_cp,
+                        font_size_px, browser_version, config_hash
+                    )
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO pair_size_observations (
+                    reference_id, style_id, left_cp, right_cp, font_size_px,
+                    left_advance_upem, right_advance_upem, pair_advance_upem,
+                    inferred_kerning_upem, browser_version, config_hash,
+                    provenance, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    reference_id, style_id, int(left_cp), int(right_cp), float(font_size_px),
+                    round(float(left_advance_upem), 2), round(float(right_advance_upem), 2),
+                    round(float(pair_advance_upem), 2), int(inferred_kerning_upem),
+                    browser_version, config_hash, provenance, created_at,
+                ),
+            )
+            conn.commit()
+
+    def get_pair_size_observations(
+        self,
+        reference_id: str,
+        style_id: str,
+        left_cp: int,
+        right_cp: int,
+        browser_version: str,
+        config_hash: str,
+    ) -> list[dict[str, Any]]:
+        """Retrieve raw per-size pair evidence rows under exact identity."""
+        if not browser_version or not config_hash:
+            raise ValueError("EXACT_IDENTITY_REQUIRED: browser_version and config_hash must be non-empty strings")
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS pair_size_observations (
+                    reference_id TEXT NOT NULL,
+                    style_id TEXT NOT NULL,
+                    left_cp INTEGER NOT NULL,
+                    right_cp INTEGER NOT NULL,
+                    font_size_px REAL NOT NULL,
+                    left_advance_upem REAL NOT NULL,
+                    right_advance_upem REAL NOT NULL,
+                    pair_advance_upem REAL NOT NULL,
+                    inferred_kerning_upem INTEGER NOT NULL,
+                    browser_version TEXT NOT NULL,
+                    config_hash TEXT NOT NULL,
+                    provenance TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (
+                        reference_id, style_id, left_cp, right_cp,
+                        font_size_px, browser_version, config_hash
+                    )
+                )
+                """
+            )
+            cur = conn.execute(
+                """
+                SELECT * FROM pair_size_observations
+                WHERE reference_id = ? AND style_id = ? AND left_cp = ? AND right_cp = ?
+                  AND browser_version = ? AND config_hash = ?
+                ORDER BY font_size_px ASC
+                """,
+                (reference_id, style_id, int(left_cp), int(right_cp), browser_version, config_hash),
+            )
+            return [dict(r) for r in cur.fetchall()]
+
     def record_source_collection_completed(
         self,
         reference_id: str,
