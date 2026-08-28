@@ -50,6 +50,7 @@ from compute.source import SourceAcquirer
 from measurement.models import ObservationConfig
 from compute.validator import validate_font_file
 from config import Settings
+from fidelity.profiles import BALANCED_MAX_PROFILE
 from fidelity.release_gate import STAGE9D_ATTESTATION_SCHEMA_VERSION, Stage9DAttestation, Stage9DReleaseGate
 from queue_client import CloudflareQueueClient, QueueMessage
 from scratch import ScratchManager
@@ -355,6 +356,10 @@ class JobRunner:
                 style_data.observation_browser_version,
                 gate_config.compute_hash(),
             ),
+            # Stage 16 production flow: BALANCED_MAX primary with the
+            # deterministic confidence gate; fail-closed escalation to
+            # canonical FULL_MAX once per job (fidelity.release_gate).
+            reconstruction_profile=BALANCED_MAX_PROFILE,
         )
         if not result.is_publishable or result.attestation is None:
             reason = ";".join(result.failure_reasons)[:128] if result.failure_reasons else ""
@@ -618,6 +623,10 @@ class JobRunner:
                     provider_capability=self._sealed_provider_capability(
                         store, family_key, style_key, bv, cfg
                     ),
+                    # Stage 16 production flow: BALANCED_MAX primary with
+                    # the deterministic confidence gate; fail-closed
+                    # escalation to canonical FULL_MAX once per job.
+                    reconstruction_profile=BALANCED_MAX_PROFILE,
                 )
                 if not result.is_publishable or result.attestation is None:
                     reason = ";".join(result.failure_reasons)[:128] if result.failure_reasons else ""

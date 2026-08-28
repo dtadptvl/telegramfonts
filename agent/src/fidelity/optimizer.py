@@ -671,8 +671,24 @@ class FitOnlyGlyphOptimizer:
         self,
         glyph: ReconstructedGlyph,
         prepared: Sequence[tuple[CalibrationTransform, np.ndarray, int]],
+        fail_on_budget_exhaustion: bool = True,
+        allow_scale_search: bool = True,
     ) -> tuple[ReconstructedGlyph, GlyphOptimizationRecord]:
         """Optimize one glyph's outline; fail-closed on non-convergence.
+
+        ``fail_on_budget_exhaustion`` preserves the canonical FULL MAX
+        fail-closed semantics (budget exhaustion raises). Versioned
+        reduced-budget search schedules (BALANCED_MAX ladder tiers) set
+        it to False to keep the best valid candidate deterministically;
+        the record still carries the honest stop reason and every
+        downstream unchanged gate still applies.
+
+        ``allow_scale_search`` is a call-time search-space bound (never
+        part of the canonical policy identity): coarse ladder tiers that
+        run on observation subsets set it to False because subset
+        evidence cannot reliably identify anisotropic scale, and a
+        spurious coarse scale decision does not generalize to the
+        complete evidence set. Canonical callers use the default True.
 
         Causal search space: the deterministic segment-variant lattice
         (original / simplified / subdivided) crossed with translate +
@@ -715,14 +731,23 @@ class FitOnlyGlyphOptimizer:
         tol = self.policy.convergence_tol
         stop_reason = "ITERATION_BUDGET_EXHAUSTED"
 
+        search_dim_names = ("dx", "dy")
+        if allow_scale_search:
+            search_dim_names = search_dim_names + ("sx", "sy")
+
         while iterations < self.policy.max_iterations:
             improved = False
-            for dim, delta_candidates in (
-                ("dx", (-step_t, step_t)),
-                ("dy", (-step_t, step_t)),
-                ("sx", (-step_s, step_s)),
-                ("sy", (-step_s, step_s)),
-            ):
+            # Rebuilt every round from the LIVE step sizes: canonical
+            # coordinate-descent annealing halves step_t/step_s after a
+            # non-improving round, and the next round must search with the
+            # halved deltas. Freezing the initial deltas outside the loop
+            # regressed canonical FULL MAX fit quality (issue #86 probe:
+            # deterministic 0.3905/0.4045 vs frozen-envelope 0.2946/0.3225).
+            search_dims = [
+                (dim, (-step_t, step_t) if dim in ("dx", "dy") else (-step_s, step_s))
+                for dim in search_dim_names
+            ]
+            for dim, delta_candidates in search_dims:
                 for delta in delta_candidates:
                     if iterations >= self.policy.max_iterations:
                         break
@@ -770,7 +795,7 @@ class FitOnlyGlyphOptimizer:
             transform=(dx, dy, sx, sy),
         )
         validate_loss_vector_complete(record)
-        if not converged:
+        if not converged and fail_on_budget_exhaustion:
             raise OptimizerNonConvergenceError(
                 f"OPTIMIZER_NON_CONVERGENCE_CP_{glyph.code_point}"
             )
@@ -794,14 +819,111 @@ class FitOnlyGlyphOptimizer:
         )
         return optimized, record
 
+    def prepare_glyph_observations(
+        self,
+        cp_records: Sequence[ObservationRecord],
+        raster_provider: Callable[[ObservationRecord], bytes],
+        units_per_em: int = 1000,
+        cache: Any = None,
+    ) -> list[tuple]:
+        """Prepare one glyph's fit observations for objective evaluation.
+
+        Exact semantics of the canonical ``optimize`` preparation loop:
+        raster bytes are size+SHA256 verified against the sealed records,
+        the calibration transform is derived per observation, and the
+        reference-side artifacts (crop/edge/signed distance/ink count)
+        are computed exactly once per observation.
+
+        ``cache`` is an optional exact-identity intermediate cache
+        (decode + prepared artifacts). Cached entries are pure
+        derivations of the sealed, hash-verified observation bytes; any
+        stale/cross-identity entry fails closed to recomputation. FULL
+        MAX callers pass no cache and keep the canonical behavior.
+        """
+        if not cp_records:
+            raise ValueError("OPTIMIZER_NO_FIT_OBSERVATIONS")
+        identity = {
+            (r.reference_id, r.style_id, r.browser_version, r.config_hash)
+            for r in cp_records
+        }
+        if len(identity) != 1:
+            raise ValueError("OPTIMIZER_MIXED_EVIDENCE_IDENTITY")
+
+        prepared: list[tuple] = []
+        for r in sorted(cp_records, key=lambda rec: rec.cache_key):
+            png_bytes = raster_provider(r)
+            if not isinstance(png_bytes, bytes) or len(png_bytes) != r.raster_size_bytes:
+                raise ValueError("OPTIMIZER_RASTER_BYTES_MISMATCH")
+            if hashlib.sha256(png_bytes).hexdigest() != r.raster_sha256:
+                raise ValueError("OPTIMIZER_RASTER_SHA_MISMATCH")
+            transform = CalibrationTransform.from_observation(
+                resolution=r.resolution,
+                metrics=r.metrics,
+                subpixel_x=r.subpixel_x,
+                subpixel_y=r.subpixel_y,
+                units_per_em=units_per_em,
+            )
+            if cache is not None:
+                decode_key = cache.decode_key(
+                    r.raster_sha256, r.resolution, r.raster_size_bytes
+                )
+                ref_mask = cache.get_decode(decode_key)
+                if ref_mask is None:
+                    ref_mask = self._decode_mask(png_bytes, r.resolution)
+                    cache.put_decode(decode_key, ref_mask)
+                prepare_key = cache.prepare_key(r.cache_key, r.raster_sha256, r.resolution)
+                precomputed = cache.get_prepared(prepare_key)
+                if precomputed is None:
+                    precomputed = self._prepare_reference_artifacts(ref_mask)
+                    cache.put_prepared(prepare_key, precomputed)
+            else:
+                ref_mask = self._decode_mask(png_bytes, r.resolution)
+                # Production preparation: reference-side artifacts (crop,
+                # edge, signed distance, ink count) are computed exactly
+                # once per observation and bound into every objective
+                # evaluation of this glyph. The full-resolution mask is
+                # released immediately after preparation.
+                precomputed = self._prepare_reference_artifacts(ref_mask)
+                del ref_mask
+            prepared.append((transform, None, r.resolution, precomputed))
+        return prepared
+
+    def score_glyph(
+        self,
+        contours: Sequence[Contour],
+        prepared: Sequence[tuple],
+    ) -> tuple[float, dict[str, float]]:
+        """Score candidate contours against prepared fit evidence.
+
+        Read-only authoritative scoring used by the full-resolution
+        rerank: returns the canonical weighted objective and the
+        complete loss vector. Never mutates state; never consumes
+        held-out evidence (callers pass fit-prepared observations only).
+        """
+        components = self._loss_components(contours, prepared)
+        objective = sum(
+            OPTIMIZATION_LOSS_WEIGHTS[name] * components[name]
+            for name in REQUIRED_OPTIMIZATION_LOSSES
+        )
+        if not math.isfinite(objective):
+            raise OptimizerNonFiniteObjectiveError("OPTIMIZER_NON_FINITE_OBJECTIVE")
+        return float(objective), components
+
     def optimize(
         self,
         glyphs: Mapping[int, ReconstructedGlyph],
         fit_records: Sequence[ObservationRecord],
         raster_provider: Callable[[ObservationRecord], bytes],
         units_per_em: int = 1000,
+        cache: Any = None,
     ) -> tuple[dict[int, ReconstructedGlyph], OptimizationTrace]:
-        """Optimize all glyphs strictly against fit evidence; fail-closed on any non-convergence."""
+        """Optimize all glyphs strictly against fit evidence; fail-closed on any non-convergence.
+
+        ``cache`` optionally supplies the exact-identity intermediate cache
+        (reuse of compatible decode/prepare artifacts). It never skips any
+        scheduled observation: every fit record is still prepared and
+        consumed; only the deterministic preprocessing may be reused.
+        """
         if not fit_records:
             raise ValueError("OPTIMIZER_NO_FIT_OBSERVATIONS")
         if not glyphs:
@@ -825,29 +947,9 @@ class FitOnlyGlyphOptimizer:
             cp_records = by_cp.get(cp)
             if not cp_records:
                 raise ValueError(f"OPTIMIZER_MISSING_FIT_EVIDENCE_CP_{cp}")
-            prepared: list[tuple[CalibrationTransform, np.ndarray | None, int]] = []
-            for r in sorted(cp_records, key=lambda rec: rec.cache_key):
-                png_bytes = raster_provider(r)
-                if not isinstance(png_bytes, bytes) or len(png_bytes) != r.raster_size_bytes:
-                    raise ValueError("OPTIMIZER_RASTER_BYTES_MISMATCH")
-                if hashlib.sha256(png_bytes).hexdigest() != r.raster_sha256:
-                    raise ValueError("OPTIMIZER_RASTER_SHA_MISMATCH")
-                transform = CalibrationTransform.from_observation(
-                    resolution=r.resolution,
-                    metrics=r.metrics,
-                    subpixel_x=r.subpixel_x,
-                    subpixel_y=r.subpixel_y,
-                    units_per_em=units_per_em,
-                )
-                ref_mask = self._decode_mask(png_bytes, r.resolution)
-                # Production preparation: reference-side artifacts (crop,
-                # edge, signed distance, ink count) are computed exactly
-                # once per observation and bound into every objective
-                # evaluation of this glyph. The full-resolution mask is
-                # released immediately after preparation.
-                precomputed = self._prepare_reference_artifacts(ref_mask)
-                del ref_mask
-                prepared.append((transform, None, r.resolution, precomputed))
+            prepared = self.prepare_glyph_observations(
+                cp_records, raster_provider, units_per_em=units_per_em, cache=cache
+            )
             optimized, record = self.optimize_glyph(glyphs[cp], prepared)
             optimized_glyphs[cp] = optimized
             records.append(record)
