@@ -712,25 +712,65 @@ NO  -> may remain in scope
 `NO_CHANGE` is valid when current behavior already satisfies ACCEPT.
 Minimize semantic change, not line count.
 
+### Validation cost classes
+
+Use the following default classification unless the contract establishes a more appropriate measured project threshold:
+
+```text
+FOCUSED    exact triggering repro or directly affected tests
+QUICK      expected wall time <=10 minutes
+EXPENSIVE  expected wall time >10 minutes; unknown-duration; paid/live/device;
+           soak, benchmark, or large end-to-end chain
+RELEASE    final production/release evidence; may also be EXPENSIVE
+```
+
+Unknown duration is `EXPENSIVE` until measured. Browser use alone does not make a test expensive; observed/estimated cost and consequential boundaries do.
+
+### Contracting expensive evidence
+
+When `EXPENSIVE` or `RELEASE` validation is required, add:
+
+```text
+VALIDATION_PLAN
+FOCUSED: <exact scope/commands>
+QUICK: <exact suite/command>
+EXPENSIVE: <exact gate/command or NONE>
+TRIGGER: <causal paths/risk/release condition>
+EXPECTED_WALL: <range>
+MAX_RUNS: <integer per named gate; default 1>
+MAX_WALL: <hard bound>
+REUSE_IDENTITY: <HEAD/artifact + lock + fixture/config + platform/command identity>
+```
+
+`Full validation` is not a test selector. Name the exact suite. A repository-wide suite is allowed only when its causal breadth or a canonical release gate requires it.
+
 Default execution budget:
 
 ```text
 inspect current state once
 -> smallest sufficient delta
--> narrow test while debugging
--> full relevant validation once
+-> focused validation while debugging
+-> quick causally relevant validation
+-> stable final candidate identity
+-> one contracted expensive/release gate, if any
 -> report
 ```
 
-Avoid:
+The final candidate is stable only when the intended delta is complete, focused/quick gates pass, and no known edit remains. A post-PASS change reruns expensive evidence only when R3 proves causal invalidation.
 
-- repeated full-suite runs during narrow debugging;
-- repeated production probes;
-- polling/status loops;
-- rerunning accepted expensive evidence without causal invalidation;
-- repo-wide exploration when the failing surface is known.
+### Project and CI design
 
-`ACCEPT` passing is a stop signal: run one risk-proportional final verification, then stop unless ambiguity, contradiction, or a concrete defect remains.
+- keep expensive tests behind explicit markers/targets rather than the default developer command;
+- split quick always-on CI from conditional expensive/release lanes and run independent lanes in parallel;
+- use a deterministic critical-path classifier or explicit release trigger; absence of a trigger must not silently omit causally required evidence;
+- record command-level duration and slowest tests; investigate material timing regression rather than normalizing it;
+- when a recurring gate exceeds 15 minutes, evaluate checkpoint/resume or stage-level reuse where its added complexity has positive net benefit;
+- do not enable test parallelism until shared process, port, cache, global state, filesystem, and fixture isolation are proven;
+- do not duplicate equivalent accepted expensive evidence locally and in CI.
+
+Avoid repeated full-suite runs during narrow debugging, repeated production probes, polling/status loops, rerunning accepted expensive evidence without causal invalidation, and repo-wide exploration when the failing surface is known.
+
+`ACCEPT` passing is a stop signal: perform the one contracted risk-proportional final verification, then stop unless ambiguity, contradiction, a concrete defect, or causal evidence invalidation remains.
 
 ---
 
@@ -764,7 +804,7 @@ R5  correction delta / review decision detail
 R6  uncertain causal diagnosis
 R7  production/consequential/merge authorization
 R8  contract macro/example ambiguity
-R9  scope growth / over-engineering / execution budget
+R9  scope growth / over-engineering / validation cost / execution budget
 R10 skills or extra agents
 ```
 

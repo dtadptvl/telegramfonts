@@ -1,6 +1,6 @@
 # EXECUTOR.md — Canonical Executor Policy
 
-CORE_REV: `E-20260827.2`
+CORE_REV: `E-20260828.1`
 
 ## 0. Purpose
 
@@ -119,7 +119,7 @@ Every Executor-authored terminal GitHub status begins:
 ```text
 EXECUTOR | <STATUS>
 REF: <Architect issue/review/comment id>
-POLICY: E-20260827.2 | REFS: <NONE | Rn[,Rn...]>
+POLICY: E-20260828.1 | REFS: <NONE | Rn[,Rn...]>
 ```
 
 Canonical statuses:
@@ -201,7 +201,7 @@ The active contract may define only applicable fields such as:
 ```text
 GOAL / SCOPE / INVARIANTS / IDENTITY / ACCEPT
 NEGATIVE / KNOWN_REPRO / ADVERSARIAL_PACK
-EVIDENCE / BUDGET / FORBIDDEN / GATE / STOP / ROLLBACK / RETURN
+EVIDENCE / VALIDATION_PLAN / BUDGET / FORBIDDEN / GATE / STOP / ROLLBACK / RETURN
 REFS
 ```
 
@@ -288,8 +288,10 @@ Default execution profile:
 ```text
 inspect targeted state
 -> smallest sufficient delta
--> narrow validation while debugging
--> full relevant validation once
+-> focused validation while debugging
+-> quick causally relevant validation
+-> freeze candidate identity
+-> one explicitly required expensive/release gate, if any
 -> report
 ```
 
@@ -300,6 +302,25 @@ Never enter unbounded polling/status/retry loops. Long operations should run onc
 When causal diagnosis/retry mechanics become non-trivial, effective REFS must include R1; if contract/review did not include it and the need emerges during execution, load R1 as an **emergent procedural REF**, include it in the terminal `POLICY` marker, and continue only if GOAL/SCOPE/GATE remain unchanged. For scope/over-engineering/execution-budget ambiguity, the same rule applies to R9.
 
 Emergent procedural REF loading may add guidance; it may not expand task scope, authority, or mutation rights.
+
+### Cost-aware validation
+
+Validation classes are:
+
+```text
+FOCUSED    exact repro/directly affected tests
+QUICK      ordinary validation expected to finish within 10 minutes
+EXPENSIVE  expected >10 minutes, unknown-duration, paid/live/device, soak, benchmark, or large E2E
+RELEASE    final release/production evidence
+```
+
+Do not interpret `full`, `final`, or `relevant` as authority to run the whole repository suite. Run only the exact gate named by the contract or required by a canonical release boundary.
+
+Before starting `EXPENSIVE` or `RELEASE` validation, confirm that focused/quick gates pass, the candidate HEAD is stable, no known edit remains, and the contract identifies the command/scope, causal trigger, expected duration, `MAX_RUNS`, `MAX_WALL`, and reusable evidence identity. If these are materially ambiguous, load R9 emergently; do not guess by launching the expensive command.
+
+An expensive gate runs at most once by default. After PASS, apply the evidence-reuse rule in Section 6. Do not duplicate equivalent local and CI evidence. After timeout, interruption, or lost session, first recover authoritative process/result/checkpoint state under R1; never infer authority for a blind rerun.
+
+If another run would exceed budget, stop `BLOCKED` with `CAUSE=BUDGET_EXCEEDED` and preserve completed reusable evidence. Detailed execution, duration reporting, checkpoint/resume, and safe parallelism rules are in R9.
 
 ---
 
@@ -359,14 +380,14 @@ If Architect omitted one of these but the condition becomes materially true duri
 Before any mutation:
 
 ```text
-1. current EXECUTOR.md refreshed and CORE_REV == E-20260827.2?
+1. current EXECUTOR.md refreshed and CORE_REV == E-20260828.1?
 2. active contract + latest unresolved Architect review known?
 3. contract/review REFS resolved and required sections loaded?
 4. current local/remote HEAD, branch, worktree ownership reconciled?
 5. valid existing/uncommitted work preserved?
 6. unsatisfied ACCEPT/invariants identified?
 7. smallest sufficient semantic delta identified?
-8. scope/BUDGET/GATE/STOP known?
+8. scope/VALIDATION_PLAN/BUDGET/GATE/STOP known where applicable?
 9. authoritative observation plane known where identity/runtime facts matter?
 10. required execution authority present?
 ```
@@ -547,7 +568,7 @@ R5  Git / PR / Architect review response detail
 R6  production/runtime evidence discipline
 R7  consequential authorization / PROD_SINGLE_SHOT   [mandatory before consequential mutation]
 R8  secret/security handling
-R9  minimal-delta / execution-budget ambiguity
+R9  minimal-delta / validation-cost / execution-budget ambiguity
 R10 contract/macros/report schema reference
 ```
 
@@ -596,7 +617,7 @@ Before DONE/READY, perform one compact final check:
 8. no forbidden shortcut or stale/misattributed evidence?
 9. authorization/mutation accounting correct where applicable?
 10. required GitHub report exists on required channel?
-11. final relevant validation complete once?
+11. contracted validation ladder complete within budget, with every expensive gate within MAX_RUNS/MAX_WALL?
 12. terminal POLICY marker reports current core rev + effective REFS?
 13. stop.
 ```
@@ -606,7 +627,7 @@ If uncertain after allowed bounded execution:
 ```text
 EXECUTOR | BLOCKED
 REF: <active Architect ref>
-POLICY: E-20260827.2 | REFS: <effective refs>
+POLICY: E-20260828.1 | REFS: <effective refs>
 NEXT: ARCHITECT_REVIEW
 ```
 
