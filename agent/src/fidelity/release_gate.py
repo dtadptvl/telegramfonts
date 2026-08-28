@@ -23,6 +23,8 @@ import json
 import logging
 import os
 import tempfile
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -68,6 +70,24 @@ STAGE9D_ATTESTATION_SCHEMA_VERSION = 1
 PROVENANCE_STAGE9D_RASTER = "stage9d_raster_v1"
 PROVENANCE_VIETNAMESE_AI = "vietnamese_ai_v1"
 PROVENANCE_VIETNAMESE_PRESERVED = "vietnamese_preserved_v1"
+
+# Issue #82: bounded identity-bound memo of gate model formation. The gate
+# re-runs snapshot->reconstruction->optimization->calibration->assembly per
+# style x format even on byte-identical verified evidence and identical
+# optimizer policy; this memo reuses the formed model across such calls.
+# Hits are drift-guarded fail-closed and bounded (LRU).
+_MODEL_FORMATION_MEMO_MAX = 2
+
+
+@dataclass(frozen=True)
+class _ModelFormationEntry:
+    """One memoized model-formation result (pre-Vietnamese-extension base)."""
+
+    model: Any
+    sealed: Any
+    trace: OptimizationTrace
+    calibrated_glyphs: tuple[tuple[int, CalibratedGlyph], ...]
+    kerning_map: tuple[tuple[tuple[int, int], int], ...]
 
 
 @dataclass(frozen=True)
@@ -236,6 +256,37 @@ def _fail_result(
 class Stage9DReleaseGate:
     """Fail-closed Stage 9 release gate for the runner archive-miss path."""
 
+    # Identity-bound model-formation memo (Issue #82): process-wide, bounded.
+    _formation_memo_lock = threading.Lock()
+    _formation_memo: "OrderedDict[Any, _ModelFormationEntry]" = OrderedDict()
+
+    @classmethod
+    def _formation_memo_get(cls, key: Any) -> "_ModelFormationEntry | None":
+        with cls._formation_memo_lock:
+            entry = cls._formation_memo.get(key)
+            if entry is not None:
+                cls._formation_memo.move_to_end(key)
+            return entry
+
+    @classmethod
+    def _formation_memo_put(cls, key: Any, entry: "_ModelFormationEntry") -> None:
+        with cls._formation_memo_lock:
+            cls._formation_memo[key] = entry
+            cls._formation_memo.move_to_end(key)
+            while len(cls._formation_memo) > _MODEL_FORMATION_MEMO_MAX:
+                cls._formation_memo.popitem(last=False)
+
+    @classmethod
+    def _formation_memo_drop(cls, key: Any) -> None:
+        with cls._formation_memo_lock:
+            cls._formation_memo.pop(key, None)
+
+    @classmethod
+    def _formation_memo_clear(cls) -> None:
+        with cls._formation_memo_lock:
+            cls._formation_memo.clear()
+
+
     @classmethod
     async def execute(
         cls,
@@ -290,36 +341,6 @@ class Stage9DReleaseGate:
             logger.error("Stage 9D partition failed: %s", type(exc).__name__)
             return _fail_result("FAIL", snapshot, "PIPELINE_ERROR: SNAPSHOT_PARTITION_FAILED", clean_format)
 
-        # 3. Fit-only reconstruction + 4. bounded deterministic optimization.
-        trace: OptimizationTrace | None = None
-        try:
-            solver = MaxReconstructionSolver()
-            fit_by_cp: dict[int, list] = {}
-            for r in partition.fit_records:
-                fit_by_cp.setdefault(r.code_point, []).append(r)
-
-            reconstructed_glyphs: dict[int, ReconstructedGlyph] = {}
-            for cp, cp_fit_recs in fit_by_cp.items():
-                glyph_fit_obs = [(r, snapshot.get_raster_bytes(r.cache_key)) for r in cp_fit_recs]
-                reconstructed_glyphs[cp] = solver.reconstruct_glyph(glyph_fit_obs)
-
-            optimizer = FitOnlyGlyphOptimizer(policy=optimizer_policy)
-            optimized_glyphs, trace = optimizer.optimize(
-                glyphs=reconstructed_glyphs,
-                fit_records=partition.fit_records,
-                raster_provider=lambda r: snapshot.get_raster_bytes(r.cache_key),
-                units_per_em=1000,
-            )
-        except OptimizerNonConvergenceError:
-            return _fail_result("FAIL", snapshot, "PIPELINE_ERROR: OPTIMIZER_NON_CONVERGENCE", clean_format, trace=trace)
-        except OptimizerNonFiniteObjectiveError:
-            return _fail_result("FAIL", snapshot, "PIPELINE_ERROR: OPTIMIZER_NON_FINITE_OBJECTIVE", clean_format, trace=trace)
-        except Exception as exc:
-            logger.error("Stage 9D reconstruction/optimization failed: %s", type(exc).__name__)
-            return _fail_result("FAIL", snapshot, "PIPELINE_ERROR: MODEL_FITTING_FAILED", clean_format, trace=trace)
-
-        # 5. Calibration and canonical model assembly from fit evidence only.
-        model_hash = ""
         # Provider-capability collections calibrate against the sealed fit
         # sizes only; held-out sizes stay sealed from fitting.
         capability_fit_sizes = (
@@ -327,166 +348,265 @@ class Stage9DReleaseGate:
             if snapshot.provider_capability is not None
             else None
         )
-        try:
-            calibrated_metrics = ObservationCalibrator.calibrate_all(
-                records=partition.fit_records,
-                config=snapshot.config,
-                units_per_em=1000,
-                required_resolutions=capability_fit_sizes,
-            )
-            calib_fp = ObservationCalibrator.compute_calibration_fingerprint(
-                records=partition.fit_records,
-                config=snapshot.config,
-                units_per_em=1000,
-                required_resolutions=capability_fit_sizes,
+
+        # 3.-5. Fit-only reconstruction + bounded deterministic optimization +
+        # calibration + canonical model assembly, under an identity-bound
+        # model-formation memo (Issue #82). An exact
+        # (snapshot_fingerprint, optimizer_policy) hit reuses the LIVE formed
+        # model, its sealed handle and its frozen convergence trace, skipping
+        # ONLY reconstruction/optimization/calibration/assembly: snapshot load,
+        # partition, candidate build, four-consumer evidence, held-out
+        # evaluation and attestation still run fail-closed on every call.
+        effective_policy = optimizer_policy if optimizer_policy is not None else OptimizerPolicy()
+        memo_key = (
+            snapshot.snapshot_fingerprint,
+            tuple(sorted(effective_policy.to_dict().items())),
+        )
+        cached = cls._formation_memo_get(memo_key)
+
+        trace: OptimizationTrace | None = None
+        calibrated_glyphs: dict[int, CalibratedGlyph] = {}
+        kerning_map: dict[tuple[int, int], int] = {}
+        model_hash = ""
+        if cached is not None:
+            try:
+                # Fail-closed drift guard on hit: the live model must still
+                # hash to the sealed model hash and the sealed handle must
+                # verify; any drift discards the entry and recomputes.
+                if cached.model.compute_canonical_hash() != cached.sealed.model_hash:
+                    raise ValueError("MEMO_MODEL_DRIFT")
+                cached.sealed.verify()
+            except Exception:
+                logger.warning(
+                    "Stage 9D model formation memo drift detected; "
+                    "entry discarded, recomputing fail-closed"
+                )
+                cls._formation_memo_drop(memo_key)
+                cached = None
+
+        if cached is not None:
+            model = cached.model
+            sealed = cached.sealed
+            trace = cached.trace
+            calibrated_glyphs = dict(cached.calibrated_glyphs)
+            kerning_map = dict(cached.kerning_map)
+            model_hash = sealed.model_hash
+            logger.info(
+                "Stage 9D model formation memo hit: "
+                "reconstruction/optimization/calibration/assembly skipped"
             )
 
-            # Robust multi-size GLYPH metrics: derived from the sealed raw
-            # per-size metric_observations (lower median across the closed
-            # metric schedule). Caller-authored aggregates or absent raw
-            # evidence cannot substitute; structural recomputation is the
-            # only accepted path.
-            expected_metric_sizes = tuple(
-                float(s) for s in snapshot.config.metric_sizes_px
-            )
-            multisize_derived: dict[int, dict[str, float]] = {}
-            for cp in sorted(calibrated_metrics.keys()):
-                multisize_derived[cp] = derive_multisize_derived_metrics(
-                    metric_observations=snapshot.metric_observations,
-                    code_point=cp,
+        if cached is None:
+            # 3. Fit-only reconstruction + 4. bounded deterministic optimization.
+            try:
+                solver = MaxReconstructionSolver()
+                fit_by_cp: dict[int, list] = {}
+                for r in partition.fit_records:
+                    fit_by_cp.setdefault(r.code_point, []).append(r)
+
+                reconstructed_glyphs: dict[int, ReconstructedGlyph] = {}
+                for cp, cp_fit_recs in fit_by_cp.items():
+                    glyph_fit_obs = [(r, snapshot.get_raster_bytes(r.cache_key)) for r in cp_fit_recs]
+                    reconstructed_glyphs[cp] = solver.reconstruct_glyph(glyph_fit_obs)
+
+                optimizer = FitOnlyGlyphOptimizer(policy=optimizer_policy)
+                optimized_glyphs, trace = optimizer.optimize(
+                    glyphs=reconstructed_glyphs,
+                    fit_records=partition.fit_records,
+                    raster_provider=lambda r: snapshot.get_raster_bytes(r.cache_key),
+                    units_per_em=1000,
+                )
+            except OptimizerNonConvergenceError:
+                return _fail_result("FAIL", snapshot, "PIPELINE_ERROR: OPTIMIZER_NON_CONVERGENCE", clean_format, trace=trace)
+            except OptimizerNonFiniteObjectiveError:
+                return _fail_result("FAIL", snapshot, "PIPELINE_ERROR: OPTIMIZER_NON_FINITE_OBJECTIVE", clean_format, trace=trace)
+            except Exception as exc:
+                logger.error("Stage 9D reconstruction/optimization failed: %s", type(exc).__name__)
+                return _fail_result("FAIL", snapshot, "PIPELINE_ERROR: MODEL_FITTING_FAILED", clean_format, trace=trace)
+            # 5. Calibration and canonical model assembly from fit evidence only.
+            try:
+                calibrated_metrics = ObservationCalibrator.calibrate_all(
+                    records=partition.fit_records,
+                    config=snapshot.config,
+                    units_per_em=1000,
+                    required_resolutions=capability_fit_sizes,
+                )
+                calib_fp = ObservationCalibrator.compute_calibration_fingerprint(
+                    records=partition.fit_records,
+                    config=snapshot.config,
+                    units_per_em=1000,
+                    required_resolutions=capability_fit_sizes,
+                )
+
+                # Robust multi-size GLYPH metrics: derived from the sealed raw
+                # per-size metric_observations (lower median across the closed
+                # metric schedule). Caller-authored aggregates or absent raw
+                # evidence cannot substitute; structural recomputation is the
+                # only accepted path.
+                expected_metric_sizes = tuple(
+                    float(s) for s in snapshot.config.metric_sizes_px
+                )
+                multisize_derived: dict[int, dict[str, float]] = {}
+                for cp in sorted(calibrated_metrics.keys()):
+                    multisize_derived[cp] = derive_multisize_derived_metrics(
+                        metric_observations=snapshot.metric_observations,
+                        code_point=cp,
+                        reference_id=snapshot.reference_id,
+                        style_id=snapshot.style_id,
+                        browser_version=snapshot.browser_version,
+                        config_hash=snapshot.config.compute_hash(),
+                        expected_sizes=expected_metric_sizes,
+                    )
+
+                calibrated_glyphs: dict[int, CalibratedGlyph] = {}
+                for cp, rec_g in optimized_glyphs.items():
+                    m = calibrated_metrics[cp]
+                    # Override the single-anchor metrics with the robust
+                    # multi-size derivation, so glyph/global/vertical truth is
+                    # causally bound to the sealed raw evidence.
+                    ms = multisize_derived.get(cp)
+                    if ms is None:
+                        raise ValueError(
+                            f"MULTISIZE_METRIC_CP_MISSING: cp={cp:04X}"
+                        )
+                    calibrated_glyphs[cp] = CalibratedGlyph(
+                        code_point=cp,
+                        character=chr(cp),
+                        advance_width_upem=ms["advance_width_upem"],
+                        lsb_upem=ms["lsb_upem"],
+                        rsb_upem=ms["rsb_upem"],
+                        ascent_upem=ms["ascent_upem"],
+                        descent_upem=ms["descent_upem"],
+                        bounding_box_upem=rec_g.bounding_box_upem,
+                        contours=rec_g.contours,
+                        confidence=m.confidence,
+                        observation_fingerprints=m.observation_fingerprints,
+                    )
+
+                # Robust multi-size GLOBAL and VERTICAL metrics derived from the
+                # sealed raw per-size evidence (max ascent / min descent /
+                # max advance / mean advance / cap from H / x from x), via the
+                # per-glyph multi-size derivations above. Any drift in the sealed
+                # raw rows changes these values and the sealed snapshot identity.
+                glyph_advances = [g.advance_width_upem for g in calibrated_glyphs.values()]
+                glyph_ascents = [g.ascent_upem for g in calibrated_glyphs.values()]
+                glyph_descents = [g.descent_upem for g in calibrated_glyphs.values()]
+                ascent = max(glyph_ascents) if glyph_ascents else 0.0
+                descent = min(glyph_descents) if glyph_descents else 0.0
+                max_adv = max(glyph_advances) if glyph_advances else 0.0
+                avg_adv = float(np.mean(glyph_advances)) if glyph_advances else 0.0
+                cap_h = calibrated_glyphs.get(
+                    ord("H"), next(iter(calibrated_glyphs.values()))
+                ).ascent_upem
+                x_h = calibrated_glyphs.get(
+                    ord("x"), next(iter(calibrated_glyphs.values()))
+                ).ascent_upem
+
+                global_metrics = GlobalFontMetrics(
+                    units_per_em=1000,
+                    ascent_upem=ascent,
+                    descent_upem=descent,
+                    line_gap_upem=0.0,
+                    cap_height_upem=cap_h,
+                    x_height_upem=x_h,
+                    max_advance_width_upem=max_adv,
+                    avg_char_width_upem=avg_adv,
+                    underline_position_upem=-100.0,
+                    underline_thickness_upem=50.0,
+                )
+
+                # Kerning truth consumed by the model: recomputed fresh from the
+                # sealed raw per-size pair evidence under the exact collection
+                # identity (lower-median across the closed metric schedule), the
+                # same causal path as glyph/global/vertical above. Absent raw
+                # rows, schedule mismatch, duplicate sizes, or drift against the
+                # stored derived pair value fail closed. Caller-authored
+                # aggregate values are never consumed.
+                expected_pair_sizes = tuple(
+                    float(s) for s in snapshot.config.metric_sizes_px
+                )
+                raw_pair_rows: dict[tuple[int, int], list[dict[str, Any]]] = {}
+                for ps in snapshot.pair_size_observations:
+                    raw_pair_rows.setdefault(
+                        (int(ps["left_cp"]), int(ps["right_cp"])), []
+                    ).append(dict(ps))
+                kerning_map: dict[tuple[int, int], int] = {}
+                for p in partition.fit_pairs:
+                    if not (p.is_kerning_applied or p.inferred_kerning_upem != 0):
+                        continue
+                    pair_key = (int(p.left_cp), int(p.right_cp))
+                    rows = raw_pair_rows.get(pair_key)
+                    if not rows:
+                        raise ValueError(
+                            f"MULTISIZE_KERNING_NO_EVIDENCE: ({pair_key[0]},{pair_key[1]}) "
+                            f"in {snapshot.reference_id}:{snapshot.style_id}"
+                        )
+                    validate_pair_size_schedule(rows, expected_pair_sizes)
+                    recomputed = derive_multisize_kerning(rows)
+                    if recomputed != int(p.inferred_kerning_upem):
+                        raise ValueError(
+                            f"MULTISIZE_KERNING_DRIFT: ({pair_key[0]},{pair_key[1]}) "
+                            f"stored={int(p.inferred_kerning_upem)} "
+                            f"recomputed={recomputed} in "
+                            f"{snapshot.reference_id}:{snapshot.style_id}"
+                        )
+                    kerning_map[pair_key] = recomputed
+
+                model = CanonicalFontModel(
+                    schema_version="1.0.0",
+                    family_name=snapshot.family_name,
+                    style_name=snapshot.style_name,
                     reference_id=snapshot.reference_id,
                     style_id=snapshot.style_id,
-                    browser_version=snapshot.browser_version,
+                    metrics=global_metrics,
+                    glyphs=calibrated_glyphs,
                     config_hash=snapshot.config.compute_hash(),
-                    expected_sizes=expected_metric_sizes,
+                    browser_version=snapshot.browser_version,
+                    fit_observations_count=len(partition.fit_records),
+                    calibration_fingerprint=calib_fp,
+                    kerning_pairs=kerning_map,
                 )
+                # Deep-immutability seal BEFORE the Vietnamese/build stages:
+                # the canonical model is sealed into a deeply immutable handle
+                # (frozen canonical bytes + SHA-256 seal). The build, consumer
+                # evidence and attestation bind this sealed model hash; any
+                # post-seal mutation of the model graph is detected fail-closed
+                # before use (drift guard below). TTF and OTF runs bind the
+                # identical sealed hash.
+                sealed = model.seal()
+                model_hash = sealed.model_hash
 
-            calibrated_glyphs: dict[int, CalibratedGlyph] = {}
-            for cp, rec_g in optimized_glyphs.items():
-                m = calibrated_metrics[cp]
-                # Override the single-anchor metrics with the robust
-                # multi-size derivation, so glyph/global/vertical truth is
-                # causally bound to the sealed raw evidence.
-                ms = multisize_derived.get(cp)
-                if ms is None:
-                    raise ValueError(
-                        f"MULTISIZE_METRIC_CP_MISSING: cp={cp:04X}"
-                    )
-                calibrated_glyphs[cp] = CalibratedGlyph(
-                    code_point=cp,
-                    character=chr(cp),
-                    advance_width_upem=ms["advance_width_upem"],
-                    lsb_upem=ms["lsb_upem"],
-                    rsb_upem=ms["rsb_upem"],
-                    ascent_upem=ms["ascent_upem"],
-                    descent_upem=ms["descent_upem"],
-                    bounding_box_upem=rec_g.bounding_box_upem,
-                    contours=rec_g.contours,
-                    confidence=m.confidence,
-                    observation_fingerprints=m.observation_fingerprints,
-                )
-
-            # Robust multi-size GLOBAL and VERTICAL metrics derived from the
-            # sealed raw per-size evidence (max ascent / min descent /
-            # max advance / mean advance / cap from H / x from x), via the
-            # per-glyph multi-size derivations above. Any drift in the sealed
-            # raw rows changes these values and the sealed snapshot identity.
-            glyph_advances = [g.advance_width_upem for g in calibrated_glyphs.values()]
-            glyph_ascents = [g.ascent_upem for g in calibrated_glyphs.values()]
-            glyph_descents = [g.descent_upem for g in calibrated_glyphs.values()]
-            ascent = max(glyph_ascents) if glyph_ascents else 0.0
-            descent = min(glyph_descents) if glyph_descents else 0.0
-            max_adv = max(glyph_advances) if glyph_advances else 0.0
-            avg_adv = float(np.mean(glyph_advances)) if glyph_advances else 0.0
-            cap_h = calibrated_glyphs.get(
-                ord("H"), next(iter(calibrated_glyphs.values()))
-            ).ascent_upem
-            x_h = calibrated_glyphs.get(
-                ord("x"), next(iter(calibrated_glyphs.values()))
-            ).ascent_upem
-
-            global_metrics = GlobalFontMetrics(
-                units_per_em=1000,
-                ascent_upem=ascent,
-                descent_upem=descent,
-                line_gap_upem=0.0,
-                cap_height_upem=cap_h,
-                x_height_upem=x_h,
-                max_advance_width_upem=max_adv,
-                avg_char_width_upem=avg_adv,
-                underline_position_upem=-100.0,
-                underline_thickness_upem=50.0,
+            except Exception as exc:
+                logger.error("Stage 9D model assembly failed: %s", type(exc).__name__)
+                reason_code = "PIPELINE_ERROR: MODEL_FITTING_FAILED"
+                message = str(exc)
+                if message.startswith("VI_"):
+                    reason_code = f"PIPELINE_ERROR: {message}"
+                return _fail_result("FAIL", snapshot, reason_code, clean_format, model_hash=model_hash, trace=trace)
+            cls._formation_memo_put(
+                memo_key,
+                _ModelFormationEntry(
+                    model=model,
+                    sealed=sealed,
+                    trace=trace,
+                    calibrated_glyphs=tuple(sorted(calibrated_glyphs.items())),
+                    kerning_map=tuple(sorted(kerning_map.items())),
+                ),
             )
 
-            # Kerning truth consumed by the model: recomputed fresh from the
-            # sealed raw per-size pair evidence under the exact collection
-            # identity (lower-median across the closed metric schedule), the
-            # same causal path as glyph/global/vertical above. Absent raw
-            # rows, schedule mismatch, duplicate sizes, or drift against the
-            # stored derived pair value fail closed. Caller-authored
-            # aggregate values are never consumed.
-            expected_pair_sizes = tuple(
-                float(s) for s in snapshot.config.metric_sizes_px
-            )
-            raw_pair_rows: dict[tuple[int, int], list[dict[str, Any]]] = {}
-            for ps in snapshot.pair_size_observations:
-                raw_pair_rows.setdefault(
-                    (int(ps["left_cp"]), int(ps["right_cp"])), []
-                ).append(dict(ps))
-            kerning_map: dict[tuple[int, int], int] = {}
-            for p in partition.fit_pairs:
-                if not (p.is_kerning_applied or p.inferred_kerning_upem != 0):
-                    continue
-                pair_key = (int(p.left_cp), int(p.right_cp))
-                rows = raw_pair_rows.get(pair_key)
-                if not rows:
-                    raise ValueError(
-                        f"MULTISIZE_KERNING_NO_EVIDENCE: ({pair_key[0]},{pair_key[1]}) "
-                        f"in {snapshot.reference_id}:{snapshot.style_id}"
-                    )
-                validate_pair_size_schedule(rows, expected_pair_sizes)
-                recomputed = derive_multisize_kerning(rows)
-                if recomputed != int(p.inferred_kerning_upem):
-                    raise ValueError(
-                        f"MULTISIZE_KERNING_DRIFT: ({pair_key[0]},{pair_key[1]}) "
-                        f"stored={int(p.inferred_kerning_upem)} "
-                        f"recomputed={recomputed} in "
-                        f"{snapshot.reference_id}:{snapshot.style_id}"
-                    )
-                kerning_map[pair_key] = recomputed
 
-            model = CanonicalFontModel(
-                schema_version="1.0.0",
-                family_name=snapshot.family_name,
-                style_name=snapshot.style_name,
-                reference_id=snapshot.reference_id,
-                style_id=snapshot.style_id,
-                metrics=global_metrics,
-                glyphs=calibrated_glyphs,
-                config_hash=snapshot.config.compute_hash(),
-                browser_version=snapshot.browser_version,
-                fit_observations_count=len(partition.fit_records),
-                calibration_fingerprint=calib_fp,
-                kerning_pairs=kerning_map,
-            )
-            # Deep-immutability seal BEFORE the Vietnamese/build stages:
-            # the canonical model is sealed into a deeply immutable handle
-            # (frozen canonical bytes + SHA-256 seal). The build, consumer
-            # evidence and attestation bind this sealed model hash; any
-            # post-seal mutation of the model graph is detected fail-closed
-            # before use (drift guard below). TTF and OTF runs bind the
-            # identical sealed hash.
-            sealed = model.seal()
-            model_hash = sealed.model_hash
+        # VIETNAMESE extension boundary: ORIGINAL never invokes AI work.
+        # The extension runs on EVERY VIETNAMESE gate call, including memo
+        # hits; memoized entries always hold the pre-extension base model.
+        gate_provenance = PROVENANCE_STAGE9D_RASTER
+        gate_ai_binding = ""
+        # Code points constructed by the provenance-attested extension
+        # (deterministic + AI): they carry no fit observations by
+        # construction and are exempt from fit-evidence binding only.
+        extension_cps: frozenset[int] = frozenset()
+        if mode.strip().upper() == "VIETNAMESE":
+            try:
 
-            # VIETNAMESE extension boundary: ORIGINAL never invokes AI work.
-            gate_provenance = PROVENANCE_STAGE9D_RASTER
-            gate_ai_binding = ""
-            # Code points constructed by the provenance-attested extension
-            # (deterministic + AI): they carry no fit observations by
-            # construction and are exempt from fit-evidence binding only.
-            extension_cps: frozenset[int] = frozenset()
-            if mode.strip().upper() == "VIETNAMESE":
                 if vietnamese_service is None:
                     from compute.vietnamese import VietnameseExtensionService, missing_vietnamese_codepoints
 
@@ -508,13 +628,14 @@ class Stage9DReleaseGate:
                         gate_provenance = PROVENANCE_VIETNAMESE_PRESERVED
                     sealed = model.seal()
                     model_hash = sealed.model_hash
-        except Exception as exc:
-            logger.error("Stage 9D model assembly failed: %s", type(exc).__name__)
-            reason_code = "PIPELINE_ERROR: MODEL_FITTING_FAILED"
-            message = str(exc)
-            if message.startswith("VI_"):
-                reason_code = f"PIPELINE_ERROR: {message}"
-            return _fail_result("FAIL", snapshot, reason_code, clean_format, model_hash=model_hash, trace=trace)
+            except Exception as exc:
+                logger.error("Stage 9D Vietnamese extension failed: %s", type(exc).__name__)
+                reason_code = "PIPELINE_ERROR: MODEL_FITTING_FAILED"
+                message = str(exc)
+                if message.startswith("VI_"):
+                    reason_code = f"PIPELINE_ERROR: {message}"
+                return _fail_result("FAIL", snapshot, reason_code, clean_format, model_hash=model_hash, trace=trace)
+
 
         # Post-attestation drift guard: the model was sealed above; any
         # mutation of the model graph between seal and use fails closed
@@ -595,6 +716,7 @@ class Stage9DReleaseGate:
                     kerning_pairs=kerning_map,
                     observations=list(partition.fit_pairs),
                 ),
+                formats=(clean_format,),
             )
 
             art_file = family_build.ttf if clean_format == "TTF" else family_build.otf
@@ -914,6 +1036,7 @@ class Stage9DReleaseGate:
                     kerning_pairs=dict(model.kerning_pairs),
                     observations=list(partition.fit_pairs),
                 ),
+                formats=(clean_format,),
             )
             art_file = family_build.ttf if clean_format == "TTF" else family_build.otf
             if not art_file or not art_file.file_path or not Path(art_file.file_path).is_file():

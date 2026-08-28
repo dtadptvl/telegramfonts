@@ -1,0 +1,201 @@
+{
+  "coverage_original": [
+    65,
+    79
+  ],
+  "coverage_vietnamese": [
+    32,
+    65,
+    66,
+    67,
+    69,
+    72,
+    73,
+    77,
+    79,
+    84,
+    85,
+    86,
+    88,
+    89,
+    97,
+    99,
+    101,
+    103,
+    104,
+    105,
+    110,
+    111,
+    112,
+    116,
+    117,
+    121,
+    224,
+    236,
+    242,
+    243,
+    770
+  ],
+  "cpu_count": 12,
+  "gates": [
+    {
+      "ai_binding": "95022e7598fe4d5541152c7c5543a4d1a5dec11fec59900f843612d951f31e36",
+      "ai_calls": 1,
+      "attestation_hash": "d89536dee15769e7fce4e34afbb230b2309b54d5b287ca4d7b57d856c3a4ef29",
+      "candidate_artifact_sha": "d8ff093135a61fb65a7b920664f45ff1dcc162a70cc78213a461b100902cce23",
+      "candidate_size_bytes": 7564,
+      "chain": "VIETNAMESE",
+      "consumer_bundle_hash": "e896bef86181a9425db3401c2468951c793123b4db16d859c59ac826021ec75d",
+      "fit_set_fingerprint": "77ae1c6d1532d3298037faeba05bbfb580a8636520e4b479cd9741265f177b87",
+      "format": "TTF",
+      "glyph_count": 135,
+      "held_out_set_fingerprint": "c26a947087b8b3b3c343f2783214cc4cca9a7815516aaa2937359bb7fdbcb4ec",
+      "is_publishable": true,
+      "model_hash": "1b83588bffd50d2a913e36677cde53f6acf80529eba837a69bc3ee514a073472",
+      "provenance": "vietnamese_ai_v1",
+      "report_hash": "fbfd92c13c4f6c7c5a36b4ca7becd8906b3912fdc864bfb1b6943950f9d80fc5",
+      "snapshot_fingerprint": "05e6a97ff7453ec426e893fa3e48a999e0004153d44981dec876d29f6612cb93",
+      "status": "PASS",
+      "total_iterations": 2661,
+      "trace_hash": "f4ac05a0a4deee85fceeb097a10a295e10426b10d1076535a36db6c3c6570886",
+      "wall_ms": 3176531.0657999944
+    }
+  ],
+  "git_branch": "codex/issue-82-maxperf",
+  "git_dirty": "?? agent/perf/",
+  "git_sha": "13140867c4855534e32cc6513714ca11a0b02030",
+  "issue": 82,
+  "label": "baseline",
+  "peak_working_set_mb": -1.0,
+  "platform": "Windows-10-10.0.19045-SP0",
+  "python": "3.14.6",
+  "segment": "vi",
+  "stages": {
+    "build.candidate_family": {
+      "calls": 1.0,
+      "time_ms": 52.516
+    },
+    "calibration.calibrate_all": {
+      "calls": 3.0,
+      "time_ms": 158.637
+    },
+    "calibration.derive_multisize_kerning": {
+      "calls": 10.0,
+      "time_ms": 0.096
+    },
+    "calibration.fingerprint": {
+      "calls": 2.0,
+      "time_ms": 105.528
+    },
+    "calibration.validate_pair_schedule": {
+      "calls": 5.0,
+      "time_ms": 0.043
+    },
+    "collection.total": {
+      "calls": 1.0,
+      "time_ms": 156636.648
+    },
+    "consumers.chromium": {
+      "calls": 1.0,
+      "time_ms": 1995.596
+    },
+    "consumers.fonttools": {
+      "calls": 1.0,
+      "time_ms": 4.266
+    },
+    "consumers.freetype": {
+      "calls": 1.0,
+      "time_ms": 131749.182
+    },
+    "consumers.harfbuzz": {
+      "calls": 1.0,
+      "time_ms": 0.726
+    },
+    "consumers.produce_bundle": {
+      "calls": 1.0,
+      "time_ms": 133853.168
+    },
+    "evaluator.evaluate": {
+      "calls": 1.0,
+      "time_ms": 446850.332
+    },
+    "model.compute_canonical_hash": {
+      "calls": 5.0,
+      "time_ms": 139.478
+    },
+    "model.seal": {
+      "calls": 2.0,
+      "time_ms": 50.218
+    },
+    "optimizer.boundary": {
+      "calls": 360320.0,
+      "time_ms": 55298.983
+    },
+    "optimizer.complexity_loss": {
+      "calls": 2785.0,
+      "time_ms": 9.412
+    },
+    "optimizer.curvature_loss": {
+      "calls": 2785.0,
+      "time_ms": 682.984
+    },
+    "optimizer.decode_mask": {
+      "calls": 3968.0,
+      "time_ms": 95732.903
+    },
+    "optimizer.loss_components": {
+      "calls": 2785.0,
+      "time_ms": 1938838.887
+    },
+    "optimizer.optimize": {
+      "calls": 1.0,
+      "time_ms": 2110925.365
+    },
+    "optimizer.optimize_glyph": {
+      "calls": 31.0,
+      "time_ms": 1938977.915
+    },
+    "optimizer.prepare_reference_artifacts": {
+      "calls": 3968.0,
+      "time_ms": 73319.929
+    },
+    "optimizer.rasterize_model_crop": {
+      "calls": 356480.0,
+      "time_ms": 223566.702
+    },
+    "optimizer.signed_distance": {
+      "calls": 353664.0,
+      "time_ms": 1224095.65
+    },
+    "optimizer.simplify_contours": {
+      "calls": 31.0,
+      "time_ms": 0.132
+    },
+    "optimizer.subdivide_contours": {
+      "calls": 31.0,
+      "time_ms": 1.694
+    },
+    "optimizer.transform_contours": {
+      "calls": 2661.0,
+      "time_ms": 93.711
+    },
+    "snapshot.get_raster_bytes": {
+      "bytes": 90165448.0,
+      "calls": 14880.0,
+      "time_ms": 42.082
+    },
+    "snapshot.load_from_store": {
+      "calls": 1.0,
+      "time_ms": 5347.755
+    },
+    "solver.reconstruct_glyph": {
+      "calls": 31.0,
+      "time_ms": 479079.704
+    },
+    "solver.schneider_fit_contour": {
+      "calls": 31.0,
+      "time_ms": 1612.695
+    }
+  },
+  "total_wall_ms": 3336062.0869999984
+}
