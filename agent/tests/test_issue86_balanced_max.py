@@ -722,3 +722,130 @@ def test_rerank_margin_top1_rule():
     assert rerank_margin_accepts_top1(BALANCED_MAX_PROFILE, 1, bound - 0.01) is True
     assert rerank_margin_accepts_top1(BALANCED_MAX_PROFILE, 1, bound + 0.01) is False
     assert rerank_margin_accepts_top1(BALANCED_MAX_PROFILE, 0, 0.0) is False
+
+
+# =========================================================================
+# 13. BALANCED_MAX production-path E2E: AI-VIETNAMESE missing-coverage case
+# =========================================================================
+
+
+@pytest.fixture(scope="module")
+def e2e_vi_collection86(tmp_path_factory):
+    """Shared canonical MAX collection for the BALANCED VIETNAMESE chain."""
+    from tests.test_issue75_fullmax_e2e import _E2E_VI_COVERAGE
+
+    base_dir = tmp_path_factory.mktemp("issue86_balanced_vi_collection")
+    session = _E2EFixtureSession(_E2E_VI_COVERAGE, "chromium_issue86_vi_v1")
+    store, config, bv = asyncio.run(
+        _collect_family(base_dir, "e2e_vi_fam", "E2EViFam", session, _E2E_VI_COVERAGE)
+    )
+    return base_dir, store, config, bv
+
+
+def test_13_balanced_vi_production_path_publishes(e2e_vi_collection86, tmp_path):
+    """BALANCED_MAX production-path E2E (AI-VIETNAMESE): the missing-coverage
+    Vietnamese chain publishes under the BALANCED_MAX profile with the
+    deterministic confidence gate, deterministic-first extension, and every
+    unchanged final gate; no escalation needed for the reference fixture."""
+    import hashlib
+
+    from compute.vietnamese import (
+        MARK_CODEPOINT_SET,
+        VIETNAMESE_REQUIRED_CODEPOINTS,
+        VietnameseExtensionService,
+    )
+    from fidelity.profiles import PROFILE_BALANCED_MAX
+    from fidelity.release_gate import PROVENANCE_STAGE9D_RASTER
+
+    from tests.test_issue75_fullmax_e2e import _E2E_VI_COVERAGE
+
+    base_dir, store, config, bv = e2e_vi_collection86
+
+    class _E2EAIProvider:
+        """Deterministic fake transport: closed schema, finite geometry."""
+
+        model_id = "openrouter"
+        model_version = "openrouter-route-v1"
+
+        def __init__(self):
+            self.calls = 0
+            self.requested: list[int] = []
+
+        def prompt_hash(self) -> str:
+            return hashlib.sha256(b"e2e_prompt").hexdigest()
+
+        async def generate_candidates(self, request):
+            from compute.vietnamese import AICandidateSpec
+
+            self.calls += 1
+            self.requested = list(request["missing_codepoints"])
+            specs = []
+            for cp in self.requested:
+                anchors = (("mark", 250.0, 320.0),) if cp in MARK_CODEPOINT_SET else ()
+                specs.append(
+                    AICandidateSpec(
+                        code_point=cp,
+                        contours=(((175.0, 100.0), (425.0, 100.0), (425.0, 340.0), (175.0, 340.0)),),
+                        advance_width_upem=1.0 if cp in MARK_CODEPOINT_SET else 600.0,
+                        lsb_upem=175.0,
+                        rsb_upem=175.0,
+                        ascent_upem=340.0,
+                        descent_upem=-100.0,
+                        anchors=anchors,
+                    )
+                )
+            return specs
+
+    provider = _E2EAIProvider()
+    service = VietnameseExtensionService(
+        provider, config_hash=config.compute_hash(), source_hash="e" * 64
+    )
+
+    async def run():
+        res = await Stage9DReleaseGate.execute(
+            store=store,
+            config=config,
+            reference_id="e2e_vi_fam",
+            style_id="regular",
+            family_name="E2EViFam",
+            style_name="Regular",
+            browser_version=bv,
+            format_type="TTF",
+            output_dir=tmp_path / "vi_balanced",
+            mode="VIETNAMESE",
+            vietnamese_service=service,
+            reconstruction_profile=BALANCED_MAX_PROFILE,
+        )
+        assert res.is_publishable, res.failure_reasons
+        # Published by BALANCED_MAX itself: deterministic confidence PASS,
+        # no escalation, unchanged final gates decided publication.
+        assert res.reconstruction_profile == PROFILE_BALANCED_MAX
+        assert res.confidence_status == CONFIDENCE_PASS
+        assert res.escalated_from_profile == ""
+        assert res.attestation is not None
+        assert res.attestation.overall_status == "PASS"
+        assert res.attestation.ai_binding
+        assert res.attestation.provenance != PROVENANCE_STAGE9D_RASTER
+        # Deterministic-first extension invariant preserved under BALANCED.
+        assert provider.calls == 1
+        existing = set(_E2E_VI_COVERAGE)
+        assert not (set(provider.requested) & existing)
+        missing_all = {cp for cp in VIETNAMESE_REQUIRED_CODEPOINTS if cp not in existing}
+        deterministic = missing_all - set(provider.requested)
+        assert len(deterministic) > 0
+        assert set(provider.requested) == missing_all - deterministic
+        for cp in existing:
+            assert cp in res.model.glyphs
+        # Search ladder evidence: the ladder forms exactly the browser-fit
+        # base coverage (extended glyphs are constructed by the deterministic
+        # extension path, not the fit ladder); HARD defaults cover the
+        # fixture's marks/composites, zero-ink space stays the trivial EASY.
+        summary = dict(res.search_summary)
+        assert summary["glyph_count"] == len(_E2E_VI_COVERAGE)
+        assert len(res.model.glyphs) > summary["glyph_count"]
+        assert summary["hard_glyphs"] >= 1
+        assert summary["easy_glyphs"] >= 1
+        return res
+
+    res = asyncio.run(run())
+    res.cleanup()
