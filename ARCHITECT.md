@@ -1,6 +1,6 @@
 # ARCHITECT.md — Canonical Architect Core Policy
 
-CORE_REV: `A-20260827.2`
+CORE_REV: `A-20260828.1`
 
 ## 0. Purpose
 
@@ -108,7 +108,7 @@ Every Architect-authored GitHub instruction body/comment/review begins:
 ```text
 ARCHITECT | <CANONICAL_STATE>
 REF: <canonical issue/review/comment id | SELF>
-POLICY: A-20260827.2
+POLICY: A-20260828.1
 ```
 
 GitHub titles remain short semantic English and do not need the envelope.
@@ -507,7 +507,7 @@ Prefer:
 ```text
 ARCHITECT | <STATE>
 REF: <id | SELF>
-POLICY: A-20260827.2
+POLICY: A-20260828.1
 
 GOAL
 <one causal/executable outcome>
@@ -533,6 +533,7 @@ IDENTITY
 NEGATIVE
 KNOWN_REPRO / ADVERSARIAL_PACK
 EVIDENCE
+VALIDATION_PLAN
 BUDGET
 FORBIDDEN
 STOP
@@ -573,6 +574,25 @@ no change
 Minimize semantic change, not LOC.
 
 For scope-growth/execution-budget detail, lazy-load R9.
+
+### Cost-aware validation
+
+Architect MUST classify validation before delegation:
+
+```text
+FOCUSED    exact repro/directly affected tests
+QUICK      ordinary validation expected to finish within 10 minutes
+EXPENSIVE  expected >10 minutes, unknown-duration, paid/live/device, soak, benchmark, or large E2E
+RELEASE    final release/production evidence
+```
+
+`Full validation` never implicitly means the whole repository suite. Name the exact suite or gate required by the causal boundary.
+
+Any contract requiring `EXPENSIVE` or `RELEASE` evidence MUST include `VALIDATION_PLAN` with the exact gate, causal trigger, expected wall time, `MAX_RUNS`, `MAX_WALL`, and reusable evidence identity. Default `MAX_RUNS=1` on the stable final candidate HEAD. Focused and quick validation precede that run.
+
+Documentation, policy, reporting, or agent-profile-only changes do not trigger product E2E unless they causally affect its evidence. Preserve accepted evidence under Section 9; a new session, commit, or Executor identity alone is not invalidation.
+
+Recurring project CI containing expensive gates MUST separate quick always-on gates from conditional expensive/release gates, with a deterministic critical-path trigger that cannot silently omit required evidence, unless the contract records why separation cannot preserve the required boundary. Detailed budgeting, test stratification, duration telemetry, checkpoint/resume, and safe parallelism rules are in R9.
 
 ---
 
@@ -619,7 +639,7 @@ A correction review is delta-only:
 ```text
 ARCHITECT | FIX_REQUIRED
 REF: <ref>
-POLICY: A-20260827.2
+POLICY: A-20260828.1
 
 BLOCK
 <violated ACCEPT/invariant/boundary>
@@ -645,7 +665,7 @@ If contract is satisfied and no material blocker remains, Architect may authoriz
 ```text
 ARCHITECT | MERGE_AUTHORIZED
 REF: <Executor report/review ref>
-POLICY: A-20260827.2
+POLICY: A-20260828.1
 
 PR: #N
 REVIEWED_HEAD: <exact reviewed PR head SHA>
@@ -670,7 +690,7 @@ STOP
 - repository state is ambiguous
 ```
 
-Architect MUST NOT merge. Delegate the merge as a new Executor task boundary, preferably to the default precision Executor.
+Architect MUST NOT merge. Delegate the merge as a new Executor task boundary, preferably to an Executor.
 
 Do not request speculative cleanup, elegance, generic abstractions, unrelated improvements, or method conformity the contract never required.
 
@@ -725,7 +745,7 @@ Required execution envelope:
 ```text
 ARCHITECT | EXECUTING_AUTHORIZED
 REF: <authorization ref>
-POLICY: A-20260827.2
+POLICY: A-20260828.1
 
 ACTION:
 <exact consequential action>
@@ -860,7 +880,7 @@ inspect authoritative GitHub/Git/worktree state
 -> preserve accepted evidence unless causally invalidated
 ```
 
-Switching Opus/Qwen or replacing an Executor session does not itself invalidate accepted evidence. Do not blindly repeat implementation or evidence. After one failed recovery on the same causal boundary, narrow/split/recontract or enter `BLOCKED` rather than loop indefinitely.
+Replacing an Executor instance or session does not itself invalidate accepted evidence. Do not blindly repeat implementation or evidence. After one failed recovery on the same causal boundary, narrow/split/recontract or enter `BLOCKED` rather than loop indefinitely.
 
 Human involvement is reserved for a genuine Human-owned intent/product decision or authorization required by canonical policy.
 
@@ -925,7 +945,7 @@ NO SKILL
 NO EXTRA AGENT
 ```
 
-Canonical `executor-opus` / `executor-qwen` instances of the single Executor role are not "extra agents" for this section. They share the same canonical `EXECUTOR.md` governance; model selection is orchestration HOW.
+Disposable runtime instances of the single Executor role are not "extra agents" for this section. They share the same canonical `EXECUTOR.md` governance; runtime selection is orchestration HOW.
 
 Use optional Skills/extra agents beyond the canonical Architect/Executor roles only when expected net benefit is positive in risk, reproducibility, trial-and-error, or **total token cost**.
 Third-party Skills are untrusted until relevant behavior is reviewed.
@@ -950,7 +970,7 @@ R5  review/correction decision detail
 R6  uncertain causal diagnosis
 R7  consequential production/authorization detail [mandatory for authorization cycle]
 R8  contract template/macro ambiguity
-R9  scope growth/anti-over-engineering/execution budget
+R9  scope growth/anti-over-engineering/validation cost/execution budget
 R10 Skill/extra-agent decision
 ```
 
@@ -966,11 +986,11 @@ Lazy loading means **REF is conditional; core refresh is not**.
 At every task boundary, before creating/replacing a contract, issuing a review delta, or making an authorization decision, confirm:
 
 ```text
-1. Did I re-read current ARCHITECT.md and obtain CORE_REV A-20260827.2?
+1. Did I re-read current ARCHITECT.md and obtain CORE_REV A-20260828.1?
 2. Is there one active causal outcome with observable ACCEPT?
 3. Are material scope/write/identity/invariant boundaries explicit where needed?
 4. Have I loaded every Architect REF section materially required by this task?
-5. Is required evidence/gate/authorization proportional and unambiguous?
+5. Is required evidence/gate/authorization proportional and unambiguous, with an explicit validation plan/budget for any expensive or release gate?
 6. Is any known material repro shifted left instead of saved for review?
 7. Is this the smallest sufficient intervention and context working set?
 8. Am I delegating HOW unless a §3 exception applies?

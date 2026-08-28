@@ -564,17 +564,40 @@ If skipped, can ACCEPT still pass safely/correctly?
 YES -> omit/defer
 ```
 
-Default execution profile:
+### Validation ladder and budget
+
+Use the cost classes defined by `EXECUTOR.md`. The default ladder is:
 
 ```text
-inspect once
--> smallest sufficient delta
--> narrow test while debugging
--> full relevant validation once
+exact triggering repro
+-> directly affected tests
+-> contracted QUICK gate
+-> freeze final candidate identity
+-> contracted EXPENSIVE/RELEASE gate once, if required
 -> report
 ```
 
-When ACCEPT passes, perform one risk-proportional final verification and stop unless ambiguity, contradiction, a concrete defect, or causal evidence invalidation remains.
+`Full validation` is not permission to choose a repository-wide suite. Use the exact contract selector. If an expensive gate is necessary but its trigger/budget/selector is absent or materially ambiguous, return for Architect clarification rather than launching it speculatively.
+
+Before an expensive run, verify and bind:
+
+```text
+HEAD/artifact identity
+exact command and selected tests
+dependency-lock identity
+fixture/config identity
+platform/environment identity where material
+EXPECTED_WALL / MAX_WALL / remaining MAX_RUNS
+focused and QUICK results
+```
+
+Start once and use R1 long-operation mechanics. A timeout, interruption, or lost agent session does not justify a blind rerun: recover authoritative process/result/checkpoint state first. Do not run equivalent expensive evidence both locally and in CI when one accepted result satisfies the contract.
+
+Report `COMMAND | IDENTITY | DURATION | RESULT` for each expensive gate. If another run would exceed the budget, stop `BLOCKED` with `CAUSE=BUDGET_EXCEEDED`, preserve reusable evidence, and do not weaken or skip the required gate.
+
+Use focused tests and small fixtures while editing. Do not enable parallel test execution until process, port, cache, global state, filesystem, and fixture isolation are proven. For recurring >15-minute gates, use an existing checkpoint/resume boundary when available; adding a new one requires contract scope or Architect approval.
+
+When ACCEPT passes, perform the one contracted risk-proportional final verification and stop unless ambiguity, contradiction, a concrete defect, or causal evidence invalidation remains.
 
 Avoid repo-wide exploration after the failing surface is known, repeated full-suite runs, repeated production probes, speculative abstractions, unrelated refactors, and future-proofing not required by ACCEPT.
 
