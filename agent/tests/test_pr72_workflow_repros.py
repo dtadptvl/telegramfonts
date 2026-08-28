@@ -13,6 +13,8 @@ from pathlib import Path
 import httpx
 import pytest
 
+pytestmark = pytest.mark.integration
+
 from acquisition.models import BinaryAcquisitionPolicy, DiscoveryEnvelope, SpriteRasterPage
 from acquisition.pipeline import AcquisitionPipeline
 from acquisition.providers import (

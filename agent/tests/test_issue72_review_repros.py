@@ -14,6 +14,8 @@ from unittest.mock import patch
 import httpx
 import pytest
 
+pytestmark = pytest.mark.integration
+
 from acquisition.adapters import (
     AuthorizedSessionHttpTransport,
     AuthorizedSessionMaterialStore,

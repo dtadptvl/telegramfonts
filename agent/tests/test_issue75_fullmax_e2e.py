@@ -32,6 +32,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.fullmax_e2e
+
 from fidelity.release_gate import PROVENANCE_STAGE9D_RASTER, Stage9DReleaseGate
 from measurement.calibration import CalibrationTransform
 from measurement.collector import ObservationCollector

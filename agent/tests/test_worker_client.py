@@ -3,6 +3,8 @@ import json
 import httpx
 import pytest
 
+pytestmark = pytest.mark.integration
+
 from config import Settings
 from worker_client import ClaimedJob, WorkerJobClient
 

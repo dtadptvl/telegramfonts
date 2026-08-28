@@ -37,3 +37,12 @@ dev = [
 testpaths = ["tests"]
 pythonpath = ["src"]
 asyncio_mode = "auto"
+# Issue #88: explicit pytest tiers. Quick gate selector:
+#   -m "not fullmax_e2e and not performance"
+# fullmax-final lane selector: -m "fullmax_e2e or performance"
+markers = [
+    "fullmax_e2e: canonical FULL-MAX end-to-end chains (~1h; excluded from the quick gate, runs in the fullmax-final lane)",
+    "performance: performance-measurement tests (benchmark harness; excluded from the quick gate)",
+    "browser: tests exercising real or fake browser-process boundaries (real launches skip when unavailable)",
+    "integration: tests composing multiple subsystems against hermetic fakes (included in the quick gate)",
+]

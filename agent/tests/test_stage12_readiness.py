@@ -16,6 +16,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
+pytestmark = pytest.mark.integration
+
 from config import Settings
 from manifest import generate_deployment_manifest, verify_deployment_manifest
 from readiness import ReadinessReport, run_a23_preflight

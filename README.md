@@ -550,7 +550,10 @@ python -m pip install -r agent/requirements-lock.txt
 npm run preflight
 npm run typecheck
 npm test
-python -m pytest agent/tests -v
+# Quick gate: every tier except the ~1h canonical FULL-MAX E2E chain and the performance harness
+python -m pytest agent/tests -m "not fullmax_e2e and not performance" --durations=25
+# Canonical FULL-MAX E2E tier: exactly once at final HEAD (CI runs it in the conditional fullmax-final lane)
+python -m pytest agent/tests -m "fullmax_e2e or performance" --durations=25
 python agent/src/benchmark.py --samples 10 --json-out ops/benchmark_report.json
 ```
 
