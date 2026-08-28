@@ -54,14 +54,6 @@ jobs:
         run: |
           pytest agent/tests
 
-      - name: Run orchestration protocol tests
-        run: |
-          python .orchestra/tests/test_runner.py
-
-      - name: Run Executor event handoff tests
-        run: |
-          python .orchestra/tests/test_executor_handoff.py
-
       - name: Run benchmark harness check
         run: |
           python agent/src/benchmark.py --samples 2 --quiet

@@ -670,7 +670,7 @@ STOP
 - repository state is ambiguous
 ```
 
-Architect MUST NOT merge. Delegate the merge as a new Executor task boundary, preferably to the default precision Executor.
+Architect MUST NOT merge. Delegate the merge as a new Executor task boundary, preferably to an Executor.
 
 Do not request speculative cleanup, elegance, generic abstractions, unrelated improvements, or method conformity the contract never required.
 
@@ -860,7 +860,7 @@ inspect authoritative GitHub/Git/worktree state
 -> preserve accepted evidence unless causally invalidated
 ```
 
-Switching Opus/Qwen or replacing an Executor session does not itself invalidate accepted evidence. Do not blindly repeat implementation or evidence. After one failed recovery on the same causal boundary, narrow/split/recontract or enter `BLOCKED` rather than loop indefinitely.
+Replacing an Executor instance or session does not itself invalidate accepted evidence. Do not blindly repeat implementation or evidence. After one failed recovery on the same causal boundary, narrow/split/recontract or enter `BLOCKED` rather than loop indefinitely.
 
 Human involvement is reserved for a genuine Human-owned intent/product decision or authorization required by canonical policy.
 
@@ -925,7 +925,7 @@ NO SKILL
 NO EXTRA AGENT
 ```
 
-Canonical `executor-opus` / `executor-qwen` instances of the single Executor role are not "extra agents" for this section. They share the same canonical `EXECUTOR.md` governance; model selection is orchestration HOW.
+Disposable runtime instances of the single Executor role are not "extra agents" for this section. They share the same canonical `EXECUTOR.md` governance; runtime selection is orchestration HOW.
 
 Use optional Skills/extra agents beyond the canonical Architect/Executor roles only when expected net benefit is positive in risk, reproducibility, trial-and-error, or **total token cost**.
 Third-party Skills are untrusted until relevant behavior is reviewed.
