@@ -352,13 +352,16 @@ def run_a23_preflight(
                 )
             )
         if cfg.VIETNAMESE_AI_ENABLED:
-            has_or_key = bool(cfg.OPENROUTER_API_KEY and cfg.OPENROUTER_API_KEY.get_secret_value().strip())
+            has_ai_key = bool(
+                (cfg.WOKUSHOP_API_KEY and cfg.WOKUSHOP_API_KEY.get_secret_value().strip())
+                or (cfg.OPENROUTER_API_KEY and cfg.OPENROUTER_API_KEY.get_secret_value().strip())
+            )
             checks.append(
                 ReadinessCheck(
                     category="Acquisition & AI Capabilities",
-                    name="OpenRouter API Key for Vietnamese Extension",
-                    passed=has_or_key,
-                    message="Configured (redacted)" if has_or_key else "Missing OPENROUTER_API_KEY while VIETNAMESE_AI_ENABLED=True",
+                    name="AI Provider Key for Vietnamese Extension (Woku/OpenRouter)",
+                    passed=has_ai_key,
+                    message="Configured (redacted)" if has_ai_key else "Missing wokushop_api_key/openrouter_api_key while VIETNAMESE_AI_ENABLED=True",
                     critical=True,
                 )
             )

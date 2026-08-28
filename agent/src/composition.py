@@ -4,11 +4,11 @@ Constructs every concrete production dependency and fails closed when an
 enabled required capability is not constructible. Test doubles are never
 constructed here; production assembly uses only production types.
 
-Runtime secret boundary: the non-versioned dev.vars-shaped OpenRouter key
-(lowercase ``openrouter_api_key``) is consumed ONLY here, through the
-explicit ``load_dev_vars_secret`` loader with an explicit path supplied by
-the production entrypoint. Ordinary Settings construction and tests never
-open the real dev.vars file.
+Runtime secret boundary: the non-versioned dev.vars-shaped AI keys
+(lowercase ``wokushop_api_key`` and ``openrouter_api_key``) are consumed
+ONLY here, through the explicit ``load_dev_vars_secret`` loader with an
+explicit path supplied by the production entrypoint. Ordinary Settings
+construction and tests never open the real dev.vars file.
 """
 from __future__ import annotations
 
@@ -99,8 +99,27 @@ def build_production_components(
         # lowercase openrouter_api_key (key-only shape) is consumed safely.
         key_value = load_dev_vars_secret(dev_vars_path, "openrouter_api_key")
 
+    woku_key = getattr(settings, "WOKUSHOP_API_KEY", None)
+    woku_key_value = woku_key.get_secret_value() if woku_key is not None else ""
+    if not woku_key_value and dev_vars_path is not None:
+        # Explicit runtime boundary: the non-versioned dev.vars-shaped
+        # lowercase wokushop_api_key (key-only shape) is consumed safely.
+        woku_key_value = load_dev_vars_secret(dev_vars_path, "wokushop_api_key")
+
     vietnamese_ai_provider = None
-    if key_value:
+    if woku_key_value:
+        # Woku-primary cascade: exact gpt-5.6-luna PRIMARY -> exact
+        # gemini-3.7-flash FALLBACK -> existing OpenRouter route unchanged
+        # as downstream fallback (wired when its key is available). Bounded,
+        # fail-closed, no substitution. ORIGINAL and complete-VI paths remain
+        # zero-call by construction (the runner/extension service never
+        # invoke the provider there).
+        from compute.openrouter_client import OpenRouterAIClient
+        from compute.woku_client import WokuCascadeAIClient
+
+        downstream = OpenRouterAIClient(key_value) if key_value else None
+        vietnamese_ai_provider = WokuCascadeAIClient(woku_key_value, downstream=downstream)
+    elif key_value:
         # Key-only runtime: with a key available the fixed OpenRouter
         # provider is constructible for VIETNAMESE missing coverage.
         # ORIGINAL and complete-VI paths remain zero-call by construction
