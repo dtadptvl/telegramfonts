@@ -1,0 +1,257 @@
+{
+  "coverage_original": [
+    65,
+    79
+  ],
+  "coverage_vietnamese": [
+    32,
+    65,
+    66,
+    67,
+    69,
+    72,
+    73,
+    77,
+    79,
+    84,
+    85,
+    86,
+    88,
+    89,
+    97,
+    99,
+    101,
+    103,
+    104,
+    105,
+    110,
+    111,
+    112,
+    116,
+    117,
+    121,
+    224,
+    236,
+    242,
+    243,
+    770
+  ],
+  "cpu_count": 12,
+  "gates": [
+    {
+      "ai_binding": "",
+      "attestation_hash": "c2a5053c0cbf54ee026aa3a669830ffc8e85b32e3d57c6bfa61267f1a1f849a6",
+      "candidate_artifact_sha": "1fcb0e91008cc5bd67b2ec3706732b2a66c595d2c0f0573b432947dcd1486230",
+      "candidate_size_bytes": 1140,
+      "chain": "ORIGINAL",
+      "consumer_bundle_hash": "bc6bf3a12c6b32d538974938d45c206fe4cb753caff1ad9e4f3d9d722fee1046",
+      "fit_set_fingerprint": "3a5f47a031a3c7e25e40ee65bf65c2ef33b18a936c429aea79e7fbe96c6fc249",
+      "format": "TTF",
+      "held_out_set_fingerprint": "b96accb642f41e4fc51b219985472a49b02a8a47ff2a02003ead469a4e8d951c",
+      "is_publishable": true,
+      "model_hash": "8944dfc05fad3c854f0750bcc688f491903190d2c705b874b9284db43c9c3808",
+      "provenance": "stage9d_raster_v1",
+      "report_hash": "30e29d8418694618f70d7cbe4c6c845d975d0d49909be0770284ab0efa60791c",
+      "snapshot_fingerprint": "60a8bb596284cfdd73cad2d352334e901a7b5c17203247d7b2c98f82a6036ac3",
+      "status": "PASS",
+      "total_iterations": 164,
+      "trace_hash": "4cdb1a6cf96bfa665830ac5e7fd692b494d41f605e5f9387123826fc63bbf9c4",
+      "wall_ms": 233987.13670001598
+    },
+    {
+      "ai_binding": "",
+      "attestation_hash": "3c8a66d72189bee9861e1543eb3ffab1437cf50963c3ea92f6b4f68a2a122de1",
+      "candidate_artifact_sha": "52afd92b427a832025af21474311758d56fab179bc8c03b09e984145bc6e00f8",
+      "candidate_size_bytes": 1136,
+      "chain": "ORIGINAL",
+      "consumer_bundle_hash": "2681f3afe35abdbbeebb369bf015b105ffb877ca7d5c443310545fcae44f1a12",
+      "fit_set_fingerprint": "3a5f47a031a3c7e25e40ee65bf65c2ef33b18a936c429aea79e7fbe96c6fc249",
+      "format": "OTF",
+      "held_out_set_fingerprint": "b96accb642f41e4fc51b219985472a49b02a8a47ff2a02003ead469a4e8d951c",
+      "is_publishable": true,
+      "model_hash": "8944dfc05fad3c854f0750bcc688f491903190d2c705b874b9284db43c9c3808",
+      "provenance": "stage9d_raster_v1",
+      "report_hash": "ecdd3df4c1b7d6e38ae09d2a34f3d3c2094849cc7b0407b93d456e961092cc2a",
+      "snapshot_fingerprint": "60a8bb596284cfdd73cad2d352334e901a7b5c17203247d7b2c98f82a6036ac3",
+      "status": "PASS",
+      "total_iterations": 164,
+      "trace_hash": "4cdb1a6cf96bfa665830ac5e7fd692b494d41f605e5f9387123826fc63bbf9c4",
+      "wall_ms": 230336.58679999644
+    },
+    {
+      "ai_binding": "",
+      "attestation_hash": "c2a5053c0cbf54ee026aa3a669830ffc8e85b32e3d57c6bfa61267f1a1f849a6",
+      "candidate_artifact_sha": "1fcb0e91008cc5bd67b2ec3706732b2a66c595d2c0f0573b432947dcd1486230",
+      "candidate_size_bytes": 1140,
+      "chain": "ORIGINAL",
+      "consumer_bundle_hash": "bc6bf3a12c6b32d538974938d45c206fe4cb753caff1ad9e4f3d9d722fee1046",
+      "fit_set_fingerprint": "3a5f47a031a3c7e25e40ee65bf65c2ef33b18a936c429aea79e7fbe96c6fc249",
+      "format": "L2_TTF",
+      "held_out_set_fingerprint": "b96accb642f41e4fc51b219985472a49b02a8a47ff2a02003ead469a4e8d951c",
+      "is_publishable": true,
+      "model_hash": "8944dfc05fad3c854f0750bcc688f491903190d2c705b874b9284db43c9c3808",
+      "provenance": "stage9d_raster_v1",
+      "report_hash": "30e29d8418694618f70d7cbe4c6c845d975d0d49909be0770284ab0efa60791c",
+      "snapshot_fingerprint": "60a8bb596284cfdd73cad2d352334e901a7b5c17203247d7b2c98f82a6036ac3",
+      "status": "PASS",
+      "wall_ms": 47465.51929999259
+    },
+    {
+      "ai_binding": "",
+      "attestation_hash": "c2a5053c0cbf54ee026aa3a669830ffc8e85b32e3d57c6bfa61267f1a1f849a6",
+      "candidate_artifact_sha": "1fcb0e91008cc5bd67b2ec3706732b2a66c595d2c0f0573b432947dcd1486230",
+      "candidate_size_bytes": 1140,
+      "chain": "ORIGINAL",
+      "consumer_bundle_hash": "bc6bf3a12c6b32d538974938d45c206fe4cb753caff1ad9e4f3d9d722fee1046",
+      "fit_set_fingerprint": "3a5f47a031a3c7e25e40ee65bf65c2ef33b18a936c429aea79e7fbe96c6fc249",
+      "format": "TTF_REPEAT",
+      "held_out_set_fingerprint": "b96accb642f41e4fc51b219985472a49b02a8a47ff2a02003ead469a4e8d951c",
+      "is_publishable": true,
+      "model_hash": "8944dfc05fad3c854f0750bcc688f491903190d2c705b874b9284db43c9c3808",
+      "provenance": "stage9d_raster_v1",
+      "report_hash": "30e29d8418694618f70d7cbe4c6c845d975d0d49909be0770284ab0efa60791c",
+      "snapshot_fingerprint": "60a8bb596284cfdd73cad2d352334e901a7b5c17203247d7b2c98f82a6036ac3",
+      "status": "PASS",
+      "total_iterations": 164,
+      "trace_hash": "4cdb1a6cf96bfa665830ac5e7fd692b494d41f605e5f9387123826fc63bbf9c4",
+      "wall_ms": 236998.79449998843
+    }
+  ],
+  "git_branch": "codex/issue-82-maxperf",
+  "git_dirty": "?? agent/perf/",
+  "git_sha": "13140867c4855534e32cc6513714ca11a0b02030",
+  "issue": 82,
+  "label": "baseline",
+  "peak_working_set_mb": -1.0,
+  "platform": "Windows-10-10.0.19045-SP0",
+  "python": "3.14.6",
+  "segment": "original",
+  "stages": {
+    "build.candidate_family": {
+      "calls": 4.0,
+      "time_ms": 27.64
+    },
+    "calibration.calibrate_all": {
+      "calls": 10.0,
+      "time_ms": 36.957
+    },
+    "calibration.derive_multisize_kerning": {
+      "calls": 6.0,
+      "time_ms": 0.059
+    },
+    "calibration.fingerprint": {
+      "calls": 7.0,
+      "time_ms": 25.616
+    },
+    "calibration.validate_pair_schedule": {
+      "calls": 3.0,
+      "time_ms": 0.026
+    },
+    "collection.total": {
+      "calls": 1.0,
+      "time_ms": 10050.722
+    },
+    "consumers.chromium": {
+      "calls": 4.0,
+      "time_ms": 6778.454
+    },
+    "consumers.fonttools": {
+      "calls": 4.0,
+      "time_ms": 8.72
+    },
+    "consumers.freetype": {
+      "calls": 4.0,
+      "time_ms": 44289.507
+    },
+    "consumers.harfbuzz": {
+      "calls": 4.0,
+      "time_ms": 0.629
+    },
+    "consumers.produce_bundle": {
+      "calls": 4.0,
+      "time_ms": 51105.391
+    },
+    "evaluator.evaluate": {
+      "calls": 4.0,
+      "time_ms": 139022.961
+    },
+    "model.compute_canonical_hash": {
+      "calls": 20.0,
+      "time_ms": 35.208
+    },
+    "model.seal": {
+      "calls": 4.0,
+      "time_ms": 7.474
+    },
+    "optimizer.boundary": {
+      "calls": 66816.0,
+      "time_ms": 13176.15
+    },
+    "optimizer.complexity_loss": {
+      "calls": 516.0,
+      "time_ms": 1.87
+    },
+    "optimizer.curvature_loss": {
+      "calls": 516.0,
+      "time_ms": 130.702
+    },
+    "optimizer.decode_mask": {
+      "calls": 768.0,
+      "time_ms": 23699.227
+    },
+    "optimizer.loss_components": {
+      "calls": 516.0,
+      "time_ms": 425979.619
+    },
+    "optimizer.optimize": {
+      "calls": 3.0,
+      "time_ms": 466925.222
+    },
+    "optimizer.optimize_glyph": {
+      "calls": 6.0,
+      "time_ms": 426007.048
+    },
+    "optimizer.prepare_reference_artifacts": {
+      "calls": 768.0,
+      "time_ms": 16588.981
+    },
+    "optimizer.rasterize_model_crop": {
+      "calls": 66048.0,
+      "time_ms": 45679.32
+    },
+    "optimizer.signed_distance": {
+      "calls": 66816.0,
+      "time_ms": 266938.339
+    },
+    "optimizer.simplify_contours": {
+      "calls": 6.0,
+      "time_ms": 0.03
+    },
+    "optimizer.subdivide_contours": {
+      "calls": 6.0,
+      "time_ms": 0.336
+    },
+    "optimizer.transform_contours": {
+      "calls": 492.0,
+      "time_ms": 17.767
+    },
+    "snapshot.get_raster_bytes": {
+      "bytes": 19262400.0,
+      "calls": 3328.0,
+      "time_ms": 8.782
+    },
+    "snapshot.load_from_store": {
+      "calls": 4.0,
+      "time_ms": 1503.475
+    },
+    "solver.reconstruct_glyph": {
+      "calls": 6.0,
+      "time_ms": 90037.299
+    },
+    "solver.schneider_fit_contour": {
+      "calls": 6.0,
+      "time_ms": 344.533
+    }
+  },
+  "total_wall_ms": 758934.9773000285
+}

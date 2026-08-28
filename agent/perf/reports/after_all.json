@@ -1,0 +1,279 @@
+{
+  "coverage_original": [
+    65,
+    79
+  ],
+  "coverage_vietnamese": [
+    32,
+    65,
+    66,
+    67,
+    69,
+    72,
+    73,
+    77,
+    79,
+    84,
+    85,
+    86,
+    88,
+    89,
+    97,
+    99,
+    101,
+    103,
+    104,
+    105,
+    110,
+    111,
+    112,
+    116,
+    117,
+    121,
+    224,
+    236,
+    242,
+    243,
+    770
+  ],
+  "cpu_count": 12,
+  "gates": [
+    {
+      "ai_binding": "",
+      "attestation_hash": "f49d8c98da8a1142a17047c63f37795a9b84155be1e82f6fa40838a763077b00",
+      "candidate_artifact_sha": "1fcb0e91008cc5bd67b2ec3706732b2a66c595d2c0f0573b432947dcd1486230",
+      "candidate_size_bytes": 1140,
+      "chain": "ORIGINAL",
+      "consumer_bundle_hash": "bc6bf3a12c6b32d538974938d45c206fe4cb753caff1ad9e4f3d9d722fee1046",
+      "fit_set_fingerprint": "3a5f47a031a3c7e25e40ee65bf65c2ef33b18a936c429aea79e7fbe96c6fc249",
+      "format": "TTF",
+      "held_out_set_fingerprint": "b96accb642f41e4fc51b219985472a49b02a8a47ff2a02003ead469a4e8d951c",
+      "is_publishable": true,
+      "model_hash": "8944dfc05fad3c854f0750bcc688f491903190d2c705b874b9284db43c9c3808",
+      "provenance": "stage9d_raster_v1",
+      "report_hash": "30e29d8418694618f70d7cbe4c6c845d975d0d49909be0770284ab0efa60791c",
+      "snapshot_fingerprint": "726ec04856742783a819b864934392ff05a1a982b6b16086d5a2bbb4bfb656dc",
+      "status": "PASS",
+      "total_iterations": 164,
+      "trace_hash": "4cdb1a6cf96bfa665830ac5e7fd692b494d41f605e5f9387123826fc63bbf9c4",
+      "wall_ms": 192741.36570002884
+    },
+    {
+      "ai_binding": "",
+      "attestation_hash": "5bab82dfccff74ea0217b5368c993d44bdc0a9e362a973996d5036ce5ad366e6",
+      "candidate_artifact_sha": "52afd92b427a832025af21474311758d56fab179bc8c03b09e984145bc6e00f8",
+      "candidate_size_bytes": 1136,
+      "chain": "ORIGINAL",
+      "consumer_bundle_hash": "2681f3afe35abdbbeebb369bf015b105ffb877ca7d5c443310545fcae44f1a12",
+      "fit_set_fingerprint": "3a5f47a031a3c7e25e40ee65bf65c2ef33b18a936c429aea79e7fbe96c6fc249",
+      "format": "OTF",
+      "held_out_set_fingerprint": "b96accb642f41e4fc51b219985472a49b02a8a47ff2a02003ead469a4e8d951c",
+      "is_publishable": true,
+      "model_hash": "8944dfc05fad3c854f0750bcc688f491903190d2c705b874b9284db43c9c3808",
+      "provenance": "stage9d_raster_v1",
+      "report_hash": "ecdd3df4c1b7d6e38ae09d2a34f3d3c2094849cc7b0407b93d456e961092cc2a",
+      "snapshot_fingerprint": "726ec04856742783a819b864934392ff05a1a982b6b16086d5a2bbb4bfb656dc",
+      "status": "PASS",
+      "total_iterations": 164,
+      "trace_hash": "4cdb1a6cf96bfa665830ac5e7fd692b494d41f605e5f9387123826fc63bbf9c4",
+      "wall_ms": 39627.1451000066
+    },
+    {
+      "ai_binding": "",
+      "attestation_hash": "f49d8c98da8a1142a17047c63f37795a9b84155be1e82f6fa40838a763077b00",
+      "candidate_artifact_sha": "1fcb0e91008cc5bd67b2ec3706732b2a66c595d2c0f0573b432947dcd1486230",
+      "candidate_size_bytes": 1140,
+      "chain": "ORIGINAL",
+      "consumer_bundle_hash": "bc6bf3a12c6b32d538974938d45c206fe4cb753caff1ad9e4f3d9d722fee1046",
+      "fit_set_fingerprint": "3a5f47a031a3c7e25e40ee65bf65c2ef33b18a936c429aea79e7fbe96c6fc249",
+      "format": "L2_TTF",
+      "held_out_set_fingerprint": "b96accb642f41e4fc51b219985472a49b02a8a47ff2a02003ead469a4e8d951c",
+      "is_publishable": true,
+      "model_hash": "8944dfc05fad3c854f0750bcc688f491903190d2c705b874b9284db43c9c3808",
+      "provenance": "stage9d_raster_v1",
+      "report_hash": "30e29d8418694618f70d7cbe4c6c845d975d0d49909be0770284ab0efa60791c",
+      "snapshot_fingerprint": "726ec04856742783a819b864934392ff05a1a982b6b16086d5a2bbb4bfb656dc",
+      "status": "PASS",
+      "wall_ms": 39439.54059999669
+    },
+    {
+      "ai_binding": "",
+      "attestation_hash": "f49d8c98da8a1142a17047c63f37795a9b84155be1e82f6fa40838a763077b00",
+      "candidate_artifact_sha": "1fcb0e91008cc5bd67b2ec3706732b2a66c595d2c0f0573b432947dcd1486230",
+      "candidate_size_bytes": 1140,
+      "chain": "ORIGINAL",
+      "consumer_bundle_hash": "bc6bf3a12c6b32d538974938d45c206fe4cb753caff1ad9e4f3d9d722fee1046",
+      "fit_set_fingerprint": "3a5f47a031a3c7e25e40ee65bf65c2ef33b18a936c429aea79e7fbe96c6fc249",
+      "format": "TTF_REPEAT",
+      "held_out_set_fingerprint": "b96accb642f41e4fc51b219985472a49b02a8a47ff2a02003ead469a4e8d951c",
+      "is_publishable": true,
+      "model_hash": "8944dfc05fad3c854f0750bcc688f491903190d2c705b874b9284db43c9c3808",
+      "provenance": "stage9d_raster_v1",
+      "report_hash": "30e29d8418694618f70d7cbe4c6c845d975d0d49909be0770284ab0efa60791c",
+      "snapshot_fingerprint": "726ec04856742783a819b864934392ff05a1a982b6b16086d5a2bbb4bfb656dc",
+      "status": "PASS",
+      "total_iterations": 164,
+      "trace_hash": "4cdb1a6cf96bfa665830ac5e7fd692b494d41f605e5f9387123826fc63bbf9c4",
+      "wall_ms": 39685.69829998887
+    },
+    {
+      "ai_binding": "95022e7598fe4d5541152c7c5543a4d1a5dec11fec59900f843612d951f31e36",
+      "ai_calls": 1,
+      "attestation_hash": "2dc75ea3dda64b48c1acb696433aec96c85b8dce97f15151eefd8204efc8c50d",
+      "candidate_artifact_sha": "d8ff093135a61fb65a7b920664f45ff1dcc162a70cc78213a461b100902cce23",
+      "candidate_size_bytes": 7564,
+      "chain": "VIETNAMESE",
+      "consumer_bundle_hash": "e896bef86181a9425db3401c2468951c793123b4db16d859c59ac826021ec75d",
+      "fit_set_fingerprint": "77ae1c6d1532d3298037faeba05bbfb580a8636520e4b479cd9741265f177b87",
+      "format": "TTF",
+      "glyph_count": 135,
+      "held_out_set_fingerprint": "c26a947087b8b3b3c343f2783214cc4cca9a7815516aaa2937359bb7fdbcb4ec",
+      "is_publishable": true,
+      "model_hash": "1b83588bffd50d2a913e36677cde53f6acf80529eba837a69bc3ee514a073472",
+      "provenance": "vietnamese_ai_v1",
+      "report_hash": "fbfd92c13c4f6c7c5a36b4ca7becd8906b3912fdc864bfb1b6943950f9d80fc5",
+      "snapshot_fingerprint": "17cbbc44a9251fa02cf6dd3971325453ed10e703b29b0d5e39d970c93a3ec63c",
+      "status": "PASS",
+      "total_iterations": 2661,
+      "trace_hash": "f4ac05a0a4deee85fceeb097a10a295e10426b10d1076535a36db6c3c6570886",
+      "wall_ms": 3122638.935099996
+    }
+  ],
+  "git_branch": "codex/issue-82-maxperf",
+  "git_dirty": "",
+  "git_sha": "91020815a8f94a1fc2819d6fca65477bb9aa7f11",
+  "issue": 82,
+  "label": "after",
+  "peak_working_set_mb": -1.0,
+  "platform": "Windows-10-10.0.19045-SP0",
+  "python": "3.14.6",
+  "segment": "all",
+  "stages": {
+    "build.candidate_family": {
+      "calls": 5.0,
+      "time_ms": 45.282
+    },
+    "calibration.calibrate_all": {
+      "calls": 9.0,
+      "time_ms": 177.966
+    },
+    "calibration.derive_multisize_kerning": {
+      "calls": 16.0,
+      "time_ms": 0.117
+    },
+    "calibration.fingerprint": {
+      "calls": 7.0,
+      "time_ms": 111.764
+    },
+    "calibration.validate_pair_schedule": {
+      "calls": 8.0,
+      "time_ms": 0.06
+    },
+    "collection.total": {
+      "calls": 2.0,
+      "time_ms": 146833.167
+    },
+    "consumers.chromium": {
+      "calls": 5.0,
+      "time_ms": 8416.969
+    },
+    "consumers.fonttools": {
+      "calls": 5.0,
+      "time_ms": 12.453
+    },
+    "consumers.freetype": {
+      "calls": 5.0,
+      "time_ms": 170917.353
+    },
+    "consumers.harfbuzz": {
+      "calls": 5.0,
+      "time_ms": 9.919
+    },
+    "consumers.produce_bundle": {
+      "calls": 5.0,
+      "time_ms": 179495.342
+    },
+    "evaluator.evaluate": {
+      "calls": 5.0,
+      "time_ms": 563208.943
+    },
+    "model.compute_canonical_hash": {
+      "calls": 27.0,
+      "time_ms": 179.393
+    },
+    "model.seal": {
+      "calls": 4.0,
+      "time_ms": 57.512
+    },
+    "optimizer.boundary": {
+      "calls": 382592.0,
+      "time_ms": 61226.197
+    },
+    "optimizer.complexity_loss": {
+      "calls": 2957.0,
+      "time_ms": 10.012
+    },
+    "optimizer.curvature_loss": {
+      "calls": 2957.0,
+      "time_ms": 725.876
+    },
+    "optimizer.decode_mask": {
+      "calls": 4224.0,
+      "time_ms": 102706.834
+    },
+    "optimizer.loss_components": {
+      "calls": 2957.0,
+      "time_ms": 2079160.22
+    },
+    "optimizer.optimize": {
+      "calls": 2.0,
+      "time_ms": 2262554.251
+    },
+    "optimizer.optimize_glyph": {
+      "calls": 33.0,
+      "time_ms": 2079305.901
+    },
+    "optimizer.prepare_reference_artifacts": {
+      "calls": 4224.0,
+      "time_ms": 77551.929
+    },
+    "optimizer.rasterize_model_crop": {
+      "calls": 378496.0,
+      "time_ms": 238021.067
+    },
+    "optimizer.signed_distance": {
+      "calls": 375936.0,
+      "time_ms": 1311876.647
+    },
+    "optimizer.simplify_contours": {
+      "calls": 33.0,
+      "time_ms": 0.138
+    },
+    "optimizer.subdivide_contours": {
+      "calls": 33.0,
+      "time_ms": 1.778
+    },
+    "optimizer.transform_contours": {
+      "calls": 2825.0,
+      "time_ms": 97.019
+    },
+    "snapshot.get_raster_bytes": {
+      "bytes": 101405960.0,
+      "calls": 17184.0,
+      "time_ms": 61.29
+    },
+    "snapshot.load_from_store": {
+      "calls": 5.0,
+      "time_ms": 6070.984
+    },
+    "solver.reconstruct_glyph": {
+      "calls": 33.0,
+      "time_ms": 422205.712
+    },
+    "solver.schneider_fit_contour": {
+      "calls": 33.0,
+      "time_ms": 1450.468
+    }
+  },
+  "total_wall_ms": 3583198.266899999
+}

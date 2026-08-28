@@ -45,8 +45,9 @@ class CandidateFontArtifact:
 @dataclass(frozen=True)
 class CandidateFamilyBuildResult:
     """Set of candidate font binaries derived from the same cubic master."""
-    otf: CandidateFontArtifact
-    ttf: CandidateFontArtifact
+
+    otf: CandidateFontArtifact | None
+    ttf: CandidateFontArtifact | None
     glyph_count: int
     family_name: str
     style_name: str
@@ -142,15 +143,33 @@ class MaxCandidateFontBuilder:
         glyphs: list[ReconstructedGlyph] | dict[int, ReconstructedGlyph],
         output_dir: Path | str,
         typography: TypographyDataset | None = None,
+        formats: tuple[str, ...] | None = None,
     ) -> CandidateFamilyBuildResult:
-        """Build OTF and TTF candidate fonts from the same cubic masters."""
+        """Build OTF and TTF candidate fonts from the same cubic masters.
+
+        ``formats`` optionally restricts the build to the requested output
+        formats (subset of {"OTF", "TTF"}): each gate consumes exactly one
+        format, so building only that format avoids the unused half of the
+        work without altering any bytes. Default (None) builds both, exactly
+        as before; a built format's bytes are identical to the dual build.
+        """
         out_dir = Path(output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
 
         glyph_map = glyphs if isinstance(glyphs, dict) else {g.code_point: g for g in glyphs}
 
-        otf_art = self.build_candidate_otf(glyph_map, out_dir, typography=typography)
-        ttf_art = self.build_candidate_ttf(glyph_map, out_dir, typography=typography)
+        if formats is None:
+            build_otf = True
+            build_ttf = True
+        else:
+            requested = {str(f).strip().upper() for f in formats}
+            if not requested or requested - {"OTF", "TTF"}:
+                raise ValueError("CANDIDATE_BUILD_FORMATS_INVALID")
+            build_otf = "OTF" in requested
+            build_ttf = "TTF" in requested
+
+        otf_art = self.build_candidate_otf(glyph_map, out_dir, typography=typography) if build_otf else None
+        ttf_art = self.build_candidate_ttf(glyph_map, out_dir, typography=typography) if build_ttf else None
 
         return CandidateFamilyBuildResult(
             otf=otf_art,
