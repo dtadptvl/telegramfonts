@@ -203,6 +203,15 @@ Set runtime variables in `edge/wrangler.jsonc` `[vars]` or deploy secrets:
    The authorized Debian stage must retain the pinned release tar beside the
    release and the runtime identity manifest beside the runtime.
 
+   Reliability semantics (Issue #90 fix cycle): the worker launches with
+   `PYTHONDONTWRITEBYTECODE=1`, and the supervisor removes any `__pycache__`
+   trees from the staged release/runtime trees before release verification,
+   so worker bytecode can never pollute the staged tree and fail later
+   supervisor restart verification. The worker is launched through an `exec`
+   chain, so the PID the supervisor records is the actual worker process:
+   stop signals (INT/TERM/HUP) terminate the worker itself and can never
+   orphan it behind a bash subshell.
+
 ---
 
 ### Step 8: Strict Preflight & Recovery Gating `[WAIT HUMAN]`
