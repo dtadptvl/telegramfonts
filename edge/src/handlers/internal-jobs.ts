@@ -729,7 +729,7 @@ export async function handleInternalJobs(
   // Route: POST /internal/jobs/:job_id/recover (terminal FAILED-job recovery CAS)
   if (action === 'recover') {
     if (!/^[a-zA-Z0-9_-]{1,64}$/.test(jobId)) {
-      return new Response(JSON.stringify({ error: 'Valid job_id is required' }), {
+      return new Response(JSON.stringify({ error: 'Valid job_id is required', status: 'INVALID_REQUEST', http_status: 400 }), {
         status: 400,
         headers: { 'Content-Type': 'application/json' },
       });
@@ -751,7 +751,7 @@ export async function handleInternalJobs(
       bodyKeys.length !== expectedKeys.length ||
       expectedKeys.some((key) => !Object.prototype.hasOwnProperty.call(body, key))
     ) {
-      return new Response(JSON.stringify({ error: 'Exact recover request fields required' }), {
+      return new Response(JSON.stringify({ error: 'Exact recover request fields required', status: 'INVALID_REQUEST', http_status: 400 }), {
         status: 400,
         headers: { 'Content-Type': 'application/json' },
       });
@@ -789,7 +789,7 @@ export async function handleInternalJobs(
       dispatchAttempts < 0 ||
       dispatchAttempts > 1_000_000
     ) {
-      return new Response(JSON.stringify({ error: 'Invalid recover request bounds' }), {
+      return new Response(JSON.stringify({ error: 'Invalid recover request bounds', status: 'INVALID_REQUEST', http_status: 400 }), {
         status: 400,
         headers: { 'Content-Type': 'application/json' },
       });
@@ -816,12 +816,18 @@ export async function handleInternalJobs(
         });
       }
 
-      return new Response(JSON.stringify({ error: 'Recover preconditions not met', status: 'CONFLICT' }), {
+      return new Response(JSON.stringify({ error: 'Recover preconditions not met', status: 'CONFLICT', http_status: 409 }), {
         status: 409,
         headers: { 'Content-Type': 'application/json' },
       });
-    } catch {
-      return new Response(JSON.stringify({ error: 'Recover failed' }), {
+    } catch (error) {
+      emitStructuredLog({
+        event: 'recover_error',
+        job_id: jobId,
+        http_status: 500,
+        reason: error instanceof Error ? error.message.slice(0, 256) : 'unknown',
+      });
+      return new Response(JSON.stringify({ error: 'Recover failed', status: 'ERROR', http_status: 500 }), {
         status: 500,
         headers: { 'Content-Type': 'application/json' },
       });

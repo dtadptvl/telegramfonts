@@ -737,6 +737,13 @@ export class JobService {
 
     const now = Date.now();
     const nextMaxAttempts = cleanParams.maxAttempts + 1;
+    // Reaper-terminal admission (issue 90): the cron reaper fencing write clears
+    // lease_token but leaves lease_owner/leased_at/lease_expires_at residue on the
+    // terminal FAILED row. Admit exactly that shape (lease_token NULL and owner
+    // residue provably expired, or no owner at all); the SET clause normalizes all
+    // four lease fields to NULL in the same atomic statement. Live leases stay
+    // rejected: a non-NULL lease_token never matches, and owner residue with
+    // lease_expires_at >= now fails the expiry clause.
     const statements: D1PreparedStatement[] = [
       this.db
         .prepare(
@@ -755,10 +762,8 @@ export class JobService {
              AND j.status = 'FAILED'
              AND j.attempt_count = ?
              AND j.max_attempts = ?
-             AND j.lease_owner IS NULL
              AND j.lease_token IS NULL
-             AND j.leased_at IS NULL
-             AND j.lease_expires_at IS NULL
+             AND (j.lease_owner IS NULL OR j.lease_expires_at < ?)
              AND j.last_error = ?
              AND j.artifact_key IS NULL
              AND j.artifact_sha256 IS NULL
@@ -825,6 +830,7 @@ export class JobService {
           cleanParams.orderId,
           cleanParams.attemptCount,
           cleanParams.maxAttempts,
+          now,
           cleanParams.lastError,
           cleanParams.orderId,
           cleanParams.paymentCode,
