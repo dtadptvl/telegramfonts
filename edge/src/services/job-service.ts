@@ -108,6 +108,25 @@ export interface ExactJobRescueParams {
   dispatchAttempts: number;
 }
 
+export type TerminalJobRecoveryStatus = 'RECOVERED' | 'ALREADY_RECOVERED' | 'CONFLICT';
+
+export interface TerminalJobRecoveryResult {
+  status: TerminalJobRecoveryStatus;
+}
+
+export interface TerminalJobRecoveryParams {
+  jobId: string;
+  orderId: string;
+  outboxId: string;
+  paymentId: string;
+  paymentTransactionId: string;
+  paymentCode: string;
+  attemptCount: number;
+  maxAttempts: number;
+  lastError: string;
+  dispatchAttempts: number;
+}
+
 export interface FinalizeExpiredJobsResult {
   finalizedJobs: number;
   transitionedOrders: number;
@@ -126,6 +145,7 @@ export interface QueueRearmParams {
 export const QUEUE_REARM_AUDIT_REASON = 'QUEUE_RETENTION_EXPIRED_RECOVERY';
 export const MAX_ATTEMPTS_EXHAUSTED_REASON = 'max_attempts_exhausted';
 export const MAX_ATTEMPTS_EXHAUSTED_RESCUE_REASON = 'MAX_ATTEMPTS_EXHAUSTED_RESCUE';
+export const TERMINAL_FAILED_RECOVERY_REASON = 'TERMINAL_FAILED_RECOVERY';
 
 const SAFE_INTERNAL_ID = /^[a-zA-Z0-9_-]{1,64}$/;
 const SAFE_LINEAGE_ID = /^[a-zA-Z0-9_.:-]{1,128}$/;
@@ -160,6 +180,28 @@ function validExactJobRescueParams(params: ExactJobRescueParams): boolean {
     SAFE_INTERNAL_ID.test(params.leaseOwner) &&
     Number.isSafeInteger(params.leaseExpiresAt) &&
     params.leaseExpiresAt >= 0 &&
+    Number.isInteger(params.attemptCount) &&
+    params.attemptCount >= 0 &&
+    params.attemptCount <= MAX_REARM_ATTEMPT_COUNT &&
+    Number.isInteger(params.maxAttempts) &&
+    params.maxAttempts > 0 &&
+    params.maxAttempts < MAX_REARM_ATTEMPT_COUNT &&
+    params.attemptCount === params.maxAttempts &&
+    params.lastError === MAX_ATTEMPTS_EXHAUSTED_REASON &&
+    Number.isInteger(params.dispatchAttempts) &&
+    params.dispatchAttempts >= 0 &&
+    params.dispatchAttempts <= MAX_REARM_DISPATCH_ATTEMPTS
+  );
+}
+
+function validTerminalJobRecoveryParams(params: TerminalJobRecoveryParams): boolean {
+  return (
+    SAFE_INTERNAL_ID.test(params.jobId) &&
+    SAFE_INTERNAL_ID.test(params.orderId) &&
+    SAFE_INTERNAL_ID.test(params.outboxId) &&
+    SAFE_INTERNAL_ID.test(params.paymentId) &&
+    SAFE_LINEAGE_ID.test(params.paymentTransactionId) &&
+    SAFE_INTERNAL_ID.test(params.paymentCode) &&
     Number.isInteger(params.attemptCount) &&
     params.attemptCount >= 0 &&
     params.attemptCount <= MAX_REARM_ATTEMPT_COUNT &&
@@ -673,6 +715,295 @@ export class JobService {
     return results.every((result) => result.meta.changes === 1)
       ? { status: 'RESCUED' }
       : { status: 'CONFLICT' };
+  }
+
+  async recoverTerminalFailedJob(params: TerminalJobRecoveryParams): Promise<TerminalJobRecoveryResult> {
+    const cleanParams: TerminalJobRecoveryParams = {
+      jobId: params.jobId.trim(),
+      orderId: params.orderId.trim(),
+      outboxId: params.outboxId.trim(),
+      paymentId: params.paymentId.trim(),
+      paymentTransactionId: params.paymentTransactionId.trim(),
+      paymentCode: params.paymentCode.trim(),
+      attemptCount: params.attemptCount,
+      maxAttempts: params.maxAttempts,
+      lastError: params.lastError.trim(),
+      dispatchAttempts: params.dispatchAttempts,
+    };
+
+    if (!validTerminalJobRecoveryParams(cleanParams)) {
+      return { status: 'CONFLICT' };
+    }
+
+    const now = Date.now();
+    const nextMaxAttempts = cleanParams.maxAttempts + 1;
+    const statements: D1PreparedStatement[] = [
+      this.db
+        .prepare(
+          `UPDATE fulfillment_jobs AS j
+           SET status = 'RETRY',
+               max_attempts = max_attempts + 1,
+               next_retry_at = NULL,
+               last_error = ?,
+               lease_owner = NULL,
+               lease_token = NULL,
+               leased_at = NULL,
+               lease_expires_at = NULL,
+               updated_at = ?
+           WHERE j.id = ?
+             AND j.order_id = ?
+             AND j.status = 'FAILED'
+             AND j.attempt_count = ?
+             AND j.max_attempts = ?
+             AND j.lease_owner IS NULL
+             AND j.lease_token IS NULL
+             AND j.leased_at IS NULL
+             AND j.lease_expires_at IS NULL
+             AND j.last_error = ?
+             AND j.artifact_key IS NULL
+             AND j.artifact_sha256 IS NULL
+             AND j.artifact_size_bytes IS NULL
+             AND j.artifact_parts IS NULL
+             AND j.completed_at IS NULL
+             AND NOT EXISTS (
+               SELECT 1 FROM fulfillment_receipts AS r
+               WHERE r.job_id = j.id OR r.order_id = j.order_id
+             )
+             AND NOT EXISTS (
+               SELECT 1 FROM artifacts AS a
+               WHERE a.job_id = j.id OR a.order_id = j.order_id
+             )
+             AND EXISTS (
+               SELECT 1 FROM orders AS o
+               WHERE o.id = ?
+                 AND o.status = 'FAILED'
+                 AND o.payment_code = ?
+             )
+             AND EXISTS (
+               SELECT 1
+               FROM payments AS p
+               JOIN orders AS payment_order ON payment_order.id = p.order_id
+               WHERE p.id = ?
+                 AND p.order_id = ?
+                 AND payment_order.id = ?
+                 AND p.provider = 'SEPAY'
+                 AND p.status = 'VERIFIED'
+                 AND p.transaction_id = ?
+                 AND p.amount = payment_order.total_amount
+                 AND p.currency = payment_order.currency
+             )
+             AND (
+               SELECT COUNT(*) FROM payments
+               WHERE order_id = ? AND provider = 'SEPAY' AND status = 'VERIFIED'
+             ) = 1
+             AND EXISTS (
+               SELECT 1 FROM outbox_events AS e
+               WHERE e.id = ?
+                 AND e.event_type = 'JOB_READY'
+                 AND e.aggregate_type = 'ORDER'
+                 AND e.aggregate_id = ?
+                 AND e.status = 'SENT'
+                 AND e.dispatch_attempts = ?
+                 AND e.dispatched_at IS NOT NULL
+                 AND e.dispatch_lease_token IS NULL
+                 AND e.dispatch_leased_at IS NULL
+                 AND e.dispatch_lease_expires_at IS NULL
+                 AND e.next_dispatch_at IS NULL
+                 AND json_valid(e.payload) = 1
+                 AND json_extract(e.payload, '$.job_id') = ?
+             )
+             AND (
+               SELECT COUNT(*) FROM outbox_events
+               WHERE event_type = 'JOB_READY'
+                 AND aggregate_id = ?
+             ) = 1`
+        )
+        .bind(
+          TERMINAL_FAILED_RECOVERY_REASON,
+          now,
+          cleanParams.jobId,
+          cleanParams.orderId,
+          cleanParams.attemptCount,
+          cleanParams.maxAttempts,
+          cleanParams.lastError,
+          cleanParams.orderId,
+          cleanParams.paymentCode,
+          cleanParams.paymentId,
+          cleanParams.orderId,
+          cleanParams.orderId,
+          cleanParams.paymentTransactionId,
+          cleanParams.orderId,
+          cleanParams.outboxId,
+          cleanParams.orderId,
+          cleanParams.dispatchAttempts,
+          cleanParams.jobId,
+          cleanParams.orderId
+        ),
+      this.db
+        .prepare(
+          `UPDATE orders AS o
+           SET status = 'PROCESSING', updated_at = ?
+           WHERE o.id = ?
+             AND o.status = 'FAILED'
+             AND o.payment_code = ?
+             AND EXISTS (
+               SELECT 1 FROM fulfillment_jobs AS j
+               WHERE j.id = ?
+                 AND j.order_id = ?
+                 AND j.status = 'RETRY'
+                 AND j.attempt_count = ?
+                 AND j.max_attempts = ?
+                 AND j.last_error = ?
+                 AND j.updated_at = ?
+             )
+             AND EXISTS (
+               SELECT 1 FROM payments AS p
+               WHERE p.id = ?
+                 AND p.order_id = o.id
+                 AND p.provider = 'SEPAY'
+                 AND p.status = 'VERIFIED'
+                 AND p.transaction_id = ?
+                 AND p.amount = o.total_amount
+                 AND p.currency = o.currency
+             )
+             AND (
+               SELECT COUNT(*) FROM payments
+               WHERE order_id = o.id AND provider = 'SEPAY' AND status = 'VERIFIED'
+             ) = 1`
+        )
+        .bind(
+          now,
+          cleanParams.orderId,
+          cleanParams.paymentCode,
+          cleanParams.jobId,
+          cleanParams.orderId,
+          cleanParams.attemptCount,
+          nextMaxAttempts,
+          TERMINAL_FAILED_RECOVERY_REASON,
+          now,
+          cleanParams.paymentId,
+          cleanParams.paymentTransactionId
+        ),
+      this.db
+        .prepare(
+          `UPDATE outbox_events AS e
+           SET status = 'PENDING',
+               dispatched_at = NULL,
+               dispatch_lease_token = NULL,
+               dispatch_leased_at = NULL,
+               dispatch_lease_expires_at = NULL,
+               next_dispatch_at = NULL,
+               last_dispatch_error = ?
+           WHERE e.id = ?
+             AND e.event_type = 'JOB_READY'
+             AND e.aggregate_type = 'ORDER'
+             AND e.aggregate_id = ?
+             AND e.status = 'SENT'
+             AND e.dispatch_attempts = ?
+             AND e.dispatched_at IS NOT NULL
+             AND e.dispatch_lease_token IS NULL
+             AND e.dispatch_leased_at IS NULL
+             AND e.dispatch_lease_expires_at IS NULL
+             AND e.next_dispatch_at IS NULL
+             AND json_valid(e.payload) = 1
+             AND json_extract(e.payload, '$.job_id') = ?
+             AND EXISTS (
+               SELECT 1 FROM fulfillment_jobs AS j
+               WHERE j.id = ?
+                 AND j.order_id = ?
+                 AND j.status = 'RETRY'
+                 AND j.attempt_count = ?
+                 AND j.max_attempts = ?
+                 AND j.last_error = ?
+                 AND j.updated_at = ?
+             )
+             AND EXISTS (
+               SELECT 1 FROM orders AS o
+               WHERE o.id = ? AND o.status = 'PROCESSING'
+             )`
+        )
+        .bind(
+          TERMINAL_FAILED_RECOVERY_REASON,
+          cleanParams.outboxId,
+          cleanParams.orderId,
+          cleanParams.dispatchAttempts,
+          cleanParams.jobId,
+          cleanParams.jobId,
+          cleanParams.orderId,
+          cleanParams.attemptCount,
+          nextMaxAttempts,
+          TERMINAL_FAILED_RECOVERY_REASON,
+          now,
+          cleanParams.orderId
+        ),
+    ];
+
+    const results = await this.db.batch(statements);
+    if (results.every((result) => result.meta.changes === 1)) {
+      return { status: 'RECOVERED' };
+    }
+
+    // An idempotent replay is accepted only when the exact recovered lineage
+    // already carries the bounded recovery marker; broad status inference is
+    // intentionally avoided (same discipline as rearm ALREADY_REARMED).
+    const alreadyRecovered = await this.db
+      .prepare(
+        `SELECT 1 AS matched
+         FROM fulfillment_jobs AS j
+         WHERE j.id = ?
+           AND j.order_id = ?
+           AND j.status = 'RETRY'
+           AND j.attempt_count = ?
+           AND j.max_attempts = ?
+           AND j.last_error = ?
+           AND j.lease_owner IS NULL
+           AND j.lease_token IS NULL
+           AND j.leased_at IS NULL
+           AND j.lease_expires_at IS NULL
+           AND j.next_retry_at IS NULL
+           AND j.artifact_key IS NULL
+           AND j.artifact_sha256 IS NULL
+           AND j.artifact_size_bytes IS NULL
+           AND j.artifact_parts IS NULL
+           AND j.completed_at IS NULL
+           AND EXISTS (
+             SELECT 1 FROM orders AS o
+             WHERE o.id = ? AND o.status = 'PROCESSING'
+           )
+           AND EXISTS (
+             SELECT 1 FROM outbox_events AS e
+             WHERE e.id = ?
+               AND e.event_type = 'JOB_READY'
+               AND e.aggregate_type = 'ORDER'
+               AND e.aggregate_id = ?
+               AND e.status = 'PENDING'
+               AND e.dispatch_attempts = ?
+               AND e.dispatched_at IS NULL
+               AND e.dispatch_lease_token IS NULL
+               AND e.dispatch_leased_at IS NULL
+               AND e.dispatch_lease_expires_at IS NULL
+               AND e.next_dispatch_at IS NULL
+               AND e.last_dispatch_error = ?
+               AND json_valid(e.payload) = 1
+               AND json_extract(e.payload, '$.job_id') = ?
+           )`
+      )
+      .bind(
+        cleanParams.jobId,
+        cleanParams.orderId,
+        cleanParams.attemptCount,
+        nextMaxAttempts,
+        TERMINAL_FAILED_RECOVERY_REASON,
+        cleanParams.orderId,
+        cleanParams.outboxId,
+        cleanParams.orderId,
+        cleanParams.dispatchAttempts,
+        TERMINAL_FAILED_RECOVERY_REASON,
+        cleanParams.jobId
+      )
+      .first<{ matched: number }>();
+
+    return alreadyRecovered ? { status: 'ALREADY_RECOVERED' } : { status: 'CONFLICT' };
   }
 
   async validateLeaseForArtifactUpload(
