@@ -37,8 +37,10 @@ from compute.archive import (
     PROVENANCE_VIETNAMESE_AI,
     PROVENANCE_VIETNAMESE_PRESERVED,
     ArchiveIdentity,
+    ArchiveModeResolution,
     FinalFontArchive,
     canonical_source_identity,
+    resolve_archive_mode,
 )
 from compute.binary_cache import AuthorizedBinaryCache, BinaryCacheIdentity
 from compute.binary_gate import BINARY_PIPELINE_VERSION, BinaryConsumerValidator, BinaryGateReport, prepare_binary_artifact
@@ -172,7 +174,20 @@ class JobRunner:
             observation_store_dir=getattr(self.source_acquirer, "store_dir", None)
         )
         self.packager = packager or PackagerService()
-        self.archive = archive if archive is not None else FinalFontArchive.from_settings(settings)
+        # D21 safe archive mode (Issue #90): explicit, versioned, fail-closed.
+        # NO_LOCAL_ARCHIVE disables the local L1 archive entirely (repeat
+        # orders recompute; delivery unchanged); injecting an archive into a
+        # worker explicitly configured for NO_LOCAL_ARCHIVE is a forbidden
+        # fake-archive path and fails closed at construction.
+        self.archive_mode: ArchiveModeResolution = resolve_archive_mode(
+            settings, archive_present=archive is not None
+        )
+        if archive is not None and not self.archive_mode.archive_enabled:
+            raise ValueError("ARCHIVE_FORBIDDEN_IN_NO_LOCAL_ARCHIVE_MODE")
+        if self.archive_mode.archive_enabled:
+            self.archive = archive if archive is not None else FinalFontArchive.from_settings(settings)
+        else:
+            self.archive = None
         self.acquisition_pipeline = acquisition_pipeline
         self.model_cache = model_cache
         self.binary_cache = binary_cache
@@ -860,6 +875,8 @@ class JobRunner:
             family_name = job.family_name or self._family_name_from_url(job.source_url)
             archive_context = self._get_archive_context(job)
             self.last_reuse_trace = {"events": [], "acquisition_traces": {}}
+            # D21: archive-mode truth is observable in every job report trace.
+            self.last_reuse_trace["archive_mode"] = self.archive_mode.to_dict()
             cached_files = self._get_archive_hit(job, family_name, archive_context)
             reuse_state: dict[str, Any] = {"gated": False, "binaries": {}}
             if cached_files is not None:

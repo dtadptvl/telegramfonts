@@ -73,6 +73,15 @@ class Settings(BaseSettings):
         default=None,
         description="External ext4 root for immutable validated OTF/TTF final-font artifacts",
     )
+    FONT_ARCHIVE_MODE: str = Field(
+        default="AUTO",
+        description=(
+            "D21 safe archive mode (Issue #90): AUTO resolves from FONT_ARCHIVE_ROOT; "
+            "EXTERNAL_EXT4 requires the canonical external ext4 archive root; "
+            "NO_LOCAL_ARCHIVE disables local L1 archive reuse (repeat orders recompute, "
+            "delivery unchanged) where the external archive cannot be attached"
+        ),
+    )
     HTTP_TIMEOUT_SECONDS: float = Field(
         default=30.0,
         ge=1.0,
@@ -146,6 +155,17 @@ class Settings(BaseSettings):
         if not clean:
             clean = "a23-worker"
         return clean[:64]
+
+    @model_validator(mode="after")
+    def validate_archive_mode_consistency(self) -> Settings:
+        # D21 (Issue #90): explicit versioned archive mode, fail-closed.
+        # EXTERNAL_EXT4 demands a configured canonical root; NO_LOCAL_ARCHIVE
+        # rejects one so internal/loopback storage can never be presented as
+        # the canonical external archive. Raises ValueError on contradiction.
+        from compute.archive import resolve_archive_mode
+
+        resolve_archive_mode(self)
+        return self
 
     @model_validator(mode="after")
     def validate_heartbeat_lease_safety(self) -> Settings:
