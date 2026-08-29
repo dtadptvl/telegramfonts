@@ -108,6 +108,16 @@ verify_archive_filesystem_identity() {
   [ -n "$canonical_identity" ] && [ "$canonical_identity" = "$bridge_identity" ]
 }
 
+clean_bytecode_caches() {
+  # Worker bytecode (__pycache__) must never pollute the staged release/runtime
+  # trees: the release verification compares the complete staged path set and
+  # contents against the clean release archive and fails closed on any
+  # worker-written .pyc. The worker also runs with PYTHONDONTWRITEBYTECODE=1.
+  local target="$1"
+  "$CHROOT_BIN" "$DEBIAN_ROOT" /usr/bin/find "$target" -type d -name __pycache__ \
+    -prune -exec /bin/rm -rf {} + >/dev/null 2>&1
+}
+
 log() {
   printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" >>"$LOG_FILE"
 }
@@ -118,6 +128,14 @@ log() {
 [ ! -L "$DEBIAN_ROOT$RELEASE_ROOT" ] || fail "release identity must not be a symlink"
 [ -f "$DEBIAN_ROOT$WORKER_ENTRYPOINT" ] || fail "worker entrypoint is unavailable"
 [ -d "$DEBIAN_ROOT$RUNTIME_ROOT" ] || fail "required runtime identity is unavailable"
+
+# Hygiene before release/runtime verification: remove any worker-written
+# bytecode caches so the staged trees verify against the clean release.
+# Canonical ext4/mode identity checks below remain untouched.
+clean_bytecode_caches "$RELEASE_ROOT" \
+  || fail "release tree bytecode cache cannot be cleaned"
+clean_bytecode_caches "$RUNTIME_ROOT" \
+  || fail "runtime tree bytecode cache cannot be cleaned"
 
 # The clean release archive is content-addressed and compared with the staged
 # tree. A SHA-named directory alone is not a release identity.
@@ -279,20 +297,27 @@ restart_count=0
 window_start=0
 
 run_worker() {
+  # Called only as a background job. The exec below replaces the backgrounded
+  # subshell with the env->chroot->python chain, so the PID recorded by the
+  # supervisor ($!) IS the actual worker process: stop signals reach the
+  # worker itself and can never orphan it behind a bash subshell.
   if [ "$archive_mode" = "NO_LOCAL_ARCHIVE" ]; then
     # D21 NO_LOCAL_ARCHIVE: never propagate an archive root (even when one is
     # present in the host config); the worker runs the explicit versioned
     # NO_LOCAL_ARCHIVE mode - delivery works, local L1 reuse disabled.
-    env -u FONT_ARCHIVE_ROOT \
+    exec env -u FONT_ARCHIVE_ROOT \
     HOME="/root" \
     PATH="$WORKER_PATH" \
     PYTHONPATH="$RELEASE_ROOT/agent/src" \
+    PYTHONDONTWRITEBYTECODE=1 \
     FONT_ARCHIVE_MODE="NO_LOCAL_ARCHIVE" \
     "$CHROOT_BIN" "$DEBIAN_ROOT" "$RUNTIME_PYTHON" "$WORKER_ENTRYPOINT"
   else
+    exec env \
     HOME="/root" \
     PATH="$WORKER_PATH" \
     PYTHONPATH="$RELEASE_ROOT/agent/src" \
+    PYTHONDONTWRITEBYTECODE=1 \
     FONT_ARCHIVE_ROOT="$ARCHIVE_ROOT" \
     FONT_ARCHIVE_MODE="EXTERNAL_EXT4" \
     "$CHROOT_BIN" "$DEBIAN_ROOT" "$RUNTIME_PYTHON" "$WORKER_ENTRYPOINT"
@@ -303,6 +328,7 @@ while :; do
   [ "$stop_requested" -eq 0 ] || break
 
   log "launching Debian worker"
+  # run_worker execs the worker chain; worker_pid is the actual worker PID.
   run_worker </dev/null >>"$LOG_FILE" 2>&1 &
   worker_pid=$!
   wait "$worker_pid"

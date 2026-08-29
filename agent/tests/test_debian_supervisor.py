@@ -242,6 +242,162 @@ def test_no_legacy_termux_worker_fallback_remains() -> None:
     assert 'debian_worker_supervisor.sh' in _text(LAUNCH)
 
 
+def test_supervisor_worker_launch_disables_bytecode_and_execs_worker() -> None:
+    source = _text(SUPERVISOR)
+
+    start = source.index("run_worker() {")
+    end = source.index("\n}\n", start) + 2
+    body = source[start:end]
+
+    assert body.count("PYTHONDONTWRITEBYTECODE=1") == 2
+    assert body.count("exec env") == 2
+    assert 'exec env -u FONT_ARCHIVE_ROOT' in body
+    assert 'run_worker </dev/null >>"$LOG_FILE" 2>&1 &' in source
+
+
+def test_supervisor_cleans_bytecode_caches_before_release_verification() -> None:
+    source = _text(SUPERVISOR)
+
+    function = _shell_function(source, "clean_bytecode_caches")
+    assert '/usr/bin/find "$target" -type d -name __pycache__' in function
+    assert '-exec /bin/rm -rf {} +' in function
+
+    # Hygiene runs before release verification; the canonical ext4/mode
+    # identity checks remain present and untouched.
+    assert source.index('clean_bytecode_caches "$RELEASE_ROOT"') < source.index(
+        'verify_release_contents "$RELEASE_ARCHIVE" "$RELEASE_ROOT"'
+    )
+    assert source.index('clean_bytecode_caches "$RUNTIME_ROOT"') < source.index(
+        'verify_release_contents "$RELEASE_ARCHIVE" "$RELEASE_ROOT"'
+    )
+    assert 'release tree bytecode cache cannot be cleaned' in source
+    assert 'runtime tree bytecode cache cannot be cleaned' in source
+    assert 'verify_archive_filesystem_identity "$DEBIAN_ROOT$ARCHIVE_ROOT" "$HOST_ARCHIVE_BRIDGE"' in source
+
+
+def _stop_probe_script(run_worker_source: str, temp_dir: str) -> str:
+    # Causal stop-semantics probe for the supervisor's recorded worker PID.
+    # The extracted run_worker runs against a fake chroot whose process
+    # records its own PID. The asserted causal property: the PID the
+    # supervisor records ($!) IS the actual worker process PID, so the
+    # supervisor's TERM reaches the worker itself and can never be absorbed
+    # by an intervening bash subshell (the observed device failure mode).
+    # The explicit `exec` in run_worker guarantees this PID identity
+    # deterministically; without it the identity depends on bash-version
+    # exec-optimization heuristics and was observed to break on device.
+    return "\n".join(
+        (
+            "set -u",
+            f'cd "{temp_dir}" || {{ echo CD_FAILED; exit 1; }}',
+            'archive_mode="NO_LOCAL_ARCHIVE"',
+            'CHROOT_BIN="$PWD/fake_chroot.sh"',
+            'DEBIAN_ROOT="/nonexistent"',
+            'RELEASE_ROOT="/nonexistent"',
+            'RUNTIME_PYTHON="/nonexistent"',
+            'WORKER_ENTRYPOINT="/nonexistent"',
+            'ARCHIVE_ROOT="/nonexistent"',
+            'WORKER_PATH="/usr/bin:/bin"',
+            'export pidfile="$PWD/sentinel.pid"',
+            "cat >fake_chroot.sh <<'STUB'",
+            "#!/bin/sh",
+            'printf "%s\\n" "$$" >"$pidfile"',
+            "exec sleep 30 # telefont-stop-probe-sentinel",
+            "STUB",
+            "chmod +x fake_chroot.sh",
+            run_worker_source,
+            'run_worker </dev/null >/dev/null 2>&1 &',
+            "worker_pid=$!",
+            "sleep 1",
+            'sentinel_pid="$(cat "$pidfile" 2>/dev/null || true)"',
+            '[ -n "$sentinel_pid" ] || { echo NO_SENTINEL_PID; exit 1; }',
+            '[ "$worker_pid" = "$sentinel_pid" ] || { echo PID_MISMATCH "$worker_pid" "$sentinel_pid"; exit 1; }',
+            'kill -TERM "$worker_pid" 2>/dev/null || { echo TERM_FAILED; exit 1; }',
+            'wait "$worker_pid" 2>/dev/null || true',
+            "sleep 1",
+            'if kill -0 "$sentinel_pid" 2>/dev/null; then',
+            '  kill -KILL "$sentinel_pid" 2>/dev/null || true',
+            "  echo ORPHANED",
+            "  exit 1",
+            "fi",
+            "echo STOPPED",
+        )
+    )
+
+
+def test_supervisor_stop_terminates_actual_worker_process() -> None:
+    bash = _bash_command()
+    if bash is None:
+        pytest.skip("bash is not available on the validation host")
+
+    source = _text(SUPERVISOR)
+    run_worker_source = _shell_function(source, "run_worker")
+
+    with tempfile.TemporaryDirectory(dir=ROOT) as temp_dir:
+        result = subprocess.run(
+            [bash, "-c", _stop_probe_script(run_worker_source, Path(temp_dir).as_posix())],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "STOPPED" in result.stdout
+
+def test_supervisor_bytecode_cache_clean_removes_only_pycache() -> None:
+    bash = _bash_command()
+    if bash is None:
+        pytest.skip("bash is not available on the validation host")
+
+    source = _text(SUPERVISOR)
+    function = _shell_function(source, "clean_bytecode_caches")
+
+    with tempfile.TemporaryDirectory(dir=ROOT) as temp_dir:
+        temp_root = Path(temp_dir)
+        staged = temp_root / "staged"
+        (staged / "agent" / "src" / "__pycache__").mkdir(parents=True)
+        (staged / "agent" / "__pycache__").mkdir(parents=True)
+        (staged / "agent" / "src" / "__pycache__" / "main.cpython-311.pyc").write_bytes(b"x")
+        (staged / "agent" / "src" / "main.py").write_text("X = 1\n", encoding="utf-8")
+        fake_chroot = temp_root / "fake_chroot.sh"
+        fake_chroot.write_text(
+            "\n".join(
+                (
+                    "#!/bin/sh",
+                    "shift",
+                    'cmd="$1"',
+                    "shift",
+                    'case "$cmd" in',
+                    '  /usr/bin/find) exec find "$@" ;;',
+                    '  /bin/rm) exec rm "$@" ;;',
+                    "esac",
+                    "",
+                )
+            ),
+            encoding="utf-8",
+        )
+        fake_chroot.chmod(0o755)
+        script = "\n".join(
+            (
+                "set -u",
+                'CHROOT_BIN="$PWD/fake_chroot.sh"',
+                'DEBIAN_ROOT="/nonexistent"',
+                function,
+                'clean_bytecode_caches "$PWD/staged"',
+            )
+        )
+        result = subprocess.run(
+            [bash, "-c", script],
+            cwd=temp_dir,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert not list(staged.rglob("__pycache__"))
+        assert (staged / "agent" / "src" / "main.py").read_text(encoding="utf-8") == "X = 1\n"
+
+
 def test_supervisor_shell_syntax() -> None:
     bash = shutil.which("bash")
     if bash is None:
