@@ -22,6 +22,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+pytestmark = pytest.mark.integration
+
 from acquisition.models import (
     AcquisitionOutcome,
     AcquiredBinary,
@@ -2463,6 +2465,7 @@ async def test_ATTESTATION_EMPTY_RESOURCE_TYPE():
     assert pages is None
 
 
+@pytest.mark.browser
 @pytest.mark.asyncio
 async def test_STEALTH_BROWSER_LOCAL_HTML_FIXTURE():
     """STEALTH_BROWSER_LOCAL_HTML_FIXTURE: Real Chromium browser executes production evaluator on local HTML fixture with multiple same-family loaded faces."""
@@ -2569,6 +2572,7 @@ async def test_STEALTH_BROWSER_LOCAL_HTML_FIXTURE():
         await p_ctx.__aexit__(None, None, None)
 
 
+@pytest.mark.browser
 @pytest.mark.asyncio
 async def test_STEALTH_CSS_MD5_WITH_LOCAL_FALLBACK_REJECTED():
     """STEALTH_CSS_MD5_WITH_LOCAL_FALLBACK_REJECTED: CSS declares MD5 URL with local fallback, but URL 404s/fails -> rejected."""
@@ -2633,6 +2637,7 @@ async def test_STEALTH_CSS_MD5_WITH_LOCAL_FALLBACK_REJECTED():
         await p_ctx.__aexit__(None, None, None)
 
 
+@pytest.mark.browser
 @pytest.mark.asyncio
 async def test_STEALTH_OBSERVED_FONT_RESPONSE_ACCEPTED():
     """STEALTH_OBSERVED_FONT_RESPONSE_ACCEPTED: Exact font URL fulfilled with 200 and bytes -> accepted and bound."""
@@ -2703,6 +2708,7 @@ async def test_STEALTH_OBSERVED_FONT_RESPONSE_ACCEPTED():
         await p_ctx.__aexit__(None, None, None)
 
 
+@pytest.mark.browser
 @pytest.mark.asyncio
 async def test_STEALTH_PERFORMANCE_ONLY_REJECTED():
     """STEALTH_PERFORMANCE_ONLY_REJECTED: matching performance entry + no observed final 2xx font response -> STEALTH_MD5_RESOURCE_NOT_LOADED."""
@@ -2767,6 +2773,7 @@ async def test_STEALTH_PERFORMANCE_ONLY_REJECTED():
         await p_ctx.__aexit__(None, None, None)
 
 
+@pytest.mark.browser
 @pytest.mark.asyncio
 async def test_STEALTH_REDIRECT_THEN_FAIL_REJECTED():
     """STEALTH_REDIRECT_THEN_FAIL_REJECTED: expected-MD5 URL 3xx -> failed target/local fallback -> reject."""
@@ -2838,6 +2845,7 @@ async def test_STEALTH_REDIRECT_THEN_FAIL_REJECTED():
         await p_ctx.__aexit__(None, None, None)
 
 
+@pytest.mark.browser
 @pytest.mark.asyncio
 async def test_STEALTH_UNRELATED_MD5_RESPONSE_REJECTED():
     """STEALTH_UNRELATED_MD5_RESPONSE_REJECTED: unrelated 2xx URL containing expected MD5 while font URL fails/local fallback -> reject."""
@@ -2909,6 +2917,7 @@ async def test_STEALTH_UNRELATED_MD5_RESPONSE_REJECTED():
         await p_ctx.__aexit__(None, None, None)
 
 
+@pytest.mark.browser
 @pytest.mark.asyncio
 async def test_STEALTH_UNLOADED_FACE_REJECTED():
     """STEALTH_UNLOADED_FACE_REJECTED: matching descriptors but FontFace not loaded -> reject."""

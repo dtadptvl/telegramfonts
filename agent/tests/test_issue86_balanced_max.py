@@ -27,6 +27,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.fullmax_e2e
+
 from fidelity import release_gate as rg
 from fidelity.balanced_search import (
     GLOBAL_INTERMEDIATE_CACHE,

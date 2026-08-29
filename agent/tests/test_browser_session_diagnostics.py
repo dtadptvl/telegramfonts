@@ -7,6 +7,8 @@ import threading
 from types import SimpleNamespace
 
 import pytest
+
+pytestmark = pytest.mark.browser
 from websockets.exceptions import InvalidMessage
 
 import measurement.browser_session as browser_session

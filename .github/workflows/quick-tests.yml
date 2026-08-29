@@ -1,0 +1,100 @@
+name: quick-tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  classify:
+    name: Critical-Path Classifier (fail-closed)
+    runs-on: ubuntu-latest
+    outputs:
+      fullmax: ${{ steps.decide.outputs.fullmax }}
+      reason: ${{ steps.decide.outputs.reason }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Classify changed paths (fail-closed FULL-MAX trigger)
+        id: decide
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          FORCE_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'fullmax:force') }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            git fetch --no-tags --depth=1 origin "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
+            CHANGED="$(git diff --name-only "origin/$BASE_REF"...HEAD || true)"
+          elif git rev-parse --verify HEAD^1 >/dev/null 2>&1; then
+            CHANGED="$(git diff --name-only HEAD^1 HEAD || true)"
+          else
+            CHANGED=""
+          fi
+          echo "Changed paths:"
+          printf '%s\n' "$CHANGED"
+          python scripts/critical_path_classifier.py \
+            --event "$EVENT_NAME" \
+            --force-label "$FORCE_LABEL" \
+            --files "$CHANGED"
+
+  edge:
+    name: Edge Build & Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Preflight check
+        run: npm run preflight
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Run automated tests
+        run: npm test
+
+  agent-quick:
+    name: Agent Quick Tests (excludes fullmax_e2e + performance)
+    needs: classify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r agent/requirements-lock.txt
+
+      - name: Run quick pytest tier
+        run: |
+          pytest agent/tests -m "not fullmax_e2e and not performance" --strict-markers --durations=25
+
+      - name: Run benchmark harness check
+        run: |
+          python agent/src/benchmark.py --samples 2 --quiet

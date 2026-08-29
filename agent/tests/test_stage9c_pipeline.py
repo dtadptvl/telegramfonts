@@ -27,6 +27,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
 import pytest
+
+pytestmark = pytest.mark.integration
 from PIL import Image, ImageDraw
 
 from fidelity.models import (

@@ -1,5 +1,7 @@
 import json
 import pytest
+
+pytestmark = pytest.mark.performance
 from pathlib import Path
 from benchmark import (
     calculate_percentile,

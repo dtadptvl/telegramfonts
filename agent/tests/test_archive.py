@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.integration
+
 from compute.archive import ArchiveIdentity, FinalFontArchive
 from compute.models import ArchiveSourceContext, ClaimStyle, GeneratedFontFile
 from compute.source import SourceAcquirer

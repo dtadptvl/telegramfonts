@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.fullmax_e2e
+
 from measurement.collector import (
     ObservationCollector,
     derive_multisize_kerning,

@@ -7,6 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
+pytestmark = pytest.mark.browser
+
 import measurement.browser_session as browser_session
 import measurement.chromium_readiness as readiness
 from measurement.browser_session import (
