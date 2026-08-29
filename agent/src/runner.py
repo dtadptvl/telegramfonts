@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -195,30 +196,35 @@ class JobRunner:
         # Deterministic per-job acquisition/reuse call trace (sanitized).
         self.last_reuse_trace: dict[str, Any] = {}
 
-    async def _heartbeat_loop(
+    def _heartbeat_thread_main(
         self,
         job_id: str,
         lease_token: str,
         expiry_holder: list[int],
-        fenced_event: asyncio.Event,
-        stop_event: asyncio.Event,
+        fenced_event: threading.Event,
+        stop_event: threading.Event,
     ) -> None:
-        """Background concurrent heartbeat loop."""
-        interval = self.settings.HEARTBEAT_INTERVAL_SECONDS
-        while not stop_event.is_set():
-            try:
-                await asyncio.wait_for(stop_event.wait(), timeout=interval)
-                break
-            except asyncio.TimeoutError:
-                pass
+        """Lease heartbeat loop on a dedicated thread (independent scheduler).
 
+        The heartbeat MUST keep extending the lease for the full duration of
+        acquisition/reconstruction/optimization/delivery. Running it as an
+        asyncio task on the compute loop was proven to starve it whenever
+        synchronous compute blocked the loop (Issue #90 attempt 5: zero
+        heartbeat requests and zero D1 lease extensions over ~21 minutes of
+        healthy compute; the cron reaper then correctly fenced the run). A
+        dedicated thread keeps beating regardless of event-loop blocking.
+        Cadence, endpoint payload, and fenced/transient reactions are
+        unchanged; reaper/lease semantics live on the edge and are untouched.
+        Renewals log at INFO so lease extensions are observable in
+        production logs.
+        """
+        interval = self.settings.HEARTBEAT_INTERVAL_SECONDS
+        while not stop_event.wait(timeout=interval):
             if stop_event.is_set():
                 break
 
             try:
-                hb_res = await self.worker_client.heartbeat(job_id, lease_token)
-            except asyncio.CancelledError:
-                raise
+                hb_res = self.worker_client.heartbeat_sync(job_id, lease_token)
             except Exception as exc:
                 logger.warning(
                     "Heartbeat exception for %s; class=%s",
@@ -228,7 +234,7 @@ class JobRunner:
                 continue
             if hb_res.success and hb_res.lease_expires_at:
                 expiry_holder[0] = hb_res.lease_expires_at
-                logger.debug(f"Heartbeat renewed for job {job_id}, new expiry={hb_res.lease_expires_at}")
+                logger.info(f"Heartbeat renewed for job {job_id}, new expiry={hb_res.lease_expires_at}")
             elif hb_res.fenced:
                 logger.warning(f"Job {job_id} lease was fenced or expired during execution")
                 fenced_event.set()
@@ -694,7 +700,7 @@ class JobRunner:
         source_payload: SourcePayload | None,
         job: ClaimedJob,
         job_dir: Path,
-        fenced_event: asyncio.Event,
+        fenced_event: threading.Event,
         expiry_holder: list[int],
         archive_context: ArchiveSourceContext | None = None,
         cached_files: list[GeneratedFontFile] | None = None,
@@ -861,13 +867,19 @@ class JobRunner:
         # 2. Job successfully CLAIMED -> Execute isolated compute pipeline
         job = claim_res.job
         job_dir = self.scratch_manager.get_job_dir(job.job_id, job.lease_token)
-        fenced_event = asyncio.Event()
-        stop_event = asyncio.Event()
+        fenced_event = threading.Event()
+        stop_event = threading.Event()
         expiry_holder = [job.lease_expires_at]
 
-        heartbeat_task = asyncio.create_task(
-            self._heartbeat_loop(job.job_id, job.lease_token, expiry_holder, fenced_event, stop_event)
+        # Lease liveness runs on a dedicated thread so blocking compute on
+        # the event loop can never starve lease extensions (Issue #90).
+        heartbeat_thread = threading.Thread(
+            target=self._heartbeat_thread_main,
+            args=(job.job_id, job.lease_token, expiry_holder, fenced_event, stop_event),
+            name=f"lease-heartbeat-{job.job_id}",
+            daemon=True,
         )
+        heartbeat_thread.start()
 
         try:
             # Step A: tiered reuse. L1 exact archive hit -> package directly.
@@ -1245,7 +1257,14 @@ class JobRunner:
 
         finally:
             stop_event.set()
-            await heartbeat_task
+            await asyncio.to_thread(
+                heartbeat_thread.join, self.settings.HTTP_TIMEOUT_SECONDS + 5.0
+            )
+            if heartbeat_thread.is_alive():
+                logger.warning(
+                    "Heartbeat thread for job %s did not exit promptly after stop",
+                    job.job_id,
+                )
 
     async def process_pending_catalogs(self, max_requests: int = 1) -> int:
         """Resolve at most max_requests pending catalog request(s) per loop to protect Queue latency."""

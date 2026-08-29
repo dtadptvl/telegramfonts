@@ -2,6 +2,7 @@
 import asyncio
 import hashlib
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -188,7 +189,7 @@ def test_runner_packages_verified_archive_hit_without_builder(test_settings: Set
         source_payload=None,
         job=job,
         job_dir=tmp_path / "job",
-        fenced_event=asyncio.Event(),
+        fenced_event=threading.Event(),
         expiry_holder=[9999999999999],
         archive_context=context,
         cached_files=hit,

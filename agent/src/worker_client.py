@@ -165,7 +165,12 @@ class CompleteResult:
 
 
 class WorkerJobClient:
-    def __init__(self, settings: Settings, client: httpx.AsyncClient | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        client: httpx.AsyncClient | None = None,
+        sync_client: httpx.Client | None = None,
+    ) -> None:
         self.settings = settings
         self.base_url = f"{settings.EDGE_BASE_URL}/internal/jobs"
         self.headers = {
@@ -174,10 +179,16 @@ class WorkerJobClient:
         }
         self._external_client = client is not None
         self._client = client or httpx.AsyncClient(timeout=settings.HTTP_TIMEOUT_SECONDS)
+        # Optional injected sync client for the dedicated heartbeat thread
+        # (tests); production creates a short-lived client per beat instead.
+        self._external_sync_client = sync_client is not None
+        self._sync_client = sync_client
 
     async def close(self) -> None:
         if not self._external_client:
             await self._client.aclose()
+        if self._sync_client is not None and not self._external_sync_client:
+            self._sync_client.close()
 
     async def claim(self, job_id: str, lease_seconds: int | None = None) -> ClaimResult:
         url = f"{self.base_url}/{job_id}/claim"
@@ -245,6 +256,49 @@ class WorkerJobClient:
         except httpx.RequestError as exc:
             logger.warning(f"Network error on heartbeat ({job_id}): {type(exc).__name__}")
             return HeartbeatResult(success=False, fenced=False)
+
+    def heartbeat_sync(self, job_id: str, lease_token: str) -> HeartbeatResult:
+        """Blocking lease heartbeat for the dedicated heartbeat thread.
+
+        Exact mirror of async heartbeat() (same endpoint, payload, auth, and
+        response semantics) but safe to call OFF the event loop: synchronous
+        compute that blocks the loop can therefore never starve lease
+        extensions (Issue #90 attempt 5: zero heartbeats over ~21 minutes of
+        healthy compute). Uses a short-lived sync client; never shares the
+        loop-bound async client across threads.
+        """
+        url = f"{self.base_url}/{job_id}/heartbeat"
+        payload = {
+            "worker_id": self.settings.A23_WORKER_ID,
+            "lease_token": lease_token,
+            "extend_seconds": self.settings.LEASE_DURATION_SECONDS,
+        }
+
+        try:
+            if self._sync_client is not None:
+                resp = self._sync_client.post(url, headers=self.headers, json=payload)
+            else:
+                with httpx.Client(timeout=self.settings.HTTP_TIMEOUT_SECONDS) as client:
+                    resp = client.post(url, headers=self.headers, json=payload)
+        except httpx.RequestError as exc:
+            logger.warning(f"Network error on heartbeat ({job_id}): {type(exc).__name__}")
+            return HeartbeatResult(success=False, fenced=False)
+
+        if resp.status_code == 200:
+            try:
+                data = resp.json()
+            except ValueError:
+                return HeartbeatResult(success=False, fenced=False)
+            return HeartbeatResult(
+                success=True,
+                fenced=False,
+                lease_expires_at=data.get("lease_expires_at"),
+            )
+
+        if resp.status_code == 409:
+            return HeartbeatResult(success=False, fenced=True)
+
+        return HeartbeatResult(success=False, fenced=False)
 
     async def upload_artifact(
         self,

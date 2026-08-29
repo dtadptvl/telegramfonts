@@ -596,11 +596,12 @@ async def test_runner_fenced_heartbeat_during_build_aborts(test_settings: Settin
 
     fast_hb_settings = test_settings.model_copy(update={"HEARTBEAT_INTERVAL_SECONDS": 1, "LEASE_DURATION_SECONDS": 60})
 
+    sync_http = httpx.Client(transport=httpx.MockTransport(worker_handler))
     async with httpx.AsyncClient(transport=httpx.MockTransport(queue_handler)) as q_http, \
                httpx.AsyncClient(transport=httpx.MockTransport(worker_handler)) as w_http, \
                httpx.AsyncClient(transport=httpx.MockTransport(source_handler)) as s_http:
         q_client = CloudflareQueueClient(fast_hb_settings, client=q_http)
-        w_client = WorkerJobClient(fast_hb_settings, client=w_http)
+        w_client = WorkerJobClient(fast_hb_settings, client=w_http, sync_client=sync_http)
         runner = A23Runner(
             fast_hb_settings,
             q_client,
