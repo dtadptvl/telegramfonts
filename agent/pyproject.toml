@@ -39,7 +39,9 @@ pythonpath = ["src"]
 asyncio_mode = "auto"
 # Issue #88: explicit pytest tiers. Quick gate selector:
 #   -m "not fullmax_e2e and not performance"
-# fullmax-final lane selector: -m "fullmax_e2e or performance"
+# fullmax-final lane selector: -m "fullmax_e2e or performance or browser"
+# (the browser-marked Chromium readiness/warmup set makes the lane
+# Chromium-ready before the E2E tier; FULLMAX_LANE_COLD_START correction)
 markers = [
     "fullmax_e2e: canonical FULL-MAX end-to-end chains (~1h; excluded from the quick gate, runs in the fullmax-final lane)",
     "performance: performance-measurement tests (benchmark harness; excluded from the quick gate)",

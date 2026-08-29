@@ -79,4 +79,7 @@ jobs:
 
       - name: Run canonical FULL-MAX E2E tier (exactly once at final HEAD)
         run: |
-          pytest agent/tests -m "fullmax_e2e or performance" --strict-markers --durations=25
+          # Issue 88 FULLMAX_LANE_COLD_START correction: the browser-marked
+          # Chromium readiness/warmup set runs first so the canonical chain
+          # never cold-starts the first in-session Chromium launch.
+          pytest agent/tests -m "fullmax_e2e or performance or browser" --strict-markers --durations=25

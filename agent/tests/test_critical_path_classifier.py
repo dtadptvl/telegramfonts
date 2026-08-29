@@ -223,3 +223,18 @@ def test_lanes_fire_on_pr_and_main_push_and_support_overrides():
 
 def test_legacy_single_lane_workflow_removed():
     assert not (WORKFLOWS / "ci.yml").exists()
+
+
+def test_fullmax_lane_is_chromium_ready_before_e2e():
+    """Issue #88 FULLMAX_LANE_COLD_START correction: the fullmax lane selects
+    the browser-marked Chromium readiness/warmup set ahead of the canonical
+    E2E tier (pytest runs files alphabetically; test_browser_warmup.py sorts
+    before test_issue75_fullmax_e2e.py), so the canonical chain never
+    cold-starts the first in-session Chromium launch."""
+    fullmax = (WORKFLOWS / "fullmax-final.yml").read_text(encoding="utf-8")
+    assert '"fullmax_e2e or performance or browser"' in fullmax
+    warmup = ROOT / "agent" / "tests" / "test_browser_warmup.py"
+    source = warmup.read_text(encoding="utf-8")
+    assert "pytestmark = pytest.mark.browser" in source
+    assert "run_readiness" in source
+    assert "test_browser_warmup" < "test_issue75_fullmax_e2e"
