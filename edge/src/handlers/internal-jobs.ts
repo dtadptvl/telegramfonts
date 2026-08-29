@@ -81,7 +81,7 @@ export async function handleInternalJobs(
   const path = url.pathname;
 
   // Match /internal/jobs/:job_id/:action
-  const match = path.match(/^\/internal\/jobs\/([a-zA-Z0-9_-]+)\/(claim|heartbeat|fail|artifact|complete|rearm|rescue)$/);
+  const match = path.match(/^\/internal\/jobs\/([a-zA-Z0-9_-]+)\/(claim|heartbeat|fail|artifact|complete|rearm|rescue|recover)$/);
   if (!match) {
     return new Response(JSON.stringify({ error: 'Not Found' }), {
       status: 404,
@@ -720,6 +720,108 @@ export async function handleInternalJobs(
       });
     } catch {
       return new Response(JSON.stringify({ error: 'Rescue failed' }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+  }
+
+  // Route: POST /internal/jobs/:job_id/recover (terminal FAILED-job recovery CAS)
+  if (action === 'recover') {
+    if (!/^[a-zA-Z0-9_-]{1,64}$/.test(jobId)) {
+      return new Response(JSON.stringify({ error: 'Valid job_id is required' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    const expectedKeys = [
+      'order_id',
+      'outbox_id',
+      'payment_id',
+      'payment_transaction_id',
+      'payment_code',
+      'attempt_count',
+      'max_attempts',
+      'last_error',
+      'dispatch_attempts',
+    ];
+    const bodyKeys = Object.keys(body);
+    if (
+      bodyKeys.length !== expectedKeys.length ||
+      expectedKeys.some((key) => !Object.prototype.hasOwnProperty.call(body, key))
+    ) {
+      return new Response(JSON.stringify({ error: 'Exact recover request fields required' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    const orderId = typeof body.order_id === 'string' ? body.order_id.trim() : '';
+    const outboxId = typeof body.outbox_id === 'string' ? body.outbox_id.trim() : '';
+    const paymentId = typeof body.payment_id === 'string' ? body.payment_id.trim() : '';
+    const paymentTransactionId = typeof body.payment_transaction_id === 'string'
+      ? body.payment_transaction_id.trim()
+      : '';
+    const paymentCode = typeof body.payment_code === 'string' ? body.payment_code.trim() : '';
+    const attemptCount = body.attempt_count;
+    const maxAttempts = body.max_attempts;
+    const lastError = typeof body.last_error === 'string' ? body.last_error.trim() : '';
+    const dispatchAttempts = body.dispatch_attempts;
+
+    if (
+      !/^[a-zA-Z0-9_-]{1,64}$/.test(orderId) ||
+      !/^[a-zA-Z0-9_-]{1,64}$/.test(outboxId) ||
+      !/^[a-zA-Z0-9_-]{1,64}$/.test(paymentId) ||
+      !/^[a-zA-Z0-9_.:-]{1,128}$/.test(paymentTransactionId) ||
+      !/^[a-zA-Z0-9_-]{1,64}$/.test(paymentCode) ||
+      typeof attemptCount !== 'number' ||
+      !Number.isInteger(attemptCount) ||
+      attemptCount < 0 ||
+      attemptCount > 1000 ||
+      typeof maxAttempts !== 'number' ||
+      !Number.isInteger(maxAttempts) ||
+      maxAttempts < 1 ||
+      maxAttempts >= 1000 ||
+      !/^[a-zA-Z0-9_]{1,64}$/.test(lastError) ||
+      typeof dispatchAttempts !== 'number' ||
+      !Number.isInteger(dispatchAttempts) ||
+      dispatchAttempts < 0 ||
+      dispatchAttempts > 1_000_000
+    ) {
+      return new Response(JSON.stringify({ error: 'Invalid recover request bounds' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    try {
+      const result = await jobService.recoverTerminalFailedJob({
+        jobId,
+        orderId,
+        outboxId,
+        paymentId,
+        paymentTransactionId,
+        paymentCode,
+        attemptCount,
+        maxAttempts,
+        lastError,
+        dispatchAttempts,
+      });
+
+      if (result.status === 'RECOVERED' || result.status === 'ALREADY_RECOVERED') {
+        return new Response(JSON.stringify({ success: true, status: result.status }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      return new Response(JSON.stringify({ error: 'Recover preconditions not met', status: 'CONFLICT' }), {
+        status: 409,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    } catch {
+      return new Response(JSON.stringify({ error: 'Recover failed' }), {
         status: 500,
         headers: { 'Content-Type': 'application/json' },
       });
