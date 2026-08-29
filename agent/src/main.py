@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from composition import build_production_components, default_dev_vars_path
+from compute.archive import resolve_archive_mode
 from config import Settings
 from logging_utils import setup_logging
 from queue_client import CloudflareQueueClient
@@ -19,6 +20,9 @@ logger = setup_logging()
 
 async def main() -> None:
     settings = Settings()
+    # D21 safe archive mode (Issue #90): resolve and announce the explicit,
+    # versioned archive-mode identity at startup; never silent.
+    archive_mode = resolve_archive_mode(settings)
     scratch_manager = ScratchManager(settings.SCRATCH_DIR)
 
     # Prune stale scratch dirs on startup
@@ -61,7 +65,8 @@ async def main() -> None:
 
     logger.info(
         f"A23 Compute Worker started (worker_id={settings.A23_WORKER_ID}, "
-        f"queue={settings.CF_QUEUE_ID}, edge={settings.EDGE_BASE_URL})"
+        f"queue={settings.CF_QUEUE_ID}, edge={settings.EDGE_BASE_URL}, "
+        f"archive_mode={archive_mode.identity})"
     )
 
     try:

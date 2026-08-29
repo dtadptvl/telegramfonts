@@ -40,6 +40,110 @@ PROVENANCE_PROBE_ORDER: tuple[str, ...] = (
     PROVENANCE_VIETNAMESE_AI,
 )
 
+# ---------------------------------------------------------------------------
+# D21 safe A23 archive mode (Issue #90): explicit, versioned, never silent.
+#
+# The canonical final-font L1 archive exists ONLY on the accepted external
+# ext4 filesystem (future mini-PC production target). Where that filesystem
+# cannot be attached (A23), the worker runs the explicit NO_LOCAL_ARCHIVE
+# mode: validated delivery works unchanged, local L1 archive reuse is
+# disabled, repeat orders recompute, and the mode truth is observable in
+# readiness/reuse-trace/log surfaces. Loopback or internal storage is never
+# presented as the canonical external archive, and archive reuse is never
+# reported when unavailable.
+# ---------------------------------------------------------------------------
+
+ARCHIVE_MODE_AUTO = "AUTO"
+ARCHIVE_MODE_EXTERNAL_EXT4 = "EXTERNAL_EXT4"
+ARCHIVE_MODE_NO_LOCAL_ARCHIVE = "NO_LOCAL_ARCHIVE"
+
+ARCHIVE_MODE_VERSIONS: dict[str, int] = {
+    ARCHIVE_MODE_EXTERNAL_EXT4: 1,
+    ARCHIVE_MODE_NO_LOCAL_ARCHIVE: 1,
+}
+
+ARCHIVE_MODE_IDENTITIES: dict[str, str] = {
+    ARCHIVE_MODE_EXTERNAL_EXT4: "external_ext4_archive_v1",
+    ARCHIVE_MODE_NO_LOCAL_ARCHIVE: "no_local_archive_v1",
+}
+
+
+@dataclass(frozen=True)
+class ArchiveModeResolution:
+    """Resolved, versioned archive-mode truth for one worker configuration."""
+
+    mode: str
+    identity: str
+    archive_enabled: bool
+    explicit: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "mode": self.mode,
+            "identity": self.identity,
+            "version": ARCHIVE_MODE_VERSIONS[self.mode],
+            "archive_enabled": self.archive_enabled,
+            "explicit": self.explicit,
+        }
+
+
+def resolve_archive_mode(settings: Any, archive_present: bool = False) -> ArchiveModeResolution:
+    """Resolve the explicit archive-mode truth; fail closed on contradiction.
+
+    AUTO (default) resolves to the operational truth: the canonical external
+    archive is active exactly when an archive root is configured or an archive
+    instance is present; otherwise NO_LOCAL_ARCHIVE is active. Explicit modes
+    never infer: EXTERNAL_EXT4 demands a configured archive root, and
+    NO_LOCAL_ARCHIVE rejects one, so internal/loopback storage can never
+    masquerade as the canonical external archive.
+    """
+    raw = getattr(settings, "FONT_ARCHIVE_MODE", ARCHIVE_MODE_AUTO)
+    requested = str(raw if raw is not None else ARCHIVE_MODE_AUTO).strip().upper()
+    if requested not in {
+        ARCHIVE_MODE_AUTO,
+        ARCHIVE_MODE_EXTERNAL_EXT4,
+        ARCHIVE_MODE_NO_LOCAL_ARCHIVE,
+    }:
+        raise ValueError(f"UNSUPPORTED_ARCHIVE_MODE: {requested}")
+
+    root = getattr(settings, "FONT_ARCHIVE_ROOT", None)
+    root_configured = root is not None and str(root).strip() != ""
+
+    if requested == ARCHIVE_MODE_EXTERNAL_EXT4:
+        if not root_configured:
+            raise ValueError("ARCHIVE_MODE_EXTERNAL_EXT4_REQUIRES_FONT_ARCHIVE_ROOT")
+        return ArchiveModeResolution(
+            mode=ARCHIVE_MODE_EXTERNAL_EXT4,
+            identity=ARCHIVE_MODE_IDENTITIES[ARCHIVE_MODE_EXTERNAL_EXT4],
+            archive_enabled=True,
+            explicit=True,
+        )
+
+    if requested == ARCHIVE_MODE_NO_LOCAL_ARCHIVE:
+        if root_configured:
+            raise ValueError("ARCHIVE_MODE_CONTRADICTION_FONT_ARCHIVE_ROOT_SET")
+        return ArchiveModeResolution(
+            mode=ARCHIVE_MODE_NO_LOCAL_ARCHIVE,
+            identity=ARCHIVE_MODE_IDENTITIES[ARCHIVE_MODE_NO_LOCAL_ARCHIVE],
+            archive_enabled=False,
+            explicit=True,
+        )
+
+    if root_configured or archive_present:
+        return ArchiveModeResolution(
+            mode=ARCHIVE_MODE_EXTERNAL_EXT4,
+            identity=ARCHIVE_MODE_IDENTITIES[ARCHIVE_MODE_EXTERNAL_EXT4],
+            archive_enabled=True,
+            explicit=False,
+        )
+    return ArchiveModeResolution(
+        mode=ARCHIVE_MODE_NO_LOCAL_ARCHIVE,
+        identity=ARCHIVE_MODE_IDENTITIES[ARCHIVE_MODE_NO_LOCAL_ARCHIVE],
+        archive_enabled=False,
+        explicit=False,
+    )
+
+
 
 def canonical_source_identity(source_url: str) -> str:
     """Return a stable, non-secret identity for a source URL."""

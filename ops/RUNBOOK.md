@@ -171,6 +171,7 @@ Set runtime variables in `edge/wrangler.jsonc` `[vars]` or deploy secrets:
    VISIBILITY_TIMEOUT_MS=300000
    HEARTBEAT_INTERVAL_SECONDS=60
    LEASE_DURATION_SECONDS=300
+   FONT_ARCHIVE_MODE=NO_LOCAL_ARCHIVE
    ```
 4. Load environment & Execute Authoritative Physical A23 Capacity Benchmark:
    ```bash
@@ -184,9 +185,21 @@ Set runtime variables in `edge/wrangler.jsonc` `[vars]` or deploy secrets:
    bash scripts/debian_worker_supervisor.sh
    ```
    The supervisor loads `~/.telefont.env` without echoing it, enters the
-   explicit Debian release/runtime, propagates `FONT_ARCHIVE_ROOT=/srv/fontlab/archive`,
-   verifies the pinned release artifact, runtime fingerprint, and external
-   Ext4 mount, and fails closed instead of falling back to Termux Python or a dirty checkout.
+   explicit Debian release/runtime, verifies the pinned release artifact and
+   runtime fingerprint, and fails closed instead of falling back to Termux
+   Python or a dirty checkout.
+
+   D21 safe archive mode (Issue #90): the A23 cannot attach the canonical
+   external ext4 archive, so it starts with `FONT_ARCHIVE_MODE=NO_LOCAL_ARCHIVE`
+   (set in `~/.telefont.env`). The supervisor logs `archive_mode=NO_LOCAL_ARCHIVE`,
+   skips only the external ext4 mount/device/bridge identity checks under that
+   explicit mode (they remain unchanged and fail-closed for `EXTERNAL_EXT4`),
+   and launches the worker with `FONT_ARCHIVE_MODE=NO_LOCAL_ARCHIVE` and no
+   archive root (`env -u FONT_ARCHIVE_ROOT`). The worker runs the versioned
+   `no_local_archive_v1` identity: delivery unchanged, local L1 archive reuse
+   disabled, repeat orders recompute. `EXTERNAL_EXT4` (which propagates
+   `FONT_ARCHIVE_ROOT=/srv/fontlab/archive` and verifies the external ext4
+   mount) is reserved for the mini-PC production target.
    The authorized Debian stage must retain the pinned release tar beside the
    release and the runtime identity manifest beside the runtime.
 

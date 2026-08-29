@@ -182,6 +182,40 @@ print("|".join(values), end="")
 [ "$runtime_fingerprint" = "$EXPECTED_RUNTIME_FINGERPRINT" ] \
   || fail "Debian runtime identity mismatch"
 
+[ -n "$FLOCK_BIN" ] || fail "flock is unavailable"
+
+CONFIG_SOURCE="$(printenv TELEFONT_ENV_FILE 2>/dev/null || true)"
+if [ -z "$CONFIG_SOURCE" ]; then
+  CONFIG_SOURCE="$CONFIG_SOURCE_DEFAULT"
+fi
+[ -f "$CONFIG_SOURCE" ] || fail "canonical environment file is unavailable"
+
+# Load the existing host-side config without ever echoing its contents. The
+# worker receives the exported values through chroot; its HOME is reset below
+# so it cannot fall back to a Termux dotfile or a dirty checkout.
+set -a
+. "$CONFIG_SOURCE" >/dev/null 2>&1
+CONFIG_STATUS=$?
+set +a
+[ "$CONFIG_STATUS" -eq 0 ] || fail "canonical environment file could not be loaded"
+
+mkdir -p "$(dirname "$LOCK_FILE")" || fail "supervisor lock directory is unavailable"
+mkdir -p "$(dirname "$LOG_FILE")" || fail "supervisor log directory is unavailable"
+
+# D21 safe archive mode (Issue #90): explicit, versioned, never silent.
+# EXTERNAL_EXT4 (default) keeps the exact canonical external ext4 filesystem
+# identity checks fail-closed and unchanged. NO_LOCAL_ARCHIVE runs the worker
+# without any archive root; those identity checks are skipped ONLY under that
+# explicit mode and are never weakened for the canonical external path.
+archive_mode="$(printenv FONT_ARCHIVE_MODE 2>/dev/null || true)"
+case "$archive_mode" in
+  ''|AUTO|auto) archive_mode="EXTERNAL_EXT4" ;;
+  EXTERNAL_EXT4) archive_mode="EXTERNAL_EXT4" ;;
+  NO_LOCAL_ARCHIVE) archive_mode="NO_LOCAL_ARCHIVE" ;;
+  *) fail "unsupported FONT_ARCHIVE_MODE (expected EXTERNAL_EXT4 or NO_LOCAL_ARCHIVE)" ;;
+esac
+
+if [ "$archive_mode" = "EXTERNAL_EXT4" ]; then
 # Require an actual mount entry at the canonical path, and require ext4 on a
 # device different from Debian /. This rejects an unmounted backing directory
 # without depending on optional findmnt/blkid packages or printing device IDs.
@@ -215,34 +249,18 @@ root_device="$("$CHROOT_BIN" "$DEBIAN_ROOT" /usr/bin/stat -c %d / 2>/dev/null)" 
   || fail "canonical archive resolves to the Debian root device"
 verify_archive_filesystem_identity "$DEBIAN_ROOT$ARCHIVE_ROOT" "$HOST_ARCHIVE_BRIDGE" \
   || fail "canonical archive is not the accepted external archive filesystem"
-
-[ -n "$FLOCK_BIN" ] || fail "flock is unavailable"
-
-CONFIG_SOURCE="$(printenv TELEFONT_ENV_FILE 2>/dev/null || true)"
-if [ -z "$CONFIG_SOURCE" ]; then
-  CONFIG_SOURCE="$CONFIG_SOURCE_DEFAULT"
+else
+  log "archive_mode=NO_LOCAL_ARCHIVE: canonical external ext4 archive identity checks skipped by explicit D21 mode"
 fi
-[ -f "$CONFIG_SOURCE" ] || fail "canonical environment file is unavailable"
-
-# Load the existing host-side config without ever echoing its contents. The
-# worker receives the exported values through chroot; its HOME is reset below
-# so it cannot fall back to a Termux dotfile or a dirty checkout.
-set -a
-. "$CONFIG_SOURCE" >/dev/null 2>&1
-CONFIG_STATUS=$?
-set +a
-[ "$CONFIG_STATUS" -eq 0 ] || fail "canonical environment file could not be loaded"
 
 export PATH="$HOST_PATH"
-mkdir -p "$(dirname "$LOCK_FILE")" || fail "supervisor lock directory is unavailable"
-mkdir -p "$(dirname "$LOG_FILE")" || fail "supervisor log directory is unavailable"
 
 exec 9>"$LOCK_FILE" || fail "supervisor lock is unavailable"
 "$FLOCK_BIN" -n 9 || fail "another Debian worker supervisor already owns the lock"
 
 cd "$DEBIAN_ROOT" || fail "cannot enter Debian root"
 
-log "started release=$RELEASE_SHA" || fail "supervisor log is unavailable"
+log "started release=$RELEASE_SHA archive_mode=$archive_mode" || fail "supervisor log is unavailable"
 notify_startup READY || fail "startup handshake is unavailable"
 
 worker_pid=""
@@ -261,11 +279,24 @@ restart_count=0
 window_start=0
 
 run_worker() {
-  HOME="/root" \
-  PATH="$WORKER_PATH" \
-  PYTHONPATH="$RELEASE_ROOT/agent/src" \
-  FONT_ARCHIVE_ROOT="$ARCHIVE_ROOT" \
-  "$CHROOT_BIN" "$DEBIAN_ROOT" "$RUNTIME_PYTHON" "$WORKER_ENTRYPOINT"
+  if [ "$archive_mode" = "NO_LOCAL_ARCHIVE" ]; then
+    # D21 NO_LOCAL_ARCHIVE: never propagate an archive root (even when one is
+    # present in the host config); the worker runs the explicit versioned
+    # NO_LOCAL_ARCHIVE mode - delivery works, local L1 reuse disabled.
+    env -u FONT_ARCHIVE_ROOT \
+    HOME="/root" \
+    PATH="$WORKER_PATH" \
+    PYTHONPATH="$RELEASE_ROOT/agent/src" \
+    FONT_ARCHIVE_MODE="NO_LOCAL_ARCHIVE" \
+    "$CHROOT_BIN" "$DEBIAN_ROOT" "$RUNTIME_PYTHON" "$WORKER_ENTRYPOINT"
+  else
+    HOME="/root" \
+    PATH="$WORKER_PATH" \
+    PYTHONPATH="$RELEASE_ROOT/agent/src" \
+    FONT_ARCHIVE_ROOT="$ARCHIVE_ROOT" \
+    FONT_ARCHIVE_MODE="EXTERNAL_EXT4" \
+    "$CHROOT_BIN" "$DEBIAN_ROOT" "$RUNTIME_PYTHON" "$WORKER_ENTRYPOINT"
+  fi
 }
 
 while :; do

@@ -394,6 +394,43 @@ def run_a23_preflight(
             )
         )
 
+    # D21 safe archive mode (Issue #90): the resolved archive-mode identity is
+    # explicit, versioned, and observable; contradictions fail closed.
+    if cfg is not None:
+        try:
+            from compute.archive import resolve_archive_mode
+
+            mode_resolution = resolve_archive_mode(cfg)
+            if mode_resolution.archive_enabled:
+                mode_msg = (
+                    f"{mode_resolution.identity}: canonical external ext4 L1 archive active"
+                )
+            else:
+                mode_msg = (
+                    f"{mode_resolution.identity}: local L1 archive reuse disabled; "
+                    "repeat orders recompute; delivery unchanged"
+                )
+            checks.append(
+                ReadinessCheck(
+                    category="Filesystem & Storage Readiness",
+                    name="Archive Mode Identity (D21)",
+                    passed=True,
+                    message=mode_msg,
+                    critical=True,
+                    details=mode_resolution.to_dict(),
+                )
+            )
+        except ValueError as exc:
+            checks.append(
+                ReadinessCheck(
+                    category="Filesystem & Storage Readiness",
+                    name="Archive Mode Identity (D21)",
+                    passed=False,
+                    message=f"Archive mode contradiction: {exc}",
+                    critical=True,
+                )
+            )
+
     # 5. SQLite Store Initializations & Migration Idempotency
     db_test_dir = test_db_dir or (scratch_root / "_preflight_db_test")
     try:
