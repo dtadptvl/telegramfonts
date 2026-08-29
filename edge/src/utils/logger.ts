@@ -82,6 +82,13 @@ export interface CatalogFailedLogEvent extends LogEventBase {
   reason?: string;
 }
 
+export interface RecoverErrorLogEvent extends LogEventBase {
+  event: 'recover_error';
+  job_id: string;
+  http_status: number;
+  reason: string;
+}
+
 export type StructuredLogEvent =
   | PaymentAcceptedLogEvent
   | OutboxDispatchedLogEvent
@@ -91,7 +98,8 @@ export type StructuredLogEvent =
   | TelegramDeliveredLogEvent
   | DownloadServedLogEvent
   | CatalogCompletedLogEvent
-  | CatalogFailedLogEvent;
+  | CatalogFailedLogEvent
+  | RecoverErrorLogEvent;
 
 const SENSITIVE_SUBSTRINGS = [
   'authorization',

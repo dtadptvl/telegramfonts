@@ -20,6 +20,7 @@ type FixtureOptions = {
   jobStatus?: 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED';
   orderStatus?: 'PAID' | 'PROCESSING' | 'COMPLETED' | 'FAILED';
   retainLease?: boolean;
+  leaseResidue?: 'expired' | 'live';
   attemptCount?: number;
   maxAttempts?: number;
   lastError?: string | null;
@@ -54,6 +55,8 @@ function unique(prefix: string): string {
 // every lease field cleared to NULL, order FAILED, outbox JOB_READY SENT,
 // exactly one SEPAY VERIFIED payment. retainLease builds the cron
 // finalization-path shape (lease retained) that belongs to rescue instead.
+// leaseResidue builds the reaper-terminal shape (issue 90 attempt 5): lease_token
+// cleared by the cron fencing write with owner/leased_at/expires residue left behind.
 async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
   const now = Date.now();
   const jobId = unique('job');
@@ -71,9 +74,16 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
   const jobStatus = options.jobStatus ?? 'FAILED';
   const orderStatus = options.orderStatus ?? 'FAILED';
   const retainLease = options.retainLease ?? false;
-  const leasedAt = retainLease ? now - 120_000 : null;
-  const leaseExpiresAt = retainLease ? now - 60_000 : null;
-  const leaseOwnerValue = retainLease ? leaseOwner : null;
+  const leaseResidue = options.leaseResidue ?? 'none';
+  const leasedAt = retainLease ? now - 120_000 : leaseResidue === 'none' ? null : now - 420_000;
+  const leaseExpiresAt = retainLease
+    ? now - 60_000
+    : leaseResidue === 'expired'
+      ? now - 60_000
+      : leaseResidue === 'live'
+        ? now + 240_000
+        : null;
+  const leaseOwnerValue = retainLease ? leaseOwner : leaseResidue === 'none' ? null : leaseOwner;
   const leaseTokenValue = retainLease ? leaseToken : null;
   const lastError = options.lastError === undefined
     ? (jobStatus === 'FAILED' ? MAX_ATTEMPTS_EXHAUSTED_REASON : null)
@@ -478,6 +488,7 @@ describe('terminal FAILED fulfillment recovery', () => {
       { options: {}, mutate: (body) => ({ ...body, last_error: 'OTHER_FAILURE' }) },
       { options: { includeReceipt: true } },
       { options: { includeArtifact: true } },
+      { options: { leaseResidue: 'live' } },
     ];
 
     for (const testCase of cases) {
@@ -505,5 +516,169 @@ describe('terminal FAILED fulfillment recovery', () => {
     ).bind(fixture.outboxId).first<Record<string, unknown>>();
     expect(job).toEqual({ status: 'RETRY', attempt_count: 3, max_attempts: 4 });
     expect(outbox).toEqual({ status: 'PENDING', dispatch_attempts: 1 });
+  });
+
+  it('recovers a reaper-terminal FAILED row (token cleared, expired owner residue) and normalizes all four lease fields', async () => {
+    const fixture = await createFixture({ leaseResidue: 'expired' });
+
+    // Production reaper shape (issue 90 attempt 5): the cron fencing write
+    // cleared lease_token but left owner/leased_at/expires residue past expiry.
+    const before = await env.DB.prepare(
+      `SELECT status, lease_owner, lease_token, leased_at, lease_expires_at
+       FROM fulfillment_jobs WHERE id = ?`
+    ).bind(fixture.jobId).first<Record<string, unknown>>();
+    expect(before).toMatchObject({
+      status: 'FAILED',
+      lease_owner: fixture.leaseOwner,
+      lease_token: null,
+    });
+    expect(typeof before?.leased_at).toBe('number');
+    expect(typeof before?.lease_expires_at).toBe('number');
+    expect(before?.lease_expires_at as number).toBeLessThan(Date.now());
+
+    const first = await callRecover(fixture);
+    expect(first.response.status).toBe(200);
+    expect(first.data).toEqual({ success: true, status: 'RECOVERED' });
+
+    const job = await env.DB.prepare(
+      `SELECT status, attempt_count, max_attempts, next_retry_at, last_error,
+              lease_owner, lease_token, leased_at, lease_expires_at
+       FROM fulfillment_jobs WHERE id = ?`
+    ).bind(fixture.jobId).first<Record<string, unknown>>();
+    const order = await env.DB.prepare('SELECT status FROM orders WHERE id = ?')
+      .bind(fixture.orderId).first<{ status: string }>();
+    const outbox = await env.DB.prepare(
+      'SELECT status, dispatch_attempts, dispatched_at, last_dispatch_error FROM outbox_events WHERE id = ?'
+    ).bind(fixture.outboxId).first<Record<string, unknown>>();
+
+    // The same atomic UPDATE normalizes the expired residue to NULL.
+    expect(job).toEqual({
+      status: 'RETRY',
+      attempt_count: 3,
+      max_attempts: 4,
+      next_retry_at: null,
+      last_error: TERMINAL_FAILED_RECOVERY_REASON,
+      lease_owner: null,
+      lease_token: null,
+      leased_at: null,
+      lease_expires_at: null,
+    });
+    expect(order?.status).toBe('PROCESSING');
+    expect(outbox).toMatchObject({
+      status: 'PENDING',
+      dispatch_attempts: 1,
+      dispatched_at: null,
+      last_dispatch_error: TERMINAL_FAILED_RECOVERY_REASON,
+    });
+  });
+
+  it('rejects live leases: unexpired owner residue stays rejected with zero writes', async () => {
+    const liveResidue = await createFixture({ leaseResidue: 'live' });
+    const live = await callRecover(liveResidue);
+    expect(live.response.status).toBe(409);
+    expect(live.data).toEqual({
+      error: 'Recover preconditions not met',
+      status: 'CONFLICT',
+      http_status: 409,
+    });
+
+    // Row byte-identical: the rejected batch leaks no partial write.
+    const job = await env.DB.prepare(
+      `SELECT status, attempt_count, max_attempts, lease_owner, lease_token, leased_at, lease_expires_at
+       FROM fulfillment_jobs WHERE id = ?`
+    ).bind(liveResidue.jobId).first<Record<string, unknown>>();
+    expect(job).toMatchObject({
+      status: 'FAILED',
+      attempt_count: 3,
+      max_attempts: 3,
+      lease_owner: liveResidue.leaseOwner,
+      lease_token: null,
+    });
+    expect(typeof job?.leased_at).toBe('number');
+    expect(job?.lease_expires_at as number).toBeGreaterThan(Date.now());
+
+    const order = await env.DB.prepare('SELECT status FROM orders WHERE id = ?')
+      .bind(liveResidue.orderId).first<{ status: string }>();
+    const outbox = await env.DB.prepare('SELECT status FROM outbox_events WHERE id = ?')
+      .bind(liveResidue.outboxId).first<{ status: string }>();
+    expect(order?.status).toBe('FAILED');
+    expect(outbox?.status).toBe('SENT');
+  });
+
+  it('preserves fencing invariants after reaper-terminal recovery (single claim, rival fenced, stale heartbeat rejected)', async () => {
+    const fixture = await createFixture({ leaseResidue: 'expired' });
+    expect((await callRecover(fixture)).response.status).toBe(200);
+
+    const service = new JobService(env.DB);
+    const claim = await service.claimJob(fixture.jobId, 'recover-worker', 60);
+    expect(claim.status).toBe('CLAIMED');
+    expect(claim.payload?.order_id).toBe(fixture.orderId);
+    expect(claim.payload?.lease_token).toMatch(/^[0-9a-f-]{36}$/);
+
+    const claimed = await env.DB.prepare(
+      'SELECT attempt_count, max_attempts, status, lease_owner FROM fulfillment_jobs WHERE id = ?'
+    ).bind(fixture.jobId).first<Record<string, unknown>>();
+    expect(claimed).toMatchObject({
+      attempt_count: 4,
+      max_attempts: 4,
+      status: 'PROCESSING',
+      lease_owner: 'recover-worker',
+    });
+
+    // The granted pass consumes the final attempt, so a rival claim is fenced
+    // exactly like a fresh job at max attempts: TERMINAL with ack.
+    const rivalClaim = await service.claimJob(fixture.jobId, 'recover-worker-2', 60);
+    expect(rivalClaim.status).toBe('TERMINAL');
+    expect(rivalClaim.queue_action).toBe('ack');
+    expect(rivalClaim.reason).toBe(MAX_ATTEMPTS_EXHAUSTED_REASON);
+
+    const fenced = await env.DB.prepare(
+      'SELECT lease_owner FROM fulfillment_jobs WHERE id = ?'
+    ).bind(fixture.jobId).first<Record<string, unknown>>();
+    expect(fenced?.lease_owner).toBe('recover-worker');
+
+    const staleHeartbeat = await service.heartbeat(
+      fixture.jobId,
+      'recover-worker',
+      '11111111-1111-1111-1111-111111111111',
+    );
+    expect(staleHeartbeat.status).toBe('EXPIRED_OR_FENCED');
+  });
+
+  it('is idempotent across replays of a reaper-terminal recovery', async () => {
+    const fixture = await createFixture({ leaseResidue: 'expired' });
+    expect((await callRecover(fixture)).data).toEqual({ success: true, status: 'RECOVERED' });
+
+    const second = await callRecover(fixture);
+    expect(second.response.status).toBe(200);
+    expect(second.data).toEqual({ success: true, status: 'ALREADY_RECOVERED' });
+
+    const job = await env.DB.prepare(
+      `SELECT attempt_count, max_attempts, lease_owner, lease_token, leased_at, lease_expires_at
+       FROM fulfillment_jobs WHERE id = ?`
+    ).bind(fixture.jobId).first<Record<string, unknown>>();
+    expect(job).toEqual({
+      attempt_count: 3,
+      max_attempts: 4,
+      lease_owner: null,
+      lease_token: null,
+      leased_at: null,
+      lease_expires_at: null,
+    });
+  });
+
+  it('serializes concurrent recover calls on a reaper-terminal row to exactly one recovery', async () => {
+    const fixture = await createFixture({ leaseResidue: 'expired' });
+    const results = await Promise.all([callRecover(fixture), callRecover(fixture)]);
+    expect(results.map((result) => result.response.status).sort()).toEqual([200, 200]);
+    expect(results.map((result) => result.data.status).sort()).toEqual([
+      'ALREADY_RECOVERED',
+      'RECOVERED',
+    ]);
+
+    const job = await env.DB.prepare(
+      'SELECT status, attempt_count, max_attempts FROM fulfillment_jobs WHERE id = ?'
+    ).bind(fixture.jobId).first<Record<string, unknown>>();
+    expect(job).toEqual({ status: 'RETRY', attempt_count: 3, max_attempts: 4 });
   });
 });
