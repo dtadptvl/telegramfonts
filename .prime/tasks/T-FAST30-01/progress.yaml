@@ -1,0 +1,41 @@
+task: T-FAST30-01
+contract_rev: 2
+policy_rev: "P-20260830.8-LEAN-SAFE-R15"
+policy_fingerprint: "d059a83646a03543"
+worker: logical-worker-deep
+branch: prime-v12-cutover
+base_head: da354b9
+milestones:
+  - id: M1
+    ts: "2026-08-30T04:52:00Z"
+    status: done
+    summary: >-
+      Contract verified (id/rev/fingerprint match). ADR-0001 read. Surface mapped:
+      profiles.py, release_gate.py (BALANCED->FULL escalation), runner.py (2 call
+      sites), balanced_search.py ladder, CI lanes (quick-tests, fullmax-final),
+      critical_path_classifier, retired-profile test files. Design fixed: FAST_30
+      inherits the versioned calibrated ladder schedule + 30m wall + fail-closed
+      PROFILE_RETIRED selection; escalation deleted; gate-level diagnostics kept,
+      runner maps FAIL -> FAST30_FAILED terminal.
+  - id: M2
+    status: done
+    summary: profiles.py + balanced_search.py FAST_30 core (sole profile, wall-limit error, retired guards)
+  - id: M3
+    status: done
+    summary: release_gate.py retirement (escalation deleted, PROFILE_RETIRED fail-closed, wall-limit boundaries)
+  - id: M4
+    status: done
+    summary: runner.py + CI lanes + retired/adapted tests + new focused FAST_30 tests
+  - id: M5
+    status: done
+    summary: focused causal tests green (PROFILE_RETIRED, sole-selection, FAST30_FAILED wall halt, reuse precedence)
+  - id: M6
+    status: done
+    summary: >-
+      Final single quick-lane validation run executed (878.75s): 416
+      passed / 5 failed / 1 skipped. 3 failures were this task's own
+      regime-expectation test bugs (fixed test-only, re-verified green
+      via focused runs); 2 failures pre-existing/environmental, proven
+      unrelated (WSL-bash CRLF on untouched script; missing
+      ObservationStore.get_latest_manifest API). Committed b385ab1 (21
+      files, explicit pathspecs). result.yaml written.

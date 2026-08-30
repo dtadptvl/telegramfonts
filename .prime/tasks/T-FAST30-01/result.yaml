@@ -1,0 +1,133 @@
+task: T-FAST30-01
+contract_rev: 2
+policy_rev: "P-20260830.8-LEAN-SAFE-R15"
+policy_fingerprint: "d059a83646a03543"
+worker: logical-worker-deep
+branch: prime-v12-cutover
+base_head: da354b9
+status: completed
+
+proved:
+  A1: >-
+    PROVED. BALANCED_MAX/FULL_MAX removed from every executable route:
+    runner passes only FAST_30_PROFILE; release gate is FAST_30-only with
+    fail-closed profile boundary; ladder guard rejects retired names; CI
+    fullmax-final lane + FULL-MAX classifier deleted; retired-profile test
+    suites/perf harnesses deleted. Any retired selection fails closed with
+    PROFILE_RETIRED (select_production_profile raises; gate returns FAIL
+    result PROFILE_RETIRED:<name>; BalancedMaxSearch raises). Historical
+    records (calibration identity string, ADR/journal, docstrings) retain
+    names only. Tests: test_fast30_sole_profile.py
+    test_select_retired_profile_fails_closed_with_profile_retired,
+    test_gate_retired_profile_selection_fails_closed,
+    test_ladder_guard_rejects_retired_profiles (all PASS).
+  A2: >-
+    PROVED. select_production_profile resolves only FAST_30 (absent
+    request -> FAST_30; retired -> PROFILE_RETIRED; unknown ->
+    PROFILE_UNKNOWN). Gate executes a single pass; the BALANCED->FULL
+    escalation block, staging/promotion machinery, and the
+    escalated_from_profile/escalation_reason record fields are deleted.
+    Tests: test_select_production_profile_fast30_sole,
+    test_gate_fast30_is_sole_default_and_publishes (asserts escalation
+    record absence) (PASS).
+  A3: >-
+    PROVED. FAST_30_PROFILE.wall_limit_seconds=1800 (versioned, in policy
+    hash). execute()/execute_with_model compute a monotonic deadline;
+    checkpoints at profile/format boundary, ladder tiers (form_model +
+    per-glyph + per-tier), post-formation, pre-build, pre-consumers,
+    pre-publication, and L2 tier boundaries; overrun returns FAIL with
+    FAST30_FAILED: WALL_LIMIT_EXCEEDED. Runner maps any non-publishable
+    gate outcome (deadline or quality) to terminal FAST30_FAILED and
+    stops (FAST30_FAILED in TERMINAL_ERROR_CODES). Tests:
+    test_fast30_wall_limit_halt_fails_closed,
+    test_runner_stage9d_corrupted_evidence_stops_before_side_effects,
+    test_runner_stage9d_partial_multi_artifact_failure_archives_nothing,
+    test_VI_AI_FORGED_fail_closed_no_publish,
+    test_PARTIAL_ORDER_one_failing_item_archives_nothing (PASS).
+  A4: >-
+    PROVED. Held-out partitioning, four-consumer evidence production,
+    FidelityEvaluator gating, thresholds, attestation, and drift guards
+    are code-identical (diff touches only profile selection, escalation
+    removal, wall-limit checkpoints, comments). Outputs remain TTF+OTF
+    only (gate UNSUPPORTED_FORMAT rejection unchanged;
+    compute.archive.ARCHIVEABLE_FORMATS == {TTF,OTF} unchanged). Tests:
+    test_release_gate_pass_attestation_and_artifact_binding,
+    test_release_gate_convergence_determinism_two_runs (PASS).
+  A5: >-
+    PROVED. L1 final-artifact reuse, L2 model reuse (execute_with_model),
+    L3 authorized-binary reuse, gate-internal formation memo, and the
+    exact-identity intermediate cache are preserved; reuse precedence
+    unchanged (reuse still wins immediately; bounded acquisition
+    data-source recovery untouched in compute/source). Tests:
+    test_reuse_precedence_unchanged_under_fast30 (one formation across
+    two identical gates; identical artifact SHA), test_issue82_maxperf.py
+    memo suite, test_runner_stage9d_sha_continuity_and_attested_repeat_hit
+    (PASS).
+  A6: >-
+    PROVED. .github/workflows/fullmax-final.yml deleted;
+    scripts/critical_path_classifier.py deleted; quick-tests.yml retains
+    the quick lane (dead fullmax classify job removed); fullmax_e2e
+    marker retained in pyproject only as a fail-closed quick-gate
+    exclusion. Tests: test_parallel_isolation_probe.py (asserts
+    fullmax-final.yml absent; quick lane free of xdist) (PASS).
+
+commits:
+  - sha: b385ab1
+    title: "feat(fidelity): FAST_30 sole production profile; retire BALANCED_MAX/FULL_MAX"
+    files_changed: 21
+    note: "source/test/CI task delta; explicit pathspecs only"
+
+evidence:
+  contract_verification: >-
+    .prime/tasks/T-FAST30-01/contract.yaml re-read first: id T-FAST30-01,
+    contract_rev 2, policy_fingerprint d059a83646a03543 all match;
+    ADR-0001 constraints applied.
+  focused_validation:
+    - cmd: "python -m pytest agent/tests/test_fast30_sole_profile.py -q"
+      result: "7 passed (PROFILE_RETIRED fail-closed; FAST_30 sole selection; FAST30_FAILED wall halt; reuse precedence)"
+    - cmd: "python -m pytest agent/tests/test_stage9d_release_gate.py (gate PASS/determinism/tamper + runner negative repros)"
+      result: "all adapted regime tests pass under FAST_30"
+    - cmd: "python -m pytest agent/tests/test_issue82_maxperf.py (memo suite)"
+      result: "pass with FAST_30 formation unit counters"
+  final_quick_lane_run:
+    cmd: >-
+      python -m pytest agent/tests -m "not fullmax_e2e and not
+      performance" --strict-markers  (single expensive run, max_runs=1)
+    result: "416 passed, 5 failed, 1 skipped, 6 deselected in 878.75s"
+    triage: >-
+      3 of 5 failures were regime-expectation bugs in this task's own
+      new/adapted tests (fast30 tamper repro expected wrong stage; two
+      issue71 runner repros still expected pre-regime reason codes).
+      Fixed (test-only) and re-verified via focused runs (all PASS). No
+      production code changed after the full run. Remaining 2 failures
+      are PRE-EXISTING and unrelated to this diff: (a)
+      test_debian_supervisor.py::test_supervisor_shell_syntax - Windows
+      WSL bash + CRLF checkout of an untouched shell script (passes on
+      Linux CI with LF); (b)
+      test_reconstruction.py::test_representative_subset_physical_smoke -
+      calls ObservationStore.get_latest_manifest which does not exist
+      (pre-existing broken API; only executes when a local
+      observations/benchmark store is present at repo-root cwd; skips in
+      clean checkouts). Neither file is touched by this task.
+  expected_green_state: >-
+    On the stable final candidate the quick lane is 419 passed / 1
+    skipped / 2 pre-existing environmental failures (unchanged by this
+    task); NO_LOOP forbids a second full-suite run, so the post-fix state
+    is evidenced by the focused re-runs above.
+
+budget:
+  expensive_full_runs: 1
+  focused_runs_during_edits: 12
+  validation_wall: "~18m (full run 14m38s + focused batches)"
+  session_wall: "~47m"
+
+preservation_notes:
+  - "ops/a23_deployment_manifest.json left unstaged (locally modified before this task; untouched)."
+  - "observations/benchmark/index.sqlite3 transient test side-effect restored via git checkout (not committed)."
+  - "Forbidden zones untouched: .kilo/, .local-artifacts/, agent/src/observations/, fake_chroot.sh, scratch/, tmp_candidate_build/, .telefont.env, dev.vars."
+  - "Chroot/runtime truths (NO_LOCAL_ARCHIVE, heartbeat daemon thread, CAS terminal recovery), held-out/consumer gates, thresholds, TTF+OTF outputs, reuse tiers, bounded acquisition recovery: code paths preserved unchanged."
+  - "Historical records retaining retired names (allowed by A1): CALIBRATION_CORPUS_IDENTITY value, profiles/release_gate docstrings, .prime journal/archive/ADR, perf calibration JSON report."
+
+files:
+  result: ".prime/tasks/T-FAST30-01/result.yaml"
+  progress: ".prime/tasks/T-FAST30-01/progress.yaml"
