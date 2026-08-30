@@ -1,5 +1,5 @@
 schema_version: 7
-generation: 7
+generation: 8
 
 governance:
   policy_rev: "P-20260830.9-LEAN-SAFE-R16"
@@ -18,9 +18,9 @@ now:
 next: []
 
 blockers:
-  - "REMEDIATION ENVELOPE DRAFTED, AWAITING ONE-SHOT HUMAN APPROVAL (E-00015): T-A23-PROD-01 rev 4 (DRAFT, NOT executed) covers fresh inspection, migration 0007, one CAS-bound mode=ORIGINAL designation for ord_2a142f39 ONLY (Human remediation decision; never general backfill), exact origin/main@166e45b edge+A23 deployment, at most one identity-bound dispatch/recovery mutation, 30-min wall, all-or-nothing delivery. No production action until approval."
-  - "DEPLOYMENT GATE: integrated T-PRICE-01 line (merge f16ac39; head 166e45b72b55e2c1f04e30ec7a73a07179e2ed62 on origin/main + origin/prime-recovery) deploys ONLY inside the approved rev-4 envelope (E-00012 D identity-bound requirement satisfied by the envelope)."
-  - "JOB STATE UNKNOWN SINCE PA2 (2026-08-30T07:30Z it held a live lease a23-termux-primary-01 attempt 6/6, expiry ~07:31:57Z): resolved by envelope P0 fresh inspection; non-interruption rule holds if attempt 6 is genuinely active."
+  - "REV 5 APPROVED WITH BINDING AMENDMENTS A1-A6 (E-00016); T-A23-PROD-01 executing as faithful transcription: fresh inspection -> migration 0007 -> strong one-order CAS mode=ORIGINAL -> exact 166e45b edge deploy from clean worktree -> A23 release with active-attempt protection -> at most one identity-bound dispatch -> 30-min wall monitoring. Terminal report once."
+  - "DEPLOYMENT IDENTITY RULE (A1): immutable product source = exact 166e45b72b55e2c1f04e30ec7a73a07179e2ed62; deploy from clean worktree checked out at exact 166e45b after verifying origin/main contains it; origin/main tip MAY advance (authorization-memory commits)."
+  - "JOB STATE UNKNOWN SINCE PA2 (2026-08-30T07:30Z live lease attempt 6/6, expiry ~07:31:57Z): resolved by P0 fresh inspection with A2 branching (GENUINELY_ACTIVE never interrupted; COMPLETED/FAILED reduce mutation counts; STUCK proceeds under guards)."
 
 exit:
   - "one controlled bot order completed end-to-end on A23 under FAST_30 with verified TTF/OTF delivery within the 30-minute wall limit (requires separate consequential authorization for the A23 production leg)"
@@ -36,7 +36,7 @@ human_requirements:
     - "runtime model failover only for capacity/unavailability with unchanged contract and reusable evidence"
     - "never fake/bypass/weaken external-ext4/filesystem identity checks; loopback never posed as canonical archive"
     - "stale A23 retired-profile job: read-only inspection only; no mutation without explicit authorization"
-    - "REV-4 REMEDIATION ENVELOPE PENDING ONE-SHOT APPROVAL (E-00015): Human designated mode ORIGINAL for ord_2a142f39 ONLY at already-paid price - explicit remediation decision, NOT inference, NEVER general backfill; T-A23-PROD-01 rev 4 DRAFT executes solely on that approval; E-00009 remains historical/unconfirmed; Human never executes commands/relays JSON"
+    - "REV 5 APPROVED + EXECUTING (E-00016): binding amendments A1-A6 transcribed faithfully into contract_rev 5 (deployment via clean worktree at exact 166e45b; A2 P0 branching; A3 strong CAS binding all identity fields; A4 race protection; A5 acceptance = exactly ordered format [TTF] all-or-nothing; A6 mutation maximums, unused authority expires); Human remediation designation mode=ORIGINAL for ord_2a142f39 ONLY, never general backfill; Human never executes commands/relays JSON"
     - "T-PRICE-01 integrated line (head 166e45b) deploys ONLY inside the approved rev-4 envelope; absent-mode legacy orders otherwise fail closed by design and need Human decisions, never automatic repair"
     - "E-00011 mode proof: NEVER infer ORIGINAL from an absent mode field; fulfillment proceeds only on positive durable row evidence of mode/styles/formats/payment/delivery; VIETNAMESE or unproven -> STOP fail-closed, T-PRICE-01 before fulfillment"
 
@@ -51,9 +51,10 @@ recent_invalidations:
   - {generation: 5, scopes: [production-dispatch, product-flow, pricing], severity: breaking, source_event: E-00011, note: "fail-closed mode proof; T-A23-PROD-01 rev 2 superseded by rev 3"}
   - {generation: 6, scopes: [production-dispatch, product-flow, pricing], severity: breaking, source_event: E-00012, note: "overnight bounded autonomous cycle; rev 3 envelope conditionally granted; T-PRICE-01 spec pre-authorized for VIETNAMESE/unproven branch"}
   - {generation: 7, scopes: [production-dispatch, product-flow, pricing], severity: breaking, source_event: E-00015, note: "Human remediation: mode ORIGINAL designated for ord_2a142f39 only (never general backfill); T-A23-PROD-01 rev 3 superseded by rev 4 DRAFT envelope"}
+  - {generation: 8, scopes: [production-dispatch, product-flow, pricing, production-remediation], severity: breaking, source_event: E-00016, note: "envelope approved with binding amendments A1-A6; rev 4 superseded by rev 5; execution authorized as faithful transcription"}
 
 reconciliation:
   status: in_progress
-  event: E-00015
+  event: E-00016
 
-updated_at: "2026-08-30T09:15:00Z"
+updated_at: "2026-08-30T09:30:00Z"

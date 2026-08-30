@@ -2,76 +2,87 @@ schema_version: 8
 policy_rev: "P-20260830.9-LEAN-SAFE-R16"
 policy_fingerprint: "0fa00f66ee4873bf"
 id: T-A23-PROD-01
-contract_rev: 4
+contract_rev: 5
 mode: NORMAL
-validated_at_generation: 7
+validated_at_generation: 8
 scope_tags: [a23-production-dispatch, product-flow, pricing, production-remediation]
-status: draft   # E-00015 remediation envelope; NOT executed; awaits one-shot Human approval
+status: approved   # E-00016: approved with binding amendments A1-A6; faithful transcription of rev 4 + amendments; execution authorized without further approval
 
-objective: "Remediation fulfillment (E-00015) of legacy paid order ord_2a142f39 under Human-designated mode ORIGINAL at the already-paid price: fresh inspection, migration 0007, one CAS-bound mode designation for this order only, exact origin/main@166e45b deployment to edge + A23, at most one identity-bound dispatch/recovery mutation, 30-minute delivery wall, all-or-nothing delivery of the ordered formats. Executes ONLY on one-shot Human approval of the identity-bound envelope."
+objective: "Remediation fulfillment (E-00015, approved with binding amendments E-00016) of legacy paid order ord_2a142f39 under Human-designated mode ORIGINAL at the already-paid price: fresh inspection with branch semantics, migration 0007, one strong CAS-bound mode designation for this order only, exact 166e45b deployment to edge (clean worktree) + A23 with active-attempt protection, at most one identity-bound dispatch/recovery mutation, 30-minute delivery wall, all-or-nothing delivery of exactly the ordered format [TTF]."
 
 remediation:
   authority: "Human E-00015 (generation 7): explicit mode ORIGINAL designation for THIS order only, at the already-paid 5,000 VND (tx 77506129)"
   nature: "new Human remediation decision; NOT an inference from the absent mode field"
-  scope_guard: "never a general backfill: the CAS update is bound to the exact order id + mode IS NULL + status guard; no other row may be written"
+  scope_guard: "never a general backfill: the CAS update binds the exact order id + mode IS NULL + status PROCESSING + total_amount/currency + exact prior updated_at + exact prior metadata + verified payment identity (A3); no other row may be written"
 
 authorization:
-  status: "PENDING ONE-SHOT HUMAN APPROVAL of the identity-bound envelope; NO production action authorized yet"
-  envelope: "phases P0-P6 below are the complete mutation set; approval covers M1-M5 + reads; execution order is causally fixed (migration -> CAS -> edge deploy -> A23 release -> dispatch)"
+  status: "APPROVED WITH BINDING AMENDMENTS (E-00016, 2026-08-30T09:26Z): rev 5 executes without further Human approval as a faithful transcription with no semantic expansion"
+  amendments:
+    A1: "immutable product source = exact 166e45b72b55e2c1f04e30ec7a73a07179e2ed62; authorization-memory commits may advance origin/main; deployment uses a clean worktree checked out at exact 166e45b after verifying origin/main contains it; origin/main tip is NOT required to remain 166e45b"
+    A2: "P0 branching: GENUINELY_ACTIVE -> never interrupt/restart, observe within existing bounded wall, later actions use immediately fresh monitored rows + process/lease identity; COMPLETED -> M2 + M5 mandatory NO-OP, completed order unchanged, M1/M3/M4 may continue solely to activate the product line; FAILED -> zero legacy-order remediation and zero dispatch, M1/M3/M4 may continue solely to activate the product line, failed order preserved for separate Human resolution; STUCK -> P1-P5 proceed under remaining guards"
+    A3: "strong M2 CAS from an immediately fresh snapshot binding: exact order id, mode IS NULL, status=PROCESSING, total_amount=5000, currency=VND, exact prior updated_at, exact prior metadata value, plus verified existence of payment tx 77506129 for this order (provider SEPAY, status VERIFIED, amount 5000, currency VND); set only this order's mode to ORIGINAL and advance updated_at consistently; exactly one changed row required; zero or more than one -> STOP; no session/other-order/metadata backfill/generalized migration"
+    A4: "every consequential action after P0 revalidates exact job status, attempt_count/max_attempts, lease owner/token/expiry, order status/mode, payment and outbox identity from the latest authorized monitoring read; identity drift or an active valid lease -> do not dispatch"
+    A5: "acceptance is exactly the durable ordered format [TTF] delivered all-or-nothing; TTF+OTF defines the allowed output set only; producing an unrequested OTF is NOT authorized"
+    A6: "mutation maximums: one tracked application of migration 0007; at most one exact CAS mode designation; one exact Edge deployment; one exact A23 release after active-attempt protection; at most one identity-bound dispatch/recovery mutation; COMPLETED/FAILED branches reduce counts; unused authority expires and must not be repurposed; no retries; no rollback"
   historical_evidence:
-    - "E-00009 historical/unconfirmed only; E-00012 branch D completed (T-PRICE-01 integrated); rev 3 branch C void (mode unproven)"
+    - "E-00009 historical/unconfirmed only; E-00012 branch D completed (T-PRICE-01 integrated); rev 3 branch C void; rev 4 envelope approved as amended"
   owner: human
   max_attempts: 1
-  stop: ["409/500/ambiguous/unexpected -> STOP preserve evidence", "CAS rows_changed != 1 (and order not COMPLETED) -> STOP reconcile", "30-min wall exceeded -> FAST30_FAILED STOP", "attempt genuinely active -> zero mutation, monitor only, never interrupt", "order already FAILED at P0 -> STOP reconcile (new Human decision required)"]
+  stop: ["409/500/ambiguous/unexpected -> STOP preserve evidence", "A3 CAS rows_changed != 1 -> STOP", "A3 payment identity precondition fail -> STOP", "A4 identity drift or active valid lease -> do not dispatch", "30-min wall exceeded -> FAST30_FAILED STOP", "GENUINELY_ACTIVE attempt -> never interrupt/restart", "order FAILED at P0 -> zero legacy remediation/dispatch; product-line activation may continue; failed order preserved for Human resolution"]
   rollback: "none authorized; any rollback requires its own new Human authorization"
 
 acceptance:
-  PA1: "one fresh read-only inspection session proves exact current rows (orders, order_items, payments, fulfillment_jobs, fulfillment_receipts, outbox_events for the stable IDs) plus A23 process/lease state (device agent process via existing authorized access; D1 lease fields); zero mutations in this phase; output = GENUINELY_ACTIVE | STUCK | COMPLETED | FAILED"
-  PA2: "migration 0007_font_mode.sql applied to telegramfonts-d1 exactly once (wrangler-tracked); verified by read-back: orders.mode + telegram_sessions.mode/pending_source_url columns exist; no row writes in this phase"
-  PA3: "exactly ONE CAS-bound UPDATE designates mode ORIGINAL for ord_2a142f39c5d2443492d1d8410d18bf9f only: UPDATE orders SET mode='ORIGINAL', updated_at=? WHERE id='ord_2a142f39c5d2443492d1d8410d18bf9f' AND mode IS NULL AND status='PROCESSING'; rows_changed MUST equal 1 (0 while order still PROCESSING -> STOP); NO-OP record if P0 proved COMPLETED; no other row written; never general backfill"
-  PA4: "edge deployed at exact origin/main@166e45b72b55e2c1f04e30ec7a73a07179e2ed62 by an authorized production worker with authenticated Cloudflare session; deployed identity verified"
-  PA5: "A23 release at identity containing 166e45b by an authorized production worker with existing A23 access: fresh deployment manifest generated + verified (NEVER the stale uncommitted ops/a23_deployment_manifest.json), release fingerprint PASS, archive_mode=NO_LOCAL_ARCHIVE, device manifest identity verified; held until any genuinely active attempt terminates - never interrupted"
-  PA6: "at most ONE identity-bound dispatch/recovery mutation (rescue/recover/rearm class, chosen by exact fresh post-release rows) or zero if the job is genuinely active or the queue already picked it up; no retry"
-  PA7: "delivery within the 30-minute wall: all-or-nothing Telegram delivery of the ordered formats (durable record selected_formats [TTF]; system outputs TTF/OTF only) to chat 901652398; deadline or gate failure -> FAST30_FAILED and STOP"
+  PA1: "one fresh read-only inspection session proves exact current rows (orders, order_items, payments, fulfillment_jobs, fulfillment_receipts, outbox_events for the stable IDs) plus A23 process/lease state; zero mutations; output classification GENUINELY_ACTIVE | STUCK | COMPLETED | FAILED drives A2 branching"
+  PA2: "migration 0007_font_mode.sql applied to telegramfonts-d1 exactly once (wrangler-tracked); verified by read-back: orders.mode + telegram_sessions.mode/pending_source_url columns exist; no row writes"
+  PA3: "exactly ONE strong CAS UPDATE per amendment A3 designates mode ORIGINAL for ord_2a142f39c5d2443492d1d8410d18bf9f only, advancing updated_at consistently; rows_changed MUST equal 1 (zero or more than one -> STOP); mandatory NO-OP on COMPLETED/FAILED branches; no session/other-order/metadata backfill/generalized migration"
+  PA4: "edge deployed at exact immutable source 166e45b72b55e2c1f04e30ec7a73a07179e2ed62 from a clean worktree checked out at that exact commit after verifying origin/main contains it (A1); deployed identity verified"
+  PA5: "A23 release at identity containing 166e45b by an authorized production worker with existing A23 access: fresh deployment manifest generated + verified (NEVER the stale uncommitted ops/a23_deployment_manifest.json), release fingerprint PASS, archive_mode=NO_LOCAL_ARCHIVE, device manifest identity verified; executed only after active-attempt protection (A2/A6)"
+  PA6: "at most ONE identity-bound dispatch/recovery mutation (rescue/recover/rearm class, chosen by exact fresh rows) or zero if genuinely active / queue auto-pickup / COMPLETED / FAILED; every precondition revalidated per A4 immediately before execution; no retry"
+  PA7: "delivery within the 30-minute wall: all-or-nothing Telegram delivery of exactly the ordered format [TTF] (A5) to chat 901652398; deadline or gate failure -> FAST30_FAILED and STOP"
 
 phases:
   P0_inspect:
     executor: "authorized production worker (authenticated Cloudflare session + existing A23 access)"
     surface: "one read-only batched SELECT session on telegramfonts-d1 for the stable IDs + read-only A23 process/lease observation"
-    decides: "job liveness: GENUINELY_ACTIVE (valid lease + current heartbeat + agent process on this job) | STUCK | COMPLETED | FAILED"
+    decides: "job liveness per A2: GENUINELY_ACTIVE (valid lease + current heartbeat + agent process on this job) | STUCK | COMPLETED | FAILED"
+    branches: "A2 semantics bind each outcome exactly (see authorization.amendments.A2)"
   P1_migration:
     executor: "authorized production worker"
     action: "M1: wrangler d1 migrations apply DB --remote - applies ONLY 0007_font_mode.sql (0001-0006 already tracked)"
     verify: "d1_migrations tracking row + column presence read-back"
   P2_mode_cas:
     executor: "authorized production worker"
-    action: "M2: single CAS UPDATE (exact PA3 statement), one invocation"
-    guard: "rows_changed == 1 (or NO-OP record if P0 proved COMPLETED); anything else -> STOP"
+    precondition: "immediately fresh snapshot (A3/A4): orders row exact values + payment tx 77506129 identity (SEPAY/VERIFIED/5000/VND for this order) + job/outbox identity"
+    action: "M2: single CAS UPDATE binding every A3 field; sets mode='ORIGINAL' and advances updated_at consistently; one invocation"
+    guard: "rows_changed == 1 exactly; otherwise STOP; mandatory NO-OP on COMPLETED/FAILED"
   P3_edge_deploy:
     executor: "authorized production worker"
-    action: "M3: wrangler deploy of edge/ at exact origin/main@166e45b"
+    action: "M3: wrangler deploy of edge/ from a clean worktree checked out at exact 166e45b after verifying origin/main contains it (A1)"
     verify: "deployed identity matches 166e45b"
   P4_a23_release:
     executor: "authorized production worker with existing A23 access"
     action: "M4: release agent identity containing 166e45b; fresh manifest generation + verification; release fingerprint PASS; archive_mode=NO_LOCAL_ARCHIVE"
-    hold_condition: "if attempt GENUINELY_ACTIVE: hold until that attempt terminates (any outcome); never interrupt"
+    hold_condition: "GENUINELY_ACTIVE attempt: hold until it terminates (any outcome); never interrupt/restart (A2); release happens after active-attempt protection (A6)"
   P5_dispatch:
     executor: "Prime (identity-bound, single-attempt)"
-    precondition: "fresh post-release rows (short scoped read)"
-    action: "M5: exactly one dispatch/recovery mutation chosen by exact row state, OR zero if genuinely active / queue auto-pickup"
+    precondition: "immediately fresh monitoring read per A4 (exact job status, attempt_count/max_attempts, lease owner/token/expiry, order status/mode, payment + outbox identity)"
+    action: "M5: exactly one dispatch/recovery mutation chosen by exact row state, OR zero if genuinely active / queue auto-pickup / COMPLETED / FAILED"
+    guard: "identity drift or active valid lease -> do not dispatch (A4)"
   P6_monitor:
     executor: "Prime (scoped reads of the same rows/outbox/receipts) + optional Human Telegram delivery observation"
     wall: "30 minutes from P5 dispatch (or from P0 liveness confirmation on the zero-mutation active path)"
-    success: "orders COMPLETED + fulfillment_receipts row + delivery SENT + ordered formats delivered all-or-nothing"
+    success: "orders COMPLETED + fulfillment_receipts row + delivery SENT + ordered format [TTF] delivered all-or-nothing"
 
 human_role:
-  - "one-shot approval of the envelope (M1-M5 + reads); Human never executes commands or relays JSON"
+  - "Human approved rev 5 with amendments A1-A6 (E-00016); no further approval needed for faithful execution"
   - "Human may provide the final Telegram delivery observation (PA7)"
+  - "FAILED branch (if reached): the failed paid order awaits a separate Human resolution"
 
 constraints:
   - "E-00015 designation is remediation for THIS order only; it never becomes general backfill or a precedent for inference"
+  - "amendments A1-A6 bind exactly as transcribed; no semantic expansion; unused authority expires and must not be repurposed (A6)"
   - "honor ADR-0001/ADR-0002/ADR-0003 without weakening; FAST_30 30-minute wall; no fallback/escalation"
-  - "no production action while authorization PENDING; SINGLE_SHOT + NO_LOOP; no retry of any mutation"
+  - "SINGLE_SHOT + NO_LOOP; no retry of any mutation; no rollback"
   - "never use the stale uncommitted ops/a23_deployment_manifest.json; preserve all unrelated dirty files"
   - "no secret values in logs/evidence/commits/reports"
 
@@ -81,8 +92,8 @@ extra_policies: [consequential, production, evidence]
 identity:
   repo: "E:\\cv\\telefont"
   branch: "prime-v12-cutover"
-  accepted_source_commit: "166e45b72b55e2c1f04e30ec7a73a07179e2ed62"   # origin/main head: FAST_30 (b385ab1) + T-PRICE-01 (merge f16ac39) + canonical terminal
-  deploy_line: "origin/main ONLY at exact 166e45b; recovery-only branches are not deploy sources"
+  immutable_product_source: "166e45b72b55e2c1f04e30ec7a73a07179e2ed62"   # A1: exact commit; deploy via clean worktree at this SHA; origin/main tip may advance with authorization-memory commits
+  deploy_line: "origin/main contains 166e45b (verified before deploy); deployment executes from a clean worktree checked out at exact 166e45b"
   job: "job_477b205f4aff41cb89c2dd005ecf8009"
   order: "ord_2a142f39c5d2443492d1d8410d18bf9f"
   payment_tx: "77506129"
@@ -96,4 +107,4 @@ depends_on:
   decisions: [decisions/ADR-0001.md, decisions/ADR-0002.md, decisions/ADR-0003.md]
   evidence: [".prime/journal/events.jsonl", ".prime/tasks/T-PRICE-01/result.yaml"]
 
-note: "Rev 3 superseded at generation 7 (E-00015): rev 4 adds the Human-designated mode ORIGINAL remediation for this order only (never general backfill), migration 0007 + exact 166e45b deployment identity, non-interruption of a genuinely active attempt, and one CAS-bound mode designation. DRAFT ONLY - executes solely on one-shot Human approval of the identity-bound envelope."
+note: "Rev 4 superseded at generation 8 (E-00016): rev 5 is the approved envelope amended by A1-A6 (clean-worktree deployment identity; A2 P0 branching; A3 strong CAS; A4 race protection; A5 ordered-format [TTF] acceptance; A6 mutation maximums). Faithful transcription - no semantic expansion. Executing."
