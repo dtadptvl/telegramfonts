@@ -1,0 +1,128 @@
+schema_version: 1
+task: T-FAST-ATLAS-ULTRA-01
+contract_rev: 1
+policy: P-20260830.9-LEAN-SAFE-R16 / 0fa00f66ee4873bf
+generation: 10
+branch: task/T-FAST-ATLAS-ULTRA-01
+worktree: E:\cv\telefont-atlas-ultra
+base: f574d0c51d1a4bcd596b6bdbe1fd06f5674f51be
+status: completed
+wall_hours: 4
+milestones:
+  - id: M0
+    name: discovery+setup
+    status: done
+  - id: M1
+    name: policy+walls+runtime-defaults
+    status: done
+    commit: 509c548
+    note: FAST_ATLAS_ULTRA_V1 bound under FAST_30; walls 480/720 config-driven
+  - id: M2a
+    name: atlas-core (paging, metrics regression, fast geometry)
+    status: done
+    commit: 9d1c7af
+  - id: M2b
+    name: refinement+caches+fontbuild+validation+pipeline
+    status: done
+    commit: 1b9cdef
+  - id: M3
+    name: runner integration + exhaustive gate-off
+    status: done
+    commit: 4707fcf
+  - id: M4
+    name: focused tests (16/16)
+    status: done
+    commit: cea1444
+  - id: M5
+    name: U12 bounded speed fixture
+    status: done
+    commit: 4b3a096
+    evidence: fixture-evidence.yaml + fixture-evidence-large.yaml
+  - id: M6
+    name: final bounded evidence closure (U7 licensed-binary liga preservation + U8 VIETNAMESE)
+    status: done
+    commits: [9239ee4, 93abc0b]
+    evidence: test_atlas_ultra_licensed_binary.py + test_atlas_ultra_vietnamese.py + fixture-evidence-vietnamese.yaml
+    note: >-
+      Bounded ~45-minute closure slice; no production access, no AI provider
+      calls (no keys locally), no full suite, no blind retry; both new test
+      files pass; VN fixture ran cold within the 360s cap.
+fixture_evidence:
+  ordinary_original:
+    glyph_count: 200
+    cold_wall_seconds: 74.598
+    reuse_wall_seconds: 4.909
+    target_range_seconds: [120, 300]
+    met: true
+    easy: 199
+    refined: 0
+    failed: 0
+    low_confidence: 0
+    zero_ink_excluded: [160]
+    cdp_calls: 0
+    metrics_js_calls: 4
+    pages: 2
+    peak_tracemalloc_mb: 55.793
+    validation: PASSED (FontTools TTF+OTF structural, HarfBuzz shaping, FreeType render, NFC/NFD)
+  large_original:
+    glyph_count: 457
+    cold_wall_seconds: 255.686
+    reuse_wall_seconds: 24.424
+    target_range_seconds: [300, 600]
+    met: true
+    easy: 431
+    refined: 5
+    failed: 20
+    low_confidence: [7848, 7850, 7860, 7874, 7876]
+    cdp_calls: 0
+    pages: 6
+    peak_tracemalloc_mb: 81.302
+    validation: PASSED with low-confidence IDs recorded
+  vietnamese_bounded:
+    glyph_count: 37
+    mode: VIETNAMESE
+    wall_cap_seconds: 360
+    pipeline_run_outcome: FAIL_CLOSED (VietnameseAIIntegrityError VI_AI_PROVIDER_UNAVAILABLE)
+    fail_closed_without_keys: true
+    ai_calls_made: 0
+    pipeline_run_wall_seconds: 17.136
+    total_wall_seconds: 18.034
+    peak_working_set_mb: 152.656
+    peak_tracemalloc_mb_phases23: 1.629
+    frozen_glyphs: 30
+    failed_glyphs: 7
+    failed_glyph_note: standalone combining marks (raster-unprovable; FAILED_GLYPH, no retry)
+    preserved_existing_glyphs: 23
+    deterministic_composition_resolved: 21
+    deterministic_composition_errors: 0
+    ai_required_glyphs: 60
+    ai_required_classes: 12
+    total_missing_classes: 13
+    ai_calls_budget: 13
+    ai_calls_used: 0
+    nfc_nfd_audit_failures_pre: 36
+    nfc_nfd_audit_failures_post: 29
+    anchor_mark_inference: reached (5 combining marks with inferred anchors)
+    validation_deterministic_only_extension: >-
+      FontTools structural 7/7 PASS; HarfBuzz shaping/positions PASS;
+      FreeType load/render PASS; normalization FAIL:29 + vn_corpus
+      PARTIAL:46_MISSING (honest bounded-subset gaps); VN gate
+      VI_CORPUS_SHAPING_NOTDEF x5 (subset corpus gap)
+fixture_substitution: >-
+  Neurath Mono Regular (myfonts.com) network acquisition unavailable locally
+  (no authorized session material, no production access under this task);
+  next best LOCAL fixture used: Be Vietnam Pro Regular
+  (agent/benchmark_data/ground_truth/BeVietnamPro-Regular.ttf) - the repo
+  benchmark ground truth, authorized as the local validation binary and
+  recorded as such in every evidence file.
+budget_state:
+  fixture_runs: >-
+    5 total: 1 mini smoke 40-glyph + ordinary 200 + large 457 (M5) +
+    2 bounded VIETNAMESE cold runs (M6; first superseded by a rerun after
+    fixing the peak-memory probe; both bounded, both within cap)
+  within_wall: true
+constraints_ack:
+  production_access: none
+  parent_worktree: untouched
+  secrets: key names only
+  a23: staging-only; stale claims not relied upon

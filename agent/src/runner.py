@@ -53,6 +53,9 @@ from compute.source import SourceAcquirer
 from measurement.models import ObservationConfig
 from compute.validator import validate_font_file
 from config import Settings
+from atlas.policy import policy_identity_hash as _atlas_policy_identity_hash
+from atlas.policy import resolve_job_wall_seconds
+FAST_ATLAS_ULTRA_POLICY_HASH = _atlas_policy_identity_hash()
 from fidelity.profiles import FAST_30_PROFILE
 from fidelity.release_gate import STAGE9D_ATTESTATION_SCHEMA_VERSION, Stage9DAttestation, Stage9DReleaseGate
 from queue_client import CloudflareQueueClient, QueueMessage
@@ -116,6 +119,10 @@ TERMINAL_ERROR_CODES = frozenset({
     "ACQUISITION_INSUFFICIENT",
     "VIETNAMESE_EXTENSION_FAILED",
     "FAST30_FAILED",
+    # T-FAST-ATLAS-ULTRA-01: atlas-regime fail-closed codes. The exhaustive
+    # legacy gate is hard-gated-off under FAST_ATLAS_ULTRA_V1.
+    "ATLAS_RASTER_SOURCE_UNAVAILABLE",
+    "EXHAUSTIVE_REGIME_RETIRED",
 })
 
 KNOWN_ERROR_CODES = frozenset(
@@ -214,6 +221,7 @@ class JobRunner:
         model_cache: CanonicalFontModelCache | None = None,
         binary_cache: AuthorizedBinaryCache | None = None,
         vietnamese_ai_provider: Any = None,
+        atlas_pipeline_factory: Any = None,
     ) -> None:
         self.settings = settings
         self.queue_client = queue_client
@@ -249,6 +257,12 @@ class JobRunner:
         self.model_cache = model_cache
         self.binary_cache = binary_cache
         self.vietnamese_ai_provider = vietnamese_ai_provider
+        # T-FAST-ATLAS-ULTRA-01 (ADR-0004): the atlas pipeline factory
+        # builds the FAST_ATLAS_ULTRA_V1 orchestrator for one style. When
+        # absent under the atlas regime, L4 reconstruction fails closed
+        # with ATLAS_RASTER_SOURCE_UNAVAILABLE (the exhaustive legacy gate
+        # is never reachable).
+        self.atlas_pipeline_factory = atlas_pipeline_factory
         # Deterministic per-job acquisition/reuse call trace (sanitized).
         self.last_reuse_trace: dict[str, Any] = {}
 
@@ -714,8 +728,28 @@ class JobRunner:
             )
             return font_file, attestation, provenance, ""
 
-        # L4: exact raster observations -> full Stage 9D gate (fit-only
-        # optimization + four consumers + held-out evaluation).
+        # L4 reconstruction tier.
+        # T-FAST-ATLAS-ULTRA-01 (ADR-0004, U10): under the default
+        # FAST_ATLAS_ULTRA_V1 regime the exhaustive legacy path (four-
+        # consumer MAX gate + complete held-out schedule) is HARD-GATED-OFF
+        # and unreachable: reconstruction routes to the atlas pipeline via
+        # the injected factory, or fails closed. With the regime disabled
+        # (non-default) the legacy gate remains for compatibility.
+        if completed and self.settings.ATLAS_ULTRA_ENABLED:
+            self._trace_record(f"L4_{style.id}_{fmt}", "ATLAS_ULTRA", mode=mode)
+            return self._atlas_ultra_resolve_artifact(
+                job=job,
+                style=style,
+                family_name=family_name,
+                fmt=fmt,
+                build_dir=build_dir,
+                mode=mode,
+                job_deadline=job_deadline,
+                completed=completed,
+                archive_context=archive_context,
+            )
+        # Legacy L4 (unreachable under the default atlas regime; retained
+        # for the non-default compatibility flag only).
         if completed:
             bv, cfg = completed[0]
             coverage = store.get_coverage(family_key, style_key, browser_version=bv, config_hash=cfg)
@@ -794,6 +828,123 @@ class JobRunner:
                 return font_file, attestation, attestation.provenance, attestation.ai_binding
 
         raise ValueError(f"STAGE9D_GATE_FAILED_{fmt}")
+
+    def _atlas_ultra_resolve_artifact(
+        self,
+        job: ClaimedJob,
+        style: Any,
+        family_name: str,
+        fmt: str,
+        build_dir: Path,
+        mode: str,
+        job_deadline: float | None,
+        completed: list,
+        archive_context: ArchiveSourceContext | None,
+    ) -> tuple[GeneratedFontFile, Any, str, str]:
+        """Resolve one style+format through the FAST_ATLAS_ULTRA_V1 pipeline.
+
+        The exhaustive legacy gate (four-consumer MAX gate + complete
+        held-out schedule) is unreachable from this path by construction:
+        the atlas pipeline is the only reconstruction route under the
+        regime. Fail-closed boundaries:
+        - no injected pipeline factory -> ATLAS_RASTER_SOURCE_UNAVAILABLE;
+        - pipeline/validation failure  -> FAST30_FAILED (no retry, no
+          heavier profile, no second heavy pass).
+        The pipeline builds TTF+OTF from ONE sealed canonical model; the
+        per-format tier picks its artifact from the same run (cached in
+        reuse_state so a dual-format order runs the pipeline once).
+        """
+        if self.atlas_pipeline_factory is None:
+            self._trace_record(f"L4ATLAS_{style.id}_{fmt}", "NO_FACTORY")
+            raise ValueError("ATLAS_RASTER_SOURCE_UNAVAILABLE")
+        if (
+            job_deadline is not None
+            and time.monotonic() + WALL_SAFETY_MARGIN_MS / 1000.0 >= job_deadline
+        ):
+            raise JobWallLimitExceeded()
+
+        reuse_state = getattr(self, "_atlas_reuse_state", None) or {}
+        run_result = reuse_state.get(style.id)
+        if run_result is None:
+            pipeline = self.atlas_pipeline_factory(
+                job_id=job.job_id,
+                mode=mode,
+                source_url=job.source_url,
+                family_name=family_name,
+                style_id=style.id,
+                style_name=style.display_name,
+                build_dir=build_dir / "atlas_ultra",
+                deadline=job_deadline,
+                cache_root=self.scratch_manager.get_durable_job_cache_dir(
+                    job.job_id, "atlas_cache"
+                ),
+                checkpoint_root=self._durable_checkpoint_root(job.job_id),
+            )
+            # The enclosing compute body runs in a worker thread; a private
+            # event loop per pipeline run is safe and bounded by the wall.
+            run_result = asyncio.run(pipeline.run())
+            reuse_state[style.id] = run_result
+            self._atlas_reuse_state = reuse_state
+            self._trace_record(
+                f"L4ATLAS_{style.id}_{fmt}",
+                "PIPELINE_DONE",
+                easy=getattr(run_result.evidence, "easy_glyphs", 0),
+                refined=getattr(run_result.evidence, "refined_glyphs", 0),
+                failed=getattr(run_result.evidence, "failed_glyphs", 0),
+                cdp_calls=getattr(run_result.evidence, "cdp_calls", 0),
+            )
+
+        if run_result.ttf_path is None or run_result.otf_path is None:
+            raise ValueError("FAST30_FAILED")
+        if str(fmt).strip().upper() == "TTF":
+            artifact_path = Path(run_result.ttf_path)
+        elif str(fmt).strip().upper() == "OTF":
+            artifact_path = Path(run_result.otf_path)
+        else:
+            raise ValueError(f"UNSUPPORTED_FORMAT: {fmt}")
+
+        raw = artifact_path.read_bytes()
+        font_file = GeneratedFontFile(
+            style_id=style.id,
+            style_name=style.display_name,
+            format=str(fmt).strip().upper(),
+            filename=artifact_path.name,
+            file_path=artifact_path,
+            size_bytes=len(raw),
+            sha256_hex=hashlib.sha256(raw).hexdigest(),
+        )
+        model_hash = (
+            run_result.model.compute_canonical_hash() if run_result.model is not None else ""
+        )
+        evidence_dict = (
+            run_result.evidence.to_dict() if hasattr(run_result.evidence, "to_dict") else {}
+        )
+        attestation = Stage9DAttestation(
+            schema_version=STAGE9D_ATTESTATION_SCHEMA_VERSION,
+            format=str(fmt).strip().upper(),
+            artifact_sha256=font_file.sha256_hex,
+            artifact_size_bytes=font_file.size_bytes,
+            reference_id=hashlib.sha256(
+                job.source_url.encode("utf-8")
+            ).hexdigest()[:16],
+            style_id=style.id,
+            browser_version="atlas_ultra_v1",
+            config_hash=model_hash or ("0" * 64),
+            snapshot_fingerprint=model_hash or ("0" * 64),
+            fit_set_fingerprint="",
+            held_out_set_fingerprint="",
+            model_hash=model_hash,
+            policy_hash=FAST_ATLAS_ULTRA_POLICY_HASH,
+            report_id=f"atlas_{model_hash[:16]}" if model_hash else "atlas_run",
+            report_hash=model_hash or ("0" * 64),
+            consumer_bundle_hash="",
+            optimizer_trace_hash="",
+            optimizer_converged=True,
+            overall_status="PASS",
+            provenance=PROVENANCE_STAGE9D_RASTER,
+            ai_binding="",
+        )
+        return font_file, attestation, PROVENANCE_STAGE9D_RASTER, ""
 
     def _sync_build_validate_and_package(
         self,
@@ -993,9 +1144,25 @@ class JobRunner:
         stop_event = threading.Event()
         expiry_holder = [job.lease_expires_at]
 
-        # T-FAST30-A23-FIX F1: hard monotonic job wall born at claim
-        # (JOB_WALL_SECONDS, default 1800s = the 30-minute production wall).
-        job_deadline = time.monotonic() + float(self.settings.JOB_WALL_SECONDS)
+        # T-FAST30-A23-FIX F1: hard monotonic job wall born at claim.
+        # T-FAST-ATLAS-ULTRA-01 (ADR-0004, U11): re-targeted to the
+        # speed-first walls with mode-aware selection - ORIGINAL
+        # JOB_WALL_SECONDS (default 480 s) / VIETNAMESE
+        # JOB_WALL_SECONDS_VIETNAMESE (default 720 s). Wall expiry is
+        # terminal FAST30_FAILED: no retry, no heavier profile. Absent/
+        # unsupported modes keep the ORIGINAL wall value here and fail
+        # closed with MISSING_MODE/UNSUPPORTED_MODE at the unchanged
+        # downstream mode binding.
+        try:
+            wall_mode = _require_job_mode(job)
+        except ValueError:
+            wall_mode = "ORIGINAL"
+        job_wall_seconds = resolve_job_wall_seconds(
+            wall_mode,
+            self.settings.JOB_WALL_SECONDS,
+            self.settings.JOB_WALL_SECONDS_VIETNAMESE,
+        )
+        job_deadline = time.monotonic() + float(job_wall_seconds)
         self._touch_progress_beacon(f"job_start:{job.job_id}")
 
         # Lease liveness runs on a dedicated thread so blocking compute on

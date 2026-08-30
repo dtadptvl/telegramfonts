@@ -1,0 +1,60 @@
+schema_version: 8
+governance:
+  policy_rev: "P-20260830.9-LEAN-SAFE-R16"
+  policy_fingerprint: "0fa00f66ee4873bf"
+  generation: 10
+task: T-FAST-ATLAS-ULTRA-01
+contract_rev: 1
+mode: DEEP
+status: completed
+closure: >-
+  Final bounded evidence-closure slice: U7 (liga/calt preservation from the
+  authorized binary) and U8 (VIETNAMESE execution) now carry genuine local
+  evidence produced inside a bounded ~45-minute slice (no production access,
+  no AI provider calls - no keys locally, full suite never run, no blind
+  retries). AI-dependent limitations are recorded honestly below and in the
+  evidence files.
+
+proved:
+  U1: "policy identity: FAST_ATLAS_ULTRA_V1 bound internally; FAST_30 sole public name; BALANCED_MAX/FULL_MAX fail-closed PROFILE_RETIRED (atlas/policy.py; tests/test_atlas_ultra.py policy binding; commit 509c548)"
+  U2: "fast raster pass: size 1024 phase 0,0; bounded pages target 96MB/hard max 128MB (ordinary run 2 pages, large run 6 pages, all <= cap); one page in memory + streaming prefetch; crop+release; zero per-glyph CDP (cdp_calls=0 in all fixture evidence). Production HTTP/CDN transport wiring is deployment-phase (separately authorized); fixture used the injectable local provider."
+  U3: "batched metrics: <=512 glyphs per batched JS call; 250-500 glyphs = 3 calls; multi-size through-origin regression to UPEM=1000 (tests + fixture metrics_js_calls=4 including kern pairs)"
+  U4: "fast geometry chain vectorized (NumPy/SciPy/Pillow only); easy glyphs skip SDF/heavy optimizer; PASS freezes immediately: ordinary run 199/199 EASY_PASS, IoU thresholds enforced (tests/test_atlas_ultra.py geometry decisions)"
+  U5: "single refinement only: schedule violations (512/4096/quarter phases) fail closed; large run refined 5 glyphs to REFINED_PASS; 5 low-confidence IDs recorded in validation report; 20 structurally degenerate standalone combining marks stay FAILED_GLYPH with no whole-font retry"
+  U6: "streaming + caches: page N+1 prefetch while N decodes; persistent exact-identity caches + identity-bound checkpoints (drift fails closed); reuse runs 4.909s (ordinary) / 24.424s (large) < 60s target; no fsync per glyph (checkpoint fsync only)"
+  U7: "selective bounded kerning + material-delta-only GPOS kern + ss01-ss20 fail-closed implemented and ran (0 material pairs observed in fixtures). liga/calt preservation from the authorized binary is now exercised by genuine evidence: the authorized local binary (Be Vietnam Pro Regular, repo benchmark ground truth, authorized as the local validation fixture) was inspected with FontTools - GSUB features present: aalt case ccmp dnom frac liga locl numr ordn sinf ss01 subs sups; liga YES, calt NO. Focused test (tests/test_atlas_ultra_licensed_binary.py, 1 passed in 3.0s, commit 9239ee4) proves: probe-free detection preserved_gsub_tags -> ('liga',); EXACT table-copy preservation into a built TTF (identical feature-tag set and identical decompiled liga rules; nothing synthesized, nothing dropped); exact-identity TTF cache-hit semantics (put_bytes_verified -> get_bytes bit-identical: zero reconstruction on the hit path, features retained in output). Honest limitations: (a) calt absent in this binary - liga exercises the identical code path; (b) whole-GSUB graft onto a subset-reconstructed atlas font fails CLOSED when the source GSUB references non-cmap ligature/variant glyphs (this binary's GSUB references 145 glyph names incl. f_i.liga, stacked-mark glyphs, .ss01 variants; atlas subset builds cannot satisfy them under deterministic uniXXXX naming) - the error propagates, so nothing broken is ever published."
+  U8: "VIETNAMESE optional path implemented per ADR-0004 and now exercised by genuine bounded execution evidence (agent/perf/atlas_vn_fixture.py -> fixture-evidence-vietnamese.yaml, commit 93abc0b). Bounded 37-glyph subset (cap <=60) of Be Vietnam Pro Vietnamese precomposed glyphs: representative classes U+1EA5/U+1EC1/U+1EDF/U+1EE9/U+1EAD + cross-base circumflex/horn-stack and single-mark donors + NFC/NFD decomposition parts (base letters + Vietnamese combining marks); mode=VIETNAMESE, atlas pipeline local Vietnamese path, 330s pipeline deadline inside a 360s hard watchdog kill. Phase 1 pipeline run: FAIL_CLOSED at the AI gate - VietnameseAIIntegrityError VI_AI_PROVIDER_UNAVAILABLE, ai_provider=None (hardcoded at stage 5b), fail_closed_without_keys=true, wall 17.136s, ZERO network calls (LocalFont*-only file-read transports; wokushop_api_key/openrouter_api_key absent from env - names only, values never read). Phase 2 model reconstruction through the pipeline's own checkpoint + exact-identity glyph-model cache (build-only-missing resume): 30 frozen glyphs, 7 FAILED_GLYPH = exactly the standalone combining marks (raster-unprovable). Phase 3 deterministic path (service construction identical to pipeline stage 5b): NFC/NFD coverage audit 36 pre-extension failures -> 29 post (7 resolved by deterministic extension); preserved existing glyphs 23; deterministic component composition resolved 21 glyphs (5 combining marks with inferred anchors + 16 cross-base precomposed) with 0 errors; 60 glyphs across 12 classes AI-required - LISTED, NEVER CALLED (ai_calls_budget 13, ai_calls_used 0); anchor/mark inference reached (5 marks with inferred anchors; mkmk is not a stage of the deterministic-first path); validation on the deterministic-only extended model: FontTools structural all 7 checks PASS, HarfBuzz shaping/positions PASS, FreeType load/render PASS, normalization FAIL:29 + vn_corpus PARTIAL:46_MISSING (honest bounded-subset gaps: stack marks U+0302/U+0306 and corpus glyphs outside the subset), VN gate VI_CORPUS_SHAPING_NOTDEF x5 (subset corpus gap); failed classes stay failed - no global rerun per ADR-0004. Total wall 18.034s (cap 360s); peak working set 152.656MB; peak tracemalloc phases 2-3 1.629MB. Focused test tests/test_atlas_ultra_vietnamese.py (1 passed in 5.9s) independently proves the integrated VIETNAMESE pipeline fails closed without AI keys. AI-dependent classes fail closed without provider keys - runtime evidence per ADR-0003; AI-runtime outcomes remain unproven here by construction (they require keys)."
+  U9: "canonical cubic FontModel single source; OTF via CFF + TTF via cu2qu in ONE builder pass per sealed model hash (model_hash bound; build_final single stage; TTF+OTF only outputs)"
+  U10: "speed-first validation runs ONCE (second call raises ATLAS_VALIDATION_ALREADY_RAN); FontTools structural/load/table/cmap/metrics/outline + HarfBuzz representative shaping/positioning/kern + FreeType representative load/render all PASS on both fixture runs; exhaustive legacy gate unreachable under default regime (runner EXHAUSTIVE gate-off, commit 4707fcf)"
+  U11: "walls 480/720 config-driven mode-aware at claim; runtime defaults browser_sessions=1 http_concurrency=8 glyph_workers=2 atlas_pages_in_memory=1 atlas_target_mb=96 atlas_max_mb=128 checkpoint_batch=32 (config.py; tests); native vectorized ops only"
+  U12: "final bounded fixture at final HEAD: ordinary ORIGINAL 200 glyphs 74.598s (target 2-5 min), large 457 glyphs 255.686s (target 5-10 min), reuse 4.909s/24.424s (<1 min), evidence in fixture-evidence.yaml + fixture-evidence-large.yaml"
+  U13: "T-FAST30-A23-FIX hardening preserved and re-targeted: all 9 wall-enforcement tests pass unchanged; JOB_WALL_SECONDS 1800->480 + VIETNAMESE 720; watchdog/checkpoint/zombie machinery untouched; edge MAX_JOB_AGE_MS untouched; zero production actions"
+
+unproved: []
+
+evidence:
+  commits: [509c548, 9d1c7af, 1b9cdef, 4707fcf, cea1444, 4b3a096, 9239ee4, 93abc0b]
+  head_note: "branch head is the terminal task-files commit of this closure slice (git rev-parse HEAD on task/T-FAST-ATLAS-ULTRA-01)"
+  tests:
+    focused_atlas: "tests/test_atlas_ultra.py 16 passed"
+    wall_enforcement: "tests/test_fast30_wall_enforcement.py 9 passed (hardening preserved)"
+    runner_config_mode: "tests/test_runner.py + test_config.py + test_fast30_sole_profile.py + test_mode_fail_closed.py 47 passed"
+    licensed_binary_u7: "tests/test_atlas_ultra_licensed_binary.py 1 passed in 3.0s (liga presence + exact-table preservation + exact TTF cache hit)"
+    vietnamese_u8: "tests/test_atlas_ultra_vietnamese.py 1 passed in 5.9s (VIETNAMESE pipeline fails closed without AI keys)"
+    total_focused: "74 passed, 0 failed (no full suite, no soak, no retired E2E)"
+  fixture: ".prime/tasks/T-FAST-ATLAS-ULTRA-01/fixture-evidence.yaml (ordinary), fixture-evidence-large.yaml (large), fixture-evidence-vietnamese.yaml (VIETNAMESE bounded)"
+  fixture_substitution: "Neurath Mono network acquisition unavailable locally; Be Vietnam Pro Regular (agent/benchmark_data/ground_truth/BeVietnamPro-Regular.ttf), the repo benchmark ground truth, authorized as the local validation binary and recorded as such in every evidence file"
+
+candidate:
+  branch: task/T-FAST-ATLAS-ULTRA-01
+  worktree: E:\cv\telefont-atlas-ultra
+  base: f574d0c51d1a4bcd596b6bdbe1fd06f5674f51be
+  head: "terminal task-files commit of this closure slice (git rev-parse HEAD)"
+  note: >-
+    Prime integration candidate after acceptance review. Deployment of this
+    line remains separately authorized (this task grants no production
+    deployment or order-recovery authority). Device-side production
+    transport wiring (HTTP/CDN raster source + batched browser metrics) is
+    deployment-phase work under the established atlas provider interfaces.
+    AI-dependent Vietnamese classes remain fail-closed without provider keys
+    (runtime evidence per ADR-0003).
