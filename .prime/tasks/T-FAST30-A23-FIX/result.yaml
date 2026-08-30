@@ -1,0 +1,160 @@
+task: T-FAST30-A23-FIX
+contract_rev: 1
+policy_rev: "P-20260830.9-LEAN-SAFE-R16"
+policy_fingerprint: "0fa00f66ee4873bf"
+worker: rc-narrowed-completion-worker
+branch: task/T-FAST30-A23-FIX
+base_head: bc3a2f2
+status: rc_complete_pending_device_acceptance
+
+acceptance_status:
+  F1: >-
+    PROVEN. Root cause proven by the RB diagnosis
+    (.prime/tasks/T-FAST30-A23-FIX/diagnosis.md, journal E-00020): RC-1 the
+    deployed device lineage b8c6994 (PR #94 merge) predates the FAST_30 commit
+    b385ab1 and contains zero wall enforcement (BALANCED_MAX + one-shot
+    FULL_MAX escalation, unbounded); RC-2 the FAST_30 wall in origin/main is
+    gate-scoped per-font and cooperative (deadline born at Stage9DReleaseGate
+    entry; checkpoints only) with acquisition, browser supplemental
+    measurement, upload/complete and queue dwell outside any deadline and no
+    job-level claim->complete wall in runner.process_message; RC-3 nothing
+    terminates a heartbeating job (agent heartbeat daemon thread extends the
+    lease for the whole run; edge heartbeat extends unconditionally with no
+    age cap; cron finalizer needs lease expiry AND attempts exhausted and is
+    starved while heartbeats land; supervisor restarts only on process exit).
+    Zombie verdict: process continuously alive since 2026-08-29T19:46Z proven
+    (lease token e3fd2050, attempt 6/6 continuity across P0/P6/RA reads);
+    compute stalled inferred (worst-case browser measurement ~5,300 sequential
+    CDP calls x 10s cap ~= 14.7h is the only matching scale, outside any
+    wall). Reusable stage-timing evidence: A23 cold full style (Be Vietnam
+    Pro, 481 glyphs, serialized) 1629.34s = 27.2 min, mean 3387.4 ms/glyph
+    (ops/a23_proof.log, ops/max_physical_a23_proof_report.json; CAPACITY_MODEL
+    measured_full_style_cold_seconds 1629.34); healthy cold baseline consumes
+    ~90% of the 30-min wall before acquisition/measurement/upload; promised
+    <=30 min vs observed >=15h (>=30x).
+  F2: >-
+    PENDING-DEVICE. Exact runbook: one production-equivalent one-style A23 run
+    at the frozen candidate SHA (isolated scratch/cache namespace; ordered
+    style fixture; TTF output) must complete <=25 minutes with all final gates
+    unchanged; device evidence must bind candidate SHA + configuration
+    (JOB_WALL_SECONDS, MAX_JOB_AGE_MS, profile_workers). Maximum ONE such
+    final acceptance run (contract budget).
+  F3: >-
+    PROVEN by implementation + focused tests. The diff touches no final-gate
+    line: held-out partition, four-consumer evidence, all-or-nothing,
+    attestation/coverage/deterministic-identity and output gates are
+    code-unchanged; TTF and OTF remain the only permitted outputs. Wall
+    enforcement only fails closed around those gates: focused tests prove a
+    wall breach produces zero upload/complete calls (all-or-nothing) and the
+    preemptive gate wall returns a non-publishable result (never a bypass);
+    the edge spec proves the unchanged lease-expiry finalizer clause still
+    finalizes (regression) and fresh leases still extend. The device-produced
+    TTF artifact validity binds to the F2 run, whose runbook keeps all final
+    gates unchanged. OTF support path untouched (causally verified lineage
+    preserved without rerunning geometry).
+  F4: >-
+    PROVEN by implementation + focused tests. Optimize/form the model once and
+    reuse: L1 final-font archive, L2 model reuse (execute_with_model), L3
+    authorized-binary reuse, the gate-internal formation memo and the
+    exact-identity intermediate cache are all preserved; F1 clamps the gate
+    wall to the remaining job budget without altering reuse precedence; F2's
+    preemptive boundary wraps the same reuse-first flow. Prior focused runs
+    covering reuse/archive remain green (runner/archive/heartbeat/scratch 30
+    passed; stage9d/sole-profile 23 passed) and the new focused wall tests
+    prove breaches fail before side effects.
+  F5: >-
+    PROVEN by implementation + focused tests. No uncontrolled orphan survives
+    and interruption resumes instead of restarting: F1 stops the heartbeat
+    BEFORE terminal FAST30_FAILED so the edge observes fence/expiry instead of
+    further extensions; F4 (edge) refuses heartbeat extensions once the lease
+    age exceeds MAX_JOB_AGE_MS (fenced/expired result) and finalizes exhausted
+    aged jobs even under a technically live lease, both guarded by attempt
+    exhaustion (9 specs: fresh-lease extension unchanged, refusal past cap,
+    re-claim resets age, HTTP wiring via MAX_JOB_AGE_MS, age-clause
+    finalization, retry never weakened, fresh exhausted jobs untouched,
+    lease-expiry clause regression); F5 (supervisor) kills on stale progress
+    beacon beyond N x heartbeat interval under the existing restart budget
+    (config-surface assertions + causal stale-kills/fresh-does-not-kill
+    probes); F6 durable job-scoped checkpoint root survives lease-bound
+    job-dir cleanup and resumes under identical identity (focused tests: same
+    dir across re-claims, checkpoint resume across store instances,
+    identity-drift discard fail-closed). Timing/checkpoint evidence persists
+    across interruption by construction (durable namespace, identity-bound).
+  F6: >-
+    PROVEN by implementation + focused tests. Invariants preserved exactly:
+    FAST_30 remains the sole profile (no BALANCED_MAX/FULL_MAX fallback or
+    escalation reintroduced); held-out, four-consumer, all-or-nothing and
+    output gates unchanged; TTF/OTF the only outputs; acquisition order,
+    binary-wins, reuse ladder and Vietnamese AI decisions (ADR-0001/0002/0003)
+    untouched; no A23-specific hardcoding - every knob is configuration-driven
+    (JOB_WALL_SECONDS, MAX_JOB_AGE_MS, TELEFONT_WATCHDOG_* with documented
+    defaults, HEARTBEAT_INTERVAL_SECONDS) and Debian-Mini-PC-portable; the
+    diff stays inside the contracted performance/runtime scope (agent
+    runner/config/gate/raster_ingest/scratch/main, edge job-service/env/
+    handlers/wrangler, supervisor script, focused tests/specs). Focused tests
+    prove terminal semantics are preserved (retryable=false, bounded
+    FAST30_FAILED code, sanitized error mapping).
+  F7: >-
+    PENDING-DEVICE. The same F2 run binds the runtime evidence: device/runtime
+    evidence must bind the exact candidate SHA and configuration
+    (JOB_WALL_SECONDS, MAX_JOB_AGE_MS, profile_workers); the final candidate
+    device test uses an isolated scratch/cache namespace (no production cache
+    deletion/contamination).
+
+candidate_note: >-
+  Final candidate SHA = branch head after device acceptance passes; Prime
+  freezes it in T-A23-PROD-02. RC closes on branch head 94b90e8 (last code
+  commit) + the chore(prime) task-files commit; nothing is frozen here.
+
+risk_note: >-
+  Python threads cannot be force-killed: F2 unblocks the caller at the hard
+  bound (future.result timeout) while the orphaned gate thread ends at its
+  own cooperative deadline (executor.shutdown(wait=False, cancel_futures=True);
+  the unreturned future is discarded, never published); F5 watchdog covers
+  process-level stalls (stale progress beacon -> TERM then KILL under the
+  restart budget). F4 terminates heartbeating zombies via the control plane
+  (refused heartbeats -> lease expiry -> cron finalizer), requiring no device
+  access.
+
+commits:
+  - sha: ad23e28
+    title: "feat(edge): MAX_JOB_AGE_MS heartbeat/finalizer age backstop + focused specs (T-FAST30-A23-FIX F4)"
+  - sha: 12cda65
+    title: "feat(agent): job-level FAST_30 wall, preemptive gate timeout, measurement aggregate deadline, durable checkpoints (T-FAST30-A23-FIX F1/F2/F3/F6)"
+  - sha: 6daca80
+    title: "feat(supervisor): progress-beacon hang watchdog (T-FAST30-A23-FIX F5)"
+  - sha: 94b90e8
+    title: "test(agent): focused wall-enforcement tests (T-FAST30-A23-FIX)"
+
+evidence:
+  focused_validation:
+    - cmd: "python -m pytest agent/tests/test_fast30_wall_enforcement.py -x -q"
+      result: "9 passed in 16.92s (F1 wall all-or-nothing; F1 mid-build wall vs heartbeat-moved lease; sanitized FAST30_FAILED mapping; F2 preemptive WALL_LIMIT_EXCEEDED + unbounded pass-through; F3 past-deadline fail-closed + mid-loop breach with session close; F6 durable dir isolation/traversal + checkpoint resume/identity-drift)"
+    - cmd: "npx vitest run test/job-age-backstop.spec.ts test/jobs.spec.ts (from edge/)"
+      result: "2 files, 41 passed (9 new F4 specs: resolveMaxJobAgeMs bounds, fresh-lease extension unchanged, refusal past cap, re-claim age reset, HTTP wiring, age-clause finalization, retry never weakened, fresh-exhausted untouched, lease-expiry regression; 32 jobs.spec.ts regression)"
+    - cmd: "npx tsc --noEmit (from edge/)"
+      result: "clean, exit 0"
+  prior_partial_runs_preserved:
+    - "runner/archive/heartbeat/scratch focused batch: 30 passed"
+    - "stage9d/sole-profile focused batch: 23 passed"
+    - "issue72 repros: 8 passed"
+    - "debian supervisor: 16 passed + 1 skip"
+  product_bugs_found_during_test_writing: none
+
+boundary_confirmations:
+  parent_worktree_untouched: true
+  prime_changes_from_parent: none
+  production_access: none
+  device_attempts: none
+  full_suite_runs: none
+  untracked_left_in_worktree:
+    - "agent/observations/ (runtime sqlite artifact created outside the task delta; intentionally not committed)"
+
+device_dependent_remainder:
+  - "Zombie stop: graceful stop NOT authorized (attribution unavailable; sshd dead). Zombie dies via F4 edge deploy (refused heartbeats -> lease expiry -> cron finalizer sets job FAILED + order FAILED) or natural death; no D1 mutation."
+  - "F2 final acceptance: one production-equivalent one-style run on device <=25 min (isolated scratch/cache namespace) - needs surface."
+  - "Deployment + recovery per T-A23-PROD-02 (candidate SHA freeze -> origin/main containment -> governance sync -> A23 release -> conditional CAS recovery)."
+
+files:
+  result: ".prime/tasks/T-FAST30-A23-FIX/result.yaml"
+  progress: ".prime/tasks/T-FAST30-A23-FIX/progress.yaml"

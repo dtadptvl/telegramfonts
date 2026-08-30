@@ -1,0 +1,62 @@
+task: T-FAST30-A23-FIX
+contract_rev: 1
+policy_rev: "P-20260830.9-LEAN-SAFE-R16"
+policy_fingerprint: "0fa00f66ee4873bf"
+worker: rc-narrowed-completion-worker
+branch: task/T-FAST30-A23-FIX
+base_head: bc3a2f2
+milestones:
+  - id: RC1
+    status: done
+    summary: >-
+      Boundary verified: worktree E:\cv\telefont-fast30fix, branch
+      task/T-FAST30-A23-FIX, HEAD bc3a2f2, nothing committed; working tree
+      carried all six implemented fixes (F1 runner job wall + config
+      JOB_WALL_SECONDS; F2 release_gate preemptive future timeout; F3
+      raster_ingest aggregate_deadline; F4 edge MAX_JOB_AGE_MS heartbeat CAS +
+      age-based finalizer clause + specs; F5 supervisor watchdog + agent
+      progress beacon; F6 durable glyph checkpoint dir). Prior partial focused
+      runs consistent with that state.
+  - id: RC2
+    status: done
+    summary: >-
+      agent/tests/test_fast30_wall_enforcement.py written (9 focused tests):
+      F1 tiny-wall run fails terminal FAST30_FAILED with zero upload/complete
+      (all-or-nothing); F1 monotonic wall fires mid-build while heartbeats keep
+      extending the lease (independent of heartbeat-moved expiry); sanitized
+      mapping of JobWallLimitExceeded/BrowserMeasurementWallExceeded to
+      FAST30_FAILED; F2 preemptive execute_sync wall returns non-publishable
+      FAST30_FAILED: WALL_LIMIT_EXCEEDED fast (and passes through with no
+      budget); F3 past aggregate_deadline fails closed before session creation
+      and a mid-loop breach halts the loop with session closed; F6 durable dir
+      isolation/re-claim stability/traversal fail-closed + checkpoint resume
+      across instances with identical identity and fail-closed identity-drift
+      discard. Result: 9 passed in 16.92s. Zero product bugs found in the new
+      code (no product changes needed during test-writing).
+  - id: RC3
+    status: done
+    summary: >-
+      Edge validation once each: npx vitest run test/job-age-backstop.spec.ts
+      test/jobs.spec.ts -> 2 files, 41 passed (9 new F4 specs; jobs.spec.ts
+      unchanged, no stale assertions, F4 semantics regression-covered);
+      npx tsc --noEmit -> clean (exit 0). No edge test updates were needed.
+  - id: RC4
+    status: done
+    summary: >-
+      Explicit-pathspec commits on task/T-FAST30-A23-FIX: ad23e28 feat(edge)
+      F4 age backstop + specs; 12cda65 feat(agent) F1/F2/F3/F6; 6daca80
+      feat(supervisor) F5 watchdog + beacon; 94b90e8 test(agent) focused
+      wall-enforcement tests; plus this chore(prime) task-files commit.
+      agent/observations/ runtime sqlite left untracked (runtime artifact, not
+      task delta). Parent worktree untouched; no .prime changes from parent.
+  - id: RC5
+    status: pending-device
+    summary: >-
+      Device-dependent remainder (blocked on surface; sshd dead, no adb):
+      F2 final acceptance run (<=25 min production-equivalent one-style A23 at
+      the frozen candidate SHA, isolated scratch/cache namespace, all final
+      gates unchanged) and F7 runtime-evidence binding (candidate SHA +
+      configuration). Zombie terminates via F4 edge deploy (refused heartbeats
+      -> lease expiry -> cron finalizer) or natural death; graceful stop NOT
+      authorized (attribution unavailable). Deployment + recovery per
+      T-A23-PROD-02 after device acceptance.
