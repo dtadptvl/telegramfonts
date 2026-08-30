@@ -1,0 +1,398 @@
+task: "T-FAST-ATLAS-ULTRA-01"
+unit: "U8"
+run_label: "vietnamese_bounded"
+fixture:
+  font: "E:\\cv\\telefont-atlas-ultra\\agent\\benchmark_data\\ground_truth\\BeVietnamPro-Regular.ttf"
+  fixture_role: "repo benchmark ground truth authorized as the LOCAL validation binary for this task (network acquisition unavailable locally; no production access)"
+  mode: "VIETNAMESE"
+  glyph_subset_count: 37
+  glyph_subset:
+    - "U+0061"
+    - "U+0065"
+    - "U+006F"
+    - "U+0075"
+    - "U+00E0"
+    - "U+00E1"
+    - "U+00E3"
+    - "U+0110"
+    - "U+0111"
+    - "U+01A0"
+    - "U+01A1"
+    - "U+01AF"
+    - "U+01B0"
+    - "U+02C6"
+    - "U+0300"
+    - "U+0301"
+    - "U+0303"
+    - "U+0306"
+    - "U+0309"
+    - "U+031B"
+    - "U+0323"
+    - "U+1EA1"
+    - "U+1EA3"
+    - "U+1EA5"
+    - "U+1EA7"
+    - "U+1EAB"
+    - "U+1EAD"
+    - "U+1EBF"
+    - "U+1EC1"
+    - "U+1EC3"
+    - "U+1EC7"
+    - "U+1EDB"
+    - "U+1EDF"
+    - "U+1EE3"
+    - "U+1EE9"
+    - "U+1EEB"
+    - "U+1EF1"
+  subset_design: "representative precomposed Latin+diacritic classes (U+1EA5/U+1EC1/U+1EDF/U+1EE9/U+1EAD + cross-base circumflex/horn-stack and single-mark donors) plus NFC/NFD decomposition parts (base letters + Vietnamese combining marks); <=60 glyphs"
+secret_boundary:
+  wokushop_api_key_in_env: false
+  openrouter_api_key_in_env: false
+  pipeline_ai_provider: "None (hardcoded: atlas pipeline stage 5b wires ai_provider=None)"
+  network_transports: "none: LocalFontMetricsProvider/LocalFontRasterProvider are file-read-only local fixture providers"
+  ai_calls_made: 0
+phase1_vietnamese_pipeline_run:
+  deadline_seconds: 330
+  watchdog_kill_seconds: 360
+  outcome: "FAIL_CLOSED"
+  error_type: "VietnameseAIIntegrityError"
+  error: "VI_AI_PROVIDER_UNAVAILABLE"
+  fail_closed_without_keys: true
+  note: "deterministic-first path resolved what source evidence proves; remaining glyph classes require the AI gate - ai_provider=None (no keys locally) so the service fails CLOSED with a clean error; no network call occurred"
+  wall_seconds: 17.136
+phase2_model_reconstruction:
+  source: "pipeline checkpoint + exact-identity glyph-model cache (the pipeline's own resume machinery; no recomputation)"
+  frozen_glyphs: 30
+  frozen_codepoints:
+    - "U+0061"
+    - "U+0065"
+    - "U+006F"
+    - "U+0075"
+    - "U+00E0"
+    - "U+00E1"
+    - "U+00E3"
+    - "U+0110"
+    - "U+0111"
+    - "U+01A0"
+    - "U+01A1"
+    - "U+01AF"
+    - "U+01B0"
+    - "U+02C6"
+    - "U+1EA1"
+    - "U+1EA3"
+    - "U+1EA5"
+    - "U+1EA7"
+    - "U+1EAB"
+    - "U+1EAD"
+    - "U+1EBF"
+    - "U+1EC1"
+    - "U+1EC3"
+    - "U+1EC7"
+    - "U+1EDB"
+    - "U+1EDF"
+    - "U+1EE3"
+    - "U+1EE9"
+    - "U+1EEB"
+    - "U+1EF1"
+  failed_glyphs: 7
+  failed_codepoints:
+    - "U+0300"
+    - "U+0301"
+    - "U+0303"
+    - "U+0306"
+    - "U+0309"
+    - "U+031B"
+    - "U+0323"
+  wall_seconds: 0.203
+phase3_deterministic_vietnamese_path:
+  service_construction: "VietnameseExtensionService(ai_provider=None) - identical to atlas pipeline stage 5b"
+  nfc_nfd_coverage_audit:
+    pre_extension_failures:
+      - "VI_NFC_NFD_GAP_CP_01A0"
+      - "VI_NFC_NFD_GAP_CP_01A0"
+      - "VI_NFC_NFD_GAP_CP_01A1"
+      - "VI_NFC_NFD_GAP_CP_01AF"
+      - "VI_NFC_NFD_GAP_CP_01AF"
+      - "VI_NFC_NFD_GAP_CP_01B0"
+      - "VI_NFC_NFD_GAP_CP_1EA1"
+      - "VI_NFC_NFD_GAP_CP_1EA3"
+      - "VI_NFC_NFD_GAP_CP_1EA5"
+      - "VI_NFC_NFD_GAP_CP_1EA5"
+      - "VI_NFC_NFD_GAP_CP_1EA7"
+      - "VI_NFC_NFD_GAP_CP_1EA7"
+      - "VI_NFC_NFD_GAP_CP_1EAB"
+      - "VI_NFC_NFD_GAP_CP_1EAB"
+      - "VI_NFC_NFD_GAP_CP_1EAD"
+      - "VI_NFC_NFD_GAP_CP_1EAD"
+      - "VI_NFC_NFD_GAP_CP_1EBF"
+      - "VI_NFC_NFD_GAP_CP_1EBF"
+      - "VI_NFC_NFD_GAP_CP_1EC1"
+      - "VI_NFC_NFD_GAP_CP_1EC1"
+      - "VI_NFC_NFD_GAP_CP_1EC3"
+      - "VI_NFC_NFD_GAP_CP_1EC3"
+      - "VI_NFC_NFD_GAP_CP_1EC7"
+      - "VI_NFC_NFD_GAP_CP_1EC7"
+      - "VI_NFC_NFD_GAP_CP_1EDB"
+      - "VI_NFC_NFD_GAP_CP_1EDB"
+      - "VI_NFC_NFD_GAP_CP_1EDF"
+      - "VI_NFC_NFD_GAP_CP_1EDF"
+      - "VI_NFC_NFD_GAP_CP_1EE3"
+      - "VI_NFC_NFD_GAP_CP_1EE3"
+      - "VI_NFC_NFD_GAP_CP_1EE9"
+      - "VI_NFC_NFD_GAP_CP_1EE9"
+      - "VI_NFC_NFD_GAP_CP_1EEB"
+      - "VI_NFC_NFD_GAP_CP_1EEB"
+      - "VI_NFC_NFD_GAP_CP_1EF1"
+      - "VI_NFC_NFD_GAP_CP_1EF1"
+    post_extension_failures:
+      - "VI_NFC_NFD_GAP_CP_01A0"
+      - "VI_NFC_NFD_GAP_CP_01A0"
+      - "VI_NFC_NFD_GAP_CP_01A1"
+      - "VI_NFC_NFD_GAP_CP_01AF"
+      - "VI_NFC_NFD_GAP_CP_01AF"
+      - "VI_NFC_NFD_GAP_CP_01B0"
+      - "VI_NFC_NFD_GAP_CP_1EA5"
+      - "VI_NFC_NFD_GAP_CP_1EA7"
+      - "VI_NFC_NFD_GAP_CP_1EA9"
+      - "VI_NFC_NFD_GAP_CP_1EAB"
+      - "VI_NFC_NFD_GAP_CP_1EAD"
+      - "VI_NFC_NFD_GAP_CP_1EBF"
+      - "VI_NFC_NFD_GAP_CP_1EC1"
+      - "VI_NFC_NFD_GAP_CP_1EC3"
+      - "VI_NFC_NFD_GAP_CP_1EC5"
+      - "VI_NFC_NFD_GAP_CP_1EC7"
+      - "VI_NFC_NFD_GAP_CP_1ED1"
+      - "VI_NFC_NFD_GAP_CP_1ED3"
+      - "VI_NFC_NFD_GAP_CP_1ED5"
+      - "VI_NFC_NFD_GAP_CP_1ED7"
+      - "VI_NFC_NFD_GAP_CP_1ED9"
+      - "VI_NFC_NFD_GAP_CP_1EDB"
+      - "VI_NFC_NFD_GAP_CP_1EDD"
+      - "VI_NFC_NFD_GAP_CP_1EDF"
+      - "VI_NFC_NFD_GAP_CP_1EE3"
+      - "VI_NFC_NFD_GAP_CP_1EE9"
+      - "VI_NFC_NFD_GAP_CP_1EEB"
+      - "VI_NFC_NFD_GAP_CP_1EED"
+      - "VI_NFC_NFD_GAP_CP_1EF1"
+    resolved_by_deterministic_extension: 7
+  preserved_existing_glyphs:
+    count: 23
+    codepoints:
+      - "U+0110"
+      - "U+0111"
+      - "U+01A0"
+      - "U+01A1"
+      - "U+01AF"
+      - "U+01B0"
+      - "U+02C6"
+      - "U+1EA1"
+      - "U+1EA3"
+      - "U+1EA5"
+      - "U+1EA7"
+      - "U+1EAB"
+      - "U+1EAD"
+      - "U+1EBF"
+      - "U+1EC1"
+      - "U+1EC3"
+      - "U+1EC7"
+      - "U+1EDB"
+      - "U+1EDF"
+      - "U+1EE3"
+      - "U+1EE9"
+      - "U+1EEB"
+      - "U+1EF1"
+  missing_required_count: 81
+  deterministic_composition:
+    resolved_count: 21
+    codepoints:
+      - "U+0300"
+      - "U+0301"
+      - "U+0303"
+      - "U+0309"
+      - "U+0323"
+      - "U+1EA9"
+      - "U+1EB9"
+      - "U+1EBB"
+      - "U+1EBD"
+      - "U+1EC5"
+      - "U+1ECD"
+      - "U+1ECF"
+      - "U+1ED1"
+      - "U+1ED3"
+      - "U+1ED5"
+      - "U+1ED7"
+      - "U+1ED9"
+      - "U+1EDD"
+      - "U+1EE5"
+      - "U+1EE7"
+      - "U+1EED"
+    errors:
+      {}
+  ai_required:
+    count: 60
+    codepoints:
+      - "U+0306"
+      - "U+031B"
+      - "U+1EA0"
+      - "U+1EA2"
+      - "U+1EA4"
+      - "U+1EA6"
+      - "U+1EA8"
+      - "U+1EAA"
+      - "U+1EAC"
+      - "U+1EAE"
+      - "U+1EAF"
+      - "U+1EB0"
+      - "U+1EB1"
+      - "U+1EB2"
+      - "U+1EB3"
+      - "U+1EB4"
+      - "U+1EB5"
+      - "U+1EB6"
+      - "U+1EB7"
+      - "U+1EB8"
+      - "U+1EBA"
+      - "U+1EBC"
+      - "U+1EBE"
+      - "U+1EC0"
+      - "U+1EC2"
+      - "U+1EC4"
+      - "U+1EC6"
+      - "U+1EC8"
+      - "U+1EC9"
+      - "U+1ECA"
+      - "U+1ECB"
+      - "U+1ECC"
+      - "U+1ECE"
+      - "U+1ED0"
+      - "U+1ED2"
+      - "U+1ED4"
+      - "U+1ED6"
+      - "U+1ED8"
+      - "U+1EDA"
+      - "U+1EDC"
+      - "U+1EDE"
+      - "U+1EE0"
+      - "U+1EE1"
+      - "U+1EE2"
+      - "U+1EE4"
+      - "U+1EE6"
+      - "U+1EE8"
+      - "U+1EEA"
+      - "U+1EEC"
+      - "U+1EEE"
+      - "U+1EEF"
+      - "U+1EF0"
+      - "U+1EF2"
+      - "U+1EF3"
+      - "U+1EF4"
+      - "U+1EF5"
+      - "U+1EF6"
+      - "U+1EF7"
+      - "U+1EF8"
+      - "U+1EF9"
+    calls_made: 0
+    note: "listed, NEVER called: no provider keys locally; the phase-1 pipeline run proved these classes fail CLOSED at the AI gate"
+  glyph_classes:
+    total_missing_classes: 13
+    resolved_deterministic:
+      - "base_a"
+      - "base_e"
+      - "base_o"
+      - "base_u"
+      - "combining_mark"
+    requiring_ai:
+      - "base_A"
+      - "base_E"
+      - "base_I"
+      - "base_O"
+      - "base_U"
+      - "base_Y"
+      - "base_a"
+      - "base_i"
+      - "base_o"
+      - "base_u"
+      - "base_y"
+      - "combining_mark"
+    deterministic_error:
+      []
+    ai_calls_budget: 13
+    ai_calls_used: 0
+  anchor_mark_inference:
+    reached: true
+    glyphs_with_anchors: 5
+    combining_marks_with_inferred_anchors:
+      - "U+0300"
+      - "U+0301"
+      - "U+0303"
+      - "U+0309"
+      - "U+0323"
+    anchors:
+      U+0300:
+        -
+          - "mark"
+          - 320.31
+          - 68.06
+      U+0301:
+        -
+          - "mark"
+          - 320.31
+          - 68.06
+      U+0303:
+        -
+          - "mark"
+          - 320.31
+          - 68.06
+      U+0309:
+        -
+          - "mark"
+          - 320.31
+          - 68.06
+      U+0323:
+        -
+          - "mark"
+          - 326.52
+          - -235.92
+    mkmk: "not a stage of the deterministic-first path under ADR-0004 (anchor/mark inference reached; no mkmk reconstruction attempted)"
+  validation_on_deterministic_only_extension:
+    built_temporary_ttf_bytes: 12280
+    vn_gate_corpus_shaping_clipping_spacing_failures:
+      - "VI_CORPUS_SHAPING_NOTDEF"
+      - "VI_CORPUS_SHAPING_NOTDEF"
+      - "VI_CORPUS_SHAPING_NOTDEF"
+      - "VI_CORPUS_SHAPING_NOTDEF"
+      - "VI_CORPUS_SHAPING_NOTDEF"
+    speed_first_validation:
+      passed: false
+      reasons:
+        - "normalization_FAILED"
+      fonttools_ttf_checks:
+        tables: "PASS"
+        cmap: "PASS"
+        glyph_count: "PASS"
+        metrics: "PASS"
+        outline: "PASS"
+        head_bbox: "PASS"
+        magic: "PASS"
+      harfbuzz_checks:
+        shaping: "PASS"
+        positions: "PASS"
+        kern: "PASS_NONE_DECLARED"
+      freetype_checks:
+        load: "PASS"
+        render: "PASS"
+      normalization:
+        checks:
+          nfc_nfd_coverage: "FAIL:29"
+          vn_corpus_coverage: "PARTIAL:46_MISSING"
+        vietnamese: true
+        vn_corpus_strings: 8
+        passed: false
+    note: "bounded subset: corpus/NFC-NFD shortfalls are reported honestly (failed classes stay failed; no global rerun per ADR-0004)"
+  wall_seconds: 0.69
+timing_memory:
+  total_wall_seconds: 18.034
+  wall_cap_seconds: 360
+  within_cap: true
+  peak_working_set_mb: 152.656
+  peak_tracemalloc_mb_phases23: 1.629
