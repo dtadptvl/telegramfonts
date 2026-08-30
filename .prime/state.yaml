@@ -1,5 +1,5 @@
 schema_version: 7
-generation: 2
+generation: 3
 
 governance:
   policy_rev: "P-20260830.8-LEAN-SAFE-R15"
@@ -13,7 +13,8 @@ phase:
   id: "fast30-cutover"
   status: active
 
-now: []
+now:
+  - "T-A23-PROD-01"
 next: []
 
 blockers:
@@ -34,7 +35,7 @@ human_requirements:
     - "runtime model failover only for capacity/unavailability with unchanged contract and reusable evidence"
     - "never fake/bypass/weaken external-ext4/filesystem identity checks; loopback never posed as canonical archive"
     - "stale A23 retired-profile job: read-only inspection only; no mutation without explicit authorization"
-    - "PENDING HUMAN DECISION (E-00008): authorize one of - (a) read-enabling: deployed DOWNLOAD_SIGNING_SECRET disclosure/rotation OR Human-authorized SELECT on production D1 (4 rows: job/order/payment/receipts); (b) milestone-3 consequential envelope: deploy FAST_30 to A23 + one controlled bot fulfillment of ord_2a142f39 within the 30-minute wall; (c) monetary handling of the unfulfilled paid order. Milestones 3-4 are otherwise blocked."
+    - "DECIDED (E-00009): Human authorized milestone-3 envelope 'Chạy fulfillment FAST_30 trên A23'. Pending Human physical/credential steps (T-A23-PROD-01 P1+P2): device release update to head 5a2f05e + read-only D1 SELECT of job/order rows; Prime then executes exactly one identity-bound dispatch mutation (P3)."
 
 active_decisions:
   - "decisions/ADR-0001.md"
@@ -44,6 +45,6 @@ recent_invalidations:
 
 reconciliation:
   status: clean
-  event: E-00008
+  event: E-00009
 
-updated_at: "2026-08-30T06:10:00Z"
+updated_at: "2026-08-30T06:20:00Z"
