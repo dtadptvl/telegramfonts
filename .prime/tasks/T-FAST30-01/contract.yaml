@@ -1,0 +1,30 @@
+schema_version: 6
+policy_rev: "P-20260830.4-LEAN-SAFE-R10"
+policy_fingerprint: "caeb9d57b32cb996"
+id: T-FAST30-01
+contract_rev: 1
+mode: DEEP
+created_at_generation: 2
+scope_tags: [reconstruction-profile]
+
+objective: "Implement FAST_30 as the sole production reconstruction/fidelity profile and validate against the 30-minute E2E wall limit on A23; ensure no fallback/escalation path exists."
+
+acceptance:
+  A1: "no BALANCED_MAX/FULL_MAX fallback or escalation paths present in the codebase for this profile"
+  A2: "30-minute wall enforcement with FAST30_FAILED halt implemented in validation policy"
+  A3: "final gates preserved: held-out/four-consumer/TTF+OTT outputs unchanged"
+  A4: "exact binary/artifact reuse still wins immediately"
+  A5: "bounded source acquisition fallback preserved (data-source recovery only)"
+  A6: "CI lanes updated: fast-tests lane remains; fullmax-final lane semantics retired"
+
+routing:
+  role: worker-deep
+  reason: "cross-subsystem change to reconstruction/profile layers and CI lane semantics"
+  fallback_safe: true
+
+gates: LOCAL_ONLY NO_LOOP
+change_budget: {}
+validation: { required: [], max_runs: null, max_wall: null }
+authorization: {}
+
+note: "This is a pointer-only contract; implementation must start after Kilo restart per Human instruction"

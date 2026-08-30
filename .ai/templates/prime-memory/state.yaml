@@ -1,0 +1,47 @@
+schema_version: 5
+generation: 1
+
+governance:
+  policy_rev: "<from .ai/POLICY-REV>"
+  fingerprint: "<16-hex current governance fingerprint>"
+
+persistence:
+  remote_sync: unverified  # current | pending | unavailable | unverified
+  # Git is authoritative for commit/branch/worktree/remote identity. Do not cache SHAs here.
+
+objective: "<current project objective>"
+
+phase:
+  id: "<phase-id>"
+  status: active
+
+now: []
+# Current non-terminal task IDs; normally one write task plus optional useful inspector.
+
+next: []
+# Up to 1-2 concrete outcomes, not a speculative DAG.
+
+blockers: []
+exit: []
+# Observable current phase/project exit criteria.
+
+human_requirements:
+  active: []
+  # Current explicit Human constraints/preferences/acceptance only.
+
+active_decisions: []
+
+recent_invalidations: []
+# Example: {generation: 2, scopes: [auth], severity: breaking, source_event: E-00002}
+# Target <=16. Never prune an entry still capable of affecting an active task merely to meet the target;
+# revalidate/rebase/cancel the affected task first, update its binding, then prune obsolete entries.
+
+reconciliation:
+  status: clean
+  event: null
+
+last_event: null
+updated_at: "<ISO-8601>"
+
+# SOFT TARGET <= 4 KiB; HARD CAP <= 12 KiB.
+# Keep current truth/pointers only. Preserve decision-relevant overflow/history losslessly before compacting.

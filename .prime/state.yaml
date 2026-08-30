@@ -1,0 +1,64 @@
+schema_version: 5
+generation: 2
+
+governance:
+  policy_rev: "P-20260830.4-LEAN-SAFE-R10"
+  fingerprint: "caeb9d57b32cb996"
+
+persistence:
+  remote_sync: pending
+
+objective: "FAST_30 is the sole production reconstruction/fidelity profile; deliver one controlled Telegram bot order producing verified TTF/OTF on the A23 worker within a 30-minute end-to-end wall limit, no fidelity fallback/escalation."
+
+phase:
+  id: "fast30-cutover"
+  status: active
+
+now: []
+next:
+  - "T-FAST30-01: implement FAST_30 sole-profile layer (pointer only; start after Kilo restart)"
+
+blockers:
+  - "A23 live job attempt 6 runs under retired BALANCED_MAX/FULL_MAX profile; marked stale/incompatible; drains naturally fail-closed (not stopped/mutated at cutover)"
+  - "paid order ord_2a142f39 (tx 77506129) unfulfilled; fulfillment belongs to the FAST_30 path after restart"
+
+exit:
+  - "one controlled bot order completed end-to-end on A23 under FAST_30 with verified TTF/OTF delivery within the 30-minute wall limit"
+
+human_requirements:
+  active:
+    - "FAST_30 sole production profile; BALANCED_MAX and FULL_MAX fully retired"
+    - "no automatic/manual/background/confidence/gate/operator-triggered fidelity fallback or escalation"
+    - "30-minute end-to-end wall limit per font; deadline or quality failure returns FAST30_FAILED and stops"
+    - "TTF and OTF are the only outputs"
+    - "source acquisition fallbacks remain bounded data-source recovery, not fidelity-profile fallback"
+    - "exact binary/artifact reuse still wins immediately"
+    - "runtime model failover from v7 only for capacity/unavailability with unchanged contract and reusable evidence"
+    - "never fake/bypass/weaken external-ext4/filesystem identity checks; loopback never posed as canonical archive"
+    - "A23 must not be stopped or mutated by governance-only work"
+
+active_decisions:
+  - "ADR-0001 FAST_30_ONLY production profile (Human 2026-08-30)"
+
+recent_invalidations:
+  - {generation: 2, scopes: [reconstruction-profile, issue-90-balanced-max, fullmax-final-lane-semantics], severity: breaking, source_event: E-00002}
+
+reconciliation:
+  status: clean
+  event: E-00003
+
+legacy_import:
+  source_refs:
+    - "GitHub #90 (BALANCED_MAX runtime-to-bot contract; stale/incompatible at gen 2)"
+    - "GitHub #6 D18/D21 (profile escalation semantics retired; D21 runtime truth preserved in ADR-0001 consequences)"
+    - "GitHub #3/#7 (old AI-PLAN/AI-CHECKPOINT; retired governance memory)"
+  preserved_runtime_truth:
+    - "A23 archive mode no_local_archive_v1 explicit; external ext4 off A23; mini-PC is future archive target"
+    - "chroot runtime: /proc + /dev/{urandom,random,zero} binds + tmpfs /dev/shm; boot-recovery script sha256 631d2920; Chromium CDP proven"
+    - "worker heartbeat on dedicated daemon thread; terminal-FAILED recovery CAS incl. reaper-terminal residue"
+    - "edge version 7c582378; device staged release b8c6994; CI lanes quick-tests/fullmax-final exist"
+  stable_identities:
+    - "canonical line main@02dfe557 pre-cutover; merged PRs #85/#87/#89/#91/#92/#93/#94/#95"
+
+last_event: E-00003
+updated_at: "2026-08-30T03:05:00Z"

@@ -1,0 +1,14 @@
+schema_version: 3
+task: T-EXAMPLE
+contract_rev: 1
+status: in_progress
+stage: "<meaningful milestone>"
+working_identity: null
+next: []
+blockers: []
+updated_at: "<ISO-8601>"
+
+# Optional when decision-relevant: runtime: {model: null, failover_reason: null}
+# Create only when recovery value justifies it. Milestones only; never an execution diary.
+# Git is authoritative for commit identity; use a stable ref here only when recovery actually needs it.
+# SOFT TARGET <= 3 KiB; HARD CAP <= 8 KiB.

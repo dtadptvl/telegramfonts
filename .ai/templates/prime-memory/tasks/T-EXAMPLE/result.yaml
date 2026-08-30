@@ -1,0 +1,28 @@
+schema_version: 4
+task: T-EXAMPLE
+contract_rev: 1
+status: completed  # completed | needs_recontract | blocked | failed | cancelled
+governance:
+  policy_rev: "<policy_rev actually used>"
+  fingerprint: "<policy_fingerprint actually used>"
+proved: [A1]
+finished_at: "<ISO-8601>"
+
+# Omit empty fields. Add only decision-relevant delta when applicable:
+# reason_code: STALE_GOVERNANCE | IDENTITY_MISMATCH | SCOPE_EXPANSION | INTENT_CONFLICT | AUTH_REQUIRED | BUDGET_EXCEEDED | EVIDENCE_INSUFFICIENT | EXTERNAL_BLOCKER
+# failure: {class: CAUSE_UNPROVEN, probe: "<smallest discriminating probe>", evidence_ref: "<stable ref or minimum useful excerpt>"}
+# unproved: [A2]
+# policies_applied: [evidence, budget]
+# identity: {repo: null, worktree: null, branch: null, base: null, head: null, commit: null, artifact: null}
+# validation: []
+# changed: []
+# discoveries: []
+# assumptions: []
+# potential_decisions: []
+# unresolved: []
+# superseded_by: T-XXX
+# authorization_state: CONSUMED | UNCONSUMED | AMBIGUOUS
+# runtime: {model: null, failover_reason: null}  # only when decision-relevant
+# Prime promotes this worker outcome claim only when task + contract_rev match the current contract.
+# completed requires every acceptance ID in the contract to be proved.
+# No contract recap, command chronology, or implementation essay.
