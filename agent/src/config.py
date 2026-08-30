@@ -89,6 +89,31 @@ class Settings(BaseSettings):
         description="Default HTTP timeout in seconds",
     )
 
+    # T-FAST30-A23-FIX F1: hard monotonic job wall (claim -> ACK). Independent
+    # of the heartbeat-moved lease expiry: breach raises terminal FAST30_FAILED
+    # and nothing is uploaded/archived after a breach. Production default 1800
+    # seconds = the 30-minute FAST_30 production wall.
+    JOB_WALL_SECONDS: int = Field(
+        default=1800,
+        ge=2,
+        le=7200,
+        description=(
+            "Hard monotonic job wall (seconds) from claim to ACK; breach fails "
+            "terminal FAST30_FAILED with no upload/archive after the breach"
+        ),
+    )
+    # T-FAST30-A23-FIX F5: optional progress beacon file touched on stage
+    # transitions and heartbeat beats. The supervisor hang watchdog kills the
+    # worker when this file goes stale (process-lifecycle only; no pipeline
+    # semantics). Absent -> beacon disabled.
+    PROGRESS_BEACON_FILE: Path | None = Field(
+        default=None,
+        description=(
+            "Progress beacon file touched on stage transitions/heartbeat beats "
+            "for the supervisor hang watchdog (process-lifecycle only)"
+        ),
+    )
+
     # Stage 9D acquisition provider settings (runtime secrets; never logged)
     ACQUISITION_ENABLED: bool = Field(
         default=False,

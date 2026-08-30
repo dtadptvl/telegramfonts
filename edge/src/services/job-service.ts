@@ -150,6 +150,26 @@ export interface QueueRearmParams {
 }
 
 export const QUEUE_REARM_AUDIT_REASON = 'QUEUE_RETENTION_EXPIRED_RECOVERY';
+/**
+ * T-FAST30-A23-FIX F4: job-age backstop. A job's current lease may never be
+ * extended once it is older than this cap, and the exhausted-job finalizer
+ * gains an age-based candidate clause at the same cap. Documented default =
+ * 2,100,000 ms (35 min): the 30-min FAST_30 job wall plus a 5-min operational
+ * margin. Configuration-driven via the MAX_JOB_AGE_MS wrangler var; nothing
+ * here is A23-device-specific.
+ */
+export const DEFAULT_MAX_JOB_AGE_MS = 2_100_000;
+const MIN_MAX_JOB_AGE_MS = 60_000;
+const MAX_MAX_JOB_AGE_MS = 86_400_000;
+
+export function resolveMaxJobAgeMs(raw: string | undefined): number {
+  if (raw === undefined || raw === null) return DEFAULT_MAX_JOB_AGE_MS;
+  const parsed = Number.parseInt(String(raw).trim(), 10);
+  if (!Number.isFinite(parsed) || parsed < MIN_MAX_JOB_AGE_MS || parsed > MAX_MAX_JOB_AGE_MS) {
+    return DEFAULT_MAX_JOB_AGE_MS;
+  }
+  return parsed;
+}
 export const MAX_ATTEMPTS_EXHAUSTED_REASON = 'max_attempts_exhausted';
 export const MAX_ATTEMPTS_EXHAUSTED_RESCUE_REASON = 'MAX_ATTEMPTS_EXHAUSTED_RESCUE';
 export const TERMINAL_FAILED_RECOVERY_REASON = 'TERMINAL_FAILED_RECOVERY';
@@ -319,7 +339,10 @@ export const MODE_ABSENT_LEGACY_ORDER_REASON = 'MODE_ABSENT_LEGACY_ORDER';
 export const MODE_IDENTITY_MISMATCH_REASON = 'MODE_IDENTITY_MISMATCH';
 
 export class JobService {
-  constructor(private readonly db: D1Database) {}
+  constructor(
+    private readonly db: D1Database,
+    private readonly maxJobAgeMs: number = DEFAULT_MAX_JOB_AGE_MS
+  ) {}
 
   async getJobById(jobId: string): Promise<FulfillmentJobRecord | null> {
     return this.db
@@ -347,22 +370,34 @@ export class JobService {
     batchSize = 25
   ): Promise<FinalizeExpiredJobsResult> {
     const boundedBatchSize = Math.max(1, Math.min(batchSize, 25));
+    // T-FAST30-A23-FIX F4: two independent candidate clauses, one CAS per
+    // clause. (1) Unchanged lease-expiry clause. (2) Age backstop clause:
+    // leased_at (set only at claim time, never moved by heartbeats) older
+    // than maxJobAgeMs with attempts exhausted. A zombie that keeps
+    // heartbeating can no longer starve finalization: once its lease age
+    // exceeds the cap, heartbeats are refused (heartbeat age backstop) AND
+    // this clause finalizes the exhausted job even while the lease is still
+    // technically alive. Both paths keep attempt exhaustion required.
+    const ageCutoff = now - this.maxJobAgeMs;
     const candidates = await this.db
       .prepare(
-        `SELECT id, order_id, lease_expires_at, attempt_count, max_attempts
+        `SELECT id, order_id, lease_expires_at, leased_at, attempt_count, max_attempts
          FROM fulfillment_jobs
          WHERE status = 'PROCESSING'
-           AND lease_expires_at IS NOT NULL
-           AND lease_expires_at <= ?
            AND attempt_count >= max_attempts
-         ORDER BY lease_expires_at ASC
+           AND (
+             (lease_expires_at IS NOT NULL AND lease_expires_at <= ?)
+             OR (leased_at IS NOT NULL AND leased_at <= ?)
+           )
+         ORDER BY COALESCE(lease_expires_at, leased_at) ASC
          LIMIT ?`
       )
-      .bind(now, boundedBatchSize)
+      .bind(now, ageCutoff, boundedBatchSize)
       .all<{
         id: string;
         order_id: string;
-        lease_expires_at: number;
+        lease_expires_at: number | null;
+        leased_at: number | null;
         attempt_count: number;
         max_attempts: number;
       }>();
@@ -373,6 +408,74 @@ export class JobService {
 
     const statements: D1PreparedStatement[] = [];
     for (const candidate of candidates.results) {
+      const leaseExpired = candidate.lease_expires_at !== null && candidate.lease_expires_at <= now;
+      if (leaseExpired) {
+        statements.push(
+          this.db
+            .prepare(
+              `UPDATE fulfillment_jobs
+               SET status = 'FAILED',
+                   lease_token = NULL,
+                   next_retry_at = NULL,
+                   last_error = ?,
+                   updated_at = ?
+               WHERE id = ?
+                 AND order_id = ?
+                 AND status = 'PROCESSING'
+                 AND lease_expires_at = ?
+                 AND lease_expires_at <= ?
+                 AND attempt_count = ?
+                 AND max_attempts = ?
+                 AND attempt_count >= max_attempts`
+            )
+            .bind(
+              MAX_ATTEMPTS_EXHAUSTED_REASON,
+              now,
+              candidate.id,
+              candidate.order_id,
+              candidate.lease_expires_at,
+              now,
+              candidate.attempt_count,
+              candidate.max_attempts
+            )
+        );
+        statements.push(
+          this.db
+            .prepare(
+              `UPDATE orders
+               SET status = 'FAILED', updated_at = ?
+               WHERE id = ?
+                 AND status = 'PROCESSING'
+                 AND EXISTS (
+                   SELECT 1
+                   FROM fulfillment_jobs
+                   WHERE id = ?
+                     AND order_id = ?
+                     AND status = 'FAILED'
+                     AND last_error = ?
+                     AND updated_at = ?
+                     AND attempt_count = ?
+                     AND max_attempts = ?
+                     AND lease_expires_at = ?
+                 )`
+            )
+            .bind(
+              now,
+              candidate.order_id,
+              candidate.id,
+              candidate.order_id,
+              MAX_ATTEMPTS_EXHAUSTED_REASON,
+              now,
+              candidate.attempt_count,
+              candidate.max_attempts,
+              candidate.lease_expires_at
+            )
+        );
+        continue;
+      }
+
+      // Age-backstop CAS: identical fail-closed shape, guarded on leased_at
+      // (claim-time truth) instead of the heartbeat-moved lease_expires_at.
       statements.push(
         this.db
           .prepare(
@@ -385,8 +488,8 @@ export class JobService {
              WHERE id = ?
                AND order_id = ?
                AND status = 'PROCESSING'
-               AND lease_expires_at = ?
-               AND lease_expires_at <= ?
+               AND leased_at = ?
+               AND leased_at <= ?
                AND attempt_count = ?
                AND max_attempts = ?
                AND attempt_count >= max_attempts`
@@ -396,8 +499,8 @@ export class JobService {
             now,
             candidate.id,
             candidate.order_id,
-            candidate.lease_expires_at,
-            now,
+            candidate.leased_at,
+            ageCutoff,
             candidate.attempt_count,
             candidate.max_attempts
           )
@@ -419,7 +522,7 @@ export class JobService {
                    AND updated_at = ?
                    AND attempt_count = ?
                    AND max_attempts = ?
-                   AND lease_expires_at = ?
+                   AND leased_at = ?
                )`
           )
           .bind(
@@ -431,7 +534,7 @@ export class JobService {
             now,
             candidate.attempt_count,
             candidate.max_attempts,
-            candidate.lease_expires_at
+            candidate.leased_at
           )
       );
     }
@@ -1452,6 +1555,12 @@ export class JobService {
     const now = Date.now();
     const newExpiresAt = now + boundedExtend * 1000;
 
+    // T-FAST30-A23-FIX F4 age backstop: once the current lease age exceeds
+    // maxJobAgeMs the extension is refused (fenced/expired result). The lease
+    // then expires within one lease period and the existing finalizer/claim
+    // fencing terminates the run. leased_at is set only at claim time and is
+    // never moved by heartbeats, so the CAS clause stays atomic and no
+    // existing fencing is weakened.
     const result = await this.db
       .prepare(
         `UPDATE fulfillment_jobs
@@ -1460,9 +1569,11 @@ export class JobService {
            AND status = 'PROCESSING'
            AND lease_owner = ?
            AND lease_token = ?
-           AND lease_expires_at > ?`
+           AND lease_expires_at > ?
+           AND leased_at IS NOT NULL
+           AND leased_at >= ?`
       )
-      .bind(newExpiresAt, now, jobId, cleanWorkerId, cleanToken, now)
+      .bind(newExpiresAt, now, jobId, cleanWorkerId, cleanToken, now, now - this.maxJobAgeMs)
       .run();
 
     if (result.meta.changes && result.meta.changes > 0) {

@@ -296,6 +296,7 @@ def _stop_probe_script(run_worker_source: str, temp_dir: str) -> str:
             'RUNTIME_PYTHON="/nonexistent"',
             'WORKER_ENTRYPOINT="/nonexistent"',
             'ARCHIVE_ROOT="/nonexistent"',
+            'WATCHDOG_PROGRESS_FILE="/root/.telefont_worker_progress"',
             'WORKER_PATH="/usr/bin:/bin"',
             'export pidfile="$PWD/sentinel.pid"',
             "cat >fake_chroot.sh <<'STUB'",
@@ -396,6 +397,107 @@ def test_supervisor_bytecode_cache_clean_removes_only_pycache() -> None:
         assert result.returncode == 0, result.stdout + result.stderr
         assert not list(staged.rglob("__pycache__"))
         assert (staged / "agent" / "src" / "main.py").read_text(encoding="utf-8") == "X = 1\n"
+
+
+def test_supervisor_watchdog_is_config_driven_and_exports_beacon() -> None:
+    source = _text(SUPERVISOR)
+
+    # Defaults are documented and overridable (config-driven; no hardcoding).
+    assert 'readonly WATCHDOG_PROGRESS_FILE_DEFAULT="/root/.telefont_worker_progress"' in source
+    assert 'readonly WATCHDOG_STALE_MULTIPLIER_DEFAULT=6' in source
+    assert 'readonly WATCHDOG_POLL_SECONDS_DEFAULT=15' in source
+    assert 'printenv TELEFONT_WATCHDOG_PROGRESS_FILE' in source
+    assert 'printenv TELEFONT_WATCHDOG_STALE_MULTIPLIER' in source
+    assert 'printenv TELEFONT_WATCHDOG_POLL_SECONDS' in source
+    # Stale threshold tracks the worker's configured heartbeat cadence.
+    assert 'printenv HEARTBEAT_INTERVAL_SECONDS' in source
+    assert 'WATCHDOG_STALE_SECONDS=$((WATCHDOG_STALE_MULTIPLIER * worker_heartbeat_interval))' in source
+    # The worker receives the beacon path (chroot coordinates) in both chains.
+    assert source.count('PROGRESS_BEACON_FILE="$WATCHDOG_PROGRESS_FILE"') == 2
+    # Host-side watchdog reads the beacon through the Debian root.
+    assert 'WATCHDOG_PROGRESS_FILE_HOST="$DEBIAN_ROOT$WATCHDOG_PROGRESS_FILE"' in source
+    # Lifecycle controls preserved: restart budget still applies after a kill.
+    assert 'watchdog_wait_or_kill || fail' in source
+    assert 'worker was killed by the hang watchdog; restart budget applies' in source
+    assert 'readonly MAX_RESTARTS=3' in source
+
+
+def _watchdog_probe(function_source: str, temp_dir: str, scenario: str) -> str:
+    # Causal watchdog probe: the extracted watchdog_wait_or_kill runs against
+    # a fake worker. "stale" scenario: the worker never touches the beacon
+    # and must be killed after the stale threshold. "fresh" scenario: the
+    # beacon is fresh and the worker exits naturally; the watchdog must NOT
+    # kill (process-lifecycle only, no false positives).
+    beacon_touch = "touch \"$WATCHDOG_PROGRESS_FILE_HOST\"\n" if scenario == "fresh" else ""
+    worker_cmd = "sleep 1" if scenario == "fresh" else "sleep 30"
+    return "\n".join(
+        (
+            "set -u",
+            f'cd "{temp_dir}" || exit 1',
+            'DEBIAN_ROOT="$PWD/rootfs"',
+            'mkdir -p "$DEBIAN_ROOT/root"',
+            'WATCHDOG_PROGRESS_FILE_HOST="$DEBIAN_ROOT/root/.telefont_worker_progress"',
+            "WATCHDOG_STALE_SECONDS=2",
+            "WATCHDOG_POLL_SECONDS=1",
+            "WATCHDOG_TERM_GRACE_SECONDS=2",
+            'STAT_BIN="$(command -v stat)"',
+            'LOG_FILE="$PWD/watchdog.log"',
+            'log() { printf \'%s\\n\' "$1" >>"$LOG_FILE"; }',
+            function_source,
+            beacon_touch + f'{worker_cmd} </dev/null >/dev/null 2>&1 &',
+            "worker_pid=$!",
+            'watchdog_wait_or_kill || { echo CLOCK_FAIL; exit 1; }',
+            'echo "watchdog_kill=$watchdog_kill"',
+            'if kill -0 "$worker_pid" 2>/dev/null; then',
+            '  kill -KILL "$worker_pid" 2>/dev/null || true',
+            "  echo ORPHAN",
+            "else",
+            "  echo WORKER_DEAD",
+            "fi",
+        )
+    )
+
+
+def test_supervisor_watchdog_kills_worker_with_stale_progress() -> None:
+    bash = _bash_command()
+    if bash is None:
+        pytest.skip("bash is not available on the validation host")
+
+    source = _text(SUPERVISOR)
+    function = _shell_function(source, "watchdog_wait_or_kill")
+
+    with tempfile.TemporaryDirectory(dir=ROOT) as temp_dir:
+        result = subprocess.run(
+            [bash, "-c", _watchdog_probe(function, Path(temp_dir).as_posix(), "stale")],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "watchdog_kill=1" in result.stdout
+        assert "WORKER_DEAD" in result.stdout
+
+
+def test_supervisor_watchdog_does_not_kill_worker_with_fresh_progress() -> None:
+    bash = _bash_command()
+    if bash is None:
+        pytest.skip("bash is not available on the validation host")
+
+    source = _text(SUPERVISOR)
+    function = _shell_function(source, "watchdog_wait_or_kill")
+
+    with tempfile.TemporaryDirectory(dir=ROOT) as temp_dir:
+        result = subprocess.run(
+            [bash, "-c", _watchdog_probe(function, Path(temp_dir).as_posix(), "fresh")],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "watchdog_kill=0" in result.stdout
+        assert "WORKER_DEAD" in result.stdout
 
 
 def test_supervisor_shell_syntax() -> None:

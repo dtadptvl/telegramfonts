@@ -360,6 +360,7 @@ class Stage9DReleaseGate:
         provider_capability: Any = None,
         profile: Any = None,
         deadline: float | None = None,
+        checkpoint_root: str | Path | None = None,
     ) -> ReleaseGateResult:
         if profile is None:
             profile = FAST_30_PROFILE
@@ -491,7 +492,20 @@ class Stage9DReleaseGate:
             # optimized, and gated.
             try:
                 ckpt_store = None
-                if output_dir is not None:
+                if checkpoint_root is not None:
+                    # T-FAST30-A23-FIX F6: durable, stable-identity checkpoint
+                    # placement. The caller-supplied root is scoped to the job
+                    # (durable cache, not the lease-token-bound scratch dir)
+                    # and this segment binds the snapshot identity, so a
+                    # re-claimed attempt of the same job over identical
+                    # evidence resumes instead of restarting. Load-time
+                    # identity-hash validation stays fail-closed; distinct
+                    # jobs never share a root.
+                    ckpt_store = GlyphCheckpointStore(
+                        Path(checkpoint_root) / snapshot.snapshot_fingerprint[:16],
+                        profile,
+                    )
+                elif output_dir is not None:
                     ckpt_store = GlyphCheckpointStore(Path(output_dir), profile)
                 search = BalancedMaxSearch(profile, checkpoint_store=ckpt_store)
                 formation = search.form_model(
@@ -1048,6 +1062,7 @@ class Stage9DReleaseGate:
         provider_capability: Any = None,
         reconstruction_profile: Any = None,
         wall_limit_seconds: float | None = None,
+        checkpoint_root: str | Path | None = None,
     ) -> ReleaseGateResult:
         """Stage 9D production flow under FAST_30 (ADR-0001).
 
@@ -1092,7 +1107,11 @@ class Stage9DReleaseGate:
             provider_capability=provider_capability,
         )
         return await cls._execute_profiled(
-            output_dir=output_dir, profile=profile, deadline=deadline, **common
+            output_dir=output_dir,
+            profile=profile,
+            deadline=deadline,
+            checkpoint_root=checkpoint_root,
+            **common,
         )
 
     @classmethod
@@ -1114,6 +1133,7 @@ class Stage9DReleaseGate:
         provider_capability: Any = None,
         reconstruction_profile: Any = None,
         wall_limit_seconds: float | None = None,
+        checkpoint_root: str | Path | None = None,
     ) -> ReleaseGateResult:
         kwargs = dict(
             store=store,
@@ -1132,19 +1152,45 @@ class Stage9DReleaseGate:
             provider_capability=provider_capability,
             reconstruction_profile=reconstruction_profile,
             wall_limit_seconds=wall_limit_seconds,
+            checkpoint_root=checkpoint_root,
         )
+        return cls._run_bounded(cls.execute, kwargs, format_type, wall_limit_seconds)
+
+    @classmethod
+    def _run_bounded(
+        cls,
+        coro_fn: Any,
+        kwargs: dict[str, Any],
+        format_type: str,
+        wall_limit_seconds: float | None,
+    ) -> ReleaseGateResult:
+        """T-FAST30-A23-FIX F2: preemptive wall at the sync gate boundary.
+
+        The gate always runs on a dedicated executor future; when a wall
+        limit is supplied the boundary is HARD: ``future.result(timeout=
+        remaining_budget)`` returns FAST30_FAILED WALL_LIMIT_EXCEEDED (never
+        publishable) even if the cooperative in-gate checkpoints have not
+        fired (those checkpoints remain unchanged). The worker thread cannot
+        be force-killed in Python; it terminates at its own cooperative
+        deadline, while the caller is unblocked at the hard bound.
+        """
+        import concurrent.futures
+
+        clean_format = str(format_type).strip().upper()
+        limit = float(wall_limit_seconds) if wall_limit_seconds is not None else None
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-
-        if loop and loop.is_running():
-            import concurrent.futures
-
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(lambda: asyncio.run(cls.execute(**kwargs)))
+            future = executor.submit(lambda: asyncio.run(coro_fn(**kwargs)))
+            if limit is None:
                 return future.result()
-        return asyncio.run(cls.execute(**kwargs))
+            try:
+                return future.result(timeout=max(0.0, limit))
+            except concurrent.futures.TimeoutError:
+                return _fail_result(
+                    "FAIL", None, "FAST30_FAILED: WALL_LIMIT_EXCEEDED", clean_format
+                )
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     @classmethod
     async def execute_with_model(
@@ -1427,15 +1473,15 @@ class Stage9DReleaseGate:
 
     @classmethod
     def execute_sync_with_model(cls, **kwargs) -> ReleaseGateResult:
-        """Synchronous wrapper around execute_with_model for runner threads."""
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-        if loop and loop.is_running():
-            import concurrent.futures
+        """Synchronous wrapper around execute_with_model for runner threads.
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(lambda: asyncio.run(cls.execute_with_model(**kwargs)))
-                return future.result()
-        return asyncio.run(cls.execute_with_model(**kwargs))
+        T-FAST30-A23-FIX F2: same preemptive hard wall as ``execute_sync``:
+        the remaining job budget bounds the executor future; on timeout the
+        L2 tier returns FAST30_FAILED WALL_LIMIT_EXCEEDED without publishing.
+        """
+        return cls._run_bounded(
+            cls.execute_with_model,
+            kwargs,
+            str(kwargs.get("format_type", "")),
+            kwargs.get("wall_limit_seconds"),
+        )

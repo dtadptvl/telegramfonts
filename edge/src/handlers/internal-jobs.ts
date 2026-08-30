@@ -1,5 +1,5 @@
 import type { Env } from '../env';
-import { JobService, buildArtifactStorageKey } from '../services/job-service';
+import { JobService, resolveMaxJobAgeMs, buildArtifactStorageKey } from '../services/job-service';
 import { emitStructuredLog } from '../utils/logger';
 
 const INTERNAL_AUTH_COMPARE_BYTES = 1024;
@@ -92,7 +92,7 @@ export async function handleInternalJobs(
   const jobId = match[1];
   const action = match[2];
 
-  const jobService = new JobService(env.DB);
+  const jobService = new JobService(env.DB, resolveMaxJobAgeMs(env.MAX_JOB_AGE_MS));
   const defaultLeaseSeconds = env.A23_JOB_LEASE_SECONDS
     ? Math.max(10, Math.min(parseInt(env.A23_JOB_LEASE_SECONDS, 10) || 300, 1800))
     : 300;

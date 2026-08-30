@@ -11,7 +11,7 @@ from compute.archive import resolve_archive_mode
 from config import Settings
 from logging_utils import setup_logging
 from queue_client import CloudflareQueueClient
-from runner import A23Runner
+from runner import A23Runner, touch_progress_beacon
 from scratch import ScratchManager
 from worker_client import WorkerJobClient
 
@@ -68,6 +68,10 @@ async def main() -> None:
         f"queue={settings.CF_QUEUE_ID}, edge={settings.EDGE_BASE_URL}, "
         f"archive_mode={archive_mode.identity})"
     )
+
+    # T-FAST30-A23-FIX F5: seed the supervisor progress beacon at startup so
+    # the hang watchdog has a baseline before the first loop iteration.
+    touch_progress_beacon(settings.PROGRESS_BEACON_FILE, "worker_start")
 
     try:
         await runner.run_loop(stop_event=stop_event)
