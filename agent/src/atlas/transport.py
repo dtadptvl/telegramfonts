@@ -477,7 +477,13 @@ async ({ cells, page_w, page_h }) => {
     canvas.width = page_w;
     canvas.height = page_h;
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    // Coverage convention (atlas/geometry.decode_alpha: value/255 = ink):
+    // WHITE ink on a BLACK background, matching LocalFontRasterProvider.
+    // The background fill also bakes anti-aliased edge alpha into RGB so
+    // the grayscale decode carries true fractional coverage.
     ctx.fillStyle = '#000000';
+    ctx.fillRect(0, 0, page_w, page_h);
+    ctx.fillStyle = '#ffffff';
     ctx.textBaseline = 'alphabetic';
     for (const cell of cells) {
         ctx.font = cell.font_spec;
