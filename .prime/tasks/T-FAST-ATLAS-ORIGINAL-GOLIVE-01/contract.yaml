@@ -1,0 +1,57 @@
+schema_version: 8
+policy_rev: "P-20260830.9-LEAN-SAFE-R16"
+policy_fingerprint: "0fa00f66ee4873bf"
+id: T-FAST-ATLAS-ORIGINAL-GOLIVE-01
+contract_rev: 1
+mode: DEEP
+validated_at_generation: 13
+scope_tags: [a23-staging-release, acquisition, atlas-runtime, product-flow]
+status: active
+
+objective: "Complete ORIGINAL go-live on A23 (E-00029): fix the runtime capability gap, pass one real production-egress ORIGINAL smoke on A23 within the approved wall, then freeze one final candidate and activate Edge + A23 exactly once each, reaching BOT_ORIGINAL_READY so Human can self-test ORIGINAL via the bot. Prime owns the HOW within the budget and boundaries below."
+
+budget_prime_set:
+  smoke_iterations_max: 3        # each <=480s wall, isolated namespaces, honest evidence
+  runtime_rebuilds_max: 2
+  cycle_wall_hours: 4
+  retries: "no blind retries; every iteration requires a diagnosed cause"
+
+acceptance:
+  G1: "runtime capability fixed: the pinned A23 runtime contains a working persistent-browser capability (Playwright + browser or equivalent CDP bridge) proven on device (session starts; canvas/measureText functional); runtime pin rebuilt with fresh manifest/fingerprint passing ALL supervisor verifications"
+  G2: "candidate staged side-by-side with the new runtime: release+runtime dirs for the candidate SHA, fresh manifest from the candidate identity (never the dirty ops manifest), supervisor verifications PASS (archive hash, path set, tar diff, runtime manifest, runtime fingerprint), archive_mode=NO_LOCAL_ARCHIVE, current worker undisturbed during staging"
+  G3: "exactly ONE passing ORIGINAL smoke on A23 from the staged candidate (within <=3 attempts): real raster/binary acquired via production egress (observed responses only - never fabricated), TTF+OTF built, combining marks retained, FontTools structural PASS, representative HarfBuzz + FreeType PASS, total wall <=480s (FAST_30 ORIGINAL wall), zero D1/Queue/R2/payment/order/Telegram mutation, isolated scratch/cache namespaces, no production-cache contamination"
+  G4: "activation: final candidate SHA frozen+bound; Edge deployed EXACTLY ONCE at the final integrated SHA (vars keep VIETNAMESE_ORDERING_ENABLED=false and MAX_JOB_AGE_MS), deployed identity + queue/cron bindings verified; staged A23 release activated EXACTLY ONCE (atomic switch per supervisor convention); Telefont supervisor restarted EXACTLY ONCE; verification: worker SHA matches candidate, manifest fingerprint PASS, readiness PASS, empty-queue polling healthy, zero orphan Chromium; bot ORIGINAL readiness confirmed (ORIGINAL product flow reachable; VN gate active pre-payment)"
+  G5: "boundaries preserved: VN locked pre-payment; ord_2a142f39 untouched; no paid orders/fake payments; no D1/Queue/R2 product-data mutations; validation strictness unchanged; no fakes; no BALANCED_MAX/FULL_MAX; TTF+OTF-only; walls kept; unrelated dirty files preserved; Debian Mini PC migratability preserved (no A23-specific hardcoding)"
+
+rollback_prebound:
+  condition: "only if final activation mutated state and readiness fails BEFORE accepting any job; exactly ONE rollback"
+  edge_known_good: "version d0d9c4ef-47db-42ca-8940-cbeeb72d6d4f (source commit 166e45b72b55e2c1f04e30ec7a73a07179e2ed62, deployed 2026-08-30T09:35:22Z)"
+  a23_known_good: "release /opt/telefont-release-b8c6994cd207380683e5e08501537faad71248d2 + runtime /opt/telefont-runtime-b8c6994cd207380683e5e08501537faad71248d2 (currently live; supervisor PID 23985; worker PID 21267 at pre-activation)"
+
+prohibited:
+  - "recovery/fix/refund/dispatch of ord_2a142f39"
+  - "self-created paid orders or fake payments"
+  - "D1/Queue/R2 product-data mutations (normal deployment itself requires none)"
+  - "fake binary/raster/MD5/evidence; weakening exact family/style validation"
+  - "BALANCED_MAX/FULL_MAX restoration; wall weakening; TTF/OTF output-set changes"
+  - "asking Human for technical blocker fixes"
+
+gates: [NO_LOOP]
+extra_policies: [consequential, production, evidence, security, budget]
+
+identity:
+  repo: "E:\\cv\\telefont"
+  current_main: "4cc57630f8bd3e339d66d8dd7773ec581044d0bc"
+  integrated_candidate: "34f24b0de58743318a3bab1869f114ccca5335e9"
+  staged_release_dirs: "/data/local/chroot/debian/opt/telefont-release-34f24b0... (+ runtime dir) - from E-00028 O4"
+  worktree: "E:\\cv\\telefont-golive"
+  branch: "task/T-FAST-ATLAS-ORIGINAL-GOLIVE-01"
+  final_candidate_sha: null   # frozen at G3 pass
+  edge_known_good_version: "d0d9c4ef-47db-42ca-8940-cbeeb72d6d4f"
+  a23_known_good: "release+runtime b8c6994cd207380683e5e08501537faad71248d2"
+
+depends_on:
+  decisions: [decisions/ADR-0002.md, decisions/ADR-0003.md, decisions/ADR-0004.md]
+  evidence: [".prime/journal/events.jsonl", ".prime/tasks/T-FAST-ATLAS-A23-ORIGINAL-RELEASE-01/progress.yaml"]
+
+note: "Created at generation 13 (E-00029); Prime-designed decomposition. Prior proven evidence reused: gate 33/33 at 34f24b0, staging convention + supervisor verifications, dump-dom egress works on device, Neurath Mono envelope reachable. Root gap from E-00028: pinned runtime lacks persistent-browser capability."

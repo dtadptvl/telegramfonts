@@ -1,5 +1,5 @@
 schema_version: 7
-generation: 12
+generation: 13
 
 governance:
   policy_rev: "P-20260830.9-LEAN-SAFE-R16"
@@ -13,7 +13,8 @@ phase:
   id: "fast30-cutover"
   status: active
 
-now: []
+now:
+  - "T-FAST-ATLAS-ORIGINAL-GOLIVE-01"
 next: []
 
 blockers:
@@ -40,7 +41,7 @@ human_requirements:
     - "E-00018 cycle TERMINAL (E-00022): T-FAST30-A23-FIX failed final acceptance on duration (wall machinery proven; measurement throughput is the remaining gap); T-A23-PROD-02 deployment authority VOID; failed paid order preserved for Human resolution; device idle; any further implementation/recovery/deployment requires fresh Human authorization; Human never executes commands/relays JSON"
     - "E-00023 SPEED-FIRST cycle COMPLETE (E-00024): T-FAST-ATLAS-ULTRA-01 accepted + integrated (merge e2a0b60); FAST_ATLAS_ULTRA_V1 under FAST_30 public name; walls 480s/720s; all fixture targets met with wide margins; NOT DEPLOYED (E-00023 grants no deployment/order-recovery authority); T-FAST30-A23-FIX result at f574d0c immutable with hardening preserved; A23 staging-only boundary honored; any deployment/recovery requires a fresh identity-bound Human envelope; Human never executes commands/relays JSON"
     - "T-PRICE-01 integrated line (head 166e45b) deploys ONLY inside the approved rev-4 envelope; absent-mode legacy orders otherwise fail closed by design and need Human decisions, never automatic repair"
-    - "E-00027 cycle TERMINAL BLOCKED at O5 (E-00028): gate + freeze + integration + staging done (candidate 34f24b0 on main fedf9f3; staged side-by-side on device, supervisor untouched); smoke fail-closed on runtime capability gap (no playwright in pinned runtime); O6 not executed - Edge/A23/runtime unchanged per fail branch; next step requires fresh Human decision (new runtime pin with playwright+chromium, or browser-free acquisition path); Human never executes commands/relays JSON"
+    - "E-00029 GO-LIVE AUTHORIZATION (gen 13): Prime owns ALL HOW to reach BOT_ORIGINAL_READY; budget <=3 smokes / <=2 runtime rebuilds / <=4h cycle / no blind retries; authorized: code+dep+runtime+packaging changes in scope, staging/rebuild/smoke iterations, reads for safe decisions, then freeze+Edge-deploy-once+A23-activate-once+supervisor-restart-once+readiness; ONE rollback allowed to pre-bound known-good (Edge d0d9c4ef / A23 release+runtime b8c6994) if readiness fails before accepting jobs; boundaries: VN locked pre-payment, ord_2a142f39 untouched, no paid orders/fake payments, no D1/Queue/R2 data mutations beyond normal deployment, no fakes, no MAX profiles, TTF+OTF-only, walls kept, dirty files + Mini PC migratability preserved; BLOCK only for new product decision/unobtainable credentials/out-of-scope mutation/genuine exhaustion"
     - "E-00011 mode proof: NEVER infer ORIGINAL from an absent mode field; fulfillment proceeds only on positive durable row evidence of mode/styles/formats/payment/delivery; VIETNAMESE or unproven -> STOP fail-closed, T-PRICE-01 before fulfillment"
 
 active_decisions:
@@ -60,9 +61,10 @@ recent_invalidations:
   - {generation: 10, scopes: [reconstruction-profile, validation-regime, fast30-performance, production-behavior], severity: breaking, source_event: E-00023, note: "SPEED-FIRST FAST_ATLAS_ULTRA_V1 rebaseline (ADR-0004): supersedes exhaustive MAX schedules, four-consumer validation, held-out schedules, high-confidence publication, 30-minute wall; T-FAST-ATLAS-ULTRA-01 contracted"}
   - {generation: 11, scopes: [acquisition, atlas-runtime, combining-marks, vietnamese-ai, a23-staging-release], severity: breaking, source_event: E-00025, note: "consolidated production-readiness + conditional A23 staging release; T-FAST-ATLAS-PROD-READY-01 contracted (corrects E-00024 gaps without rewriting its history); marks zero-advance semantics + ai_provider hardcode removal + transport wiring"}
   - {generation: 12, scopes: [a23-staging-release, acquisition, atlas-runtime, product-flow], severity: breaking, source_event: E-00027, note: "ORIGINAL-FIRST mode-split: VN blocker must not block ORIGINAL; VIETNAMESE pre-payment gate default disabled; T-FAST-ATLAS-A23-ORIGINAL-RELEASE-01 contracted; supersedes E-00025 all-modes condition within mode-specific deployment scope only"}
+  - {generation: 13, scopes: [a23-staging-release, acquisition, atlas-runtime, product-flow], severity: breaking, source_event: E-00029, note: "COMPLETE ORIGINAL GO-LIVE: Prime owns HOW; T-FAST-ATLAS-ORIGINAL-GOLIVE-01 contracted; supersedes E-00027 single-smoke cap with Prime-set finite budget; rollback identities pre-bound"}
 
 reconciliation:
-  status: clean
-  event: E-00028
+  status: in_progress
+  event: E-00029
 
-updated_at: "2026-08-30T18:40:00Z"
+updated_at: "2026-08-30T17:55:00Z"
