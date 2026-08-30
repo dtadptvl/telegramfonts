@@ -72,13 +72,17 @@ def metrics_js_call_count(glyph_count: int, sizes: tuple[int, ...] = METRICS_SIZ
 
 
 def build_measure_text_js(chars: list[str], size_px: int, font_family: str) -> str:
-    """Render the batched measureText JS payload for one (size, chunk)."""
+    """Render the batched measureText JS payload for one (size, chunk).
+
+    Substitution uses str.replace (never str.format): the JS template body
+    carries literal braces that format() would misparse.
+    """
     import json
 
-    return MEASURE_TEXT_JS_TEMPLATE.format(
-        chars_json=json.dumps(chars, ensure_ascii=False),
-        size=int(size_px),
-        font_json=json.dumps(font_family),
+    return (
+        MEASURE_TEXT_JS_TEMPLATE.replace("{chars_json}", json.dumps(chars, ensure_ascii=False))
+        .replace("{size}", str(int(size_px)))
+        .replace("{font_json}", json.dumps(font_family))
     )
 
 

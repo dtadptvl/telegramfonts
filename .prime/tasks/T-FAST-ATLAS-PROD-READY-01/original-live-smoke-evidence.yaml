@@ -1,0 +1,31 @@
+task: "T-FAST-ATLAS-PROD-READY-01"
+acceptance: "R5"
+run_label: "original_live_smoke_single"
+chain: "exact cache/binary -> Chrome native --dump-dom metadata/MD5 -> (lazy persistent browser, only when needed) -> Monotype CDN PRIMARY raster (exact-MD5 verified) -> Algolia -> CDN"
+bounds:
+  source_url: "https://www.myfonts.com/collections/be-vietnam-pro"
+  family: "Be Vietnam Pro"
+  style: "Regular"
+  mode: "ORIGINAL"
+  coverage_cap_observed_cps: 24
+  pipeline_deadline_seconds: 480
+  watchdog_kill_seconds: 600
+  retry: "none (exactly one run)"
+run:
+  outcome: "FAIL_CLOSED_OR_ERROR"
+  error_type: "ValueError"
+  error: "ATLAS_RASTER_SOURCE_UNAVAILABLE"
+  wall_seconds: 2.192
+counters_observed:
+  http_requests: 0
+  cdp_calls: 1
+  browser_readbacks: 0
+  dump_dom_calls: 1
+  cache_hits: 0
+md5_discovery:
+  resolved: false
+  envelope: "none (dump-dom produced no parseable discovery)"
+timing:
+  total_wall_seconds: 2.526
+  wall_cap_seconds: 600
+  within_cap: true

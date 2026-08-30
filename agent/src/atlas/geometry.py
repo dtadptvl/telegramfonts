@@ -17,6 +17,7 @@ from PIL import Image
 
 from reconstruction.models import Contour, CubicSegment, LineSegment, Point2D
 
+from atlas.marks import is_combining_mark
 from atlas.models import CellMapping, GeometryEvidence, GlyphStatus, RegressedMetrics
 
 # Versioned fast-path thresholds (fit evidence only).
@@ -593,7 +594,17 @@ def structural_check(
         y0, y1 = min(ys), max(ys)
         tol_x = 300.0
         tol_y = 300.0
-        if x0 < regressed.lsb_upem - tol_x or x1 > regressed.advance_width_upem + tol_x:
+        if is_combining_mark(regressed.code_point):
+            # R2: zero advance is VALID for Unicode combining marks; their
+            # ink legitimately straddles the pen origin (attachment geometry
+            # is anchor-driven). Bound X by the OBSERVED ink bbox, never by
+            # the (zero) advance alone.
+            x_lo_allowed = min(regressed.lsb_upem, regressed.bbox_upem[0]) - tol_x
+            x_hi_allowed = max(regressed.advance_width_upem, regressed.bbox_upem[2]) + tol_x
+        else:
+            x_lo_allowed = regressed.lsb_upem - tol_x
+            x_hi_allowed = regressed.advance_width_upem + tol_x
+        if x0 < x_lo_allowed or x1 > x_hi_allowed:
             reasons.append("BBOX_X_OUT_OF_RANGE")
         if y0 < regressed.descent_upem - tol_y or y1 > regressed.ascent_upem + tol_y:
             reasons.append("BBOX_Y_OUT_OF_RANGE")

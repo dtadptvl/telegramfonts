@@ -6,7 +6,8 @@ import signal
 import sys
 from pathlib import Path
 
-from composition import build_production_components, default_dev_vars_path
+from composition import build_production_components
+from compute.ai_secret_loader import default_dev_vars_path
 from compute.archive import resolve_archive_mode
 from config import Settings
 from logging_utils import setup_logging
@@ -48,6 +49,11 @@ async def main() -> None:
         model_cache=components["model_cache"],
         binary_cache=components["binary_cache"],
         vietnamese_ai_provider=components["vietnamese_ai_provider"],
+        # R1: DEFAULT production atlas factory (real transport chain); no
+        # deployment-phase remainder. Absent when the acquisition capability
+        # is disabled - the runner then fails closed with
+        # ATLAS_RASTER_SOURCE_UNAVAILABLE.
+        atlas_pipeline_factory=components["atlas_pipeline_factory"],
     )
 
     stop_event = asyncio.Event()

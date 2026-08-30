@@ -5,6 +5,8 @@ import { generatePaymentCode } from '../utils/vietqr';
 import { stylePriceForMode } from '../utils/pricing';
 import { SessionConflictError } from './session-service';
 
+export const VIETNAMESE_ORDERING_TEMPORARILY_DISABLED = 'VIETNAMESE_ORDERING_TEMPORARILY_DISABLED';
+
 export interface CreateOrderResult {
   orderId: string;
   isExisting: boolean;
@@ -29,7 +31,10 @@ export interface OrderRecord {
 }
 
 export class OrderService {
-  constructor(private readonly db: D1Database) {}
+  constructor(
+    private readonly db: D1Database,
+    private readonly vietnameseOrderingEnabled = false
+  ) {}
 
   async getOrderById(orderId: string): Promise<OrderRecord | null> {
     return this.db
@@ -102,6 +107,12 @@ export class OrderService {
       throw new SessionConflictError(
         'Cannot create order without explicit ORIGINAL/VIETNAMESE mode selection'
       );
+    }
+
+    // T-FAST-ATLAS-A23-ORIGINAL-RELEASE-01 O1: defense-in-depth pre-payment gate.
+    // Rejects VIETNAMESE order creation while VIETNAMESE_ORDERING_ENABLED is disabled.
+    if (mode === 'VIETNAMESE' && !this.vietnameseOrderingEnabled) {
+      throw new SessionConflictError(VIETNAMESE_ORDERING_TEMPORARILY_DISABLED);
     }
 
     // Validate styles against authoritative persisted catalog (never trust client)

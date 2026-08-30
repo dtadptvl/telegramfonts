@@ -148,7 +148,7 @@ describe('T-PRICE-01: mode selection and durable persistence (session -> order)'
   it('createOrderFromSession carries the selected mode into orders.mode column and metadata for ORIGINAL and VIETNAMESE', async () => {
     for (const mode of ['ORIGINAL', 'VIETNAMESE'] as FontMode[]) {
       const { session } = await prepareCheckoutSession(mode);
-      const orderService = new OrderService(env.DB);
+      const orderService = new OrderService(env.DB, true);
 
       const result = await orderService.createOrderFromSession(session, testCatalog);
       expect(result.isExisting).toBe(false);
@@ -170,7 +170,7 @@ describe('T-PRICE-01: mode selection and durable persistence (session -> order)'
 
   it('createOrderFromSession fails closed when session mode is absent: no ORIGINAL default, no order created', async () => {
     const { userId, session } = await prepareCheckoutSession(null);
-    const orderService = new OrderService(env.DB);
+    const orderService = new OrderService(env.DB, true);
 
     await expect(orderService.createOrderFromSession(session, testCatalog)).rejects.toThrow(
       SessionConflictError
@@ -202,7 +202,7 @@ describe('T-PRICE-01: mode-bound pricing (pricing.ts semantics)', () => {
   });
 
   it('multi-style order totals: ORIGINAL 3 styles = 15,000 VND vs VIETNAMESE 3 styles = 24,000 VND, per-item prices mode-bound', async () => {
-    const orderService = new OrderService(env.DB);
+    const orderService = new OrderService(env.DB, true);
 
     const original = await prepareCheckoutSession('ORIGINAL');
     const originalResult = await orderService.createOrderFromSession(original.session, testCatalog);

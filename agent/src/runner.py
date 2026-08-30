@@ -879,6 +879,12 @@ class JobRunner:
                     job.job_id, "atlas_cache"
                 ),
                 checkpoint_root=self._durable_checkpoint_root(job.job_id),
+                # R3: the runtime Vietnamese AI provider reaches the atlas
+                # stage 5b ONLY in VIETNAMESE mode; ORIGINAL stays zero-AI
+                # by construction (ADR-0003).
+                ai_provider=(
+                    self.vietnamese_ai_provider if mode == "VIETNAMESE" else None
+                ),
             )
             # The enclosing compute body runs in a worker thread; a private
             # event loop per pipeline run is safe and bounded by the wall.

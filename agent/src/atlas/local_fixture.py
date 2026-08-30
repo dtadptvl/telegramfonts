@@ -87,6 +87,7 @@ class LocalFontRasterProvider:
         phase_x: float,
         phase_y: float,
         dims: tuple[int, int] | None = None,
+        pen_left_px: int | None = None,
     ) -> bytes:
         if dims is not None:
             w, h = dims
@@ -100,7 +101,8 @@ class LocalFontRasterProvider:
         canvas_h = h * scale
         img = Image.new("L", (canvas_w, canvas_h), 0)
         draw = ImageDraw.Draw(img)
-        pen_x = CELL_PAD_X_PX * scale + phase_x * scale
+        pen_base = CELL_PAD_X_PX if pen_left_px is None else int(pen_left_px)
+        pen_x = pen_base * scale + phase_x * scale
         baseline_y = CELL_PAD_Y_PX * scale + asc + phase_y * scale
         draw.text((pen_x, baseline_y), chr(code_point), font=font, fill=255, anchor="ls")
         if scale > 1:
@@ -119,19 +121,20 @@ class LocalFontRasterProvider:
         out: dict[int, bytes] = {}
         for cell in cells:
             out[cell.code_point] = self._render_cell(
-                cell.code_point, size_px, phase_x, phase_y, dims=(cell.w, cell.h)
+                cell.code_point, size_px, phase_x, phase_y, dims=(cell.w, cell.h),
+                pen_left_px=getattr(cell, "pen_left_px", None),
             )
         return out
 
     def fetch_refinement(
-        self, code_point: int, cell_w: int, cell_h: int
+        self, code_point: int, cell_w: int, cell_h: int, pen_left_px: int | None = None
     ) -> tuple[bytes | None, bytes | None, bytes | None]:
         """Exactly the single-refinement observation set (1024@0,0 +
         1024@0.5,0 + 2048@0,0); never 512, never 4096, never quarter."""
         dims = (cell_w, cell_h)
-        base = self._render_cell(code_point, 1024, 0.0, 0.0, dims=dims)
-        shifted = self._render_cell(code_point, 1024, 0.5, 0.0, dims=dims)
-        double = self._render_cell(code_point, 2048, 0.0, 0.0, dims=dims)
+        base = self._render_cell(code_point, 1024, 0.0, 0.0, dims=dims, pen_left_px=pen_left_px)
+        shifted = self._render_cell(code_point, 1024, 0.5, 0.0, dims=dims, pen_left_px=pen_left_px)
+        double = self._render_cell(code_point, 2048, 0.0, 0.0, dims=dims, pen_left_px=pen_left_px)
         return base, shifted, double
 
 

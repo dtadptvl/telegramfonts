@@ -73,8 +73,14 @@ class AICandidateSpec:
         ]
         if not all(math.isfinite(v) for v in values):
             raise VietnameseAIIntegrityError(f"VI_AI_NON_FINITE_METRICS_CP_{self.code_point}")
+        from atlas.marks import is_combining_mark
+
         if not (0.0 < self.advance_width_upem <= 4000.0):
-            raise VietnameseAIIntegrityError(f"VI_AI_INVALID_ADVANCE_CP_{self.code_point}")
+            # R2: zero advance is VALID for Unicode combining marks
+            # (anchor-driven attachment); every other glyph needs a strictly
+            # positive bounded advance.
+            if not (self.advance_width_upem == 0.0 and is_combining_mark(self.code_point)):
+                raise VietnameseAIIntegrityError(f"VI_AI_INVALID_ADVANCE_CP_{self.code_point}")
         if not self.contours:
             if self.code_point not in MARK_CODEPOINT_SET and self.code_point != 0x20:
                 raise VietnameseAIIntegrityError(f"VI_AI_NO_CONTOURS_CP_{self.code_point}")

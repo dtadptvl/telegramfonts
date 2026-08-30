@@ -92,19 +92,23 @@ def build_production_components(
     except Exception as exc:
         raise RuntimeError(f"COMPOSITION_READINESS_FAILED: {exc}") from exc
 
+    # R3 runtime secret boundary: the exact ADR-0003 key names
+    # (wokushop_api_key / openrouter_api_key) are consumed ONLY through the
+    # exact-name loader with redaction guards; values stay in memory and are
+    # never logged/hashed/reported. Settings env keys still take precedence.
+    from compute.ai_secret_loader import load_ai_secrets
+
+    runtime_secrets = load_ai_secrets(dev_vars_path)
+
     key = getattr(settings, "OPENROUTER_API_KEY", None)
     key_value = key.get_secret_value() if key is not None else ""
-    if not key_value and dev_vars_path is not None:
-        # Explicit runtime boundary: the non-versioned dev.vars-shaped
-        # lowercase openrouter_api_key (key-only shape) is consumed safely.
-        key_value = load_dev_vars_secret(dev_vars_path, "openrouter_api_key")
+    if not key_value:
+        key_value = runtime_secrets.get("openrouter_api_key", "")
 
     woku_key = getattr(settings, "WOKUSHOP_API_KEY", None)
     woku_key_value = woku_key.get_secret_value() if woku_key is not None else ""
-    if not woku_key_value and dev_vars_path is not None:
-        # Explicit runtime boundary: the non-versioned dev.vars-shaped
-        # lowercase wokushop_api_key (key-only shape) is consumed safely.
-        woku_key_value = load_dev_vars_secret(dev_vars_path, "wokushop_api_key")
+    if not woku_key_value:
+        woku_key_value = runtime_secrets.get("wokushop_api_key", "")
 
     vietnamese_ai_provider = None
     if woku_key_value:
@@ -133,9 +137,23 @@ def build_production_components(
         # required later (VI_AI_PROVIDER_UNAVAILABLE at extension time).
         raise RuntimeError("COMPOSITION_READINESS_FAILED_OPENROUTER")
 
+    # R1: the DEFAULT production atlas factory wires the real transport
+    # chain (exact cache/binary -> dump-dom -> lazy persistent browser ->
+    # Monotype CDN primary raster -> Algolia MD5 resolution) into the runner.
+    # Fail-closed readiness: an enabled but unconstructible transport raises.
+    from atlas.transport import build_default_atlas_pipeline_factory
+
+    try:
+        atlas_pipeline_factory = build_default_atlas_pipeline_factory(
+            settings, binary_cache=binary_cache
+        )
+    except Exception as exc:
+        raise RuntimeError(f"COMPOSITION_READINESS_FAILED: {exc}") from exc
+
     return {
         "acquisition_pipeline": acquisition_pipeline,
         "model_cache": model_cache,
         "binary_cache": binary_cache,
         "vietnamese_ai_provider": vietnamese_ai_provider,
+        "atlas_pipeline_factory": atlas_pipeline_factory,
     }

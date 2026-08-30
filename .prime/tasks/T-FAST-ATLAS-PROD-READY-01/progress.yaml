@@ -1,0 +1,52 @@
+schema_version: 8
+governance:
+  policy_rev: "P-20260830.9-LEAN-SAFE-R16"
+  policy_fingerprint: "0fa00f66ee4873bf"
+  generation: 11
+task: T-FAST-ATLAS-PROD-READY-01
+contract_rev: 1
+mode: DEEP
+status: blocked
+identity:
+  repo: "E:\\cv\\telefont"
+  worktree: "E:\\cv\\telefont-prod-ready"
+  branch: "task/T-FAST-ATLAS-PROD-READY-01"
+  base: "97073f10710f0f14b9b48f6a88fbf975520fe72e"
+setup:
+  worktree_created: true
+  base_verified: "97073f10710f0f14b9b48f6a88fbf975520fe72e"
+  connectivity_probe:
+    myfonts_https_head: "status=403 elapsed=0.36s (real server response; egress OPEN, not NETWORK_BLOCKED)"
+    monotype_cdn_https_head: "status=403 elapsed=0.59s (real server response; egress OPEN)"
+  environment:
+    python: "3.14.6"
+    chromium: "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe"
+    playwright: "installed"
+    uharfbuzz_freetype: "installed"
+    dev_vars_present: true
+    dev_vars_key_names_present: ["wokushop_api_key", "openrouter_api_key"]
+    ground_truth_binary: "agent/benchmark_data/ground_truth/BeVietnamPro-Regular.ttf"
+milestones:
+  - id: M0
+    name: "bounded discovery + setup"
+    status: done
+  - id: M1
+    name: "R1 production transport providers + factory wiring"
+    status: done
+    outcome: "chain 1->2->3(lazy)->4->5->4 implemented and wired as default factory; 9 hermetic causal tests green; live smoke observed fail-closed under bot-gate (see M5)"
+  - id: M2
+    name: "R2 combining-mark semantics"
+    status: done
+    outcome: "zero advance valid for Mn/Mc/Me; all 7 requested marks survive into GlyphModel/cmap/TTF/OTF; fail-closed preserved; 8 tests green"
+  - id: M3
+    name: "R3 Vietnamese AI runtime"
+    status: done
+    outcome: "stage-5b hardcode removed; exact-name dev.vars loader + redaction canary proven; cascade order/capacity/fail-closed/per-class batching proven hermetically; 11 tests + issue80 suite green"
+  - id: M4
+    name: "R4 live Vietnamese smoke (exactly one)"
+    status: done_blocked
+    outcome: "one bounded run executed (20 glyphs, wall 249.7s <= 720s): deterministic-first, then ONE batched provider call (77 glyphs); 3 model calls fired (gpt-5.6-luna UNAVAILABLE, gemini-3.7-flash UNAVAILABLE, google/gemma-3-12b-it VALIDATION_FAILED); 4th call raised BEFORE firing (cap enforced); cascade fail-closed VI_AI_ALL_ROUTES_FAILED -> VN_BLOCKED (providers); no publish, no retry; evidence: vn-live-smoke-evidence.yaml"
+  - id: M5
+    name: "R5 bounded validation + live ORIGINAL smoke + task files"
+    status: done
+    outcome: "focused affected suites green (no full suite/soak/retired E2E); live ORIGINAL smoke ran once through the real chain and proved the chain's FAIL-CLOSED path under Cloudflare bot-gate (dump-dom 1 call, no parseable discovery -> ATLAS_RASTER_SOURCE_UNAVAILABLE; http_requests=0; wall 2.2s); causality finding recorded: U12 timing evidence NOT invalidated -> no fixture rerun; walls 480/720 untouched"

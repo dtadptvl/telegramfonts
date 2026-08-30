@@ -13,6 +13,8 @@ batched.
 """
 from __future__ import annotations
 
+import asyncio
+import inspect
 import logging
 import time
 import tracemalloc
@@ -78,7 +80,12 @@ logger = logging.getLogger("telegramfonts.agent.atlas.pipeline")
 
 
 class MetricsProvider(Protocol):
-    """Batched metrics transport (few calls, never per-glyph)."""
+    """Batched metrics transport (few calls, never per-glyph).
+
+    Methods may return awaitables: production transports are async (one
+    persistent browser session); the pipeline awaits them when needed and
+    consumes synchronous providers (fixtures) unchanged.
+    """
 
     def fetch_rows(self, size_px: int, code_points: list[int]) -> list[list[float]]: ...
 
@@ -98,13 +105,14 @@ class RasterProvider(Protocol):
     ) -> dict[int, bytes]: ...
 
     def fetch_refinement(
-        self, code_point: int, cell_w: int, cell_h: int
+        self, code_point: int, cell_w: int, cell_h: int, pen_left_px: int = 0
     ) -> tuple[bytes | None, bytes | None, bytes | None]:
         """(base 1024@0,0 ; shifted 1024@0.5,0 ; double 2048@0,0).
 
         Exactly the single-refinement observation set (U5) - never 512,
         never 4096, never quarter phases. Cells match the planned cell
-        dimensions passed by the pipeline.
+        dimensions passed by the pipeline; ``pen_left_px`` carries the
+        planned pen offset (mark-aware cells extend it, R2).
         """
         ...
 
@@ -144,6 +152,7 @@ class AtlasUltraPipeline:
         checkpoint_store: AtlasCheckpointStore | None = None,
         shutdown: ShutdownCoordinator | None = None,
         deadline: float | None = None,
+        ai_provider: Any = None,
     ) -> None:
         self.spec = spec
         self.runtime = runtime.validate()
@@ -153,6 +162,10 @@ class AtlasUltraPipeline:
         self.checkpoint_store = checkpoint_store
         self.shutdown = shutdown or ShutdownCoordinator()
         self.deadline = deadline
+        # R3: the VIETNAMESE AI runtime provider is injected by the
+        # composition edge (runtime secret boundary); absent provider stays
+        # fail-closed at the extension service (VI_AI_PROVIDER_UNAVAILABLE).
+        self.ai_provider = ai_provider
         self.evidence = AtlasRunEvidence(
             policy=FAST_ATLAS_ULTRA_V1,
             policy_hash=policy_identity_hash(),
@@ -194,13 +207,15 @@ class AtlasUltraPipeline:
     # Stages
     # ------------------------------------------------------------------
 
-    def _stage_metrics(self) -> tuple[dict[int, RegressedMetrics], float, float]:
+    async def _stage_metrics(self) -> tuple[dict[int, RegressedMetrics], float, float]:
         """Batched metrics + multi-size regression to UPEM=1000 (U3)."""
         batches = build_metrics_batches(self.spec.code_points)
         self.evidence.metrics_js_calls = len(batches)
         observations: dict[int, list] = {cp: [] for cp in self.spec.code_points}
         for size_px, chunk in batches:
             rows = self.metrics_provider.fetch_rows(size_px, chunk)
+            if inspect.isawaitable(rows):
+                rows = await rows
             parsed = parse_measure_text_rows(chunk, float(size_px), rows)
             for obs in parsed:
                 observations[obs.code_point].append(obs)
@@ -212,7 +227,7 @@ class AtlasUltraPipeline:
         global_reg = regress_global_metrics(all_obs)
         return regressed, global_reg.font_ascent_upem, global_reg.font_descent_upem
 
-    def _stage_raster_pass(
+    async def _stage_raster_pass(
         self,
         regressed: dict[int, RegressedMetrics],
         frozen: dict[int, CalibratedGlyph],
@@ -234,22 +249,44 @@ class AtlasUltraPipeline:
         # Cell widths are per-glyph (regressed advance); cell heights are
         # font-global (the baseline sits at the font ascent for every cell,
         # so ink is never clipped by ink-based per-glyph heights).
+        from atlas.marks import (
+            is_combining_mark,
+            mark_effective_advance_px,
+            mark_extra_left_px,
+        )
+
         font_asc_px = ascent_px_by_size.get(size_px, size_px * 0.8)
         font_desc_px = descent_px_by_size.get(size_px, size_px * 0.2)
-        advances_px = {
-            cp: regressed[cp].advance_width_upem * size_px / 1000.0 for cp in pending
-        }
+        advances_px: dict[int, float] = {}
+        extra_left_px: dict[int, float] = {}
+        for cp in pending:
+            if is_combining_mark(cp):
+                # R2: zero advance is VALID for combining marks; the cell
+                # spans the OBSERVED ink extent (left + right of the pen).
+                advances_px[cp] = mark_effective_advance_px(
+                    regressed[cp].advance_width_upem,
+                    regressed[cp].lsb_upem,
+                    regressed[cp].bbox_width_upem,
+                    size_px,
+                )
+                extra_left_px[cp] = mark_extra_left_px(regressed[cp].lsb_upem, size_px)
+            else:
+                advances_px[cp] = regressed[cp].advance_width_upem * size_px / 1000.0
         ascents_px = {cp: font_asc_px for cp in pending}
         descents_px = {cp: font_desc_px for cp in pending}
         pages = estimate_cell_plan(
             pending, advances_px, ascents_px, descents_px, size_px,
             self.runtime.atlas_target_mb, self.runtime.atlas_max_mb,
+            extra_left_px=extra_left_px,
         )
         self.evidence.pages_total += len(pages)
         self.evidence.pages_by_source["raster_fast"] = self.evidence.pages_by_source.get(
             "raster_fast", 0
         ) + len(pages)
 
+        async_raster = inspect.iscoroutinefunction(
+            getattr(self.raster_provider, "fetch_page_cells", None)
+        )
         executor = ThreadPoolExecutor(max_workers=max(1, self.runtime.glyph_workers))
         try:
             prefetch = None
@@ -260,21 +297,33 @@ class AtlasUltraPipeline:
                     page_cells = self.raster_provider.fetch_page_cells(
                         list(page.cells), size_px, *FAST_RASTER_PHASE
                     )
+                    if inspect.isawaitable(page_cells):
+                        page_cells = await page_cells
                     self.evidence.http_requests += 1
                 else:
-                    page_cells = prefetch.result()
+                    if async_raster:
+                        page_cells = await prefetch
+                    else:
+                        page_cells = prefetch.result()
                 if page_idx + 1 < len(pages):
                     next_page = pages[page_idx + 1]
-                    prefetch = executor.submit(
-                        self._fetch_page_checked, next_page, size_px
-                    )
+                    if async_raster:
+                        # Async transports stream on the event loop (a thread
+                        # executor cannot await the persistent session).
+                        prefetch = asyncio.ensure_future(
+                            self._fetch_page_checked_async(next_page, size_px)
+                        )
+                    else:
+                        prefetch = executor.submit(
+                            self._fetch_page_checked, next_page, size_px
+                        )
                 else:
                     prefetch = None
 
                 frozen_since_checkpoint = 0
                 for cell in page.cells:
                     cp = cell.code_point
-                    cell_dims[cp] = (cell.w, cell.h)
+                    cell_dims[cp] = (cell.w, cell.h, getattr(cell, "pen_left_px", None))
                     self._check_wall("glyph_geometry")
                     if cp in frozen:
                         continue
@@ -286,7 +335,7 @@ class AtlasUltraPipeline:
 
                     mapping = CellMapping(
                         size_px=size_px,
-                        pad_left_px=CELL_PAD_X_PX,
+                        pad_left_px=getattr(cell, "pen_left_px", CELL_PAD_X_PX),
                         pad_top_px=CELL_PAD_Y_PX,
                         ascent_px=ascent_px,
                     )
@@ -349,7 +398,15 @@ class AtlasUltraPipeline:
         self.evidence.http_requests += 1
         return cells
 
-    def _stage_refinement(
+    async def _fetch_page_checked_async(self, page: Any, size_px: int) -> dict[int, bytes]:
+        """Streaming prefetch for async (production) raster transports."""
+        cells = await self.raster_provider.fetch_page_cells(
+            list(page.cells), size_px, *FAST_RASTER_PHASE
+        )
+        self.evidence.http_requests += 1
+        return cells
+
+    async def _stage_refinement(
         self,
         regressed: dict[int, RegressedMetrics],
         frozen: dict[int, CalibratedGlyph],
@@ -371,28 +428,48 @@ class AtlasUltraPipeline:
         for cp in list(failed):
             self._check_wall("refinement")
             if cp in cell_dims:
-                cell_w, cell_h = cell_dims[cp]
+                cell_w, cell_h, cell_pen = cell_dims[cp]
             else:
                 # Resume path: deterministic planner dimensions (identical
                 # inputs -> identical cells): per-glyph advance, font-global
                 # ascent/descent.
-                from atlas.paging import cell_dimensions as _cd
+                from atlas.paging import CELL_PAD_X_PX as _PADX, cell_dimensions as _cd
+                from atlas.marks import is_combining_mark, mark_extra_left_px, mark_effective_advance_px
 
+                if is_combining_mark(cp):
+                    _adv_px = mark_effective_advance_px(
+                        regressed[cp].advance_width_upem,
+                        regressed[cp].lsb_upem,
+                        regressed[cp].bbox_width_upem,
+                        size_px,
+                    )
+                    _extra_left = mark_extra_left_px(regressed[cp].lsb_upem, size_px)
+                else:
+                    _adv_px = regressed[cp].advance_width_upem * size_px / 1000.0
+                    _extra_left = 0.0
                 cell_w, cell_h = _cd(
-                    regressed[cp].advance_width_upem * size_px / 1000.0,
+                    _adv_px,
                     ascent_px_by_size.get(size_px, size_px * 0.8),
                     descent_px_by_size.get(size_px, size_px * 0.2),
                     size_px,
+                    extra_left_px=_extra_left,
                 )
+                from atlas.paging import pen_left_px as _pen_left_px
+
+                cell_pen = _pen_left_px(_extra_left)
+            from atlas.paging import CELL_PAD_X_PX as _PL_PAD
+            pen_left = cell_pen if cell_pen else _PL_PAD
             base_png, shifted_png, double_png = self.raster_provider.fetch_refinement(
-                cp, cell_w, cell_h
+                cp, cell_w, cell_h, pen_left
             )
+            if inspect.isawaitable(base_png):
+                base_png, shifted_png, double_png = await base_png
             if base_png is None:
                 remaining.append(cp)
                 continue
             mapping = CellMapping(
                 size_px=size_px,
-                pad_left_px=CELL_PAD_X_PX,
+                pad_left_px=pen_left,
                 pad_top_px=CELL_PAD_Y_PX,
                 ascent_px=ascent_px,
                 phase_x_px=0.0,
@@ -422,7 +499,7 @@ class AtlasUltraPipeline:
         state.low_confidence_code_points = list(low_confidence)
         self._save_checkpoint(state)
 
-    def _stage_typography(
+    async def _stage_typography(
         self, regressed: dict[int, RegressedMetrics]
     ) -> tuple[dict[tuple[int, int], int], dict]:
         """Selective bounded kerning; GPOS kern only for material deltas (U7)."""
@@ -433,6 +510,8 @@ class AtlasUltraPipeline:
         pair_texts = kerning_batch_texts(pairs)
         size_px = 1024
         pair_advances_px = self.metrics_provider.fetch_pair_advances_px(size_px, pair_texts)
+        if inspect.isawaitable(pair_advances_px):
+            pair_advances_px = await pair_advances_px
         self.evidence.metrics_js_calls += 1
         deltas: dict[tuple[int, int], float] = {}
         for (l_cp, r_cp), pair_px in zip(pairs, pair_advances_px):
@@ -491,20 +570,25 @@ class AtlasUltraPipeline:
             # ---- Stage 1: batched metrics (concurrent with HTTP atlas) ----
             t0 = time.perf_counter()
             self._check_wall("metrics")
-            regressed, font_asc_upem, font_desc_upem = self._stage_metrics()
+            regressed, font_asc_upem, font_desc_upem = await self._stage_metrics()
             ascent_px_by_size = {
                 size: font_asc_upem * size / 1000.0 for size in (512, 1024, 2048)
             }
             descent_px_by_size = {
                 size: max(-font_desc_upem, 0.0) * size / 1000.0 for size in (512, 1024, 2048)
             }
+            # Production raster transports place observed CDN ink / draw
+            # browser cells from OBSERVED regressed metrics only (R1).
+            binder = getattr(self.raster_provider, "bind_regressed_metrics", None)
+            if callable(binder):
+                binder(regressed, ascent_px_by_size, descent_px_by_size)
             mark("metrics", t0)
 
             # ---- Stage 2: fast raster pass -------------------------------
             t0 = time.perf_counter()
             self._check_wall("raster_pass")
-            cell_dims: dict[int, tuple[int, int]] = {}
-            self._stage_raster_pass(
+            cell_dims: dict[int, tuple[int, int, int | None]] = {}
+            await self._stage_raster_pass(
                 regressed, frozen, failed, low_confidence, state, ascent_px_by_size,
                 descent_px_by_size, cell_dims,
             )
@@ -513,7 +597,7 @@ class AtlasUltraPipeline:
             # ---- Stage 3: single refinement ------------------------------
             t0 = time.perf_counter()
             self._check_wall("refinement")
-            self._stage_refinement(
+            await self._stage_refinement(
                 regressed, frozen, failed, low_confidence, state, ascent_px_by_size,
                 descent_px_by_size, cell_dims,
             )
@@ -525,7 +609,7 @@ class AtlasUltraPipeline:
             # ---- Stage 4: typography --------------------------------------
             t0 = time.perf_counter()
             self._check_wall("typography")
-            kern_pairs, kern_evidence = self._stage_typography(regressed)
+            kern_pairs, kern_evidence = await self._stage_typography(regressed)
             mark("typography", t0)
 
             # ---- Stage 5: canonical FontModel -----------------------------
@@ -553,7 +637,10 @@ class AtlasUltraPipeline:
                 from compute.vietnamese import VietnameseExtensionService
 
                 service = VietnameseExtensionService(
-                    ai_provider=None,  # wired at composition edge when enabled
+                    # R3: runtime provider injected by the composition edge
+                    # (secret boundary preserved); absent -> fail closed in
+                    # the extension service (VI_AI_PROVIDER_UNAVAILABLE).
+                    ai_provider=self.ai_provider,
                     config_hash=self._checkpoint_identity,
                     source_hash=identity_hash({"source_url": self.spec.source_url}),
                 )
