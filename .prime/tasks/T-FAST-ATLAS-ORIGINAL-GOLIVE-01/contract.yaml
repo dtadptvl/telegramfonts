@@ -2,7 +2,7 @@ schema_version: 8
 policy_rev: "P-20260830.9-LEAN-SAFE-R16"
 policy_fingerprint: "0fa00f66ee4873bf"
 id: T-FAST-ATLAS-ORIGINAL-GOLIVE-01
-contract_rev: 1
+contract_rev: 2
 mode: DEEP
 validated_at_generation: 13
 scope_tags: [a23-staging-release, acquisition, atlas-runtime, product-flow]
@@ -11,10 +11,10 @@ status: active
 objective: "Complete ORIGINAL go-live on A23 (E-00029): fix the runtime capability gap, pass one real production-egress ORIGINAL smoke on A23 within the approved wall, then freeze one final candidate and activate Edge + A23 exactly once each, reaching BOT_ORIGINAL_READY so Human can self-test ORIGINAL via the bot. Prime owns the HOW within the budget and boundaries below."
 
 budget_prime_set:
-  smoke_iterations_max: 3        # each <=480s wall, isolated namespaces, honest evidence
-  runtime_rebuilds_max: 2
-  cycle_wall_hours: 4
-  retries: "no blind retries; every iteration requires a diagnosed cause"
+  smoke_iterations_max: 5        # rev 2 (E-00030): extended 3->5; iterations 1-3 used, each diagnosed+fixed (async bug, ink convention, IOU easy-pass divergence); every further iteration requires a diagnosed cause
+  runtime_rebuilds_max: 2        # 1 used
+  cycle_wall_hours: 6            # rev 2: +2h
+  retries: "no blind retries; every iteration requires a diagnosed cause; iterations 4-5 failing -> genuine BLOCKED terminal to Human"
 
 acceptance:
   G1: "runtime capability fixed: the pinned A23 runtime contains a working persistent-browser capability (Playwright + browser or equivalent CDP bridge) proven on device (session starts; canvas/measureText functional); runtime pin rebuilt with fresh manifest/fingerprint passing ALL supervisor verifications"
