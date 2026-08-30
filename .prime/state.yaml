@@ -13,15 +13,14 @@ phase:
   id: "fast30-cutover"
   status: active
 
-now:
-  - "T-FAST30-A23-FIX"
-next:
-  - "T-A23-PROD-02"
+now: []
+next: []
 
 blockers:
-  - "FAST_30 A23 WALL FAILURE UNDER DIAGNOSIS (E-00018, T-FAST30-A23-FIX active): attempt 6 of job_477b205f ran far beyond the 30-min wall without artifact (LEASE_ONLY_ACTIVE / PROCESS_UNATTRIBUTED - derived claim corrected per E-00019); fix must make one production-equivalent A23 job complete <=25-min fixture wall (30-min hard production wall); terminal report in Vietnamese."
+  - "FAST_30 A23 PERFORMANCE GAP (E-00022 terminal): wall enforcement is PROVEN (on-device deterministic fail-closed at exactly 1800.93s, clean lifecycle, zero orphans) but the headless-Chromium MEASUREMENT phase does not fit the wall on A23 (~29.5 min for 171 glyphs, incomplete) -> final acceptance FAILED DURATION; deployment authority VOID per E-00018 C. Candidate 2c50715 frozen-not-deployable on origin/main (head 15d6113). A deeper measurement-throughput fix requires NEW Human-authorized scope (E-00018 capped one implementation round + one acceptance run)."
+  - "FAILED PAID ORDER ord_2a142f39 preserved for Human resolution: FAILED max_attempts_exhausted at 2026-08-30T12:00:29Z (expired attempt 6 zombie lineage b8c6994; mode ORIGINAL designated; payment VERIFIED 5,000 VND). No recovery executed (deployment authority void). Options are Human-owned (e.g., refund/cancel, manual re-order after a performance fix, or other product handling)."
+  - "A23 DEVICE IDLE: zombie worker terminated (PID 24039, preserved evidence); old release b8c6994 artifacts remain on device; supervisor not restarted; no worker process running; edge still d0d9c4ef (pre-wall-fix). Device reachable (sshd 8022)."
   - "MINI-PC MIGRATION BLOCKER (preserved verbatim, DO NOT delete/rename/replay/repair during T-FAST30-A23-FIX, E-00018 section E): foreign production migration 0007_telegram_message_retention.sql (not in repo lineage) + prior deployed Edge lineage absent from repository history (deployments before 2026-08-30T09:35:22Z, versions eec4fd75..7c582378). Must remain visible for Mini PC migration reconciliation."
-  - "A23 PROCESS ATTRIBUTION GAP: exact device process observation unavailable from workspace so far (E-00017/E-00019); phase RA authorized up to three causally discriminating read-only observations (PID/service, executable SHA, cmdline, job+lease binding, checkpoint identity, logs) via surfaces in ops/RUNBOOK.md, ops/OBSERVABILITY.md, docs/A23_OPERATOR_GUIDE.md; graceful stop authorized ONLY on proven exact attribution."
 
 exit:
   - "one controlled bot order completed end-to-end on A23 under FAST_30 with verified TTF/OTF delivery within the 30-minute wall limit (requires separate consequential authorization for the A23 production leg)"
@@ -38,7 +37,7 @@ human_requirements:
     - "never fake/bypass/weaken external-ext4/filesystem identity checks; loopback never posed as canonical archive"
     - "stale A23 retired-profile job: read-only inspection only; no mutation without explicit authorization"
     - "REV-5 ENVELOPE TERMINAL (E-00017): FAST30_FAILED wall with attempt still active; M4/M5 expired unused (A6); remediation mode designation + product-line edge activation completed within the envelope; any further action (continued observation, A23 release, new fulfillment envelope) requires fresh Human authorization; Human never executes commands/relays JSON"
-    - "E-00018 autonomous repair cycle: T-FAST30-A23-FIX active (diagnose+fix FAST_30 to <=25-min fixture wall; 8h task wall; focused validation budget only); T-A23-PROD-02 pending activation (frozen-SHA deploy + conditional one-shot recovery); rev 5 stays terminal FAST30_FAILED forever (never rewritten as PASS); DELIVERED_LATE from the prior attempt never proves FAST_30 nor completes Milestone 3; production anomaly boundary preserved untouched for Mini PC reconciliation; terminal report in Vietnamese"
+    - "E-00018 cycle TERMINAL (E-00022): T-FAST30-A23-FIX failed final acceptance on duration (wall machinery proven; measurement throughput is the remaining gap); T-A23-PROD-02 deployment authority VOID; failed paid order preserved for Human resolution; device idle; any further implementation/recovery/deployment requires fresh Human authorization; Human never executes commands/relays JSON"
     - "T-PRICE-01 integrated line (head 166e45b) deploys ONLY inside the approved rev-4 envelope; absent-mode legacy orders otherwise fail closed by design and need Human decisions, never automatic repair"
     - "E-00011 mode proof: NEVER infer ORIGINAL from an absent mode field; fulfillment proceeds only on positive durable row evidence of mode/styles/formats/payment/delivery; VIETNAMESE or unproven -> STOP fail-closed, T-PRICE-01 before fulfillment"
 
@@ -57,7 +56,7 @@ recent_invalidations:
   - {generation: 9, scopes: [fast30-performance, a23-runtime, production-dispatch, reconstruction-profile], severity: breaking, source_event: E-00018, note: "autonomous FAST_30 A23 repair/acceptance/release cycle; T-FAST30-A23-FIX + T-A23-PROD-02 contracted; GENUINELY_ACTIVE derived claim narrowed to LEASE_ONLY_ACTIVE (E-00019)"}
 
 reconciliation:
-  status: in_progress
-  event: E-00018
+  status: clean
+  event: E-00022
 
-updated_at: "2026-08-30T10:42:00Z"
+updated_at: "2026-08-30T12:50:00Z"

@@ -6,12 +6,12 @@ contract_rev: 1
 mode: NORMAL
 validated_at_generation: 9
 scope_tags: [a23-production-dispatch, production-remediation]
-status: pending_activation   # activates only when ALL E-00018 section C conditions are satisfied
+status: authority_void   # E-00022: final acceptance FAILED DURATION -> deployment authority VOID per E-00018 C; candidate frozen but NOT deployable; any new attempt requires fresh Human authorization
 
 objective: "Minimal successor production envelope (E-00018 C/D): deploy the unique frozen accepted T-FAST30-A23-FIX candidate SHA to A23 (Edge NO_CHANGE unless the accepted performance fix causally changes Edge), then at most one identity-bound recovery/dispatch of ord_2a142f39 under a fresh 30-minute wall."
 
 authorization:
-  status: "PENDING ACTIVATION - deployment authority exists only for the unique final candidate SHA satisfying ALL activation conditions; any scope expansion, quality weakening, failed acceptance or identity ambiguity voids it"
+  status: "VOID (E-00022): the <=25-minute device acceptance failed at the frozen candidate (1800.93s) - E-00018 C voids deployment authority on failed acceptance; no deployment/recovery may proceed without fresh Human authorization"
   activation_conditions:
     - "candidate derived solely from T-FAST30-A23-FIX"
     - "actual reviewed diff remains inside the contracted performance/runtime scope"
@@ -60,8 +60,8 @@ extra_policies: [consequential, production, evidence]
 
 identity:
   repo: "E:\\cv\\telefont"
-  candidate_sha: "2c50715336a5e7f2a69ea365f5b7593437889fc4"   # FROZEN 2026-08-30T12:05Z (E-00021): T-FAST30-A23-FIX branch head; derived solely from that task; merged into main via cdee2b4; deployment authority activates ONLY after the <=25-minute A23 device acceptance passes at exactly this SHA
-  candidate_status: "frozen_pending_device_acceptance"
+  candidate_sha: "2c50715336a5e7f2a69ea365f5b7593437889fc4"   # FROZEN 2026-08-30T12:05Z (E-00021); acceptance FAILED DURATION (E-00022) -> NOT deployable; retained as exact evidence identity
+  candidate_status: "frozen_acceptance_failed_not_deployable"
   retained_edge_version: "d0d9c4ef-47db-42ca-8940-cbeeb72d6d4f"   # F4 edge changes ARE causal to the wall fix -> Edge will be redeployed at the candidate line when deployment activates (E-00018 C: NO_CHANGE only if unchanged)
   deployed_edge: "telegramfonts-edge.dienluanphien98.workers.dev"
   d1: "telegramfonts-d1 / 4ab4ab25-37cc-4044-acc9-66fc98b9f831"

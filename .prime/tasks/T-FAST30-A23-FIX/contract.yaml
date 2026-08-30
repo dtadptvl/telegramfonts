@@ -6,7 +6,7 @@ contract_rev: 1
 mode: DEEP
 validated_at_generation: 9
 scope_tags: [fast30-performance, a23-runtime, reconstruction-profile]
-status: active
+status: terminal   # E-00022: wall machinery proven incl. on-device fail-closed at exact wall; final acceptance FAILED DURATION (1800.93s > 1500s) -> deployment authority void; STOP per E-00018 F
 
 objective: "Diagnose and fix FAST_30 so one production-equivalent A23 job completes within the 30-minute hard production wall (target <=25-minute final controlled fixture wall, leaving operational margin), then hand the frozen accepted candidate SHA to T-A23-PROD-02 for deployment. Authorized by E-00018; runs autonomously within an 8-hour task wall."
 

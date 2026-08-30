@@ -6,7 +6,7 @@ governance:
 worker: rc-narrowed-completion-worker
 branch: task/T-FAST30-A23-FIX
 base_head: bc3a2f2
-status: blocked   # code complete + focused validation proven; blocked on device acceptance (F2/F7) - device surface recovered 11:48Z, acceptance run imminent (E-00021)
+status: failed   # wall machinery proven (incl. on-device deterministic fail-closed at exact wall); final acceptance FAILED DURATION 1800.93s > 1500s target -> deployment authority void (E-00022)
 proved: [F1, F3, F4, F5, F6]
 unproved: [F2, F7]
 
@@ -36,12 +36,18 @@ acceptance_status:
     ~90% of the 30-min wall before acquisition/measurement/upload; promised
     <=30 min vs observed >=15h (>=30x).
   F2: >-
-    PENDING-DEVICE. Exact runbook: one production-equivalent one-style A23 run
-    at the frozen candidate SHA (isolated scratch/cache namespace; ordered
-    style fixture; TTF output) must complete <=25 minutes with all final gates
-    unchanged; device evidence must bind candidate SHA + configuration
-    (JOB_WALL_SECONDS, MAX_JOB_AGE_MS, profile_workers). Maximum ONE such
-    final acceptance run (contract budget).
+    NOT PROVEN - ACCEPTANCE_FAIL_DURATION (E-00022). The ONE budgeted final
+    production-equivalent A23 run executed at frozen candidate 2c50715 on
+    2026-08-30 12:12:28-12:42:29Z (isolated scratch/cache namespaces,
+    JOB_WALL_SECONDS=1800, profile_workers=6, runtime
+    /opt/telefont-runtime-b8c6994 python 3.11.2): deterministic
+    JobWallLimitExceeded FAST30_FAILED at 1800.93s (> 1500s target) during
+    the headless-Chromium measurement phase (171 glyphs discovered at +23s;
+    measurement did not complete within the wall); zero artifact, clean
+    shutdown, zero orphans. Evidence:
+    .local-artifacts/fast30-acceptance-2c50715/acceptance-run.log. Root gap:
+    measurement throughput on A23, beyond this task's wall-enforcement scope;
+    a second run or implementation round is NOT authorized by E-00018.
   F3: >-
     PROVEN by implementation + focused tests. The diff touches no final-gate
     line: held-out partition, four-consumer evidence, all-or-nothing,
