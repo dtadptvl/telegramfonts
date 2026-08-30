@@ -1,8 +1,8 @@
 ---
 status: active
 owner: prime
-source_decisions: [decisions/ADR-0001.md]
-updated_at: "2026-08-30T04:30:00Z"
+source_decisions: [decisions/ADR-0001.md, decisions/ADR-0002.md, decisions/ADR-0003.md]
+updated_at: "2026-08-30T06:20:15Z"
 ---
 
 # Project Roadmap

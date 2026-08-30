@@ -2,97 +2,72 @@ schema_version: 8
 policy_rev: "P-20260830.8-LEAN-SAFE-R15"
 policy_fingerprint: "d059a83646a03543"
 id: T-A23-PROD-01
-contract_rev: 1
+contract_rev: 2
 mode: NORMAL
-validated_at_generation: 3
-scope_tags: [a23-production-dispatch]
+validated_at_generation: 4
+scope_tags: [a23-production-dispatch, product-flow, acquisition, reuse, vietnamese-ai, production-dispatch]
+status: PAUSED   # paused by Human at E-00010; awaiting Human review + explicit rev-2 reaffirmation
 
-objective: "Execute Milestone 3: deploy FAST_30 agent to physical A23 device, then run one controlled fulfillment for paid order ord_2a142f39 (payment tx 77506129) within a 30-minute wall limit. Exact identity binding required for all mutations."
-
-acceptance:
-  PA1: "Device agent updated to release pinned at HEAD 5a2f05e: Human runs git fetch && git checkout 5a2f05e on A23 device + regenerates deployment manifest via `python scripts/generate_deployment_manifest.py` and verifies signature matches new main_commit_sha; then starts/restarts worker via debian_worker_supervisor.sh; logs show archive_mode=NO_LOCAL_ARCHIVE and FAST_30 profile"
-  PA2: "Human performs D1 read-only SELECT (from Cloudflare console or npx wrangler session): 
-         - `SELECT id,status,attempt_count,max_attempts,last_error,lease_owner,lease_expires_at FROM fulfillment_jobs WHERE id='job_477b205f4aff41cb89c2dd005ecf8009';`
-         - `SELECT id,status,payment_id,completed_at,order_total,currency FROM orders WHERE id='ord_2a142f39c5d2443492d1d8410d18bf9f';`
-         Human returns the exact JSON rows (no secrets). Prime builds the recovery request using those exact values."
-  PA3: "Prime executes exactly ONE POST /internal/jobs/:job_id/mutation endpoint (recover/rescue/rearm based on row status) with exact-match body derived from PA2; max_attempts=1; no repair-forward on 409 (CONFLICT) or 500 (server error); stop and reconcile instead"
-  PA4: "Bot order delivered end-to-end within 30-min wall limit: Human confirms in Telegram that the buyer received the font artifact(s) (TTF and OTF) for ord_2a142f39 (verified by bot message or direct download link sent by bot within the same conversation thread)"
-  
-gates: [SINGLE_SHOT, NO_LOOP]   # production dispatch: exactly one authorized mutation; no retries
-extra_policies: [consequential, production]
+objective: "Milestone 3 (PAUSED): one controlled bot fulfillment of paid order ord_2a142f39 on A23 under FAST_30 within the 30-minute wall limit, after deploying the accepted FAST_30 source identity from origin/main. NO executable production authorization exists yet."
 
 authorization:
-  owner: human   # envelope approved by Human (E-00009); Prime executes P3 under this binding
-  action: "one controlled FAST_30 fulfillment dispatch for paid order ord_2a142f39"
-  target: "deployed control plane telegramfonts-edge.dienluanphien98.workers.dev + physical A23 device release"
-  identity:
-    release_head: "5a2f05e"
-    job: "job_477b205f4aff41cb89c2dd005ecf8009"
-    order: "ord_2a142f39c5d2443492d1d8410d18bf9f"
-  mutation: "exactly ONE of {no-op auto-pickup, POST /internal/jobs/<job_id>/rearm, POST /internal/jobs/<job_id>/rescue, POST /internal/jobs/<job_id>/recover} chosen by exact D1 row state; count=1"
+  status: "NOT GRANTED - no executable production authorization exists"
+  historical_evidence:
+    - "journal E-00009: retained ONLY as historical/unconfirmed authorization evidence; it does not authorize any action under this revision"
+  reaffirmation_required: "explicit Human reaffirmation of THIS contract_rev 2 is mandatory before any consequential action"
+  owner: human
   max_attempts: 1
   stop: ["409 CONFLICT -> STOP reconcile", "500/ambiguous -> STOP preserve evidence", "30-min wall -> FAST30_FAILED", "unexpected state -> STOP"]
-  auth_ref: "journal E-00009 (Human: 'Chạy fulfillment FAST_30 trên A23')"
-  rollback: "none authorized; rollback of a dispatched fulfillment requires its own new Human authorization"
+  rollback: "none authorized; any rollback requires its own new Human authorization"
 
-validation:
-  required:
-    - "PA2 read-enabling D1 select (exact-match values before PA3 mutation)"
-    - "PA1 device update with verified manifest signature"
-    - "Single dispatch mutation (PA3) built from PA2 values"
-    - "End-user delivery observation (PA4)"
-  max_runs: 1  # single dispatch attempt; zero repair-forward attempts
-  max_wall: "30m"
+acceptance:
+  PA1: "Device agent runs the accepted FAST_30 source implementation identity containing commit b385ab1, deployed only from origin/main after authoritative origin/main containment is verified; performed by an authorized production worker using existing A23 access (never by Human relay)"
+  PA2: "Fresh exact D1 rows for job_477b205f4aff41cb89c2dd005ecf8009 / ord_2a142f39c5d2443492d1d8410d18bf9f / payments / outbox obtained by an authorized production worker using an authenticated Cloudflare/wrangler session (never by Human command relay)"
+  PA3: "Exactly ONE identity-bound dispatch mutation (rearm/rescue/recover chosen by exact fresh row state, or zero-mutation auto-pickup) built ONLY from PA2 fresh rows; no retry; no guessed/stale values; executed only after explicit rev-2 Human authorization"
+  PA4: "End-to-end delivery of ord_2a142f39 within the 30-minute wall: TTF+OTF artifact reaches the buyer in Telegram; Human may provide the final delivery observation"
 
-stop:
-  - "If PA3 returns CONFLICT (409): STOP; reconcile with Human; do not retry"
-  - "If PA3 returns 500 (unavailable): STOP; preserve evidence; reconcile"
-  - "If delivery not observed within wall limit: FAST30_FAILED; stop; reconcile"
+phases:
+  P1_device_update:
+    executor: "authorized production worker with existing A23 access"
+    bind: "source identity containing b385ab1, present on origin/main; NEVER deploy from an unreviewed recovery-only branch"
+    verification: "device manifest main_commit_sha/policy identity matches the accepted implementation; supervisor release fingerprint PASS; archive_mode=NO_LOCAL_ARCHIVE"
+  P2_d1_read:
+    executor: "authorized production worker with authenticated Cloudflare/wrangler session"
+    surface: "read-only SELECT on telegramfonts-d1: fulfillment_jobs, orders, payments, outbox_events rows for the stable IDs"
+  P3_dispatch:
+    executor: "Prime (identity-bound, single-attempt)"
+    precondition: "fresh P2 rows + explicit Human rev-2 authorization"
+  P4_verify:
+    executor: "Prime observation + optional Human Telegram delivery observation"
 
-forbidden:
-  - "Any mutation other than the single PA3 mutation specified above (no other /internal/* endpoints, no queue purges, no secret rotations, no edge deploys, no device shutdown commands beyond supervisor restart)"
-  - "Using stale or guessed D1 values for PA3; must use exact PA2-provided rows"
-  - "Deploying edge code changes (FAST_30 changes are agent-side; edge unchanged; no wrangler deploy needed)"
-  - "Secret leakage in any result/logs (do not echo tokens/API keys)"
-  - "Multiple PA3 attempts; no repair-forward beyond first rejection"
+human_role:
+  - "Human must NOT execute commands or relay JSON merely because an agent lacks access"
+  - "If physical device/network/session access is unavailable, Prime asks Human only for the smallest genuinely Human-owned action: make the device reachable, authenticate the session securely, or supply authorization"
+  - "Human may provide the final Telegram delivery observation (PA4)"
+
+constraints:
+  - "30-minute end-to-end wall limit per font; deadline or quality failure returns FAST30_FAILED and stops"
+  - "honor ADR-0001 (FAST_30 sole profile, no fallback/escalation), ADR-0002 (product/acquisition/reuse invariants, all-or-nothing delivery), ADR-0003 (Vietnamese AI cascade) without weakening"
+  - "no deploy and no production mutation while status PAUSED or authorization NOT GRANTED"
+
+gates: [SINGLE_SHOT, NO_LOOP]
+extra_policies: [consequential, production, evidence]
 
 identity:
   repo: "E:\\cv\\telefont"
   branch: "prime-v12-cutover"
-  frozen_head: "5a2f05e"   # Release candidate commit (FAST_30 implementation complete)
-  jobs:
-    retired_job: "job_477b205f4aff41cb89c2dd005ecf8009"  # attempt 6 on retired BALANCED_MAX/FULL_MAX
-    order: "ord_2a142f39c5d2443492d1d8410d18bf9f"       # paid order requiring fulfillment
-    payment_tx: "77506129"                              # SePay transaction
+  accepted_source_commit: "b385ab1"   # accepted FAST_30 implementation delta
+  deploy_line: "origin/main ONLY after verified containment of b385ab1; recovery-only branches are not deploy sources"
+  job: "job_477b205f4aff41cb89c2dd005ecf8009"
+  order: "ord_2a142f39c5d2443492d1d8410d18bf9f"
+  payment_tx: "77506129"
   deployed_edge: "telegramfonts-edge.dienluanphien98.workers.dev"
   d1: "telegramfonts-d1 / 4ab4ab25-37cc-4044-acc9-66fc98b9f831"
   queue: "telegramfonts-fulfillment"
   r2: "telegramfonts-artifacts"
 
-instructions_human:
-  p1_device_update:
-    summary: "Update device agent to release pinned at HEAD 5a2f05e"
-    steps:
-      - "On A23 device (Termux + Debian boundary): cd telefont"
-      - "git fetch origin && git checkout 5a2f05e"
-      - "python scripts/generate_deployment_manifest.py --output ops/a23_deployment_manifest.json"
-      - "Verify generated manifest's main_commit_sha = '5a2f05e' and manifest_signature hash (print both)"
-      - "Start/restart worker supervisor: bash scripts/debian_worker_supervisor.sh"
-      - "Collect log lines showing supervisor release fingerprint check passed, and worker startup under FAST_30 profile (logs may show core_file_hashes updated)"
-      - "Report back: snapshot logs + manifest signature + main_commit_sha"
-  p2_d1_select:
-    summary: "Read-only SELECT on production D1 (Cloudflare console or npx wrangler with your credentials)"
-    query_job: "SELECT id,status,attempt_count,max_attempts,last_error,lease_owner,lease_expires_at FROM fulfillment_jobs WHERE id='job_477b205f4aff41cb89c2dd005ecf8009';"
-    query_order: "SELECT id,status,payment_id,completed_at,order_total,currency FROM orders WHERE id='ord_2a142f39c5d2443492d1d8410d18bf9f';"
-    note: "Return raw JSON results; never share Cloudflare API keys/secrets; we need ONLY the row data."
-  
-instructions_prime_phase_p3:
-  summary: "After receiving Human's PA1 (device ready) and PA2 (exact D1 rows), build ONE recovery request"
-  decision_tree:
-    - "If job.status == PENDING and no outbox event dispatched yet: let auto-pickup happen (zero mutation). Wait up to 30 min wall for delivery evidence."
-    - "If job.status == PROCESSING and lease expired OR last_error != null: use POST /internal/jobs/:job_id/rearm with {job_id,order_id,outbox_id,lease_owner,lease_expires_at,attempt_count,dispatch_attempts} from row"
-    - "If job.status == RETRY with attempt_count < max_attempts: rearm with same payload as above"
-    - "If job.status == FAILED (max_attempts_exhausted) or any terminal failure state: use POST /internal/jobs/:job_id/recover or rescue depending on last_error content, with full set of fields including payment_id,payment_transaction_id,payment_code,max_attempts,dispatch_attempts"
-  auth_ref: "E-00009 (Human approval for milestone-3 envelope); authorization.consume() upon successful POST submission, even if subsequent delivery waits within wall limit"
+depends_on:
+  decisions: [decisions/ADR-0001.md, decisions/ADR-0002.md, decisions/ADR-0003.md]
+  evidence: [".prime/tasks/T-INSPECT-01/result.yaml"]
 
-journal_event_refs: ["E-00009"]
+note: "Rev 1 superseded at generation 4 (E-00010): rev 1 assumed Human-executed P1/P2 and treated E-00009 as granted envelope; rev 2 corrects both. Contract stays PAUSED until Human review."
