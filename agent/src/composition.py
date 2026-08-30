@@ -133,9 +133,23 @@ def build_production_components(
         # required later (VI_AI_PROVIDER_UNAVAILABLE at extension time).
         raise RuntimeError("COMPOSITION_READINESS_FAILED_OPENROUTER")
 
+    # R1: the DEFAULT production atlas factory wires the real transport
+    # chain (exact cache/binary -> dump-dom -> lazy persistent browser ->
+    # Monotype CDN primary raster -> Algolia MD5 resolution) into the runner.
+    # Fail-closed readiness: an enabled but unconstructible transport raises.
+    from atlas.transport import build_default_atlas_pipeline_factory
+
+    try:
+        atlas_pipeline_factory = build_default_atlas_pipeline_factory(
+            settings, binary_cache=binary_cache
+        )
+    except Exception as exc:
+        raise RuntimeError(f"COMPOSITION_READINESS_FAILED: {exc}") from exc
+
     return {
         "acquisition_pipeline": acquisition_pipeline,
         "model_cache": model_cache,
         "binary_cache": binary_cache,
         "vietnamese_ai_provider": vietnamese_ai_provider,
+        "atlas_pipeline_factory": atlas_pipeline_factory,
     }
