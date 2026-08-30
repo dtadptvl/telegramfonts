@@ -1,11 +1,11 @@
 schema_version: 7
-generation: 9
+generation: 10
 
 governance:
   policy_rev: "P-20260830.9-LEAN-SAFE-R16"
   fingerprint: "0fa00f66ee4873bf"
 
-objective: "FAST_30 is the sole production reconstruction/fidelity profile; retire BALANCED_MAX/FULL_MAX from every executable route; deliver verified TTF/OTF fulfillment within a 30-minute end-to-end wall limit per font, no fidelity fallback/escalation."
+objective: "FAST_30 remains the sole public production reconstruction profile, internally bound to FAST_ATLAS_ULTRA_V1 (ADR-0004): speed-first atlas pipeline; ORIGINAL hard wall 8 min / VIETNAMESE 12 min; targets 2-5 min ordinary and 5-10 min large ORIGINAL styles, reuse <1 min; BALANCED_MAX/FULL_MAX retired with no fallback/escalation; verified TTF/OTF fulfillment; speed-first final validation replaces exhaustive MAX-era validation (E-00023)."
 
 roadmap_ref: decisions/ROADMAP.md
 
@@ -13,7 +13,8 @@ phase:
   id: "fast30-cutover"
   status: active
 
-now: []
+now:
+  - "T-FAST-ATLAS-ULTRA-01"
 next: []
 
 blockers:
@@ -23,14 +24,14 @@ blockers:
   - "MINI-PC MIGRATION BLOCKER (preserved verbatim, DO NOT delete/rename/replay/repair during T-FAST30-A23-FIX, E-00018 section E): foreign production migration 0007_telegram_message_retention.sql (not in repo lineage) + prior deployed Edge lineage absent from repository history (deployments before 2026-08-30T09:35:22Z, versions eec4fd75..7c582378). Must remain visible for Mini PC migration reconciliation."
 
 exit:
-  - "one controlled bot order completed end-to-end on A23 under FAST_30 with verified TTF/OTF delivery within the 30-minute wall limit (requires separate consequential authorization for the A23 production leg)"
+  - "one controlled bot order completed end-to-end on A23 under FAST_30 (FAST_ATLAS_ULTRA_V1) with verified TTF/OTF delivery within the 8-minute ORIGINAL wall (requires separate consequential authorization for the A23 production leg)"
 
 human_requirements:
   active:
     - "FAST_30 sole production profile; BALANCED_MAX/FULL_MAX retired from every executable route; retired selection fails closed with PROFILE_RETIRED"
     - "no automatic/manual/background/confidence/gate/operator-triggered fidelity fallback or escalation"
-    - "30-minute end-to-end wall limit per font; deadline or quality failure returns FAST30_FAILED and stops"
-    - "TTF and OTF are the only outputs; final held-out validation and four consumers preserved"
+    - "HARD WALLS (E-00023, supersedes 30-minute wall): ORIGINAL 8 minutes / VIETNAMESE 12 minutes; wall expiry -> FAST30_FAILED, no retry, no heavier profile; targets 2-5 min ordinary (150-250 glyphs), 5-10 min large (400-500 glyphs), reuse <1 min where practical"
+    - "TTF and OTF are the only outputs; SPEED-FIRST final validation runs once (FontTools structural + representative HarfBuzz/FreeType checks; exhaustive Chromium/four-consumer MAX gate/complete held-out schedules/second heavy pass RETIRED by E-00023); low-confidence glyph IDs are a reported accepted outcome class"
     - "source acquisition fallbacks remain bounded data-source recovery, not fidelity-profile fallback"
     - "exact binary/artifact reuse still wins immediately"
     - "runtime model failover only for capacity/unavailability with unchanged contract and reusable evidence"
@@ -38,6 +39,7 @@ human_requirements:
     - "stale A23 retired-profile job: read-only inspection only; no mutation without explicit authorization"
     - "REV-5 ENVELOPE TERMINAL (E-00017): FAST30_FAILED wall with attempt still active; M4/M5 expired unused (A6); remediation mode designation + product-line edge activation completed within the envelope; any further action (continued observation, A23 release, new fulfillment envelope) requires fresh Human authorization; Human never executes commands/relays JSON"
     - "E-00018 cycle TERMINAL (E-00022): T-FAST30-A23-FIX failed final acceptance on duration (wall machinery proven; measurement throughput is the remaining gap); T-A23-PROD-02 deployment authority VOID; failed paid order preserved for Human resolution; device idle; any further implementation/recovery/deployment requires fresh Human authorization; Human never executes commands/relays JSON"
+    - "E-00023 SPEED-FIRST rebaseline: latest Human priority is speed; T-FAST30-A23-FIX result at f574d0c immutable with its wall/watchdog/checkpoint/zombie hardening preserved and re-targeted; A23 is staging/compatibility ONLY (stale-prone claims need read-only reconciliation; no stop/restart/deploy/D1/Queue/R2/order-recovery/production job under E-00023); T-FAST-ATLAS-ULTRA-01 grants no production deployment or order-recovery authority"
     - "T-PRICE-01 integrated line (head 166e45b) deploys ONLY inside the approved rev-4 envelope; absent-mode legacy orders otherwise fail closed by design and need Human decisions, never automatic repair"
     - "E-00011 mode proof: NEVER infer ORIGINAL from an absent mode field; fulfillment proceeds only on positive durable row evidence of mode/styles/formats/payment/delivery; VIETNAMESE or unproven -> STOP fail-closed, T-PRICE-01 before fulfillment"
 
@@ -45,6 +47,7 @@ active_decisions:
   - "decisions/ADR-0001.md"
   - "decisions/ADR-0002.md"
   - "decisions/ADR-0003.md"
+  - "decisions/ADR-0004.md"
 
 recent_invalidations:
   - {generation: 2, scopes: [reconstruction-profile, issue-90-balanced-max, fullmax-final-lane-semantics], severity: breaking, source_event: E-00002}
@@ -54,9 +57,10 @@ recent_invalidations:
   - {generation: 7, scopes: [production-dispatch, product-flow, pricing], severity: breaking, source_event: E-00015, note: "Human remediation: mode ORIGINAL designated for ord_2a142f39 only (never general backfill); T-A23-PROD-01 rev 3 superseded by rev 4 DRAFT envelope"}
   - {generation: 8, scopes: [production-dispatch, product-flow, pricing, production-remediation], severity: breaking, source_event: E-00016, note: "envelope approved with binding amendments A1-A6; rev 4 superseded by rev 5; execution authorized as faithful transcription"}
   - {generation: 9, scopes: [fast30-performance, a23-runtime, production-dispatch, reconstruction-profile], severity: breaking, source_event: E-00018, note: "autonomous FAST_30 A23 repair/acceptance/release cycle; T-FAST30-A23-FIX + T-A23-PROD-02 contracted; GENUINELY_ACTIVE derived claim narrowed to LEASE_ONLY_ACTIVE (E-00019)"}
+  - {generation: 10, scopes: [reconstruction-profile, validation-regime, fast30-performance, production-behavior], severity: breaking, source_event: E-00023, note: "SPEED-FIRST FAST_ATLAS_ULTRA_V1 rebaseline (ADR-0004): supersedes exhaustive MAX schedules, four-consumer validation, held-out schedules, high-confidence publication, 30-minute wall; T-FAST-ATLAS-ULTRA-01 contracted"}
 
 reconciliation:
-  status: clean
-  event: E-00022
+  status: in_progress
+  event: E-00023
 
-updated_at: "2026-08-30T12:50:00Z"
+updated_at: "2026-08-30T14:15:00Z"
