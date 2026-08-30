@@ -2,28 +2,28 @@ schema_version: 8
 policy_rev: "P-20260830.9-LEAN-SAFE-R16"
 policy_fingerprint: "0fa00f66ee4873bf"
 id: T-A23-PROD-01
-contract_rev: 2
+contract_rev: 3
 mode: NORMAL
-validated_at_generation: 4
-scope_tags: [a23-production-dispatch, product-flow, acquisition, reuse, vietnamese-ai, production-dispatch]
-status: PAUSED   # paused by Human at E-00010; awaiting Human review + explicit rev-2 reaffirmation
+validated_at_generation: 5
+scope_tags: [a23-production-dispatch, product-flow, acquisition, reuse, vietnamese-ai, production-dispatch, pricing]
+status: PAUSED   # paused by Human at E-00010; rev 3 drafted at E-00011; authorization still NOT GRANTED
 
-objective: "Milestone 3 (PAUSED): one controlled bot fulfillment of paid order ord_2a142f39 on A23 under FAST_30 within the 30-minute wall limit, after deploying the accepted FAST_30 source identity from origin/main. NO executable production authorization exists yet."
+objective: "Milestone 3 (PAUSED): one controlled bot fulfillment of paid order ord_2a142f39 on A23 under FAST_30 within the 30-minute wall limit, after deploying the accepted FAST_30 source identity from origin/main. Fulfillment may proceed ONLY if fresh durable production evidence affirmatively proves the order's requested mode, styles, formats, payment, and delivery identity. NO executable production authorization exists yet."
 
 authorization:
-  status: "NOT GRANTED - no executable production authorization exists"
+  status: "NOT GRANTED - no executable production authorization exists; rev-3 drafting authorizes nothing"
   historical_evidence:
     - "journal E-00009: retained ONLY as historical/unconfirmed authorization evidence; it does not authorize any action under this revision"
-  reaffirmation_required: "explicit Human reaffirmation of THIS contract_rev 2 is mandatory before any consequential action"
+  reaffirmation_required: "explicit Human authorization of THIS contract_rev 3 is mandatory before any production access, read, deploy, or mutation"
   owner: human
   max_attempts: 1
-  stop: ["409 CONFLICT -> STOP reconcile", "500/ambiguous -> STOP preserve evidence", "30-min wall -> FAST30_FAILED", "unexpected state -> STOP"]
+  stop: ["409 CONFLICT -> STOP reconcile", "500/ambiguous -> STOP preserve evidence", "30-min wall -> FAST30_FAILED", "unexpected state -> STOP", "mode VIETNAMESE or mode/identity unproven -> STOP fail-closed; T-PRICE-01 before fulfillment"]
   rollback: "none authorized; any rollback requires its own new Human authorization"
 
 acceptance:
   PA1: "Device agent runs the accepted FAST_30 source implementation identity containing commit b385ab1, deployed only from origin/main after authoritative origin/main containment is verified; performed by an authorized production worker using existing A23 access (never by Human relay)"
-  PA2: "Fresh exact D1 rows for job_477b205f4aff41cb89c2dd005ecf8009 / ord_2a142f39c5d2443492d1d8410d18bf9f / payments / outbox obtained by an authorized production worker using an authenticated Cloudflare/wrangler session (never by Human command relay)"
-  PA3: "Exactly ONE identity-bound dispatch mutation (rearm/rescue/recover chosen by exact fresh row state, or zero-mutation auto-pickup) built ONLY from PA2 fresh rows; no retry; no guessed/stale values; executed only after explicit rev-2 Human authorization"
+  PA2: "Fresh exact D1 rows for job_477b205f4aff41cb89c2dd005ecf8009 / ord_2a142f39c5d2443492d1d8410d18bf9f / payments / outbox obtained by an authorized production worker using an authenticated Cloudflare/wrangler session (never by Human command relay); rows MUST affirmatively prove requested mode, styles, formats, payment (tx 77506129), and delivery identity. ORIGINAL is accepted ONLY from positive row evidence; an absent/missing/ambiguous mode field proves nothing"
+  PA3: "Exactly ONE identity-bound dispatch mutation (rearm/rescue/recover chosen by exact fresh row state, or zero-mutation auto-pickup) built ONLY from PA2 proven rows; no retry; no guessed/stale values; executed only after explicit rev-3 Human authorization; if PA2 shows VIETNAMESE or fails to prove mode/identity -> zero mutations, STOP, route T-PRICE-01 before any fulfillment"
   PA4: "End-to-end delivery of ord_2a142f39 within the 30-minute wall: TTF+OTF artifact reaches the buyer in Telegram; Human may provide the final delivery observation"
 
 phases:
@@ -31,12 +31,13 @@ phases:
     executor: "authorized production worker with existing A23 access"
     bind: "source identity containing b385ab1, present on origin/main; NEVER deploy from an unreviewed recovery-only branch"
     verification: "device manifest main_commit_sha/policy identity matches the accepted implementation; supervisor release fingerprint PASS; archive_mode=NO_LOCAL_ARCHIVE"
+    note: "uncommitted local ops/a23_deployment_manifest.json is STALE (pre-cutover identity b8c6994); never use it as deployment evidence"
   P2_d1_read:
     executor: "authorized production worker with authenticated Cloudflare/wrangler session"
-    surface: "read-only SELECT on telegramfonts-d1: fulfillment_jobs, orders, payments, outbox_events rows for the stable IDs"
+    surface: "read-only SELECT on telegramfonts-d1: fulfillment_jobs, orders, payments, outbox_events rows for the stable IDs; must surface requested mode/styles/formats/payment/delivery fields"
   P3_dispatch:
     executor: "Prime (identity-bound, single-attempt)"
-    precondition: "fresh P2 rows + explicit Human rev-2 authorization"
+    precondition: "PA2 rows proving mode ORIGINAL + identity, plus explicit Human rev-3 authorization"
   P4_verify:
     executor: "Prime observation + optional Human Telegram delivery observation"
 
@@ -47,8 +48,10 @@ human_role:
 
 constraints:
   - "30-minute end-to-end wall limit per font; deadline or quality failure returns FAST30_FAILED and stops"
-  - "honor ADR-0001 (FAST_30 sole profile, no fallback/escalation), ADR-0002 (product/acquisition/reuse invariants, all-or-nothing delivery), ADR-0003 (Vietnamese AI cascade) without weakening"
-  - "no deploy and no production mutation while status PAUSED or authorization NOT GRANTED"
+  - "honor ADR-0001 (FAST_30 sole profile, no fallback/escalation), ADR-0002 (product/acquisition/reuse invariants, all-or-nothing delivery, approved pricing ORIGINAL 5,000 / VIETNAMESE 8,000 VND per style), ADR-0003 (Vietnamese AI cascade) without weakening"
+  - "never infer ORIGINAL from an absent mode field; ORIGINAL requires positive durable row evidence (E-00011)"
+  - "if edge pricing/mode gap affects the order (VIETNAMESE or unproven), T-PRICE-01 must complete and integrate before fulfillment resumes"
+  - "no production access, deploy, query, or mutation while status PAUSED or authorization NOT GRANTED"
 
 gates: [SINGLE_SHOT, NO_LOOP]
 extra_policies: [consequential, production, evidence]
@@ -70,4 +73,4 @@ depends_on:
   decisions: [decisions/ADR-0001.md, decisions/ADR-0002.md, decisions/ADR-0003.md]
   evidence: [".prime/tasks/T-INSPECT-01/result.yaml"]
 
-note: "Rev 1 superseded at generation 4 (E-00010): rev 1 assumed Human-executed P1/P2 and treated E-00009 as granted envelope; rev 2 corrects both. Contract stays PAUSED until Human review."
+note: "Rev 2 superseded at generation 5 (E-00011) before any execution or authorization: rev 3 adds fail-closed mode proof (never infer ORIGINAL from an absent mode field), the T-PRICE-01 gate for VIETNAMESE/unproven cases, and excludes the stale uncommitted local deployment manifest. Contract stays PAUSED; authorization NOT GRANTED."
