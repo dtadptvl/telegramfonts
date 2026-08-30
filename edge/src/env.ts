@@ -21,6 +21,10 @@ export interface Env {
   // lease age exceeds this cap (zombie termination via control plane).
   MAX_JOB_AGE_MS?: string;
 
+  // T-FAST-ATLAS-A23-ORIGINAL-RELEASE-01 O1: pre-payment Vietnamese mode gate.
+  // When not explicitly 'true', selecting or creating VIETNAMESE orders is rejected.
+  VIETNAMESE_ORDERING_ENABLED?: string;
+
   // Signed Download Config (Phase 6)
   DOWNLOAD_SIGNING_SECRET?: string;
   DOWNLOAD_URL_TTL_SECONDS?: string; // default 86400, bounded 60..604800

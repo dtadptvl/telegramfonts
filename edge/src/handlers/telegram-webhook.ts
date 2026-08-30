@@ -93,7 +93,7 @@ export async function handleTelegramWebhook(
   const tg = new TelegramClient(env.TELEGRAM_BOT_TOKEN);
   const catalogService = new CatalogService(env.DB);
   const sessionService = new SessionService(env.DB);
-  const orderService = new OrderService(env.DB);
+  const orderService = new OrderService(env.DB, env.VIETNAMESE_ORDERING_ENABLED === 'true');
 
   // 4. Process update
   try {
@@ -381,6 +381,25 @@ async function handleCallbackQuery(
       await tg.answerCallbackQuery({
         callback_query_id: query.id,
         text: 'Mode already selected for this session. Send /start to begin a new order.',
+        show_alert: true,
+      });
+      return;
+    }
+
+    // T-FAST-ATLAS-A23-ORIGINAL-RELEASE-01 O1: pre-payment Vietnamese mode gate.
+    // When VIETNAMESE_ORDERING_ENABLED is disabled (not exact 'true'), return a clear,
+    // polite bilingual temporarily-unavailable message before any session mode mutation,
+    // order creation, or payment negotiation. ORIGINAL flows are completely unaffected.
+    if (modeValue === 'VIETNAMESE' && env.VIETNAMESE_ORDERING_ENABLED !== 'true') {
+      await tg.sendMessage({
+        chat_id: session.chat_id,
+        text: '⚠️ <b>Tính năng đang tạm bảo trì / Temporarily Unavailable</b>\n\n' +
+          'Phiên bản VIETNAMESE đang được hoàn thiện chất lượng và tạm ngưng nhận đơn mới. Quý khách vui lòng chọn bản <b>ORIGINAL</b> hoặc quay lại sau.\n\n' +
+          '<i>VIETNAMESE mode ordering is temporarily paused for quality tuning. Please select <b>ORIGINAL</b> or check back later.</i>',
+      });
+      await tg.answerCallbackQuery({
+        callback_query_id: query.id,
+        text: 'Tính năng VIETNAMESE tạm thời chưa khả dụng. Vui lòng chọn ORIGINAL.',
         show_alert: true,
       });
       return;

@@ -39,6 +39,9 @@
     // (35 min): the 30-min FAST_30 job wall plus a 5-min operational margin.
     // Heartbeat extension is refused and the exhausted-job finalizer gains an
     // age-based candidate clause once the current lease age exceeds this cap.
-    "MAX_JOB_AGE_MS": "2100000"
+    "MAX_JOB_AGE_MS": "2100000",
+    // T-FAST-ATLAS-A23-ORIGINAL-RELEASE-01: temporary pre-payment lock until live Vietnamese AI smoke passes (E-00027).
+    // Flip to 'true' only after the VN live smoke succeeds.
+    "VIETNAMESE_ORDERING_ENABLED": "false"
   }
 }
