@@ -1,0 +1,51 @@
+schema_version: 8
+policy_rev: "P-20260830.9-LEAN-SAFE-R16"
+policy_fingerprint: "0fa00f66ee4873bf"
+id: T-FAST-ATLAS-A23-ORIGINAL-RELEASE-01
+contract_rev: 1
+mode: NORMAL
+validated_at_generation: 12
+scope_tags: [a23-staging-release, acquisition, atlas-runtime, product-flow]
+status: active
+
+objective: "ORIGINAL-first mode-split release (E-00027): integrate the proven correction head with the smallest mode-safe gate (VIETNAMESE locked pre-payment, default disabled), freeze one candidate, then side-by-side stage on A23, run exactly one production-egress ORIGINAL smoke, and conditionally activate Edge + A23 exactly once each - reaching BOT_ORIGINAL_READY without touching VIETNAMESE fulfillment or the failed paid order."
+
+mode_split:
+  original: "may integrate, stage, deploy and smoke independently"
+  vietnamese: "temporarily locked BEFORE order creation/payment until the live AI smoke passes; implementation and approved cascade preserved untouched"
+  supersedes: "E-00025 all-modes-must-pass condition, only within mode-specific deployment scope"
+
+acceptance:
+  O1: "smallest mode-safe gate: VIETNAMESE_ORDERING_ENABLED configuration-driven (edge var, default 'false' for this release); while disabled, VIETNAMESE selection returns a clear temporarily-unavailable result BEFORE order creation or payment; defense-in-depth guard rejects VIETNAMESE at order creation; ORIGINAL unaffected; Vietnamese implementation/cascade not removed"
+  O2: "focused edge tests prove ORIGINAL remains executable and VIETNAMESE cannot reach payment/order creation while disabled; typecheck clean"
+  O3: "Prime reviews exact diff; exactly ONE candidate SHA frozen; non-force integrated into origin/main + origin/prime-recovery; governance/runtime lint OK; only causally affected focused tests run"
+  O4: "side-by-side staging without disturbing the worker: read-only A23 process + D1 lease re-inspection immediately before staging (valid active lease or ambiguous process identity -> STOP before activation); frozen SHA staged into a NEW release directory without switching the current supervisor; fresh manifest generated from the frozen SHA (NEVER the dirty ops/a23_deployment_manifest.json); release fingerprint PASS; archive_mode=NO_LOCAL_ARCHIVE verified"
+  O5: "exactly ONE production-egress ORIGINAL smoke from the staged release on A23: real chain (exact binary/cache wins first, Chrome --dump-dom, persistent browser fallback, exact-MD5 Monotype CDN primary, Algolia only for MD5 recovery), TTF+OTF outputs, zero D1/Queue/R2/payment/order/Telegram mutation, hard wall 480s, no retry; success = real raster or valid binary obtained from A23 egress (nothing fabricated), valid TTF+OTF, combining marks retained, FontTools structural PASS, representative HarfBuzz + FreeType PASS, wall <=480s"
+  O6: "conditional full activation ONLY if O5 passes: Edge deployed exactly once at the frozen integrated SHA with VIETNAMESE_ORDERING_ENABLED=false; deployed Edge version/source identity + queue/cron bindings verified; staged A23 release activated atomically; Telefont supervisor restarted/switched exactly once; worker SHA + manifest fingerprint + readiness + empty-queue polling + zero orphan Chromium verified; bot confirmed ready for ORIGINAL product tests. If O5 fails: no Edge deploy, no A23 switch, runtime unchanged, exact acquisition failure reported, STOP"
+
+prohibited:
+  - "recovery/rearm/refund/cancel of ord_2a142f39"
+  - "new paid order creation by Prime"
+  - "D1/Queue/R2 job mutation"
+  - "live Vietnamese AI retry"
+  - "rollback, blind retry, alternative fidelity profile, FULL_MAX/BALANCED_MAX"
+  - "asking Human to run commands or relay JSON"
+
+gates: [SINGLE_SHOT, NO_LOOP]
+extra_policies: [consequential, production, evidence, security]
+
+identity:
+  repo: "E:\\cv\\telefont"
+  canonical_base: "dd1b6f336a1ff1e7656c86937cca59aa30b0daca"
+  proven_correction_branch: "task/T-FAST-ATLAS-PROD-READY-01"
+  proven_correction_head: "01f83c5c1bc574b1f3ce6f6b9a2973c8600c709b"
+  worktree: "E:\\cv\\telefont-original-release"
+  branch: "task/T-FAST-ATLAS-A23-ORIGINAL-RELEASE-01"
+  candidate_sha: null   # frozen by Prime at O3
+  retained_edge_version_until_activation: "d0d9c4ef-47db-42ca-8940-cbeeb72d6d4f"
+
+depends_on:
+  decisions: [decisions/ADR-0002.md, decisions/ADR-0003.md, decisions/ADR-0004.md]
+  evidence: [".prime/journal/events.jsonl", ".prime/tasks/T-FAST-ATLAS-PROD-READY-01/result.yaml"]
+
+note: "Created at generation 12 (E-00027). E-00025/E-00026 and prior results stay immutable; this task reuses their proven changes without rewriting them. Release authority is conditional per O5/O6 and scoped to ORIGINAL mode only."
