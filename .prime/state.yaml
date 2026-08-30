@@ -13,9 +13,9 @@ phase:
   id: "fast30-cutover"
   status: active
 
-now: []
-next:
-  - "T-FAST30-01: READY_FOR_PRIME_AFTER_RESTART - implement FAST_30 sole-profile retirement layer (LOCAL_ONLY; A23 production acceptance requires a later separate consequential contract)"
+now:
+  - "T-FAST30-01 (contract_rev 2): implement FAST_30 sole-profile retirement layer (LOCAL_ONLY; A23 production acceptance requires a later separate consequential contract)"
+next: []
 
 blockers:
   - "stale retired-profile work on A23 (job_477b205f attempt 6, order ord_2a142f39): terminal disposition UNPROVEN - requires exact read-only process/job/lease inspection and reconciliation; no stop/signal/rearm/retry/mutation authorized"
@@ -46,4 +46,4 @@ reconciliation:
   status: clean
   event: E-00006
 
-updated_at: "2026-08-30T04:30:00Z"
+updated_at: "2026-08-30T04:43:00Z"
