@@ -13,9 +13,9 @@ phase:
   id: "fast30-cutover"
   status: active
 
-now:
-  - "T-FAST30-01"
-next: []
+now: []
+next:
+  - "T-INSPECT-01: EXACT READ-ONLY inspection + reconciliation of retired A23 job_477b205f / ord_2a142f39 (terminal disposition currently UNPROVEN; no stop/signal/rearm/retry/mutation authorized; separate consequential contract required before any mutation)"
 
 blockers:
   - "stale retired-profile work on A23 (job_477b205f attempt 6, order ord_2a142f39): terminal disposition UNPROVEN - requires exact read-only process/job/lease inspection and reconciliation; no stop/signal/rearm/retry/mutation authorized"
@@ -44,6 +44,6 @@ recent_invalidations:
 
 reconciliation:
   status: clean
-  event: E-00006
+  event: E-00007
 
-updated_at: "2026-08-30T04:43:00Z"
+updated_at: "2026-08-30T05:16:00Z"

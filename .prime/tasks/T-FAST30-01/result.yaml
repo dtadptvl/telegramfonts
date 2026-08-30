@@ -7,7 +7,9 @@ branch: prime-v12-cutover
 base_head: da354b9
 status: completed
 
-proved:
+proved: [A1, A2, A3, A4, A5, A6]
+
+acceptance_evidence:
   A1: >-
     PROVED. BALANCED_MAX/FULL_MAX removed from every executable route:
     runner passes only FAST_30_PROFILE; release gate is FAST_30-only with
