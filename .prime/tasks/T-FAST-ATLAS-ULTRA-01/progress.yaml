@@ -36,7 +36,17 @@ milestones:
   - id: M5
     name: U12 bounded speed fixture
     status: done
+    commit: 4b3a096
     evidence: fixture-evidence.yaml + fixture-evidence-large.yaml
+  - id: M6
+    name: final bounded evidence closure (U7 licensed-binary liga preservation + U8 VIETNAMESE)
+    status: done
+    commits: [9239ee4, 93abc0b]
+    evidence: test_atlas_ultra_licensed_binary.py + test_atlas_ultra_vietnamese.py + fixture-evidence-vietnamese.yaml
+    note: >-
+      Bounded ~45-minute closure slice; no production access, no AI provider
+      calls (no keys locally), no full suite, no blind retry; both new test
+      files pass; VN fixture ran cold within the 360s cap.
 fixture_evidence:
   ordinary_original:
     glyph_count: 200
@@ -68,13 +78,48 @@ fixture_evidence:
     pages: 6
     peak_tracemalloc_mb: 81.302
     validation: PASSED with low-confidence IDs recorded
+  vietnamese_bounded:
+    glyph_count: 37
+    mode: VIETNAMESE
+    wall_cap_seconds: 360
+    pipeline_run_outcome: FAIL_CLOSED (VietnameseAIIntegrityError VI_AI_PROVIDER_UNAVAILABLE)
+    fail_closed_without_keys: true
+    ai_calls_made: 0
+    pipeline_run_wall_seconds: 17.136
+    total_wall_seconds: 18.034
+    peak_working_set_mb: 152.656
+    peak_tracemalloc_mb_phases23: 1.629
+    frozen_glyphs: 30
+    failed_glyphs: 7
+    failed_glyph_note: standalone combining marks (raster-unprovable; FAILED_GLYPH, no retry)
+    preserved_existing_glyphs: 23
+    deterministic_composition_resolved: 21
+    deterministic_composition_errors: 0
+    ai_required_glyphs: 60
+    ai_required_classes: 12
+    total_missing_classes: 13
+    ai_calls_budget: 13
+    ai_calls_used: 0
+    nfc_nfd_audit_failures_pre: 36
+    nfc_nfd_audit_failures_post: 29
+    anchor_mark_inference: reached (5 combining marks with inferred anchors)
+    validation_deterministic_only_extension: >-
+      FontTools structural 7/7 PASS; HarfBuzz shaping/positions PASS;
+      FreeType load/render PASS; normalization FAIL:29 + vn_corpus
+      PARTIAL:46_MISSING (honest bounded-subset gaps); VN gate
+      VI_CORPUS_SHAPING_NOTDEF x5 (subset corpus gap)
 fixture_substitution: >-
   Neurath Mono Regular (myfonts.com) network acquisition unavailable locally
   (no authorized session material, no production access under this task);
   next best LOCAL fixture used: Be Vietnam Pro Regular
-  (agent/benchmark_data/ground_truth/BeVietnamPro-Regular.ttf).
+  (agent/benchmark_data/ground_truth/BeVietnamPro-Regular.ttf) - the repo
+  benchmark ground truth, authorized as the local validation binary and
+  recorded as such in every evidence file.
 budget_state:
-  fixture_runs: 3 (1 mini smoke 40-glyph + ordinary 200 + large 457; one cold+reuse pair each for the last two)
+  fixture_runs: >-
+    5 total: 1 mini smoke 40-glyph + ordinary 200 + large 457 (M5) +
+    2 bounded VIETNAMESE cold runs (M6; first superseded by a rerun after
+    fixing the peak-memory probe; both bounded, both within cap)
   within_wall: true
 constraints_ack:
   production_access: none
