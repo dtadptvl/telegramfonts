@@ -459,11 +459,12 @@ class AtlasUltraPipeline:
                 cell_pen = _pen_left_px(_extra_left)
             from atlas.paging import CELL_PAD_X_PX as _PL_PAD
             pen_left = cell_pen if cell_pen else _PL_PAD
-            base_png, shifted_png, double_png = self.raster_provider.fetch_refinement(
+            refinement = self.raster_provider.fetch_refinement(
                 cp, cell_w, cell_h, pen_left
             )
-            if inspect.isawaitable(base_png):
-                base_png, shifted_png, double_png = await base_png
+            if inspect.isawaitable(refinement):
+                refinement = await refinement
+            base_png, shifted_png, double_png = refinement
             if base_png is None:
                 remaining.append(cp)
                 continue
