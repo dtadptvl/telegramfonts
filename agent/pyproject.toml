@@ -37,13 +37,15 @@ dev = [
 testpaths = ["tests"]
 pythonpath = ["src"]
 asyncio_mode = "auto"
-# Issue #88: explicit pytest tiers. Quick gate selector:
+# Explicit pytest tiers. Quick gate selector:
 #   -m "not fullmax_e2e and not performance"
-# fullmax-final lane selector: -m "fullmax_e2e or performance or browser"
-# (the browser-marked Chromium readiness/warmup set makes the lane
-# Chromium-ready before the E2E tier; FULLMAX_LANE_COLD_START correction)
+# The fullmax-final CI lane and its selector are RETIRED together with
+# the BALANCED_MAX/FULL_MAX profiles (ADR-0001; FAST_30 sole profile).
+# The fullmax_e2e marker is retained only so the quick-gate exclusion
+# stays fail-closed: anything ever marked fullmax_e2e can never enter
+# the quick gate.
 markers = [
-    "fullmax_e2e: canonical heavy end-to-end chains (FULL-MAX + heavy causal E2E; ~1h class; excluded from quick gate, runs in the fullmax-final lane)",
+    "fullmax_e2e: RETIRED lane marker (ADR-0001): heavy end-to-end chains of the retired FULL-MAX lane; no executable test carries it; the quick-gate exclusion remains fail-closed",
     "performance: performance-measurement tests (benchmark harness; excluded from the quick gate)",
     "browser: tests exercising real or fake browser-process boundaries (real launches skip when unavailable)",
     "integration: tests composing multiple subsystems against hermetic fakes (included in the quick gate)",

@@ -745,7 +745,10 @@ async def test_VI_AI_FORGED_fail_closed_no_publish(test_settings: Settings, tmp_
     )
     res = await runner.process_message(msg)
     assert res.action == RunnerAction.FAILED_TERMINAL
-    assert res.reason == "VIETNAMESE_EXTENSION_FAILED"
+    # FAST_30 regime (ADR-0001): a gate quality failure (forged VI
+    # extension evidence included) returns FAST30_FAILED and stops;
+    # no fallback/escalation of any trigger type exists.
+    assert res.reason == "FAST30_FAILED"
     assert state["uploads"] == []
     assert state["completes"] == []
     with archive._connect() as conn:
@@ -810,7 +813,9 @@ async def test_PARTIAL_ORDER_one_failing_item_archives_nothing(test_settings: Se
     )
     res = await runner.process_message(msg)
     assert res.action == RunnerAction.FAILED_TERMINAL
-    assert res.reason == "STAGE9D_GATE_FAILED"
+    # FAST_30 regime (ADR-0001): quality failure returns FAST30_FAILED
+    # and stops; no fallback/escalation exists.
+    assert res.reason == "FAST30_FAILED"
     assert state["uploads"] == []
     assert state["completes"] == []
     # Partial PASS archived nothing, including the style whose gate passed.

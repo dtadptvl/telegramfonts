@@ -1,24 +1,33 @@
-"""Stage 16 (Issue #86 / #6 D18): versioned reconstruction-profile policy layer.
+"""Versioned reconstruction-profile policy layer.
 
-BALANCED_MAX is the primary reconstruction profile for testing and
-production; FULL_MAX remains the canonical quality reference and the
-mandatory fail-closed fallback. Both are VERSIONED POLICIES over the
-shared pipeline interfaces (snapshot -> partition -> reconstruction ->
-optimization -> calibration -> sealed FontModel -> candidate build ->
-four consumers -> held-out gating -> attestation). No duplicated
-pipelines: the profiles only select the fit/search schedule and the
-confidence policy; every downstream gate stays the canonical one.
+FAST_30 is the SOLE production reconstruction/fidelity profile
+(ADR-0001). BALANCED_MAX and FULL_MAX are retired from every
+executable production/runtime/config/CLI/CI/profile-selection route;
+any attempt to select a retired profile fails closed with
+PROFILE_RETIRED. No fidelity fallback/escalation path exists for any
+trigger type (automatic/manual/background/confidence/gate/operator).
 
-SCHEDULE INVARIANT DELTA (D18): only BALANCED_MAX's separate versioned
-fit/search schedule may shrink (adaptive resolutions, phase grids,
-candidate counts, iteration budgets, deterministic early-stop). FULL_MAX
-fit/search schedules remain exactly canonical. Held-out schedules,
-thresholds, four-consumer validation, evidence independence,
+FAST_30 is a VERSIONED POLICY over the shared pipeline interfaces
+(snapshot -> partition -> reconstruction -> optimization ->
+calibration -> sealed FontModel -> candidate build -> four consumers
+-> held-out gating -> attestation). No duplicated pipelines: the
+profile only selects the fit/search schedule and the confidence
+policy; every downstream gate stays the canonical one.
+
+SCHEDULE INVARIANT DELTA: only FAST_30's separate versioned fit/search
+schedule may shrink (adaptive resolutions, phase grids, candidate
+counts, iteration budgets, deterministic early-stop); the schedule
+values are the calibrated versioned set, inherited unchanged. Held-out
+schedules, thresholds, four-consumer validation, evidence independence,
 attestation, deterministic identity, and publication requirements are
-unchanged for BOTH profiles. Reduced fitting work is permitted only
-when the artifact passes the complete unchanged final gates.
+unchanged. Reduced fitting work is permitted only when the artifact
+passes the complete unchanged final gates.
 
-SEARCH LADDER (BALANCED_MAX, deterministic, versioned):
+WALL LIMIT: the end-to-end wall limit is 30 minutes per font; deadline
+or quality failure returns FAST30_FAILED and stops (no fallback or
+escalation of any trigger type).
+
+SEARCH LADDER (FAST_30, deterministic, versioned):
 - CORE FIT on versioned core fit resolutions (512/1024/2048 on the
   canonical MAX raster schedule; deterministic clamp for smaller
   configs) with a reduced deterministic phase grid for EASY glyphs.
@@ -47,8 +56,8 @@ coverage/edge/SDF components, convergence stability, candidate margin).
 Thresholds are calibrated against a fixed FULL_MAX reference corpus and
 frozen before production execution (calibration identity bound into the
 policy hash). Missing/incomplete/non-finite confidence inputs = LOW.
-Held-out/consumer evidence may trigger escalation only and never feeds
-fitting, ranking, early-stop, or confidence.
+Held-out/consumer evidence never feeds fitting, ranking, early-stop,
+or confidence.
 """
 from __future__ import annotations
 
@@ -62,16 +71,22 @@ from typing import Any, Mapping, Sequence
 
 PROFILE_FULL_MAX = "FULL_MAX"
 PROFILE_BALANCED_MAX = "BALANCED_MAX"
+PROFILE_FAST_30 = "FAST_30"
 
-# Versioned core fit resolutions of the BALANCED_MAX search ladder on the
+# Retired production profiles (ADR-0001): every selection route fails
+# closed with PROFILE_RETIRED. Names retained as historical record only.
+RETIRED_PROFILES: frozenset[str] = frozenset({PROFILE_BALANCED_MAX, PROFILE_FULL_MAX})
+
+# Versioned core fit resolutions of the FAST_30 search ladder on the
 # canonical MAX raster schedule (FULL MAX core is 512/1024/2048/4096; the
 # 4096 tier is reserved for the full-resolution rerank / HARD expansion).
-BALANCED_CORE_FIT_RESOLUTIONS_PX: tuple[int, ...] = (512, 1024, 2048)
+# Values inherited unchanged from the calibrated versioned schedule.
+FAST30_CORE_FIT_RESOLUTIONS_PX: tuple[int, ...] = (512, 1024, 2048)
 
 # Reduced deterministic phase grid for EASY glyphs: the {0, 0.5}^2 subset
 # of the canonical 4x4 base grid. Glyphs whose config carries no such
 # phase fall back deterministically to the smallest declared base phase.
-BALANCED_EASY_PHASE_AXES: tuple[float, ...] = (0.0, 0.5)
+FAST30_EASY_PHASE_AXES: tuple[float, ...] = (0.0, 0.5)
 
 # Vietnamese combining marks default HARD (D18). The Vietnamese extension
 # mark set is the production authority; generic Unicode combining class
@@ -123,16 +138,17 @@ class ConfidenceThresholds:
 class ReconstructionProfile:
     """Versioned reconstruction fit/search policy over shared interfaces.
 
-    FULL_MAX: every schedule field selects the complete canonical
-    fit evidence with the canonical optimizer budget; the confidence
-    gate is inactive (FULL_MAX is the canonical reference itself).
-    BALANCED_MAX: reduced versioned fit/search schedule + deterministic
-    confidence gate. All downstream gates are identical for both.
+    FAST_30 (sole production profile, ADR-0001): reduced versioned
+    fit/search schedule + deterministic confidence gate + 30-minute
+    end-to-end wall limit per font. Retired profiles (BALANCED_MAX,
+    FULL_MAX) are never selectable: selection fails closed with
+    PROFILE_RETIRED. All downstream gates are the unchanged canonical
+    ones.
     """
 
     name: str
     profile_version: str
-    # Fit/search schedule (only BALANCED_MAX may shrink these).
+    # Fit/search schedule (only FAST_30's reduced schedule may shrink).
     core_fit_resolutions: tuple[int, ...]  # empty == every config resolution
     easy_phase_axes: tuple[float, ...]  # empty == every declared base phase
     coarse_max_iterations: int
@@ -146,6 +162,9 @@ class ReconstructionProfile:
     confidence_thresholds: ConfidenceThresholds
     calibration_corpus_identity: str
     calibration_policy_version: str
+    # End-to-end wall limit (seconds) for one font under this profile;
+    # deadline or quality failure returns FAST30_FAILED and stops.
+    wall_limit_seconds: float = 1800.0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -164,6 +183,7 @@ class ReconstructionProfile:
             "confidence_thresholds": self.confidence_thresholds.to_dict(),
             "calibration_corpus_identity": self.calibration_corpus_identity,
             "calibration_policy_version": self.calibration_policy_version,
+            "wall_limit_seconds": self.wall_limit_seconds,
         }
 
     def policy_hash(self) -> str:
@@ -177,16 +197,17 @@ class ReconstructionProfile:
     def select_core_resolutions(self, config_resolutions: Sequence[int]) -> tuple[int, ...]:
         """Core fit resolutions for the search ladder, clamped to config.
 
-        FULL_MAX returns every config resolution (canonical). BALANCED_MAX
-        returns the versioned core set intersected with the config; configs
-        that carry no versioned core member clamp deterministically to the
-        largest config resolution at/below the versioned maximum core size,
-        else the smallest config resolution. Never empty for a valid config.
+        A profile with an empty core set returns every config resolution
+        (canonical). FAST_30 returns the versioned core set intersected
+        with the config; configs that carry no versioned core member clamp
+        deterministically to the largest config resolution at/below the
+        versioned maximum core size, else the smallest config resolution.
+        Never empty for a valid config.
         """
         resolutions = tuple(int(r) for r in config_resolutions)
         if not resolutions:
             raise ValueError("PROFILE_NO_CONFIG_RESOLUTIONS")
-        if self.name == PROFILE_FULL_MAX or not self.core_fit_resolutions:
+        if not self.core_fit_resolutions:
             return resolutions
         available = set(resolutions)
         core = tuple(r for r in self.core_fit_resolutions if r in available)
@@ -203,14 +224,14 @@ class ReconstructionProfile:
     ) -> tuple[tuple[float, float], ...]:
         """Reduced EASY phase grid: versioned axis subset of the base grid.
 
-        FULL_MAX (empty axes) returns every declared base phase. A config
+        Empty axes return every declared base phase (canonical). A config
         whose base grid carries no subset member falls back to the smallest
         declared base phase (deterministic, never empty).
         """
         phases = tuple((round(float(x), 4), round(float(y), 4)) for x, y in base_phases)
         if not phases:
             raise ValueError("PROFILE_NO_BASE_PHASES")
-        if self.name == PROFILE_FULL_MAX or not self.easy_phase_axes:
+        if not self.easy_phase_axes:
             return phases
         axes = {round(float(a), 4) for a in self.easy_phase_axes}
         subset = tuple(p for p in phases if p[0] in axes and p[1] in axes)
@@ -219,34 +240,16 @@ class ReconstructionProfile:
         return (min(phases),)
 
 
-FULL_MAX_PROFILE = ReconstructionProfile(
-    name=PROFILE_FULL_MAX,
+FAST_30_PROFILE = ReconstructionProfile(
+    name=PROFILE_FAST_30,
     profile_version="1.0.0",
-    core_fit_resolutions=(),
-    easy_phase_axes=(),
-    coarse_max_iterations=240,
-    tier_max_iterations=240,
-    final_max_iterations=240,
-    early_stop_abs_tol=0.0,
-    early_stop_rel_tol=0.0,
-    early_stop_rounds=0,
-    rerank_top_k=1,
-    workers_default=1,
-    confidence_thresholds=ConfidenceThresholds(),
-    calibration_corpus_identity=CALIBRATION_CORPUS_IDENTITY,
-    calibration_policy_version=CALIBRATION_POLICY_VERSION,
-)
-
-BALANCED_MAX_PROFILE = ReconstructionProfile(
-    name=PROFILE_BALANCED_MAX,
-    profile_version="1.0.0",
-    core_fit_resolutions=BALANCED_CORE_FIT_RESOLUTIONS_PX,
-    easy_phase_axes=BALANCED_EASY_PHASE_AXES,
+    core_fit_resolutions=FAST30_CORE_FIT_RESOLUTIONS_PX,
+    easy_phase_axes=FAST30_EASY_PHASE_AXES,
     coarse_max_iterations=64,
     tier_max_iterations=64,
-    # Authoritative FULL_SET tier budget equals the canonical FULL_MAX
-    # per-glyph budget: the complete-set candidate must be able to
-    # converge exactly as the canonical schedule does.
+    # Authoritative FULL_SET tier budget equals the canonical per-glyph
+    # budget: the complete-set candidate must be able to converge exactly
+    # as the canonical schedule does.
     final_max_iterations=240,
     early_stop_abs_tol=1e-5,
     early_stop_rel_tol=1e-3,
@@ -256,7 +259,33 @@ BALANCED_MAX_PROFILE = ReconstructionProfile(
     confidence_thresholds=ConfidenceThresholds(),
     calibration_corpus_identity=CALIBRATION_CORPUS_IDENTITY,
     calibration_policy_version=CALIBRATION_POLICY_VERSION,
+    wall_limit_seconds=1800.0,
 )
+
+
+def select_production_profile(
+    requested: "str | ReconstructionProfile | None" = None,
+) -> ReconstructionProfile:
+    """Fail-closed production profile selection (ADR-0001).
+
+    FAST_30 is the sole selectable production profile. An absent request
+    resolves to FAST_30. Any attempt to select a retired profile
+    (BALANCED_MAX, FULL_MAX) fails closed with PROFILE_RETIRED; unknown
+    names fail closed with PROFILE_UNKNOWN. No fallback, escalation, or
+    substitution of any trigger type exists.
+    """
+    if requested is None:
+        return FAST_30_PROFILE
+    name = (
+        requested.name
+        if isinstance(requested, ReconstructionProfile)
+        else str(requested)
+    ).strip().upper()
+    if name == PROFILE_FAST_30:
+        return FAST_30_PROFILE
+    if name in RETIRED_PROFILES:
+        raise ValueError(f"PROFILE_RETIRED: {name}")
+    raise ValueError(f"PROFILE_UNKNOWN: {name}")
 
 
 def profile_workers(profile: ReconstructionProfile) -> int:
@@ -306,9 +335,6 @@ def classify_glyph_difficulty(
     budget-exhausted coarse convergence, and multi-component topology are
     observable HARD signals. Returns (classification, reasons).
     """
-    if profile.name == PROFILE_FULL_MAX:
-        return "HARD", ("FULL_MAX_CANONICAL_COMPLETE_SCHEDULE",)
-
     reasons: list[str] = []
     if is_combining_mark(code_point):
         reasons.append(HARD_REASON_COMBINING_MARK)
@@ -374,15 +400,6 @@ def compute_profile_confidence(
     search ladder. Missing/incomplete/non-finite inputs fail closed to LOW.
     Held-out/consumer evidence never enters this computation.
     """
-    if profile.name == PROFILE_FULL_MAX:
-        return ProfileConfidence(
-            status=CONFIDENCE_PASS,
-            score=1.0,
-            reasons=(),
-            per_glyph_min=1.0,
-            budget_fraction=0.0,
-        )
-
     th = profile.confidence_thresholds
     reasons: list[str] = []
     if not glyph_evidence:

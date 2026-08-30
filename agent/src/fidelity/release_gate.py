@@ -24,15 +24,20 @@ import logging
 import os
 import tempfile
 import threading
+import time
 from collections import OrderedDict
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-from fidelity.balanced_search import SEARCH_VERSION as BALANCED_SEARCH_VERSION
-from fidelity.balanced_search import BalancedMaxSearch, GlyphCheckpointStore
+from fidelity.balanced_search import SEARCH_VERSION as FAST30_SEARCH_VERSION
+from fidelity.balanced_search import (
+    BalancedMaxSearch,
+    Fast30WallLimitError,
+    GlyphCheckpointStore,
+)
 from fidelity.evaluator import FidelityEvaluator
 from fidelity.models import FidelityReport, FidelityThresholds
 from fidelity.optimizer import (
@@ -44,13 +49,13 @@ from fidelity.optimizer import (
 )
 from fidelity.pipeline import ObservationStoreSnapshot, partition_snapshot
 from fidelity.profiles import (
-    BALANCED_MAX_PROFILE,
     CONFIDENCE_LOW,
     CONFIDENCE_PASS,
-    FULL_MAX_PROFILE,
-    PROFILE_BALANCED_MAX,
-    PROFILE_FULL_MAX,
+    FAST_30_PROFILE,
+    PROFILE_FAST_30,
+    RETIRED_PROFILES,
     compute_profile_confidence,
+    select_production_profile,
 )
 from fidelity.producers import (
     CandidateArtifact,
@@ -99,10 +104,10 @@ class _ModelFormationEntry:
     trace: OptimizationTrace
     calibrated_glyphs: tuple[tuple[int, CalibratedGlyph], ...]
     kerning_map: tuple[tuple[tuple[int, int], int], ...]
-    # Stage 16: the versioned reconstruction profile that formed this
-    # model and its deterministic confidence outcome, so memo hits never
-    # re-derive confidence from anything but sealed formation truth.
-    profile_name: str = PROFILE_FULL_MAX
+    # The versioned reconstruction profile that formed this model and
+    # its deterministic confidence outcome, so memo hits never re-derive
+    # confidence from anything but sealed formation truth.
+    profile_name: str = PROFILE_FAST_30
     confidence_status: str = ""
     confidence_score: float = -1.0
     confidence_reasons: tuple[str, ...] = ()
@@ -224,15 +229,13 @@ class ReleaseGateResult:
     attestation: Stage9DAttestation | None = None
     trace: OptimizationTrace | None = None
     failure_reasons: tuple[str, ...] = field(default_factory=tuple)
-    # Stage 16 reconstruction-profile record: which versioned profile
-    # produced this result, its deterministic confidence gate outcome,
-    # and any single fail-closed BALANCED_MAX -> FULL_MAX escalation.
-    reconstruction_profile: str = PROFILE_FULL_MAX
+    # Reconstruction-profile record: which versioned profile produced
+    # this result and its deterministic confidence gate outcome. No
+    # escalation record exists: FAST_30 has no fallback path (ADR-0001).
+    reconstruction_profile: str = PROFILE_FAST_30
     confidence_status: str = ""
     confidence_score: float = -1.0
     confidence_reasons: tuple[str, ...] = field(default_factory=tuple)
-    escalated_from_profile: str = ""
-    escalation_reason: str = ""
     search_summary: tuple[tuple[str, Any], ...] = field(default_factory=tuple)
     model: Any = field(default=None, repr=False, compare=False)
     _temp_dir: Any = field(default=None, repr=False, compare=False)
@@ -253,13 +256,13 @@ class ReleaseGateResult:
         self.cleanup()
 
 
-def _balanced_search_summary(formation: Any) -> tuple[tuple[str, Any], ...]:
-    """Deterministic, sanitized summary of one BALANCED_MAX formation."""
+def _fast30_search_summary(formation: Any) -> tuple[tuple[str, Any], ...]:
+    """Deterministic, sanitized summary of one FAST_30 ladder formation."""
     easy = sum(1 for r in formation.search_records if r.classification == "EASY")
     hard = sum(1 for r in formation.search_records if r.classification == "HARD")
     resumed = sum(1 for r in formation.search_records if r.checkpoint_resumed)
     return (
-        ("search_version", BALANCED_SEARCH_VERSION),
+        ("search_version", FAST30_SEARCH_VERSION),
         ("glyph_count", len(formation.search_records)),
         ("easy_glyphs", easy),
         ("hard_glyphs", hard),
@@ -273,41 +276,6 @@ def _balanced_search_summary(formation: Any) -> tuple[tuple[str, Any], ...]:
             for r in formation.search_records
         )),
     )
-
-
-def _promote_published_balanced_artifact(
-    result: ReleaseGateResult, output_dir: Path
-) -> ReleaseGateResult:
-    """Promote an accepted BALANCED_MAX artifact to the canonical location.
-
-    The BALANCED attempt stages its candidate artifact under
-    ``<output_dir>/balanced_max_attempt`` so a rejected attempt can never
-    collide with or masquerade as the published artifact. When the attempt
-    passes the deterministic confidence gate AND every unchanged final
-    gate, the exact attested bytes are moved to the requested canonical
-    output directory and the result path is rebound. Attestation binds
-    bytes (SHA-256/size), never the path, so promotion preserves attested
-    truth; any byte drift fails closed.
-    """
-    staged = Path(result.candidate_file_path)
-    if "balanced_max_attempt" not in staged.parts:
-        return result
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    target = output_dir / staged.name
-    data = staged.read_bytes()
-    if len(data) != result.candidate_size_bytes:
-        raise ValueError("BALANCED_PROMOTION_SIZE_DRIFT")
-    if hashlib.sha256(data).hexdigest() != result.candidate_artifact_sha:
-        raise ValueError("BALANCED_PROMOTION_SHA_DRIFT")
-    tmp = target.with_name(target.name + ".promote_tmp")
-    tmp.write_bytes(data)
-    tmp.replace(target)
-    try:
-        staged.unlink()
-    except OSError:
-        pass
-    return replace(result, candidate_file_path=str(target))
 
 
 def _fail_result(
@@ -391,12 +359,27 @@ class Stage9DReleaseGate:
         vietnamese_service: Any = None,
         provider_capability: Any = None,
         profile: Any = None,
+        deadline: float | None = None,
     ) -> ReleaseGateResult:
         if profile is None:
-            profile = FULL_MAX_PROFILE
+            profile = FAST_30_PROFILE
         clean_format = format_type.strip().upper()
         if clean_format not in ("TTF", "OTF"):
             return _fail_result("FAIL", None, "PIPELINE_ERROR: UNSUPPORTED_FORMAT", clean_format)
+        # Fail-closed profile boundary: FAST_30 is the sole production
+        # profile (ADR-0001). Retired/unknown profiles never enter the
+        # pipeline; no fallback/escalation exists.
+        if profile.name != PROFILE_FAST_30:
+            reason = (
+                f"PROFILE_RETIRED: {profile.name}"
+                if profile.name in RETIRED_PROFILES
+                else f"PROFILE_UNKNOWN: {profile.name}"
+            )
+            return _fail_result("FAIL", None, reason, clean_format)
+        if deadline is not None and time.monotonic() > deadline:
+            return _fail_result(
+                "FAIL", None, "FAST30_FAILED: WALL_LIMIT_EXCEEDED", clean_format
+            )
 
         # Host capability check (fail-closed BLOCKED, identical to Stage 9C).
         try:
@@ -447,8 +430,8 @@ class Stage9DReleaseGate:
         # partition, candidate build, four-consumer evidence, held-out
         # evaluation and attestation still run fail-closed on every call.
         effective_policy = optimizer_policy if optimizer_policy is not None else OptimizerPolicy()
-        # The memo key binds the versioned reconstruction profile: a
-        # BALANCED_MAX model and a FULL_MAX model are different
+        # The memo key binds the versioned reconstruction profile: models
+        # formed under different profile policies are different
         # reconstruction identities and can never cross-reuse.
         memo_key = (
             snapshot.snapshot_fingerprint,
@@ -499,72 +482,56 @@ class Stage9DReleaseGate:
 
         if cached is None:
             # 3. Fit-only reconstruction + 4. bounded deterministic
-            # optimization under the versioned reconstruction profile.
-            # FULL_MAX keeps the exact canonical schedule; BALANCED_MAX
-            # runs the deterministic coarse-to-fine search ladder over the
-            # same solver/optimizer interfaces, then the confidence gate.
+            # optimization under the FAST_30 profile: the deterministic
+            # coarse-to-fine search ladder over the shared solver/
+            # optimizer interfaces, then the confidence gate. The ladder
+            # reuses compatible exact-identity intermediates (decode/
+            # prepare artifacts derived purely from the sealed fit
+            # observation bytes); every fit record is still prepared,
+            # optimized, and gated.
             try:
-                if profile.name == PROFILE_BALANCED_MAX:
-                    ckpt_store = None
-                    if output_dir is not None:
-                        ckpt_store = GlyphCheckpointStore(Path(output_dir), profile)
-                    search = BalancedMaxSearch(profile, checkpoint_store=ckpt_store)
-                    formation = search.form_model(
-                        snapshot=snapshot,
-                        partition=partition,
-                        config=snapshot.config,
-                        raster_provider=lambda r: snapshot.get_raster_bytes(r.cache_key),
-                        units_per_em=1000,
+                ckpt_store = None
+                if output_dir is not None:
+                    ckpt_store = GlyphCheckpointStore(Path(output_dir), profile)
+                search = BalancedMaxSearch(profile, checkpoint_store=ckpt_store)
+                formation = search.form_model(
+                    snapshot=snapshot,
+                    partition=partition,
+                    config=snapshot.config,
+                    raster_provider=lambda r: snapshot.get_raster_bytes(r.cache_key),
+                    units_per_em=1000,
+                    deadline=deadline,
+                )
+                optimized_glyphs = dict(formation.optimized_glyphs)
+                trace = formation.trace
+                confidence = compute_profile_confidence(
+                    profile, formation.confidence_evidence
+                )
+                confidence_status = confidence.status
+                confidence_score = confidence.score
+                confidence_reasons = confidence.reasons
+                search_summary = _fast30_search_summary(formation)
+                # Deterministic confidence gate: LOW rejects the FAST_30
+                # candidate before any build/consumer work. Held-out/
+                # consumer evidence never feeds this decision (fit
+                # evidence only). LOW is a quality failure: the
+                # production flow returns FAST30_FAILED and stops; there
+                # is no fallback/escalation of any trigger type.
+                if confidence.status != CONFIDENCE_PASS:
+                    logger.warning(
+                        "FAST_30 confidence LOW: %s",
+                        ";".join(confidence.reasons) or "UNKNOWN",
                     )
-                    optimized_glyphs = dict(formation.optimized_glyphs)
-                    trace = formation.trace
-                    confidence = compute_profile_confidence(
-                        profile, formation.confidence_evidence
+                    return _fail_result(
+                        "FAIL", snapshot,
+                        "PIPELINE_ERROR: FAST30_CONFIDENCE_LOW",
+                        clean_format, model_hash="", trace=trace,
                     )
-                    confidence_status = confidence.status
-                    confidence_score = confidence.score
-                    confidence_reasons = confidence.reasons
-                    search_summary = _balanced_search_summary(formation)
-                    # Deterministic confidence gate: LOW rejects the
-                    # BALANCED_MAX candidate before any build/consumer
-                    # work. Held-out/consumer evidence never feeds this
-                    # decision (fit evidence only).
-                    if confidence.status != CONFIDENCE_PASS:
-                        logger.warning(
-                            "Stage 16 BALANCED_MAX confidence LOW: %s",
-                            ";".join(confidence.reasons) or "UNKNOWN",
-                        )
-                        return _fail_result(
-                            "FAIL", snapshot,
-                            "PIPELINE_ERROR: BALANCED_CONFIDENCE_LOW",
-                            clean_format, model_hash="", trace=trace,
-                        )
-                else:
-                    solver = MaxReconstructionSolver()
-                    fit_by_cp: dict[int, list] = {}
-                    for r in partition.fit_records:
-                        fit_by_cp.setdefault(r.code_point, []).append(r)
-
-                    reconstructed_glyphs: dict[int, ReconstructedGlyph] = {}
-                    for cp, cp_fit_recs in fit_by_cp.items():
-                        glyph_fit_obs = [(r, snapshot.get_raster_bytes(r.cache_key)) for r in cp_fit_recs]
-                        reconstructed_glyphs[cp] = solver.reconstruct_glyph(glyph_fit_obs)
-
-                    optimizer = FitOnlyGlyphOptimizer(policy=optimizer_policy)
-                    # FULL_MAX reuses compatible exact-identity intermediates
-                    # (decode/prepare artifacts derived purely from the sealed
-                    # fit observation bytes). The canonical schedule itself is
-                    # never skipped: every fit record is still prepared,
-                    # optimized, and gated.
-                    from fidelity.balanced_search import GLOBAL_INTERMEDIATE_CACHE
-
-                    optimized_glyphs, trace = optimizer.optimize(
-                        glyphs=reconstructed_glyphs,
-                        fit_records=partition.fit_records,
-                        raster_provider=lambda r: snapshot.get_raster_bytes(r.cache_key),
-                        units_per_em=1000,
-                        cache=GLOBAL_INTERMEDIATE_CACHE,
-                    )
+            except Fast30WallLimitError:
+                return _fail_result(
+                    "FAIL", snapshot, "FAST30_FAILED: WALL_LIMIT_EXCEEDED",
+                    clean_format, trace=trace,
+                )
             except OptimizerNonConvergenceError:
                 return _fail_result("FAIL", snapshot, "PIPELINE_ERROR: OPTIMIZER_NON_CONVERGENCE", clean_format, trace=trace)
             except OptimizerNonFiniteObjectiveError:
@@ -749,6 +716,12 @@ class Stage9DReleaseGate:
             )
 
 
+        if deadline is not None and time.monotonic() > deadline:
+            return _fail_result(
+                "FAIL", snapshot, "FAST30_FAILED: WALL_LIMIT_EXCEEDED",
+                clean_format, model_hash=model_hash, trace=trace,
+            )
+
         # VIETNAMESE extension boundary: ORIGINAL never invokes AI work.
         # The extension runs on EVERY VIETNAMESE gate call, including memo
         # hits; memoized entries always hold the pre-extension base model.
@@ -799,6 +772,12 @@ class Stage9DReleaseGate:
         if model.compute_canonical_hash() != sealed.model_hash:
             return _fail_result(
                 "FAIL", snapshot, "PIPELINE_ERROR: SEALED_FONT_MODEL_DRIFT", clean_format, model_hash=model_hash, trace=trace
+            )
+
+        if deadline is not None and time.monotonic() > deadline:
+            return _fail_result(
+                "FAIL", snapshot, "FAST30_FAILED: WALL_LIMIT_EXCEEDED",
+                clean_format, model_hash=model_hash, trace=trace,
             )
 
         # 6. Candidate build + attestation + on-disk drift re-verification.
@@ -912,6 +891,13 @@ class Stage9DReleaseGate:
                 "FAIL", snapshot, reason, clean_format, model_hash=model_hash, trace=trace, temp_dir=temp_dir_obj
             )
 
+        if deadline is not None and time.monotonic() > deadline:
+            return _fail_result(
+                "FAIL", snapshot, "FAST30_FAILED: WALL_LIMIT_EXCEEDED",
+                clean_format, model_hash=model_hash, trace=trace,
+                temp_dir=temp_dir_obj,
+            )
+
         # 7. Four-consumer evidence + authoritative held-out gating.
         try:
             bundle = await ProductionConsumerEvidenceProducer.produce_bundle(
@@ -1005,6 +991,15 @@ class Stage9DReleaseGate:
             ai_binding=gate_ai_binding,
         )
 
+        # Publication is bounded by the wall limit: a font that crosses
+        # the deadline before publication fails closed (FAST30_FAILED).
+        if deadline is not None and time.monotonic() > deadline:
+            return _fail_result(
+                "FAIL", snapshot, "FAST30_FAILED: WALL_LIMIT_EXCEEDED",
+                clean_format, model_hash=model_hash, trace=trace,
+                temp_dir=temp_dir_obj,
+            )
+
         return ReleaseGateResult(
             is_publishable=is_pass,
             status=report.overall_status,
@@ -1052,27 +1047,35 @@ class Stage9DReleaseGate:
         vietnamese_service: Any = None,
         provider_capability: Any = None,
         reconstruction_profile: Any = None,
+        wall_limit_seconds: float | None = None,
     ) -> ReleaseGateResult:
-        """Stage 9D production flow (Issue #86 / #6 D18).
+        """Stage 9D production flow under FAST_30 (ADR-0001).
 
-        FULL_MAX (default): the exact canonical single-pass gate.
-
-        BALANCED_MAX primary: reuse -> BALANCED_MAX formation ->
-        deterministic confidence gate -> complete unchanged held-out +
-        four-consumer gates -> publish. Low/missing/invalid confidence,
-        or any failed BALANCED_MAX held-out/consumer/artifact/
-        attestation/coverage/deterministic-identity gate: reject the
-        candidate and escalate to FULL_MAX ONCE for the complete
-        font/job; unchanged final gates decide publication. FULL_MAX
-        gate failure fails the job. The rejected BALANCED_MAX artifact
-        is never published. No profile bouncing, retry, threshold
-        adjustment, or iterative fitting against held-out failures.
+        FAST_30 is the sole selectable production profile: reuse ->
+        FAST_30 ladder formation -> deterministic confidence gate ->
+        complete unchanged held-out + four-consumer gates -> publish.
+        Low/missing/invalid confidence, any failed held-out/consumer/
+        artifact/attestation/coverage/deterministic-identity gate, or
+        a wall-limit overrun (30 minutes per font by default) fails
+        closed and stops; the production flow surfaces FAST30_FAILED.
+        No fallback/escalation of any trigger type, no profile
+        bouncing, no retry, no threshold adjustment, no iterative
+        fitting against held-out failures. Selection of a retired
+        profile (BALANCED_MAX, FULL_MAX) fails closed with
+        PROFILE_RETIRED before any work.
         """
-        profile = (
-            reconstruction_profile
-            if reconstruction_profile is not None
-            else FULL_MAX_PROFILE
+        try:
+            profile = select_production_profile(reconstruction_profile)
+        except ValueError as exc:
+            return _fail_result(
+                "FAIL", None, str(exc), format_type.strip().upper()
+            )
+        limit = (
+            float(wall_limit_seconds)
+            if wall_limit_seconds is not None
+            else float(profile.wall_limit_seconds)
         )
+        deadline = time.monotonic() + max(0.0, limit)
         common: dict[str, Any] = dict(
             store=store,
             config=config,
@@ -1088,50 +1091,9 @@ class Stage9DReleaseGate:
             vietnamese_service=vietnamese_service,
             provider_capability=provider_capability,
         )
-
-        balanced_output_dir: str | Path | None = output_dir
-        if profile.name == PROFILE_BALANCED_MAX and output_dir is not None:
-            # The BALANCED attempt's candidate artifacts live in their own
-            # subdirectory: a rejected attempt can never collide with or
-            # masquerade as the published FULL_MAX artifact.
-            balanced_output_dir = Path(output_dir) / "balanced_max_attempt"
-
-        result = await cls._execute_profiled(
-            output_dir=balanced_output_dir, profile=profile, **common
+        return await cls._execute_profiled(
+            output_dir=output_dir, profile=profile, deadline=deadline, **common
         )
-        if profile.name != PROFILE_BALANCED_MAX:
-            return result
-        if result.is_publishable and result.confidence_status == CONFIDENCE_PASS:
-            if output_dir is not None and result.candidate_file_path:
-                return _promote_published_balanced_artifact(result, Path(output_dir))
-            return result
-
-        # ---- single fail-closed escalation to canonical FULL_MAX ----
-        reason_parts: list[str] = []
-        if result.confidence_status and result.confidence_status != CONFIDENCE_PASS:
-            reason_parts.append(f"CONFIDENCE_{result.confidence_status}")
-        if result.failure_reasons:
-            reason_parts.append(str(result.failure_reasons[0]))
-        elif result.status != "PASS":
-            reason_parts.append(f"GATE_{result.status}")
-        escalation_reason = "|".join(reason_parts) or "BALANCED_REJECTED"
-        logger.warning(
-            "Stage 16 BALANCED_MAX rejected (%s); escalating once to FULL_MAX",
-            escalation_reason,
-        )
-        rejected = result
-        fallback = await cls._execute_profiled(
-            output_dir=output_dir, profile=FULL_MAX_PROFILE, **common
-        )
-        fallback = replace(
-            fallback,
-            escalated_from_profile=PROFILE_BALANCED_MAX,
-            escalation_reason=escalation_reason[:256],
-        )
-        # The rejected BALANCED_MAX attempt never publishes: release its
-        # temporary artifacts; only the FULL_MAX result is returned.
-        rejected.cleanup()
-        return fallback
 
     @classmethod
     def execute_sync(
@@ -1151,6 +1113,7 @@ class Stage9DReleaseGate:
         vietnamese_service: Any = None,
         provider_capability: Any = None,
         reconstruction_profile: Any = None,
+        wall_limit_seconds: float | None = None,
     ) -> ReleaseGateResult:
         kwargs = dict(
             store=store,
@@ -1168,6 +1131,7 @@ class Stage9DReleaseGate:
             vietnamese_service=vietnamese_service,
             provider_capability=provider_capability,
             reconstruction_profile=reconstruction_profile,
+            wall_limit_seconds=wall_limit_seconds,
         )
         try:
             loop = asyncio.get_running_loop()
@@ -1201,14 +1165,23 @@ class Stage9DReleaseGate:
         output_dir: str | Path | None = None,
         thresholds: FidelityThresholds | None = None,
         provider_capability: Any = None,
+        wall_limit_seconds: float | None = None,
     ) -> ReleaseGateResult:
         """L2 reuse tier: a cached canonical FontModel replaces acquisition,
         reconstruction, and optimization. Only causally replaced work is
         skipped: snapshot verification, candidate build, consumer evidence,
-        held-out evaluation, and attestation still run fail-closed."""
+        held-out evaluation, and attestation still run fail-closed. The
+        FAST_30 wall limit still bounds the tier (reuse never exempts a
+        font from the deadline)."""
         clean_format = format_type.strip().upper()
         if clean_format not in ("TTF", "OTF"):
             return _fail_result("FAIL", None, "PIPELINE_ERROR: UNSUPPORTED_FORMAT", clean_format)
+        limit = (
+            float(wall_limit_seconds)
+            if wall_limit_seconds is not None
+            else float(FAST_30_PROFILE.wall_limit_seconds)
+        )
+        deadline = time.monotonic() + max(0.0, limit)
 
         try:
             snapshot = ObservationStoreSnapshot.load_from_store(
@@ -1224,6 +1197,11 @@ class Stage9DReleaseGate:
         except Exception as exc:
             logger.error("Stage 9D L2 snapshot load failed: %s", type(exc).__name__)
             return _fail_result("FAIL", None, "PIPELINE_ERROR: SNAPSHOT_LOAD_FAILED", clean_format)
+
+        if time.monotonic() > deadline:
+            return _fail_result(
+                "FAIL", snapshot, "FAST30_FAILED: WALL_LIMIT_EXCEEDED", clean_format
+            )
 
         # The cached model is only reusable when the current evidence snapshot
         # is byte-identical to the one it was built from (fail-closed drift).
@@ -1256,6 +1234,12 @@ class Stage9DReleaseGate:
         if model.compute_canonical_hash() != sealed.model_hash:
             return _fail_result(
                 "FAIL", snapshot, "PIPELINE_ERROR: SEALED_FONT_MODEL_DRIFT", clean_format, model_hash=model_hash
+            )
+
+        if time.monotonic() > deadline:
+            return _fail_result(
+                "FAIL", snapshot, "FAST30_FAILED: WALL_LIMIT_EXCEEDED",
+                clean_format, model_hash=model_hash,
             )
 
         temp_dir_obj: Any = None
@@ -1338,6 +1322,12 @@ class Stage9DReleaseGate:
                 "FAIL", snapshot, "PIPELINE_ERROR: CANDIDATE_ATTESTATION_FAILED", clean_format, model_hash=model_hash
             )
 
+        if time.monotonic() > deadline:
+            return _fail_result(
+                "FAIL", snapshot, "FAST30_FAILED: WALL_LIMIT_EXCEEDED",
+                clean_format, model_hash=model_hash, temp_dir=temp_dir_obj,
+            )
+
         capability_fit_sizes = (
             tuple(snapshot.provider_capability.fit_sizes)
             if snapshot.provider_capability is not None
@@ -1404,6 +1394,12 @@ class Stage9DReleaseGate:
             provenance=cached_provenance,
             ai_binding=cached_ai_binding,
         )
+
+        if time.monotonic() > deadline:
+            return _fail_result(
+                "FAIL", snapshot, "FAST30_FAILED: WALL_LIMIT_EXCEEDED",
+                clean_format, model_hash=model_hash, temp_dir=temp_dir_obj,
+            )
 
         return ReleaseGateResult(
             is_publishable=is_pass,

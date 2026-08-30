@@ -1,20 +1,16 @@
-"""Issue #88 correction (FULLMAX_LANE_COLD_START): browser-marked Chromium
-readiness/warmup set for the fullmax-final lane.
+"""Browser-marked Chromium readiness/warmup set (Issue #88 origin).
 
-Causal evidence: at 0ff80712 the fullmax-final lane selector
-`-m "fullmax_e2e or performance"` left the ORIGINAL E2E chain as the first
-in-session Chromium launch. That cold launch failed the consumer gate
-(CONSUMER_GATE_FAIL CHROMIUM_GLYPH_COUNT_MISMATCH /
-CHROMIUM_PAIR_COUNT_MISMATCH / CHROMIUM_ENVIRONMENT_FAILED) while the later
-VIETNAMESE chain passed in the same session once the browser environment was
-live (fullmax-final run 33221130391).
+Historical context: introduced as the FULLMAX_LANE_COLD_START correction so
+a first in-session Chromium cold launch never failed the consumer gate. The
+fullmax-final CI lane that motivated it is retired together with the
+BALANCED_MAX/FULL_MAX profiles (ADR-0001). The readiness truth itself is
+preserved: the production readiness lifecycle must succeed before any gated
+Chromium consumer evidence is produced, regardless of which lane runs.
 
-This module moves the first in-session Chromium launch in front of the
-canonical E2E tier: it executes the production readiness lifecycle
-(measurement.chromium_readiness.run_readiness) with a bounded attempt budget,
-so the fullmax lane is Chromium-ready before the E2E tier runs. Consumer
-gates, thresholds, schedules, and evidence semantics are unchanged; the
-canonical E2E chains still produce their own gated Chromium evidence.
+This module executes the production readiness lifecycle
+(measurement.chromium_readiness.run_readiness) with a bounded attempt budget
+so the process is Chromium-ready before gated consumer evidence runs.
+Consumer gates, thresholds, schedules, and evidence semantics are unchanged.
 """
 from __future__ import annotations
 
@@ -35,9 +31,9 @@ MAX_WARMUP_ATTEMPTS = 3
 
 
 @pytest.mark.asyncio
-async def test_fullmax_lane_chromium_readiness_warmup():
-    """The fullmax lane's Chromium environment must be ready before the E2E
-    tier: one production readiness lifecycle (launch -> loopback CDP endpoint
+async def test_chromium_readiness_warmup_before_gated_consumers():
+    """The Chromium environment must be ready before gated consumer evidence:
+    one production readiness lifecycle (launch -> loopback CDP endpoint
     validation -> browser version identity -> inert evaluation -> clean close)
     must succeed within the bounded attempt budget."""
     try:

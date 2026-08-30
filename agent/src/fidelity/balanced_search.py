@@ -1,6 +1,6 @@
-"""Stage 16 (Issue #86 / #6 D18): BALANCED_MAX search ladder over shared interfaces.
+"""FAST_30 search ladder over shared interfaces (ADR-0001).
 
-Implements the BALANCED_MAX fit/search schedule WITHOUT duplicating the
+Implements the FAST_30 fit/search schedule WITHOUT duplicating the
 reconstruction pipeline: the canonical MaxReconstructionSolver and
 FitOnlyGlyphOptimizer are reused unchanged; this module only selects
 versioned observation subsets (coarse-to-fine), bounds iteration
@@ -15,6 +15,9 @@ Optimization priorities implemented here (D18 order):
 
 Held-out and consumer evidence are structurally unreachable from this
 module: every API receives fit records only.
+
+The 30-minute end-to-end wall limit is enforced fail-closed: a deadline
+overrun raises Fast30WallLimitError (FAST30_FAILED halt; no fallback).
 """
 from __future__ import annotations
 
@@ -23,6 +26,7 @@ import json
 import logging
 import math
 import threading
+import time
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -37,8 +41,8 @@ from fidelity.optimizer import (
     validate_loss_vector_complete,
 )
 from fidelity.profiles import (
-    BALANCED_MAX_PROFILE,
-    PROFILE_BALANCED_MAX,
+    PROFILE_FAST_30,
+    RETIRED_PROFILES,
     ReconstructionProfile,
     classify_glyph_difficulty,
     profile_workers,
@@ -50,8 +54,16 @@ from reconstruction.solver import MaxReconstructionSolver
 
 logger = logging.getLogger("telegramfonts.agent.fidelity.balanced_search")
 
-SEARCH_VERSION = "stage16-balanced-search-v1.0.0"
-BALANCED_OPTIMIZER_VERSION_PREFIX = "stage16-balanced-max"
+SEARCH_VERSION = "stage16-fast30-search-v1.0.0"
+FAST30_OPTIMIZER_VERSION_PREFIX = "stage16-fast30"
+
+
+class Fast30WallLimitError(RuntimeError):
+    """End-to-end wall limit exceeded under FAST_30 (ADR-0001).
+
+    Fail-closed halt: the gate maps this to FAST30_FAILED; no retry,
+    fallback, or escalation of any trigger type.
+    """
 
 # Intermediate-cache identity versions: any version change invalidates
 # every entry (fail-closed miss), never a cross-version hit.
@@ -158,11 +170,10 @@ class IntermediateArtifactCache:
             return dict(self.stats)
 
 
-# Process-wide bounded cache: shared by every BALANCED_MAX formation in
-# the process (optimize-once-reuse-everywhere within a job and across
-# TTF/OTF/repeat gates), and reused by the FULL_MAX fallback because the
-# cached derivations are pure functions of sealed, hash-verified fit
-# observation bytes (FULL_MAX-compatible intermediates).
+# Process-wide bounded cache: shared by every FAST_30 formation in the
+# process (optimize-once-reuse-everywhere within a job and across
+# TTF/OTF/repeat gates). The cached derivations are pure functions of
+# sealed, hash-verified fit observation bytes.
 GLOBAL_INTERMEDIATE_CACHE = IntermediateArtifactCache()
 
 
@@ -202,9 +213,9 @@ class GlyphCheckpointStore:
     canonical payload, and a SHA-256 over the canonical payload. On
     load, identity AND payload hash must match exactly; any
     stale/partial/malformed/cross-identity entry is deleted and treated
-    as a miss (fail-closed recompute). Checkpoints never skip canonical
-    FULL_MAX work: only the BALANCED_MAX ladder reads them, keyed by the
-    BALANCED policy hash.
+    as a miss (fail-closed recompute). Checkpoints never skip the
+    unchanged final gates: only the FAST_30 ladder reads them, keyed by
+    the FAST_30 policy hash.
     """
 
     def __init__(self, root: Path, profile: ReconstructionProfile) -> None:
@@ -365,7 +376,7 @@ def glyph_payload_hash(g: ReconstructedGlyph) -> str:
 
 
 # ----------------------------------------------------------------------
-# BALANCED_MAX search ladder (coarse-to-fine + full-resolution rerank)
+# FAST_30 search ladder (coarse-to-fine + full-resolution rerank)
 # ----------------------------------------------------------------------
 
 
@@ -417,7 +428,7 @@ class GlyphSearchRecord:
 
 @dataclass(frozen=True)
 class BalancedFormationResult:
-    """Deterministic outcome of one BALANCED_MAX model formation."""
+    """Deterministic outcome of one FAST_30 ladder model formation."""
 
     optimized_glyphs: dict[int, ReconstructedGlyph]
     trace: OptimizationTrace
@@ -429,7 +440,12 @@ class BalancedFormationResult:
 
 
 class BalancedMaxSearch:
-    """BALANCED_MAX model formation over the shared solver/optimizer."""
+    """FAST_30 ladder model formation over the shared solver/optimizer.
+
+    Class name retained as the versioned search mechanism identifier;
+    the only selectable profile is FAST_30 (ADR-0001). Retired profile
+    names fail closed with PROFILE_RETIRED.
+    """
 
     def __init__(
         self,
@@ -437,11 +453,22 @@ class BalancedMaxSearch:
         cache: IntermediateArtifactCache | None = None,
         checkpoint_store: GlyphCheckpointStore | None = None,
     ) -> None:
-        if profile.name != PROFILE_BALANCED_MAX:
-            raise ValueError("BALANCED_SEARCH_PROFILE_INVALID")
+        if profile.name != PROFILE_FAST_30:
+            if profile.name in RETIRED_PROFILES:
+                raise ValueError(f"PROFILE_RETIRED: {profile.name}")
+            raise ValueError("FAST30_SEARCH_PROFILE_INVALID")
         self.profile = profile
         self.cache = cache if cache is not None else GLOBAL_INTERMEDIATE_CACHE
         self.checkpoint_store = checkpoint_store
+        # Monotonic wall-limit deadline for one font (None = unset; the
+        # gate always sets it from the FAST_30 wall limit).
+        self._deadline: float | None = None
+
+    def _check_wall_limit(self) -> None:
+        """Fail-closed wall-limit checkpoint (FAST30_FAILED halt)."""
+        deadline = self._deadline
+        if deadline is not None and time.monotonic() > deadline:
+            raise Fast30WallLimitError("FAST30_WALL_LIMIT_EXCEEDED")
 
     # -- observation subset selection (deterministic, config-clamped) --
 
@@ -488,6 +515,7 @@ class BalancedMaxSearch:
         max_iterations: int,
         allow_scale_search: bool = True,
     ) -> tuple[ReconstructedGlyph, GlyphOptimizationRecord, list[tuple]]:
+        self._check_wall_limit()
         if not tier_records:
             raise ValueError(f"BALANCED_TIER_NO_EVIDENCE:{tier_name}")
         if glyph_source is None:
@@ -909,8 +937,9 @@ class BalancedMaxSearch:
         raster_provider: Callable[[ObservationRecord], bytes],
         units_per_em: int = 1000,
         workers: int | None = None,
+        deadline: float | None = None,
     ) -> BalancedFormationResult:
-        """Form the optimized glyph set under the BALANCED_MAX schedule.
+        """Form the optimized glyph set under the FAST_30 schedule.
 
         Deterministic per-glyph parallelism: each glyph is independently
         identity-bound and fail-closed; completion order can never affect
@@ -918,7 +947,12 @@ class BalancedMaxSearch:
         the canonical sorted code point order and every per-glyph
         computation is deterministic. Held-out records are never passed
         to this API (structural guarantee).
+
+        ``deadline`` (monotonic seconds) bounds the formation wall; any
+        checkpoint overrun raises Fast30WallLimitError (FAST30_FAILED).
         """
+        self._deadline = deadline
+        self._check_wall_limit()
         fit_records = tuple(partition.fit_records)
         if not fit_records:
             raise ValueError("BALANCED_NO_FIT_EVIDENCE")
@@ -937,6 +971,7 @@ class BalancedMaxSearch:
         worker_count = max(1, int(workers or profile_workers(self.profile)))
 
         def task(cp: int) -> tuple[int, ReconstructedGlyph, GlyphSearchRecord]:
+            self._check_wall_limit()
             glyph, record = self._fit_glyph(
                 cp, by_cp[cp], raster_provider, units_per_em, config, identity
             )
@@ -1002,7 +1037,7 @@ class BalancedMaxSearch:
 
         trace = OptimizationTrace(
             optimizer_version=(
-                f"{BALANCED_OPTIMIZER_VERSION_PREFIX}-"
+                f"{FAST30_OPTIMIZER_VERSION_PREFIX}-"
                 f"{self.profile.profile_version}:{self.profile.policy_hash()[:16]}"
             ),
             input_fingerprint=FitOnlyGlyphOptimizer.compute_input_fingerprint(fit_records),

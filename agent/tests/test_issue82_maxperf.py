@@ -18,11 +18,11 @@ from pathlib import Path
 
 import pytest
 
+from fidelity.balanced_search import BalancedMaxSearch
 from fidelity.evaluator import FidelityEvaluator
-from fidelity.optimizer import FitOnlyGlyphOptimizer, OptimizerPolicy
+from fidelity.optimizer import OptimizerPolicy
 from fidelity.release_gate import Stage9DReleaseGate, _ModelFormationEntry
 from reconstruction.candidate_builder import MaxCandidateFontBuilder
-from reconstruction.solver import MaxReconstructionSolver
 from tests.test_stage9d_release_gate import _rect_glyph, _seed_completed_store
 
 
@@ -106,8 +106,7 @@ def test_candidate_family_format_selection_rejects_invalid(tmp_path):
 
 @pytest.mark.asyncio
 async def test_gate_memo_hit_skips_formation_only_and_preserves_truth(monkeypatch):
-    opt_calls = _count(monkeypatch, FitOnlyGlyphOptimizer, "optimize")
-    rec_calls = _count(monkeypatch, MaxReconstructionSolver, "reconstruct_glyph")
+    formation_calls = _count(monkeypatch, BalancedMaxSearch, "form_model")
     eval_calls = _count(monkeypatch, FidelityEvaluator, "evaluate")
     otf_builds = _count(monkeypatch, MaxCandidateFontBuilder, "build_candidate_otf")
     ttf_builds = _count(monkeypatch, MaxCandidateFontBuilder, "build_candidate_ttf")
@@ -126,9 +125,8 @@ async def test_gate_memo_hit_skips_formation_only_and_preserves_truth(monkeypatc
         for res in (res_ttf, res_otf, res_rep):
             assert res.is_publishable, res.failure_reasons
 
-        # Miss then hit+hit: formation stages ran exactly once.
-        assert len(opt_calls) == 1
-        assert len(rec_calls) == 2  # two fit code points, miss path only
+        # Miss then hit+hit: the FAST_30 ladder formation ran exactly once.
+        assert len(formation_calls) == 1
         # Never skipped by the memo: partition, per-gate build, held-out eval.
         assert len(partition_calls) == 3
         assert len(eval_calls) == 3
@@ -150,7 +148,7 @@ async def test_gate_memo_hit_skips_formation_only_and_preserves_truth(monkeypatc
 
 @pytest.mark.asyncio
 async def test_gate_memo_miss_on_optimizer_policy_change(monkeypatch):
-    opt_calls = _count(monkeypatch, FitOnlyGlyphOptimizer, "optimize")
+    formation_calls = _count(monkeypatch, BalancedMaxSearch, "form_model")
     with tempfile.TemporaryDirectory() as store_dir:
         store, config, bv = await _seed_completed_store(Path(store_dir))
         kwargs = dict(
@@ -170,7 +168,7 @@ async def test_gate_memo_miss_on_optimizer_policy_change(monkeypatch):
         assert res_a.is_publishable, res_a.failure_reasons
         assert res_b.is_publishable, res_b.failure_reasons
         # Optimizer policy identity change -> no reuse, full formation.
-        assert len(opt_calls) == 2
+        assert len(formation_calls) == 2
         res_a.cleanup()
         res_b.cleanup()
 
@@ -180,7 +178,7 @@ async def test_gate_memo_miss_on_snapshot_identity_change(monkeypatch):
     from measurement.models import ObservationConfig
     from tests.test_stage9d_release_gate import STAGE9D_CONFIG
 
-    opt_calls = _count(monkeypatch, FitOnlyGlyphOptimizer, "optimize")
+    formation_calls = _count(monkeypatch, BalancedMaxSearch, "form_model")
     config_b = ObservationConfig(
         resolutions=STAGE9D_CONFIG.resolutions,
         base_subpixel_phases=STAGE9D_CONFIG.base_subpixel_phases,
@@ -198,20 +196,20 @@ async def test_gate_memo_miss_on_snapshot_identity_change(monkeypatch):
         assert res_b.is_publishable, res_b.failure_reasons
         assert res_a.snapshot_fingerprint != res_b.snapshot_fingerprint
         # Evidence identity change -> no cross-identity reuse.
-        assert len(opt_calls) == 2
+        assert len(formation_calls) == 2
         res_a.cleanup()
         res_b.cleanup()
 
 
 @pytest.mark.asyncio
 async def test_gate_memo_drift_guard_discards_entry_and_recomputes(monkeypatch):
-    opt_calls = _count(monkeypatch, FitOnlyGlyphOptimizer, "optimize")
+    formation_calls = _count(monkeypatch, BalancedMaxSearch, "form_model")
     with tempfile.TemporaryDirectory() as store_dir:
         store, config, bv = await _seed_completed_store(Path(store_dir))
         kwargs = _gate_kwargs(store, config, bv, "TTF", None)
         res_a = await Stage9DReleaseGate.execute(**kwargs)
         assert res_a.is_publishable, res_a.failure_reasons
-        assert len(opt_calls) == 1
+        assert len(formation_calls) == 1
 
         # Tamper with the memoized LIVE model: its canonical hash no longer
         # matches the sealed model hash, so the hit must fail closed.
@@ -223,7 +221,7 @@ async def test_gate_memo_drift_guard_discards_entry_and_recomputes(monkeypatch):
         res_b = await Stage9DReleaseGate.execute(**kwargs)
         assert res_b.is_publishable, res_b.failure_reasons
         # The drifted entry was discarded and never consumed.
-        assert len(opt_calls) == 2
+        assert len(formation_calls) == 2
         assert res_b.model_hash == res_a.model_hash
         assert res_b.candidate_artifact_sha == res_a.candidate_artifact_sha
         res_a.cleanup()

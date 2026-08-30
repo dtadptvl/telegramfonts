@@ -676,9 +676,9 @@ class FitOnlyGlyphOptimizer:
     ) -> tuple[ReconstructedGlyph, GlyphOptimizationRecord]:
         """Optimize one glyph's outline; fail-closed on non-convergence.
 
-        ``fail_on_budget_exhaustion`` preserves the canonical FULL MAX
+        ``fail_on_budget_exhaustion`` preserves the canonical
         fail-closed semantics (budget exhaustion raises). Versioned
-        reduced-budget search schedules (BALANCED_MAX ladder tiers) set
+        reduced-budget search schedules (FAST_30 ladder tiers) set
         it to False to keep the best valid candidate deterministically;
         the record still carries the honest stop reason and every
         downstream unchanged gate still applies.

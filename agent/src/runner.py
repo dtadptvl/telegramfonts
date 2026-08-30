@@ -53,7 +53,7 @@ from compute.source import SourceAcquirer
 from measurement.models import ObservationConfig
 from compute.validator import validate_font_file
 from config import Settings
-from fidelity.profiles import BALANCED_MAX_PROFILE
+from fidelity.profiles import FAST_30_PROFILE
 from fidelity.release_gate import STAGE9D_ATTESTATION_SCHEMA_VERSION, Stage9DAttestation, Stage9DReleaseGate
 from queue_client import CloudflareQueueClient, QueueMessage
 from scratch import ScratchManager
@@ -81,6 +81,7 @@ TERMINAL_ERROR_CODES = frozenset({
     "ACQUISITION_BINARY_INTEGRITY_FAILED",
     "ACQUISITION_INSUFFICIENT",
     "VIETNAMESE_EXTENSION_FAILED",
+    "FAST30_FAILED",
 })
 
 KNOWN_ERROR_CODES = frozenset(
@@ -167,8 +168,9 @@ class JobRunner:
         self.source_acquirer = source_acquirer or SourceAcquirer(
             timeout=settings.HTTP_TIMEOUT_SECONDS,
             cache_dir=self.scratch_manager.root / "source_cache",
-            # Production FULL MAX RECONSTRUCTION PROFILE: the exact canonical
+            # Production observation schedule: the exact canonical MAX
             # observation schedule (measurement.max_profile), never legacy.
+            # FAST_30 is the sole reconstruction profile (ADR-0001).
             observation_config=ObservationConfig.max_profile(),
         )
         self.font_builder = font_builder or FontBuilderService(
@@ -377,16 +379,16 @@ class JobRunner:
                 style_data.observation_browser_version,
                 gate_config.compute_hash(),
             ),
-            # Stage 16 production flow: BALANCED_MAX primary with the
-            # deterministic confidence gate; fail-closed escalation to
-            # canonical FULL_MAX once per job (fidelity.release_gate).
-            reconstruction_profile=BALANCED_MAX_PROFILE,
+            # Production flow under FAST_30, the sole reconstruction
+            # profile (ADR-0001): deterministic confidence gate +
+            # unchanged final gates + 30-minute wall limit; no
+            # fallback/escalation of any trigger type.
+            reconstruction_profile=FAST_30_PROFILE,
         )
         if not result.is_publishable or result.attestation is None:
-            reason = ";".join(result.failure_reasons)[:128] if result.failure_reasons else ""
-            if "VI_" in reason:
-                raise ValueError(f"VI_GATE_FAILED_{fmt}")
-            raise ValueError(f"STAGE9D_GATE_FAILED_{fmt}")
+            # FAST_30 regime: deadline or quality failure returns
+            # FAST30_FAILED and stops (no fallback/escalation).
+            raise ValueError("FAST30_FAILED")
 
         artifact_path = Path(result.candidate_file_path)
         font_file = GeneratedFontFile(
@@ -644,16 +646,15 @@ class JobRunner:
                     provider_capability=self._sealed_provider_capability(
                         store, family_key, style_key, bv, cfg
                     ),
-                    # Stage 16 production flow: BALANCED_MAX primary with
-                    # the deterministic confidence gate; fail-closed
-                    # escalation to canonical FULL_MAX once per job.
-                    reconstruction_profile=BALANCED_MAX_PROFILE,
+                    # Production flow under FAST_30, the sole
+                    # reconstruction profile (ADR-0001); no
+                    # fallback/escalation of any trigger type.
+                    reconstruction_profile=FAST_30_PROFILE,
                 )
                 if not result.is_publishable or result.attestation is None:
-                    reason = ";".join(result.failure_reasons)[:128] if result.failure_reasons else ""
-                    if "VI_" in reason:
-                        raise ValueError(f"VI_GATE_FAILED_{fmt}")
-                    raise ValueError(f"STAGE9D_GATE_FAILED_{fmt}")
+                    # FAST_30 regime: deadline or quality failure returns
+                    # FAST30_FAILED and stops (no fallback/escalation).
+                    raise ValueError("FAST30_FAILED")
                 attestation = result.attestation
                 artifact_path = Path(result.candidate_file_path)
                 font_file = GeneratedFontFile(

@@ -167,10 +167,10 @@ def test_real_browser_tests_fail_closed_to_skip_without_chromium():
 
 def test_quick_lane_does_not_enable_xdist_blindly():
     """Recorded deferral guard: until an intra-worker order-independence
-    proof exists, no CI lane may enable xdist parallelization."""
+    proof exists, no CI lane may enable xdist parallelization. The
+    fullmax-final lane is retired with the BALANCED_MAX/FULL_MAX profiles
+    (ADR-0001): it must not exist."""
     quick = (WORKFLOWS / "quick-tests.yml").read_text(encoding="utf-8")
     assert "-n " not in quick
     assert "xdist" not in quick
-    fullmax = (WORKFLOWS / "fullmax-final.yml").read_text(encoding="utf-8")
-    assert "-n " not in fullmax
-    assert "xdist" not in fullmax
+    assert not (WORKFLOWS / "fullmax-final.yml").exists()

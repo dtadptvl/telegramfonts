@@ -378,9 +378,24 @@ async def test_release_gate_snapshot_failure_fail_closed():
 
 
 @pytest.mark.asyncio
-async def test_release_gate_optimizer_non_convergence_fail_closed():
+async def test_release_gate_fast30_fit_evidence_tamper_fail_closed():
+    """FAST_30 regime (ADR-0001): corrupted sealed FIT raster evidence
+    fails closed at the snapshot integrity boundary; there is no
+    fallback/escalation path."""
     with tempfile.TemporaryDirectory() as store_dir:
         store, config, bv = await _seed_completed_store(Path(store_dir))
+        # Tamper one fit raster on disk (collector names held-out rasters
+        # *heldout*; everything else is fit evidence).
+        fit_rasters = [
+            f for f in sorted(Path(store_dir).rglob("*.png"))
+            if "heldout" not in f.name
+        ]
+        assert fit_rasters, "expected fit raster files in seeded store"
+        target = fit_rasters[0]
+        data = bytearray(target.read_bytes())
+        data[len(data) // 2] ^= 0xFF
+        target.write_bytes(bytes(data))
+
         result = await Stage9DReleaseGate.execute(
             store=store,
             config=config,
@@ -390,11 +405,16 @@ async def test_release_gate_optimizer_non_convergence_fail_closed():
             style_name="Regular",
             browser_version=bv,
             format_type="TTF",
-            optimizer_policy=OptimizerPolicy(max_iterations=1),
         )
         assert result.is_publishable is False
         assert result.status == "FAIL"
-        assert result.failure_reasons == ("PIPELINE_ERROR: OPTIMIZER_NON_CONVERGENCE",)
+        assert result.reconstruction_profile == "FAST_30"
+        # The sealed snapshot verifies raster integrity before any
+        # formation work: tampered evidence fails closed here.
+        assert result.failure_reasons == ("PIPELINE_ERROR: SNAPSHOT_LOAD_FAILED",)
+        # Retired escalation record fields no longer exist (A2).
+        assert not hasattr(result, "escalated_from_profile")
+        assert not hasattr(result, "escalation_reason")
 
 
 @pytest.mark.asyncio
@@ -841,8 +861,10 @@ async def test_runner_stage9d_corrupted_evidence_stops_before_side_effects(test_
 
     res = await runner.process_message(msg)
     assert res.action == RunnerAction.FAILED_TERMINAL
-    assert res.reason == "STAGE9D_GATE_FAILED"
-    assert state["fails"] == ["STAGE9D_GATE_FAILED"]
+    # FAST_30 regime (ADR-0001): quality failure returns FAST30_FAILED and
+    # stops; no fallback/escalation exists.
+    assert res.reason == "FAST30_FAILED"
+    assert state["fails"] == ["FAST30_FAILED"]
     assert state["uploads"] == []
     assert state["completes"] == []
     # Terminal gate failure acknowledges the message out of the queue (existing
@@ -906,7 +928,9 @@ async def test_runner_stage9d_partial_multi_artifact_failure_archives_nothing(
 
     res = await runner.process_message(msg)
     assert res.action == RunnerAction.FAILED_TERMINAL
-    assert res.reason == "STAGE9D_GATE_FAILED"
+    # FAST_30 regime (ADR-0001): quality failure returns FAST30_FAILED and
+    # stops; no fallback/escalation exists.
+    assert res.reason == "FAST30_FAILED"
     assert state["uploads"] == []
     assert state["completes"] == []
     assert state["acks"] == ["lease_stage9d"]
