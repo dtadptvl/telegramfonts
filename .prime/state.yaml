@@ -6,7 +6,7 @@ governance:
   fingerprint: "caeb9d57b32cb996"
 
 persistence:
-  remote_sync: pending
+  remote_sync: current
 
 objective: "FAST_30 is the sole production reconstruction/fidelity profile; retire BALANCED_MAX/FULL_MAX from every executable route; deliver verified TTF/OTF fulfillment within a 30-minute end-to-end wall limit per font, no fidelity fallback/escalation."
 
@@ -60,5 +60,5 @@ legacy_import:
   stable_identities:
     - "canonical line main@02dfe557 pre-cutover; merged PRs #85/#87/#89/#91/#92/#93/#94/#95"
 
-last_event: E-00004
-updated_at: "2026-08-30T02:55:00Z"
+last_event: E-00005
+updated_at: "2026-08-30T03:20:00Z"
