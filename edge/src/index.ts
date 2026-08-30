@@ -118,8 +118,9 @@ export default {
 
   async scheduled(_event: ScheduledEvent, env: Env, _ctx: ExecutionContext): Promise<void> {
     if (!env.DB) return;
-    const jobService = new JobService(env.DB, resolveMaxJobAgeMs(env.MAX_JOB_AGE_MS));
+    const jobService = new JobService(env.DB, resolveMaxJobAgeMs(env.MAX_JOB_AGE_MS), env.FULFILLMENT_QUEUE);
     await jobService.finalizeExpiredExhaustedJobs();
+    await jobService.recoverExpiredLeaseJobs();
     const outboxService = new OutboxService(env.DB, env.FULFILLMENT_QUEUE, env);
     await outboxService.dispatchPendingEvents({ batchSize: 20 });
   },

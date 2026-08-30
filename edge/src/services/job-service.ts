@@ -139,6 +139,11 @@ export interface FinalizeExpiredJobsResult {
   transitionedOrders: number;
 }
 
+export interface RecoverExpiredLeaseJobsResult {
+  recoveredJobs: number;
+  requeued: number;
+}
+
 export interface QueueRearmParams {
   jobId: string;
   orderId: string;
@@ -341,7 +346,8 @@ export const MODE_IDENTITY_MISMATCH_REASON = 'MODE_IDENTITY_MISMATCH';
 export class JobService {
   constructor(
     private readonly db: D1Database,
-    private readonly maxJobAgeMs: number = DEFAULT_MAX_JOB_AGE_MS
+    private readonly maxJobAgeMs: number = DEFAULT_MAX_JOB_AGE_MS,
+    private readonly queue?: Queue<unknown>
   ) {}
 
   async getJobById(jobId: string): Promise<FulfillmentJobRecord | null> {
@@ -547,6 +553,94 @@ export class JobService {
       if (results[i * 2 + 1].meta.changes === 1) transitionedOrders++;
     }
     return { finalizedJobs, transitionedOrders };
+  }
+
+  async recoverExpiredLeaseJobs(
+    now = Date.now(),
+    batchSize = 25
+  ): Promise<RecoverExpiredLeaseJobsResult> {
+    const boundedBatchSize = Math.max(1, Math.min(batchSize, 25));
+    const candidates = await this.db
+      .prepare(
+        `SELECT id, order_id, lease_expires_at, attempt_count, max_attempts
+         FROM fulfillment_jobs
+         WHERE status = 'PROCESSING'
+           AND lease_expires_at IS NOT NULL
+           AND lease_expires_at <= ?
+           AND attempt_count < max_attempts
+         ORDER BY lease_expires_at ASC
+         LIMIT ?`
+      )
+      .bind(now, boundedBatchSize)
+      .all<{
+        id: string;
+        order_id: string;
+        lease_expires_at: number;
+        attempt_count: number;
+        max_attempts: number;
+      }>();
+
+    if (candidates.results.length === 0) {
+      return { recoveredJobs: 0, requeued: 0 };
+    }
+
+    const statements: D1PreparedStatement[] = [];
+    for (const candidate of candidates.results) {
+      statements.push(
+        this.db
+          .prepare(
+            `UPDATE fulfillment_jobs
+             SET status = 'RETRY',
+                 lease_owner = NULL,
+                 lease_token = NULL,
+                 leased_at = NULL,
+                 lease_expires_at = NULL,
+                 next_retry_at = ?,
+                 last_error = 'lease_expired_recovery',
+                 updated_at = ?
+             WHERE id = ?
+               AND order_id = ?
+               AND status = 'PROCESSING'
+               AND lease_expires_at = ?
+               AND lease_expires_at <= ?
+               AND attempt_count = ?
+               AND max_attempts = ?
+               AND attempt_count < max_attempts`
+          )
+          .bind(
+            now,
+            now,
+            candidate.id,
+            candidate.order_id,
+            candidate.lease_expires_at,
+            now,
+            candidate.attempt_count,
+            candidate.max_attempts
+          )
+      );
+    }
+
+    const results = await this.db.batch(statements);
+    let recoveredJobs = 0;
+    let requeued = 0;
+
+    for (let i = 0; i < candidates.results.length; i++) {
+      const candidate = candidates.results[i];
+      const changeCount = results[i].meta.changes ?? 0;
+      if (changeCount === 1) {
+        recoveredJobs++;
+        if (this.queue) {
+          try {
+            await this.queue.send({ job_id: candidate.id });
+            requeued++;
+          } catch {
+            // Queue send failure will be retried on next maintenance or claim cycle
+          }
+        }
+      }
+    }
+
+    return { recoveredJobs, requeued };
   }
 
   async rearmExpiredQueueEvent(params: QueueRearmParams): Promise<QueueRearmResult> {
