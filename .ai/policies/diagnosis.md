@@ -17,7 +17,8 @@ A method/tool/configuration failure is not automatically a contract failure.
 
 Inside unchanged objective/scope/risk/budget:
 - one materially different bounded method may be tried;
-- a concrete defect in an otherwise valid method may receive one material correction and one verification;
+- one mechanical non-mutating correction to the same read-only method is allowed when the evidence target is unchanged (for example a wrong read flag or missing read-only argument); it does **not** consume the alternative-method allowance and does not bypass the diagnostic observation cap;
+- a concrete defect in an otherwise valid material method may receive one material correction and one verification;
 - repeated materially identical failure must not become a retry loop.
 
 ## Failure classification

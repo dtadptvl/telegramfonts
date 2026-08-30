@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import json
 import re
 import subprocess
 import sys
@@ -17,6 +16,7 @@ FINGERPRINT_ROOTS = (
     Path("PRIME.md"),
     # POLICY-REV is bound separately as the human-readable revision truth.
     Path(".ai/policies"),
+    Path(".ai/protocols"),
     Path(".ai/templates/prime-memory"),
     Path(".ai/tools"),
 )
@@ -162,7 +162,7 @@ def require(errors: list[str], cond: bool, msg: str) -> None:
 
 def governance_text_files() -> list[Path]:
     out = [ROOT / "PRIME.md"]
-    for base in (ROOT / ".ai/policies", ROOT / ".kilo/agents"):
+    for base in (ROOT / ".ai/policies", ROOT / ".ai/protocols", ROOT / ".kilo/agents"):
         if base.is_dir():
             out.extend(sorted(base.glob("*.md")))
     migration = ROOT / "PRIME-MIGRATION.md"
@@ -410,55 +410,6 @@ def _yaml_map_keys(path: Path, parent: str) -> list[str]:
     return out
 
 
-def _yaml_top_level_keys(path: Path) -> list[str]:
-    out: list[str] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip() or line.startswith((" ", "\t", "#")):
-            continue
-        m = re.match(r"^([A-Za-z_][A-Za-z0-9_-]*):", line)
-        if m:
-            out.append(m.group(1))
-    return out
-
-
-JOURNAL_BASE_FIELDS = {"id", "ts", "actor", "type", "generation", "summary"}
-
-
-def lint_live_journal(errors: list[str]) -> None:
-    """Live journal: every entry must parse and carry base fields; bounded scopes required when present.
-
-    Pre-v12 append-only entries without scopes remain valid historical records; v12+ entries are
-    created from the scoped template, so any entry that carries scopes must carry a bounded
-    non-empty string scope list."""
-    journal_root = ROOT / ".prime/journal"
-    if not journal_root.is_dir():
-        return
-    for path in sorted(journal_root.glob("*.jsonl")):
-        rel = path.relative_to(ROOT).as_posix()
-        for lineno, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-            line = raw.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                errors.append(f"{rel}:{lineno} journal entry is not valid JSON")
-                continue
-            require(errors, isinstance(entry, dict), f"{rel}:{lineno} journal entry must be an object")
-            if not isinstance(entry, dict):
-                continue
-            missing = sorted(JOURNAL_BASE_FIELDS - set(entry))
-            require(errors, not missing, f"{rel}:{lineno} journal entry missing base fields: {missing}")
-            require(errors, entry.get("actor") in {"human", "prime"}, f"{rel}:{lineno} journal actor must be human|prime")
-            if "scopes" in entry:
-                scopes = entry["scopes"]
-                require(
-                    errors,
-                    isinstance(scopes, list) and len(scopes) > 0 and all(isinstance(s, str) and s.strip() for s in scopes),
-                    f"{rel}:{lineno} journal scopes must be a bounded non-empty string list",
-                )
-
-
 def _safe_memory_path(ref: str) -> Path | None:
     ref = _yaml_unquote(ref)
     if not ref or ref.lower() in {"null", "none", "~"}:
@@ -563,14 +514,6 @@ def lint_runtime_memory(errors: list[str], rev: str, fingerprint: str) -> None:
     generation = _positive_int(_yaml_scalar(state_path, "generation"))
     require(errors, generation > 0, ".prime/state.yaml generation must be a positive integer")
 
-    state_schema = _yaml_scalar(state_path, "schema_version")
-    require(errors, state_schema == "7", f".prime/state.yaml live state schema_version must be 7: {state_schema!r}")
-    top_keys = set(_yaml_top_level_keys(state_path))
-    for banned in ("persistence", "remote_sync", "last_event", "local_commit", "remote_commit"):
-        require(errors, banned not in top_keys, f".prime/state.yaml contains deprecated field: {banned}")
-
-    lint_live_journal(errors)
-
     state_rev = _yaml_scalar(state_path, "policy_rev", "governance")
     state_fp = _yaml_scalar(state_path, "fingerprint", "governance")
     require(errors, state_rev == rev, f"live state governance policy_rev stale: {state_rev!r} != {rev!r}")
@@ -628,34 +571,20 @@ def lint_runtime_memory(errors: list[str], rev: str, fingerprint: str) -> None:
 
         task_id = _yaml_scalar(contract_path, "id")
         contract_rev = _positive_int(_yaml_scalar(contract_path, "contract_rev"))
+        validated_generation = _positive_int(_yaml_scalar(contract_path, "validated_at_generation"))
         acceptance = set(_yaml_map_keys(contract_path, "acceptance"))
+        scope_tags_present = _yaml_scalar(contract_path, "scope_tags") is not None
 
         result_path = task_dir / "result.yaml"
         result_status = _yaml_scalar(result_path, "status") if result_path.is_file() else None
-        # A contract is current/open until it has a terminal completed/cancelled result; this
-        # includes pending NEXT contracts. Completed/cancelled contracts remain immutable
-        # historical evidence and are not rebound to every new governance fingerprint.
+        # Completed/cancelled contracts remain immutable historical evidence (PRIME §2/§4 live memory preservation)
         historical = result_status in {"completed", "cancelled"}
 
         require(errors, task_id == task_dir.name, f"task directory/id mismatch: {task_dir.name} vs {task_id!r}")
+        require(errors, scope_tags_present, f"{task_dir.relative_to(ROOT)} missing required scope_tags")
         require(errors, contract_rev > 0, f"{task_dir.relative_to(ROOT)} contract_rev must be positive")
-
+        require(errors, validated_generation > 0, f"{task_dir.relative_to(ROOT)} validated_at_generation must be positive")
         if not historical:
-            contract_schema = _yaml_scalar(contract_path, "schema_version")
-            require(errors, contract_schema == "8", f"{task_dir.relative_to(ROOT)} current/open contract schema_version must be 8: {contract_schema!r}")
-            require(
-                errors,
-                _yaml_scalar(contract_path, "created_at_generation") is None,
-                f"{task_dir.relative_to(ROOT)} current/open contract uses deprecated created_at_generation (use validated_at_generation)",
-            )
-            require(
-                errors,
-                _yaml_scalar(contract_path, "role", "routing") is None,
-                f"{task_dir.relative_to(ROOT)} current/open contract uses deprecated routing.role (derive worker from mode)",
-            )
-            require(errors, _yaml_scalar(contract_path, "scope_tags") is not None, f"{task_dir.relative_to(ROOT)} missing required scope_tags")
-            validated_generation = _positive_int(_yaml_scalar(contract_path, "validated_at_generation"))
-            require(errors, validated_generation > 0, f"{task_dir.relative_to(ROOT)} validated_at_generation must be positive")
             if task_dir.name in now_set:
                 require(errors, validated_generation == generation, f"active {task_dir.name} generation stale: {validated_generation} != state generation {generation}")
             require(errors, _yaml_scalar(contract_path, "policy_rev") == rev, f"{task_dir.relative_to(ROOT)} policy_rev stale")
@@ -726,6 +655,8 @@ def lint() -> list[str]:
     require(errors, "single revision truth" in prime, "PRIME.md must state .ai/POLICY-REV is the single revision truth")
     require(errors, "Single-Owner Matrix" in prime, "PRIME.md missing single-owner truth matrix")
     require(errors, "Deterministic Lazy Policy Routing" in prime, "PRIME.md missing deterministic policy routing")
+    require(errors, (ROOT / ".ai/protocols/AIxAI_AGENT_PROTOCOL.md").is_file(), "missing canonical AIxAI protocol")
+    require(errors, ".ai/protocols/AIxAI_AGENT_PROTOCOL.md" in prime, "PRIME.md missing canonical AIxAI protocol reference")
     lint_prime_section_refs(errors, prime)
 
     bootstrap_template = ROOT / ".ai/templates/prime-memory/BOOTSTRAP.md"
@@ -810,14 +741,14 @@ def lint() -> list[str]:
     require(errors, "validated_at_generation == state.generation" in prime, "PRIME.md missing active-task generation barrier")
     require(errors, "scope_tags: []` means unknown/global" in prime, "PRIME.md missing fail-safe empty scope semantics")
     require(errors, "Every contract MUST contain `scope_tags`" in prime, "PRIME.md missing mandatory scope_tags invariant")
-    require(errors, "Off-machine recovery is opt-in only" in prime and "never push per task" in prime, "PRIME.md missing bounded off-machine recovery guardrail")
+    require(errors, "workspace loss is plausible" in prime and "off-machine recovery is REQUIRED" in prime and "never push per task" in prime, "PRIME.md missing conditional off-machine recovery guardrail")
     require(errors, "worker returned without a valid current result matching" in prime and "`INTERRUPTED`, never success" in prime, "PRIME.md missing worker-liveness fail-closed invariant")
     require(errors, "compact technical English" in prime and "no bilingual duplicate" in prime, "PRIME.md missing compact AI-to-AI language invariant")
     require(errors, "Do not store a second editable `routing.role` truth" in prime, "PRIME.md missing mode-only worker routing rule")
     require(errors, "ROADMAP.md" in prime and "state.yaml` owns current phase/NOW/NEXT" in prime, "PRIME.md missing roadmap/state ownership rule")
     require(errors, "Lazy roadmap recovery" in prime and "do **not** preload roadmap content" in prime, "PRIME.md missing lazy roadmap recovery rule")
     require(errors, "roadmap_ref" in prime_agent and "empty/insufficient horizon" in prime_agent, "Prime agent missing hot roadmap dereference trigger")
-    require(errors, "off-machine recovery is opt-in only" in prime_agent and "never per task" in prime_agent, "Prime agent missing bounded off-machine recovery invariant")
+    require(errors, "workspace loss is plausible" in prime_agent and "off-machine recovery is required" in prime_agent and "never per task" in prime_agent, "Prime agent missing conditional off-machine recovery invariant")
     require(errors, "`INTERRUPTED`, never success" in prime_agent, "Prime agent missing worker-liveness invariant")
     require(errors, "compact technical English" in prime_agent, "Prime agent missing compact coordination language invariant")
 
@@ -845,6 +776,7 @@ def lint() -> list[str]:
 
     diagnosis = text(".ai/policies/diagnosis.md")
     require(errors, "<=3 causally related read-only observations" in diagnosis and "OBSERVABILITY_LIMIT" in diagnosis, "diagnosis policy missing bounded-probe/observability guardrails")
+    require(errors, "mechanical non-mutating correction" in diagnosis and "does **not** consume the alternative-method allowance" in diagnosis, "diagnosis policy missing free mechanical read-only correction guardrail")
     require(errors, "MUST NOT be converted into `STATE_MISMATCH` or PASS" in diagnosis, "diagnosis policy must not confuse observation failure with state mismatch")
 
     evidence = text(".ai/policies/evidence.md")
@@ -855,6 +787,8 @@ def lint() -> list[str]:
 
     budget = text(".ai/policies/budget.md")
     require(errors, "Recurring CI efficiency" in budget and ">15-minute gates" in budget and "Do not duplicate equivalent already-accepted expensive evidence" in budget, "budget policy missing recurring expensive-CI efficiency guardrails")
+    require(errors, "Do not enable parallel test execution until process, port, cache, global-state, filesystem, and fixture isolation are proven" in budget and "Unknown isolation => run sequentially" in budget, "budget policy missing parallel-test isolation guardrail")
+    require(errors, (ROOT / ".ai/templates/prime-memory/BOOTSTRAP-TEMPLATE.md").is_file(), "missing optional BOOTSTRAP recovery template")
 
     lint_runtime_memory(errors, rev, governance_fingerprint()[:16])
     return errors

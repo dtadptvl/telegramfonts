@@ -55,6 +55,8 @@ Before EXPENSIVE/RELEASE: quick/focused gates pass, candidate identity stable, n
 
 If a test/measurement can create caches, generated artifacts, mutable fixtures, or performance interference that could contaminate identity-sensitive evidence, isolate it (for example with a clean/isolated worktree or equivalent) before relying on the result. Do not run interfering benchmark/soak measurements in parallel.
 
+Do not enable parallel test execution until process, port, cache, global-state, filesystem, and fixture isolation are proven for the affected tests/runner. Unknown isolation => run sequentially. Existing repository/runner guarantees may satisfy this proof; do not add isolation machinery merely to gain parallelism unless budgeted and materially beneficial.
+
 ## Recurring CI efficiency
 
 Separate quick always-on gates from conditional expensive/release gates when the distinction is recurring and material. Record duration for expensive recurring gates; do not normalize a material timing regression. Do not duplicate equivalent already-accepted expensive evidence locally and in CI without a causal reason. For recurring >15-minute gates, evaluate existing checkpoint/stage reuse only when expected net benefit is positive; new machinery still requires budget.

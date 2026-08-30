@@ -2,8 +2,8 @@ schema_version: 7
 generation: 4
 
 governance:
-  policy_rev: "P-20260830.8-LEAN-SAFE-R15"
-  fingerprint: "d059a83646a03543"
+  policy_rev: "P-20260830.9-LEAN-SAFE-R16"
+  fingerprint: "0fa00f66ee4873bf"
 
 objective: "FAST_30 is the sole production reconstruction/fidelity profile; retire BALANCED_MAX/FULL_MAX from every executable route; deliver verified TTF/OTF fulfillment within a 30-minute end-to-end wall limit per font, no fidelity fallback/escalation."
 

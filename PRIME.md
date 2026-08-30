@@ -30,8 +30,8 @@ On new session/resume/`continue`, suspected compaction, uncertainty, or remember
 2. compute fingerprint with .ai/tools/governance-lint.py --fingerprint
 3. initialize .prime/ from templates if absent
 4. run .prime/BOOTSTRAP.md only if the project intentionally provides it
-5. verify canonical memory is Git-tracked locally
-6. reconcile decision-relevant memory/Git divergence; inspect remote only when the current workflow/task makes it material
+5. verify canonical memory is Git-tracked locally and classify the recovery boundary (durable local workspace vs workspace-loss-plausible)
+6. reconcile decision-relevant memory/Git divergence; inspect remote only when recovery/integration reality makes it material
 7. inspect enough reality to establish objective + active work
 8. run `.ai/tools/governance-lint.py --runtime-only` after state/reconciliation is current
 9. keep roadmap content lazy; resolve `state.roadmap_ref` only at the roadmap triggers below
@@ -55,7 +55,18 @@ When both bindings are unchanged, do not reread full governance at normal bounda
 
 Active-context GC: when context telemetry is available, keep active working context <= ~80K tokens as a soft target. If working context materially exceeds the current task, finish the current atomic step, persist decision-relevant state/refs, commit the durable boundary, then drop obsolete history/logs/diffs/hypotheses. Do not wait for the model's maximum context window.
 
-Local tracked Git is primary durability. Track `PRIME.md`, `.kilo/`, `.ai/`, and canonical `.prime/` text; never track secrets. Remote Git is not hot/canonical AI memory. Off-machine recovery is opt-in only: a project-provided `.prime/BOOTSTRAP.md` or already-authoritative workflow instruction may name an authorized recovery remote/ref whose push is known not to merge/deploy. When configured, Prime may push a recovery checkpoint only at a durable phase/milestone checkpoint, before a long unattended or consequential operation where workspace loss is material, or before an expected workspace/session handoff. Commit canonical durable state first; verify remote/ref identity and authorization; never create routine Issues/PRs, never push per task, and never cache remote-sync state in `state.yaml`. Without this explicit configuration, local tracked Git remains the recovery boundary. Git is authoritative for branch/worktree/commit/remote identity.
+Local tracked Git is primary immediate durability. Track `PRIME.md`, `.kilo/`, `.ai/`, and canonical `.prime/` text; never track secrets. Remote Git is not hot/canonical AI memory.
+
+Classify the recovery boundary before relying on local-only state:
+
+```text
+durable local workspace guaranteed -> local Git is sufficient
+workspace loss is plausible         -> off-machine recovery is REQUIRED for state that must survive that loss
+```
+
+Off-machine recovery must be explicitly configured by a project-provided `.prime/BOOTSTRAP.md` or already-authoritative workflow instruction naming an authorized recovery remote/ref whose push is known not to merge/deploy. When required and configured, Prime pushes a recovery checkpoint only at a durable phase/milestone checkpoint, before a long unattended or consequential operation where workspace loss is material, or before an expected workspace/session handoff. Commit canonical durable state first; verify remote/ref identity and authorization; never create routine Issues/PRs, never push per task, and never cache remote-sync state in `state.yaml`.
+
+If workspace loss is plausible but no safe authorized recovery target is configured, local commits still protect ordinary session/context loss but Prime MUST NOT claim off-machine persistence. Before crossing a boundary whose required recovery depends on surviving workspace loss, preserve the local durable boundary and BLOCK only that durability-dependent step until an authorized non-deploy recovery target exists. Git remains authoritative for branch/worktree/commit/remote identity.
 
 Before shrinking hot memory, move decision-relevant overflow to its semantic cold home (journal, ADR, completed result, Git history, lazy archive), commit locally, then compact. Never delete the only copy of Human intent, decision, unresolved risk, acceptance, diagnosis, or evidence pointer.
 
@@ -241,6 +252,14 @@ inspector     optional read-mostly research/review/diagnosis/verification
 
 Runtime/model availability is NOT semantic contract truth. Contract mode derives the logical worker; DEEP binds `routing.reason` and `fallback_safe` when relevant. `worker-fast` uses Gemini by default; on capacity/unavailability it may fail over once to `worker-fast-qwen` with the same unchanged MICRO/NORMAL contract. `worker-deep` uses Qwen by default and may fail over once to Gemini only after Qwen capacity/unavailability with the same unchanged `mode: DEEP`, causal `routing.reason`, and `fallback_safe: true`. Runtime failure does not invalidate task/evidence by itself; preserve valid work, switch runtime, circuit-break repeated capacity failure, and record runtime only when decision-relevant.
 
+### Agent communication protocol
+
+AIxAI is the canonical Prime<->subagent transport/reference protocol at `.ai/protocols/AIxAI_AGENT_PROTOCOL.md`; it is NOT project memory. `.prime/` remains the single coordination truth, and AIxAI state/schema references are pointers to Prime-owned/versioned truth, never a second editable state universe.
+
+Use AIxAI only when structured exchange has positive expected net benefit in total token/time, interoperability, parse/retry risk, or reproducibility. Prime MUST NOT preload or relay the full master protocol per transaction. If capability is not already bootstrapped, send only the disposable base kernel; add only module kernels required by the current transaction, plus the task, required constraints, exact IDs/refs/versions, and minimal output contract. Do not send unused modules, schemas, cost theory, unrelated context, roadmap content, or governance recap. Prefer confirmed shared refs over repeated payloads.
+
+Never assume cross-agent hidden context. Preserve `tx`, stable IDs, state refs/versions, required constraints, and material unknowns exactly across relay/merge. Structured deterministic control uses DSL; large separator-heavy semantic payloads use BODY; when DSL/escaping would increase ambiguity, parse risk, retry cost, or latency, fall back to short explicit English under the same request/result/error envelope. Load the full protocol only for protocol change/recovery/mismatch or delegated protocol diagnosis; otherwise lazy-read only the needed kernel/module section.
+
 Keep horizon short: normally 1 write task, 1-2 NEXT outcomes, optional independent inspector. No speculative DAG, planner/memory-manager agent, or redundant multi-agent voting. Parallelize only causally independent work with material benefit; parallel writers MUST use isolated worktrees.
 
 ```text
@@ -301,6 +320,7 @@ external/destructive/single-shot/auth       -> consequential
 production/live/device/live-data mutation   -> consequential + production
 secret/security/trust-boundary concern      -> security
 scope growth/expensive validation/machinery -> budget
+parallel test/validation/isolation concern  -> budget
 Human pivot/intent conflict/supersession    -> reconciliation
 ```
 
