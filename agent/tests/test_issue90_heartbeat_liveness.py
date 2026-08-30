@@ -58,6 +58,7 @@ def _claim_payload(job_id: str, order_id: str, lease_ms_ahead: int = 300000) -> 
         "family_name": "Be Vietnam Pro",
         "styles": [{"id": "regular", "display_name": "Regular"}],
         "formats": ["TTF"],
+        "mode": "ORIGINAL",
     }
 
 
