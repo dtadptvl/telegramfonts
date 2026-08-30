@@ -1,0 +1,119 @@
+policy: "FAST_ATLAS_ULTRA_V1"
+policy_hash: "df2742b1b3066c08aa8902c00b6058082d7934fc82abf74e3ae5d90fa946c764"
+mode: "ORIGINAL"
+glyph_count: 200
+pages_total: 2
+pages_by_source:
+  raster_fast: 2
+http_requests: 2
+cdp_calls: 0
+browser_readbacks: 0
+metrics_js_calls: 4
+easy_glyphs: 199
+refined_glyphs: 0
+failed_glyphs: 0
+failed_glyph_ids:
+  []
+zero_ink_excluded_ids:
+  - 160
+low_confidence_glyph_ids:
+  []
+stage_timings_ms:
+  build_final: 1556.905
+  build_temp_ttf: 1651.385
+  font_model: 389.481
+  metrics: 45.711
+  raster_pass: 69641.386
+  refinement: 0.006
+  typography: 0.912
+  validation: 113.266
+total_wall_seconds: 74.579
+peak_tracemalloc_mb: 55.793
+peak_rss_mb: 0.0
+validation:
+  passed: true
+  fonttools_ttf:
+    path: "BeVietnamProFixture-Regular.ttf"
+    format: "TTF"
+    checks:
+      tables: "PASS"
+      cmap: "PASS"
+      glyph_count: "PASS"
+      metrics: "PASS"
+      outline: "PASS"
+      head_bbox: "PASS"
+      magic: "PASS"
+    glyph_count: 201
+    cmap_count: 200
+    passed: true
+  fonttools_otf:
+    path: "BeVietnamProFixture-Regular.otf"
+    format: "OTF"
+    checks:
+      tables: "PASS"
+      cmap: "PASS"
+      glyph_count: "PASS"
+      metrics: "PASS"
+      outline: "PASS"
+      head_bbox: "PASS"
+      magic: "PASS"
+    glyph_count: 201
+    cmap_count: 200
+    passed: true
+  harfbuzz:
+    checks:
+      shaping: "PASS"
+      positions: "PASS"
+      kern: "PASS_NONE_DECLARED"
+    shape_calls: 13
+    passed: true
+  freetype:
+    checks:
+      load: "PASS"
+      render: "PASS"
+    rendered: 32
+    passed: true
+  normalization:
+    checks:
+      nfc_nfd_coverage: "PASS"
+    vietnamese: false
+    passed: true
+  low_confidence_glyph_ids:
+    []
+  reasons:
+    []
+fixture:
+  font: "E:\\cv\\telefont-atlas-ultra\\agent\\benchmark_data\\ground_truth\\BeVietnamPro-Regular.ttf"
+  substitution: "Neurath Mono Regular (myfonts.com) network acquisition unavailable locally (no authorized session material, no production access); next best LOCAL fixture used: Be Vietnam Pro Regular"
+  glyph_limit: 200
+  glyph_count: 200
+  mode: "ORIGINAL"
+cold_wall_seconds: 74.598
+outputs:
+  ttf: "C:\\Users\\PC\\.telefont-atlas-fixture-cache\\cache\\build\\final\\BeVietnamProFixture-Regular.ttf"
+  otf: "C:\\Users\\PC\\.telefont-atlas-fixture-cache\\cache\\build\\final\\BeVietnamProFixture-Regular.otf"
+  model_hash: "3687e7a8269ce6a2f5ed4e7c775032ea4559d7a5837afecc6890b5a0d961d79b"
+reuse_run:
+  wall_seconds: 4.909
+  target_under_seconds: 60
+  met: true
+  ttf_sha256: true
+large_style_timing:
+  measured: true
+  evidence_file: "fixture-evidence-large.yaml"
+  run_label: "large_original"
+  glyph_count: 457
+  cold_wall_seconds: 255.686
+  reuse_wall_seconds: 24.424
+  target_range_seconds: [300, 600]
+  met: true
+  easy_glyphs: 431
+  refined_glyphs: 5
+  failed_glyphs: 20
+  failed_glyph_ids: [768, 769, 770, 771, 772, 774, 775, 776, 777, 778, 779, 780, 786, 795, 803, 806, 807, 808, 7894, 8541]
+  failed_note: "all 20 are standalone combining marks / special degenerate code points (no standalone ink in ORIGINAL raster mode); stay FAILED_GLYPH per ADR-0004, no whole-font retry"
+  low_confidence_glyph_ids: [7848, 7850, 7860, 7874, 7876]
+  peak_tracemalloc_mb: 81.302
+  validation_passed: true
+  pages_total: 6
+  cdp_calls: 0

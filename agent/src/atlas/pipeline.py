@@ -296,6 +296,16 @@ class AtlasUltraPipeline:
                     evidence, contours, _mask = fast_geometry_for_glyph(
                         png, mapping, regressed[cp], cell.w, cell.h
                     )
+                    if evidence.status == GlyphStatus.EASY_PASS and (
+                        "ZERO_INK" in evidence.reasons and cp != 0x20
+                    ):
+                        # Space-like zero-ink glyphs other than U+0020 (e.g.
+                        # NBSP) carry no fittable geometry: the canonical
+                        # model integrity rules require contours for them, so
+                        # they are deterministically excluded from the frozen
+                        # set (recorded, never counted failed).
+                        self.evidence.zero_ink_excluded_ids.append(cp)
+                        continue
                     if evidence.status == GlyphStatus.EASY_PASS:
                         fp = observation_fingerprint(
                             {"cp": cp, "size": size_px, "phase": [0.0, 0.0],

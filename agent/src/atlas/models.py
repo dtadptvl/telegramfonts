@@ -188,6 +188,7 @@ class AtlasRunEvidence:
     refined_glyphs: int = 0
     failed_glyphs: int = 0
     failed_glyph_ids: list = field(default_factory=list)
+    zero_ink_excluded_ids: list = field(default_factory=list)
     low_confidence_glyph_ids: list = field(default_factory=list)
     stage_timings_ms: dict = field(default_factory=dict)
     total_wall_seconds: float = 0.0
@@ -211,6 +212,7 @@ class AtlasRunEvidence:
             "refined_glyphs": self.refined_glyphs,
             "failed_glyphs": self.failed_glyphs,
             "failed_glyph_ids": sorted(self.failed_glyph_ids),
+            "zero_ink_excluded_ids": sorted(self.zero_ink_excluded_ids),
             "low_confidence_glyph_ids": sorted(self.low_confidence_glyph_ids),
             "stage_timings_ms": {
                 k: round(v, 3) for k, v in sorted(self.stage_timings_ms.items())
