@@ -1,0 +1,46 @@
+schema_version: 8
+policy_rev: "P-20260830.9-LEAN-SAFE-R16"
+policy_fingerprint: "0fa00f66ee4873bf"
+id: T-PRICE-01
+contract_rev: 1
+mode: DEEP
+validated_at_generation: 6
+scope_tags: [product-flow, pricing, vietnamese-ai]
+status: active
+
+objective: "Implement the approved pricing+mode product contract end-to-end (E-00012 section D): explicit ORIGINAL/VIETNAMESE selection and persistence; ORIGINAL 5,000 VND/style; VIETNAMESE 8,000 VND/style; mode bound through Telegram session, order metadata, durable order/job identity, claim payload, worker validation, archive/reuse identity, and delivery evidence; historical orders with absent mode fail closed (no ORIGINAL default, no automatic backfill). LOCAL_ONLY: no production deploy, no live orders, no mutation of the existing paid order."
+
+routing:
+  reason: "cross-subsystem product+schema change across edge TypeScript (webhook/session/order/pricing/outbox), D1 migration, agent Python claim/validation, archive/reuse identity, and delivery evidence; fail-closed historical-row semantics require reliable causal reasoning across all consumers"
+  fallback_safe: true
+
+acceptance:
+  P1: "explicit ORIGINAL/VIETNAMESE mode selection in the /muahang flow and durable persistence (session + order metadata + order identity); mode travels with the order"
+  P2: "pricing: ORIGINAL 5,000 VND/style and VIETNAMESE 8,000 VND/style enforced at exact-price computation, order total, and payment verification paths; catalog per-style defaults cannot silently undercharge VIETNAMESE"
+  P3: "mode bound end-to-end: Telegram session, order metadata, durable order/job identity, queue claim payload, agent worker validation, archive/reuse identity, delivery evidence; reuse ladder (ADR-0002 L1-L4) identity includes mode so ORIGINAL artifacts are never reused for VIETNAMESE orders and vice versa"
+  P4: "historical orders with absent mode fail closed: no ORIGINAL default anywhere in any executable route, no automatic backfill; attempting to progress such an order returns a clear fail-closed error"
+  P5: "product invariants preserved: TTF+OTF outputs only; ORIGINAL makes zero AI calls; VIETNAMESE uses exactly the ADR-0003 cascade (Woku gpt-5.6-luna PRIMARY, gemini-3.7-flash fallback; OpenRouter gemma-3-12b-it, gemma-3-27b-it DIFFICULT only, gemini-3.1-flash-lite RARE FINAL ARBITER only) with provenance binding; no weakening of FAST_30/PROFILE_RETIRED/30-min wall/acquisition/validation rules"
+  P6: "D1 migration(s) forward-safe and idempotent; safe against the live schema shape (migrations 0001-0006 semantics), verified locally"
+  P7: "focused causal tests cover: mode selection+persistence, both price points, claim payload binding, absent-mode fail-closed, reuse-identity separation; smallest sufficient final validation passes (edge typecheck + vitest suite once; agent-side targeted tests if agent surfaces change)"
+  P8: "zero production deploy, zero new live orders, zero mutation of ord_2a142f39/job_477b205f; LOCAL_ONLY gate honored; task delta committed on the task branch only"
+
+gates: [LOCAL_ONLY, NO_LOOP]
+extra_policies: [evidence, adversarial]
+
+constraints:
+  - "do not weaken ADR-0001/ADR-0002/ADR-0003 invariants (FAST_30 sole profile, no fallback/escalation, reuse ladder, all-or-nothing delivery, acquisition order, TTF+OTF-only output, AI cascade routes, local secret key names only wokushop_api_key/openrouter_api_key)"
+  - "commit only intended task delta; never commit secrets, dev.vars, .telefont.env, or generated deployment artifacts"
+  - "forbidden surfaces: ops/a23_deployment_manifest.json (stale deploy-time artifact), .github/workflows unless a new test target causally requires it, wrangler deploy, any remote/production mutation"
+  - "work happens in the isolated task worktree; parent worktree dirty/untracked items are never touched"
+
+identity:
+  repo: "E:\\cv\\telefont"
+  worktree: "E:\\cv\\telefont-price01"
+  branch: "task/T-PRICE-01"
+  base: "4eb4c3b49259b0430bf36d3d7f47b6bebb67612c"
+
+depends_on:
+  decisions: [decisions/ADR-0001.md, decisions/ADR-0002.md, decisions/ADR-0003.md]
+  evidence: [".prime/journal/events.jsonl"]
+
+note: "Pre-authorized by Human at E-00012 section D for the VIETNAMESE/unproven-mode branch; triggered by E-00013 (PA2 proved mode absent for ord_2a142f39). After acceptance, Prime reviews and integrates through the normal exact-identity non-force workflow; NO production deploy without later identity-bound Human authorization."

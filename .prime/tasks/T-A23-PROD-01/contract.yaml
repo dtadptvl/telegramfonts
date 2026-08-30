@@ -4,17 +4,20 @@ policy_fingerprint: "0fa00f66ee4873bf"
 id: T-A23-PROD-01
 contract_rev: 3
 mode: NORMAL
-validated_at_generation: 5
+validated_at_generation: 6
 scope_tags: [a23-production-dispatch, product-flow, acquisition, reuse, vietnamese-ai, production-dispatch, pricing]
-status: PAUSED   # paused by Human at E-00010; rev 3 drafted at E-00011; authorization still NOT GRANTED
+status: PAUSED   # E-00013: PA2 proved mode absent -> branch D; C-branch authorization void; resume requires T-PRICE-01 integrated + new identity-bound Human authorization
 
-objective: "Milestone 3 (PAUSED): one controlled bot fulfillment of paid order ord_2a142f39 on A23 under FAST_30 within the 30-minute wall limit, after deploying the accepted FAST_30 source identity from origin/main. Fulfillment may proceed ONLY if fresh durable production evidence affirmatively proves the order's requested mode, styles, formats, payment, and delivery identity. NO executable production authorization exists yet."
+objective: "Milestone 3 (PAUSED after branch-D resolution, E-00013): one controlled bot fulfillment of paid order ord_2a142f39 on A23 under FAST_30 within the 30-minute wall limit, after deploying the accepted FAST_30 source identity from origin/main. PA2 proved the durable rows contain NO mode; per E-00011/E-00012 the order may proceed only after T-PRICE-01 and a new identity-bound Human authorization."
 
 authorization:
-  status: "NOT GRANTED - no executable production authorization exists; rev-3 drafting authorizes nothing"
+  status: "VOID FOR THIS CYCLE - conditional branch resolved at PA2 (E-00013): mode unproven -> route D taken; zero deploys and zero production mutations executed"
+  granted_scope:
+    - "PA2: executed 2026-08-30 ~07:30Z - one batched authenticated read-only inspection (9 SELECTs, 0 mutations); evidence in journal E-00013"
+    - "PA1/PA3/PA4: NOT REACHED - required positive mode=ORIGINAL proof; mode was absent from all durable rows"
+    - "resumption requires: T-PRICE-01 integrated AND new identity-bound Human authorization (E-00012 section D)"
   historical_evidence:
-    - "journal E-00009: retained ONLY as historical/unconfirmed authorization evidence; it does not authorize any action under this revision"
-  reaffirmation_required: "explicit Human authorization of THIS contract_rev 3 is mandatory before any production access, read, deploy, or mutation"
+    - "journal E-00009: retained ONLY as historical/unconfirmed authorization evidence; superseded by E-00012"
   owner: human
   max_attempts: 1
   stop: ["409 CONFLICT -> STOP reconcile", "500/ambiguous -> STOP preserve evidence", "30-min wall -> FAST30_FAILED", "unexpected state -> STOP", "mode VIETNAMESE or mode/identity unproven -> STOP fail-closed; T-PRICE-01 before fulfillment"]

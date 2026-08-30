@@ -1,5 +1,5 @@
 schema_version: 7
-generation: 5
+generation: 6
 
 governance:
   policy_rev: "P-20260830.9-LEAN-SAFE-R16"
@@ -14,13 +14,14 @@ phase:
   status: active
 
 now:
+  - "T-PRICE-01"
+next:
   - "T-A23-PROD-01"
-next: []
 
 blockers:
-  - "A23 stale job job_477b205f attempt 6 / order ord_2a142f39: terminal disposition PROVEN READ-UNREACHABLE from workspace under READ_ONLY (T-INSPECT-01, E-00008): deployed edge+D1 live, but no pure-read surface exposes job/order rows (no GET route; queue all-mutating; local D1/R2 empty; signed /downloads SIGNATURE_MISMATCH - workspace secret copies diverge from deployed). Cron finalizer may already have set job/order FAILED (static inference only). Fresh rows required via authorized production worker (T-A23-PROD-01 rev 3 PA2); E-00011 gating: NEVER infer ORIGINAL from an absent mode field; if VIETNAMESE or unproven -> STOP fail-closed, T-PRICE-01 before fulfillment."
-  - "paid order ord_2a142f39 (tx 77506129): governance prior says unfulfilled; canonical fulfillment state read-unreachable (same evidence). Resolution path: T-A23-PROD-01 rev 3 (PAUSED, awaiting Human review)."
-  - "PRICING DIVERGENCE (factual, E-00010): approved rule ORIGINAL 5,000 VND/style + VIETNAMESE 8,000 VND/style is NOT fully implemented: edge pricing uses catalog per-style price default 5,000 only (order-service.ts:114,161; internal-catalog.ts:153; catalog-service.ts:156; telegram-webhook.ts:899); no VIETNAMESE 8,000 path and no mode concept in edge/job payload exist (agent defaults mode=ORIGINAL, worker_client.py:97). README.md:92 documents the 8,000 rule only. Task pointer: future bounded product task T-PRICE-01 (required before any new orders; gates fulfillment if PA2 shows VIETNAMESE/unproven mode identity via E-00011); no pricing change in this reconciliation."
+  - "RESOLVED (E-00013): job/order rows are reachable via authenticated Cloudflare session; PA2 read them (one batched inspection, 9 SELECTs, 0 mutations). E-00008 read-unreachability applied only to pure-read surfaces of the deployed edge. Fresh rows: order PROCESSING 5,000 VND, 1 style neurath_mono_regular, formats [TTF], chat 901652398; payment tx 77506129 VERIFIED; job PROCESSING attempt 6/6 with LIVE lease a23-termux-primary-01 (row updated 2026-08-30T07:26:57Z, lease expiry ~2026-08-30T07:31:57Z, last_error null); no fulfillment_receipts; outbox JOB_READY SENT. Job left running untouched (branch D: zero mutations)."
+  - "MODE ABSENT in all durable rows for ord_2a142f39 (E-00013): no mode column in orders schema; no mode in metadata/session/job/outbox. Per E-00011/E-00012 never infer ORIGINAL -> branch D taken: T-A23-PROD-01 fulfillment BLOCKED until T-PRICE-01 integrated AND new identity-bound Human authorization; paid order preserved unchanged."
+  - "PRICING DIVERGENCE (factual, E-00010): approved rule ORIGINAL 5,000 VND/style + VIETNAMESE 8,000 VND/style is NOT fully implemented: edge pricing uses catalog per-style price default 5,000 only (order-service.ts:114,161; internal-catalog.ts:153; catalog-service.ts:156; telegram-webhook.ts:899); no VIETNAMESE 8,000 path and no mode concept in edge/job payload exist (agent defaults mode=ORIGINAL, worker_client.py:97). README.md:92 documents the 8,000 rule only. Resolution: T-PRICE-01 now NOW (contract rev 1, E-00012 section D); no pricing change until integrated."
 
 exit:
   - "one controlled bot order completed end-to-end on A23 under FAST_30 with verified TTF/OTF delivery within the 30-minute wall limit (requires separate consequential authorization for the A23 production leg)"
@@ -36,7 +37,7 @@ human_requirements:
     - "runtime model failover only for capacity/unavailability with unchanged contract and reusable evidence"
     - "never fake/bypass/weaken external-ext4/filesystem identity checks; loopback never posed as canonical archive"
     - "stale A23 retired-profile job: read-only inspection only; no mutation without explicit authorization"
-    - "PAUSED (E-00010 + E-00011): milestone-3 production leg T-A23-PROD-01 rev 3 has NO executable authorization; E-00009 retained as historical/unconfirmed only; explicit Human authorization of contract_rev 3 required before any production access/read/deploy/mutation; Human never executes commands/relays JSON for agent access gaps"
+    - "PAUSED AGAIN (E-00013, branch D): T-A23-PROD-01 rev 3 C-branch authorization VOID - PA2 proved mode absent for ord_2a142f39; fulfillment requires T-PRICE-01 integrated + later identity-bound Human authorization (E-00012 D); E-00009 remains historical/unconfirmed; Human never executes commands/relays JSON"
     - "E-00011 mode proof: NEVER infer ORIGINAL from an absent mode field; fulfillment proceeds only on positive durable row evidence of mode/styles/formats/payment/delivery; VIETNAMESE or unproven -> STOP fail-closed, T-PRICE-01 before fulfillment"
 
 active_decisions:
@@ -48,9 +49,10 @@ recent_invalidations:
   - {generation: 2, scopes: [reconstruction-profile, issue-90-balanced-max, fullmax-final-lane-semantics], severity: breaking, source_event: E-00002}
   - {generation: 4, scopes: [product-flow, acquisition, reuse, vietnamese-ai, production-dispatch], severity: breaking, source_event: E-00010, note: "omitted pre-migration truths recovered; T-A23-PROD-01 rev 1 superseded by rev 2"}
   - {generation: 5, scopes: [production-dispatch, product-flow, pricing], severity: breaking, source_event: E-00011, note: "fail-closed mode proof; T-A23-PROD-01 rev 2 superseded by rev 3"}
+  - {generation: 6, scopes: [production-dispatch, product-flow, pricing], severity: breaking, source_event: E-00012, note: "overnight bounded autonomous cycle; rev 3 envelope conditionally granted; T-PRICE-01 spec pre-authorized for VIETNAMESE/unproven branch"}
 
 reconciliation:
   status: in_progress
-  event: E-00011
+  event: E-00012
 
-updated_at: "2026-08-30T07:15:00Z"
+updated_at: "2026-08-30T07:35:00Z"
