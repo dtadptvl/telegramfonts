@@ -6,31 +6,78 @@ generation: 10
 branch: task/T-FAST-ATLAS-ULTRA-01
 worktree: E:\cv\telefont-atlas-ultra
 base: f574d0c51d1a4bcd596b6bdbe1fd06f5674f51be
-status: in_progress
+status: completed
 wall_hours: 4
 milestones:
   - id: M0
     name: discovery+setup
     status: done
-    note: >-
-      contract/ADR-0001-amendment/ADR-0004/diagnosis read; worktree created at
-      base f574d0c; npm ci ok; python 3.14.6 + numpy/scipy/pillow/fonttools/
-      uharfbuzz/freetype-py verified; reusable components mapped
-      (candidate_builder OTF-CFF/TTF-cu2qu, font_model, sdf, validator).
   - id: M1
     name: policy+walls+runtime-defaults
-    status: in_progress
-    note: atlas/policy.py written (FAST_ATLAS_ULTRA_V1 bound under FAST_30)
-next_actions:
-  - retarget JOB_WALL_SECONDS default 480 + VIETNAMESE 720 mode-aware walls
-  - atlas runtime defaults config-driven
-  - focused wall/policy tests green, commit boundary
+    status: done
+    commit: 509c548
+    note: FAST_ATLAS_ULTRA_V1 bound under FAST_30; walls 480/720 config-driven
+  - id: M2a
+    name: atlas-core (paging, metrics regression, fast geometry)
+    status: done
+    commit: 9d1c7af
+  - id: M2b
+    name: refinement+caches+fontbuild+validation+pipeline
+    status: done
+    commit: 1b9cdef
+  - id: M3
+    name: runner integration + exhaustive gate-off
+    status: done
+    commit: 4707fcf
+  - id: M4
+    name: focused tests (16/16)
+    status: done
+    commit: cea1444
+  - id: M5
+    name: U12 bounded speed fixture
+    status: done
+    evidence: fixture-evidence.yaml + fixture-evidence-large.yaml
+fixture_evidence:
+  ordinary_original:
+    glyph_count: 200
+    cold_wall_seconds: 74.598
+    reuse_wall_seconds: 4.909
+    target_range_seconds: [120, 300]
+    met: true
+    easy: 199
+    refined: 0
+    failed: 0
+    low_confidence: 0
+    zero_ink_excluded: [160]
+    cdp_calls: 0
+    metrics_js_calls: 4
+    pages: 2
+    peak_tracemalloc_mb: 55.793
+    validation: PASSED (FontTools TTF+OTF structural, HarfBuzz shaping, FreeType render, NFC/NFD)
+  large_original:
+    glyph_count: 457
+    cold_wall_seconds: 255.686
+    reuse_wall_seconds: 24.424
+    target_range_seconds: [300, 600]
+    met: true
+    easy: 431
+    refined: 5
+    failed: 20
+    low_confidence: [7848, 7850, 7860, 7874, 7876]
+    cdp_calls: 0
+    pages: 6
+    peak_tracemalloc_mb: 81.302
+    validation: PASSED with low-confidence IDs recorded
+fixture_substitution: >-
+  Neurath Mono Regular (myfonts.com) network acquisition unavailable locally
+  (no authorized session material, no production access under this task);
+  next best LOCAL fixture used: Be Vietnam Pro Regular
+  (agent/benchmark_data/ground_truth/BeVietnamPro-Regular.ttf).
 budget_state:
-  elapsed_min: ~35
-  remaining_min: ~205
-  fixture_runs_used: 0
+  fixture_runs: 3 (1 mini smoke 40-glyph + ordinary 200 + large 457; one cold+reuse pair each for the last two)
+  within_wall: true
 constraints_ack:
   production_access: none
-  parent_worktree: untouched (dirty files preserved)
+  parent_worktree: untouched
   secrets: key names only
-  a23: staging-only; no reliance on stale claims
+  a23: staging-only; stale claims not relied upon
