@@ -289,6 +289,8 @@ class JobRunner:
         production logs.
         """
         interval = self.settings.HEARTBEAT_INTERVAL_SECONDS
+        last_beat_attempted: float = 0.0
+        last_beat_ok: float = 0.0
         while not stop_event.wait(timeout=interval):
             if stop_event.is_set():
                 break
@@ -296,6 +298,7 @@ class JobRunner:
             # T-FAST30-A23-FIX F5: a beating heartbeat IS progress; the
             # supervisor watchdog kills only when this goes stale.
             self._touch_progress_beacon("heartbeat")
+            last_beat_attempted = time.time()
 
             try:
                 hb_res = self.worker_client.heartbeat_sync(job_id, lease_token)
@@ -307,6 +310,7 @@ class JobRunner:
                 )
                 continue
             if hb_res.success and hb_res.lease_expires_at:
+                last_beat_ok = time.time()
                 expiry_holder[0] = hb_res.lease_expires_at
                 logger.info(f"Heartbeat renewed for job {job_id}, new expiry={hb_res.lease_expires_at}")
             elif hb_res.fenced:
