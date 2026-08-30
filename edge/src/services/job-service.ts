@@ -50,6 +50,13 @@ export interface ClaimComputePayload {
   foundry?: string;
   styles: Array<{ id: string; display_name: string }>;
   formats: string[];
+  /**
+   * T-PRICE-01: durable ORIGINAL/VIETNAMESE mode identity, bound end-to-end
+   * (order -> claim payload -> agent validation -> reuse/archive identity).
+   * Always present for claimable jobs: absent-mode orders fail closed before
+   * any payload is ever produced.
+   */
+  mode: 'ORIGINAL' | 'VIETNAMESE';
 }
 
 export interface ClaimJobResult {
@@ -300,6 +307,16 @@ export function buildArtifactStorageKey(orderId: string, jobId: string, sha256He
 }
 
 const ALLOWED_FORMATS = new Set(['TTF', 'OTF']);
+const ALLOWED_MODES = new Set(['ORIGINAL', 'VIETNAMESE']);
+
+/**
+ * T-PRICE-01 terminal reasons for orders whose durable mode identity is
+ * absent or inconsistent. Historical orders with ABSENT mode fail closed on
+ * every executable route: no ORIGINAL default, no automatic backfill, no
+ * silent inference (mirrors the PROFILE_RETIRED fail-closed style).
+ */
+export const MODE_ABSENT_LEGACY_ORDER_REASON = 'MODE_ABSENT_LEGACY_ORDER';
+export const MODE_IDENTITY_MISMATCH_REASON = 'MODE_IDENTITY_MISMATCH';
 
 export class JobService {
   constructor(private readonly db: D1Database) {}
@@ -1216,12 +1233,63 @@ export class JobService {
 
     // Fetch and defensively validate compute payload (BLOCK 6)
     const order = await this.db
-      .prepare('SELECT id, metadata FROM orders WHERE id = ?')
+      .prepare('SELECT id, metadata, mode FROM orders WHERE id = ?')
       .bind(job.order_id)
-      .first<{ id: string; metadata: string | null }>();
+      .first<{ id: string; metadata: string | null; mode: string | null }>();
 
     if (!order) {
       return { status: 'MALFORMED_METADATA', queue_action: 'retry', reason: 'order_not_found' };
+    }
+
+    // T-PRICE-01 fail-closed mode gate (durable order identity). The mode
+    // column is the authoritative schema home; ABSENT mode marks a historical
+    // order and can never progress: no ORIGINAL default, no automatic
+    // backfill, no silent inference. The job (already CAS-transitioned to
+    // PROCESSING above) and the order are moved to FAILED terminally.
+    const orderMode =
+      typeof order.mode === 'string' ? order.mode.trim().toUpperCase() : '';
+
+    if (!ALLOWED_MODES.has(orderMode)) {
+      await this.failClosedForAbsentMode(
+        jobId,
+        job.order_id,
+        newLeaseToken,
+        now,
+        MODE_ABSENT_LEGACY_ORDER_REASON
+      );
+      return {
+        status: 'TERMINAL',
+        queue_action: 'ack',
+        reason: MODE_ABSENT_LEGACY_ORDER_REASON,
+      };
+    }
+
+    // Cross-check the metadata mirror of the mode identity. A divergence
+    // between the durable column and the metadata is terminal (split-brain),
+    // never silently resolved.
+    try {
+      const parsedForMode = JSON.parse(order.metadata || '{}') as Record<string, unknown>;
+      if (parsedForMode && typeof parsedForMode === 'object' && !Array.isArray(parsedForMode)) {
+        const metaMode = parsedForMode.mode;
+        if (metaMode !== undefined) {
+          if (typeof metaMode !== 'string' || metaMode.trim().toUpperCase() !== orderMode) {
+            await this.failClosedForAbsentMode(
+              jobId,
+              job.order_id,
+              newLeaseToken,
+              now,
+              MODE_IDENTITY_MISMATCH_REASON
+            );
+            return {
+              status: 'TERMINAL',
+              queue_action: 'ack',
+              reason: MODE_IDENTITY_MISMATCH_REASON,
+            };
+          }
+        }
+      }
+    } catch {
+      // Malformed metadata JSON is handled by the defensive parse below.
     }
 
     let sourceUrl = '';
@@ -1320,8 +1388,48 @@ export class JobService {
         foundry,
         styles,
         formats,
+        // T-PRICE-01: mode travels with the claim payload (validated above).
+        mode: orderMode as 'ORIGINAL' | 'VIETNAMESE',
       },
     };
+  }
+
+  /**
+   * T-PRICE-01 fail-closed terminal transition for jobs whose order lacks a
+   * consistent durable mode identity. Atomically marks the claimed job FAILED
+   * (with a clear reason) and the order FAILED; nothing is backfilled and no
+   * ORIGINAL default is ever applied. Guarded by the fresh lease token so a
+   * superseded claim cannot mutate state.
+   */
+  private async failClosedForAbsentMode(
+    jobId: string,
+    orderId: string,
+    leaseToken: string,
+    now: number,
+    reason: string
+  ): Promise<void> {
+    await this.db.batch([
+      this.db
+        .prepare(
+          `UPDATE fulfillment_jobs
+           SET status = 'FAILED',
+               lease_owner = NULL,
+               lease_token = NULL,
+               leased_at = NULL,
+               lease_expires_at = NULL,
+               last_error = ?,
+               updated_at = ?
+           WHERE id = ? AND status = 'PROCESSING' AND lease_token = ?`
+        )
+        .bind(reason, now, jobId, leaseToken),
+      this.db
+        .prepare(
+          `UPDATE orders
+           SET status = 'FAILED', updated_at = ?
+           WHERE id = ? AND status = 'PROCESSING'`
+        )
+        .bind(now, orderId),
+    ]);
   }
 
   async heartbeat(

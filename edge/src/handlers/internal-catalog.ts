@@ -150,12 +150,16 @@ export async function handleInternalCatalog(
       );
     }
 
-    const DEFAULT_STYLE_PRICE_VND = 5000;
+    // T-PRICE-01: catalog style rows carry the mode-independent base price
+    // (the ORIGINAL rate). VIETNAMESE orders are priced at 8,000 VND/style at
+    // order-time exact-price computation, so this default can never silently
+    // undercharge a VIETNAMESE order.
+    const DEFAULT_ORIGINAL_STYLE_PRICE_VND = 5000;
     const styles = rawStyles
       .map((s: Record<string, unknown>) => ({
         id: String(s.id || '').trim(),
         displayName: String(s.display_name || s.displayName || s.id || '').trim(),
-        price: DEFAULT_STYLE_PRICE_VND,
+        price: DEFAULT_ORIGINAL_STYLE_PRICE_VND,
       }))
       .filter((s) => s.id.length > 0);
 
