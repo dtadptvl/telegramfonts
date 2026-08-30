@@ -34,6 +34,11 @@
     ]
   },
   "vars": {
-    "BASE_URL": "https://telegramfonts-edge.dienluanphien98.workers.dev"
+    "BASE_URL": "https://telegramfonts-edge.dienluanphien98.workers.dev",
+    // T-FAST30-A23-FIX F4: job-age backstop (ms). Documented default = 2100000
+    // (35 min): the 30-min FAST_30 job wall plus a 5-min operational margin.
+    // Heartbeat extension is refused and the exhausted-job finalizer gains an
+    // age-based candidate clause once the current lease age exceeds this cap.
+    "MAX_JOB_AGE_MS": "2100000"
   }
 }

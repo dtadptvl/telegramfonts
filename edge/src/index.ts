@@ -6,7 +6,7 @@ import { handleInternalCatalog } from './handlers/internal-catalog';
 import { handleInternalOutbox } from './handlers/internal-outbox';
 import { handleDownload } from './handlers/downloads';
 import { OutboxService } from './services/outbox-service';
-import { JobService } from './services/job-service';
+import { JobService, resolveMaxJobAgeMs } from './services/job-service';
 
 const REQUIRED_TABLES_COUNT = 13;
 const SCHEMA_CHECK_QUERY = `
@@ -118,7 +118,7 @@ export default {
 
   async scheduled(_event: ScheduledEvent, env: Env, _ctx: ExecutionContext): Promise<void> {
     if (!env.DB) return;
-    const jobService = new JobService(env.DB);
+    const jobService = new JobService(env.DB, resolveMaxJobAgeMs(env.MAX_JOB_AGE_MS));
     await jobService.finalizeExpiredExhaustedJobs();
     const outboxService = new OutboxService(env.DB, env.FULFILLMENT_QUEUE, env);
     await outboxService.dispatchPendingEvents({ batchSize: 20 });

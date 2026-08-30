@@ -15,6 +15,11 @@ export interface Env {
   // Internal Node Auth (A23 private compute node boundary)
   A23_NODE_SECRET?: string;
   A23_JOB_LEASE_SECONDS?: string;
+  // T-FAST30-A23-FIX F4: job-age backstop in milliseconds (default 2100000 =
+  // 35 min = 30-min FAST_30 job wall + 5-min operational margin). Heartbeat
+  // extensions are refused and exhausted jobs are finalized once the current
+  // lease age exceeds this cap (zombie termination via control plane).
+  MAX_JOB_AGE_MS?: string;
 
   // Signed Download Config (Phase 6)
   DOWNLOAD_SIGNING_SECRET?: string;
