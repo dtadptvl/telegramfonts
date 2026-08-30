@@ -6,7 +6,7 @@ contract_rev: 1
 mode: DEEP
 validated_at_generation: 6
 scope_tags: [product-flow, pricing, vietnamese-ai]
-status: active
+status: completed   # accepted E-00014; integrated merge f16ac39; NOT deployed (requires later identity-bound Human authorization)
 
 objective: "Implement the approved pricing+mode product contract end-to-end (E-00012 section D): explicit ORIGINAL/VIETNAMESE selection and persistence; ORIGINAL 5,000 VND/style; VIETNAMESE 8,000 VND/style; mode bound through Telegram session, order metadata, durable order/job identity, claim payload, worker validation, archive/reuse identity, and delivery evidence; historical orders with absent mode fail closed (no ORIGINAL default, no automatic backfill). LOCAL_ONLY: no production deploy, no live orders, no mutation of the existing paid order."
 
