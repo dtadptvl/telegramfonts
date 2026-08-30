@@ -831,14 +831,43 @@ class PersistentBrowserAtlasSession:
     async def fetch_cell_pages(
         self, cell_specs: list[dict]
     ) -> dict[int, bytes]:
-        """Render the given cells on ONE page canvas, ONE readback, crop in
-        Python. Each spec: {cp, w, h, y0, pen_left, baseline_y, phase_x,
-        phase_y, size_px}. Returns per-cp PNG bytes."""
-        import json as _json
+        """Render the given cells on stacked page canvases, crop in Python.
+        Each spec: {cp, w, h, y0, pen_left, baseline_y, phase_x,
+        phase_y, size_px}. Returns per-cp PNG bytes.
+
+        Canvas-height bounding (G3 iteration-3 root cause): the stacked
+        canvas height is bounded by atlas.paging.MAX_CANVAS_DIMENSION_PX.
+        Planner pages are area-budgeted (up to ~128 Mpx) and their full
+        vertical stack can exceed the browser canvas dimension limit, which
+        the browser rejects SILENTLY (empty data URL -> the whole page's
+        observations are lost). Cells are therefore rendered in stacked
+        batches, each one readback; per-cell crops/geometry are identical.
+        """
+        from atlas.paging import MAX_CANVAS_DIMENSION_PX
 
         out: dict[int, bytes] = {}
         if not cell_specs:
             return out
+        batches: list[list[dict]] = []
+        current: list[dict] = []
+        current_h = 0
+        for s in cell_specs:
+            h = int(s["h"])
+            if current and current_h + h > MAX_CANVAS_DIMENSION_PX:
+                batches.append(current)
+                current = []
+                current_h = 0
+            current.append(s)
+            current_h += h
+        if current:
+            batches.append(current)
+        for batch in batches:
+            out.update(await self._fetch_cell_batch(batch))
+        return out
+
+    async def _fetch_cell_batch(self, cell_specs: list[dict]) -> dict[int, bytes]:
+        """ONE bounded stacked canvas -> ONE readback -> crops in Python."""
+        out: dict[int, bytes] = {}
         page_w = max(int(s["w"]) for s in cell_specs)
         page_h = sum(int(s["h"]) for s in cell_specs)
         payload_cells = []
