@@ -1,11 +1,14 @@
 task: T-FAST30-A23-FIX
 contract_rev: 1
-policy_rev: "P-20260830.9-LEAN-SAFE-R16"
-policy_fingerprint: "0fa00f66ee4873bf"
+governance:
+  policy_rev: "P-20260830.9-LEAN-SAFE-R16"
+  fingerprint: "0fa00f66ee4873bf"
 worker: rc-narrowed-completion-worker
 branch: task/T-FAST30-A23-FIX
 base_head: bc3a2f2
-status: rc_complete_pending_device_acceptance
+status: blocked   # code complete + focused validation proven; blocked on device acceptance (F2/F7) - device surface recovered 11:48Z, acceptance run imminent (E-00021)
+proved: [F1, F3, F4, F5, F6]
+unproved: [F2, F7]
 
 acceptance_status:
   F1: >-
