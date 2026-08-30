@@ -6,9 +6,10 @@ import type {
   InlineKeyboardMarkup,
 } from '../types/telegram';
 import type { FontCatalog, Style } from '../types/catalog';
-import type { TelegramSessionRecord, FontFormat } from '../types/session';
-import { SUPPORTED_FORMATS } from '../types/session';
+import type { TelegramSessionRecord, FontFormat, FontMode } from '../types/session';
+import { SUPPORTED_FORMATS, isFontMode } from '../types/session';
 import { escapeHtml } from '../utils/html';
+import { MODE_PRICE_PER_STYLE_VND, stylePriceForMode } from '../utils/pricing';
 import { normalizeMyFontsUrl } from '../utils/myfonts';
 import { generateVietQrUrl } from '../utils/vietqr';
 import { TelegramClient } from '../services/telegram-client';
@@ -179,15 +180,66 @@ async function handleMessage(
     return;
   }
 
+  // T-PRICE-01 mode gate (/muahang invariant order: ORIGINAL|VIETNAMESE ->
+  // MyFonts URL -> catalog/styles -> ...): a valid MyFonts URL never starts
+  // catalog work until an explicit ORIGINAL/VIETNAMESE selection exists.
+  // Absent mode fails closed here; no ORIGINAL default, no silent inference.
+  const modeSession = await sessionService.getSessionByUserId(userId);
+  if (!modeSession || modeSession.mode === null) {
+    if (!alreadyApplied) {
+      await sessionService.setPendingSourceUrl(userId, normalized.canonicalUrl, updateId);
+    }
+    if (modeSession) {
+      const { text: modeText, replyMarkup: modeMarkup } = renderModeSelection(
+        modeSession.workflow_token
+      );
+      await tg.sendMessage({
+        chat_id: chatId,
+        text: modeText,
+        reply_markup: modeMarkup,
+      });
+    }
+    return;
+  }
+
+  await startCatalogFlow(
+    userId,
+    chatId,
+    normalized.canonicalUrl,
+    normalized.canonicalKey,
+    tg,
+    sessionService,
+    catalogService,
+    updateId,
+    alreadyApplied
+  );
+}
+
+/**
+ * Shared catalog start/advance flow (T-PRICE-01): used by the URL message path
+ * (mode already selected) and by the mode-selection callback continuation
+ * (consuming the pending source URL). Callers must enforce the mode gate first.
+ */
+async function startCatalogFlow(
+  userId: string,
+  chatId: string,
+  canonicalUrl: string,
+  canonicalKey: string,
+  tg: TelegramClient,
+  sessionService: SessionService,
+  catalogService: CatalogService,
+  updateId?: number,
+  alreadyApplied = false
+): Promise<void> {
   // Create or deduplicate catalog request (atomic conflict-safe)
   const reqRecord = await catalogService.getOrCreateCatalogRequest(
     userId,
-    normalized.canonicalUrl,
-    normalized.canonicalKey
+    canonicalUrl,
+    canonicalKey
   );
 
   // Check if catalog data is already available
-  const catalog = await catalogService.getCatalogByCanonicalKey(normalized.canonicalKey);
+  const catalog = await catalogService.getCatalogByCanonicalKey(canonicalKey);
 
   if (!catalog) {
     // Catalog pending (future A23 agent will satisfy this)
@@ -197,7 +249,7 @@ async function handleMessage(
     await tg.sendMessage({
       chat_id: chatId,
       text: `🔍 <b>Analyzing font catalog...</b>\n\nWe are analyzing:\n<code>${escapeHtml(
-        normalized.canonicalUrl
+        canonicalUrl
       )}</code>\n\nPlease wait a moment.`,
     });
     return;
@@ -302,6 +354,89 @@ async function handleCallbackQuery(
     await tg.answerCallbackQuery({
       callback_query_id: query.id,
       text: `Current status: ${order.status}`,
+    });
+    return;
+  }
+
+  // Handle MODE SELECTION actions (Prefix 'mode') - T-PRICE-01
+  if (prefix === 'mode') {
+    const modeValue = tokenOrParam as FontMode;
+    const modeToken = param;
+
+    if (
+      action !== 'set' ||
+      !isFontMode(modeValue) ||
+      !modeToken ||
+      modeToken !== session.workflow_token
+    ) {
+      await tg.answerCallbackQuery({
+        callback_query_id: query.id,
+        text: 'This menu is expired. Please use the latest message.',
+        show_alert: true,
+      });
+      return;
+    }
+
+    if (session.mode !== null) {
+      await tg.answerCallbackQuery({
+        callback_query_id: query.id,
+        text: 'Mode already selected for this session. Send /start to begin a new order.',
+        show_alert: true,
+      });
+      return;
+    }
+
+    try {
+      await sessionService.selectMode(
+        userId,
+        session.workflow_token,
+        modeValue,
+        session.version,
+        updateId
+      );
+    } catch (err: unknown) {
+      if (err instanceof SessionConflictError) {
+        await tg.answerCallbackQuery({
+          callback_query_id: query.id,
+          text: 'Action conflict or menu expired. Please refresh.',
+          show_alert: true,
+        });
+        return;
+      }
+      throw err;
+    }
+
+    // Consume the pending source URL (if any) and continue the /muahang flow.
+    const pendingUrl = session.pending_source_url;
+    if (pendingUrl) {
+      const normalized = normalizeMyFontsUrl(pendingUrl);
+      if (normalized.isValid && normalized.canonicalUrl && normalized.canonicalKey) {
+        await startCatalogFlow(
+          userId,
+          session.chat_id,
+          normalized.canonicalUrl,
+          normalized.canonicalKey,
+          tg,
+          sessionService,
+          catalogService,
+          updateId,
+          alreadyApplied
+        );
+        await tg.answerCallbackQuery({
+          callback_query_id: query.id,
+          text: `Mode ${modeValue} selected`,
+        });
+        return;
+      }
+    }
+
+    await tg.sendMessage({
+      chat_id: session.chat_id,
+      text: `✅ <b>Mode: ${modeValue}.</b>\n\nNow send me a link to any font family on <b>MyFonts.com</b> to start.`,
+    });
+    await tg.answerCallbackQuery({
+      callback_query_id: query.id,
+      text: `Mode ${modeValue} selected`,
     });
     return;
   }
@@ -580,6 +715,17 @@ async function handleCallbackQuery(
           return;
         }
 
+        // T-PRICE-01 fail-closed: confirmation requires an explicit mode.
+        // Legacy sessions with absent mode can never reach order confirmation.
+        if (!isFontMode(session.mode)) {
+          await tg.answerCallbackQuery({
+            callback_query_id: query.id,
+            text: 'Font mode is missing for this session. Send /start to begin a new order.',
+            show_alert: true,
+          });
+          return;
+        }
+
         await sessionService.transitionStatus(
           userId,
           session.workflow_token,
@@ -594,7 +740,8 @@ async function handleCallbackQuery(
           catalog,
           currentStyles,
           currentFormats,
-          session.workflow_token
+          session.workflow_token,
+          session.mode
         );
 
         await tg.editMessageText({
@@ -634,6 +781,17 @@ async function handleCallbackQuery(
           await tg.answerCallbackQuery({
             callback_query_id: query.id,
             text: 'Order confirmation is no longer valid.',
+            show_alert: true,
+          });
+          return;
+        }
+
+        // T-PRICE-01 fail-closed: an order can never be created without an
+        // explicit ORIGINAL/VIETNAMESE mode (legacy sessions fail closed here).
+        if (!isFontMode(session.mode)) {
+          await tg.answerCallbackQuery({
+            callback_query_id: query.id,
+            text: 'This order cannot proceed: font mode is missing. Send /start to begin a new order.',
             show_alert: true,
           });
           return;
@@ -709,6 +867,39 @@ async function replayAppliedCallbackUI(
       // Non-blocking best-effort on APPLIED replay
     }
   };
+
+  // T-PRICE-01: replay of a mode-selection callback. The selection is durable;
+  // render the post-state UI for the current session stage.
+  if ((query.data || '').startsWith('mode:')) {
+    if (!session.mode) {
+      // Selection never persisted; nothing to replay.
+      await safeAnswer();
+      return;
+    }
+
+    if (session.status === 'IDLE') {
+      await tg.editMessageText({
+        chat_id: session.chat_id,
+        message_id: messageId,
+        text: `✅ <b>Mode: ${session.mode}.</b>\n\nNow send me a link to any font family on <b>MyFonts.com</b> to start.`,
+      });
+      await safeAnswer(`Mode ${session.mode} selected`);
+      return;
+    }
+
+    if (session.status === 'AWAITING_CATALOG') {
+      await tg.editMessageText({
+        chat_id: session.chat_id,
+        message_id: messageId,
+        text: `🔍 <b>Analyzing font catalog...</b>\n\nPlease wait a moment.`,
+      });
+      await safeAnswer(`Mode ${session.mode} selected`);
+      return;
+    }
+
+    // SELECTING_STYLES / SELECTING_FORMATS / CONFIRMING / ORDER_CREATED fall
+    // through to the generic status replay below.
+  }
 
   if (session.status === 'IDLE') {
     await tg.editMessageText({
@@ -792,11 +983,24 @@ async function replayAppliedCallbackUI(
   }
 
   if (session.status === 'CONFIRMING') {
+    // T-PRICE-01 fail-closed: a legacy session with absent mode can never
+    // render a valid confirmation (exact price depends on the mode).
+    if (!isFontMode(session.mode)) {
+      await tg.editMessageText({
+        chat_id: session.chat_id,
+        message_id: messageId,
+        text: '⚠️ <b>Font mode is missing for this session.</b>\n\nSend /start to begin a new order.',
+      });
+      await safeAnswer();
+      return;
+    }
+
     const { text, replyMarkup } = renderOrderConfirmation(
       catalog,
       selectedStyles,
       selectedFormats,
-      session.workflow_token
+      session.workflow_token,
+      session.mode
     );
     await tg.editMessageText({
       chat_id: session.chat_id,
@@ -809,6 +1013,40 @@ async function replayAppliedCallbackUI(
   }
 
   await safeAnswer();
+}
+
+/**
+ * T-PRICE-01: explicit ORIGINAL/VIETNAMESE mode selection screen.
+ * The mode callback data format is `mode:set:<MODE>:<workflowToken>` and
+ * remains far below Telegram's 64-byte callback limit.
+ */
+export function renderModeSelection(
+  workflowToken: string
+): { text: string; replyMarkup: InlineKeyboardMarkup } {
+  const originalPrice = MODE_PRICE_PER_STYLE_VND.ORIGINAL.toLocaleString('vi-VN');
+  const vietnamesePrice = MODE_PRICE_PER_STYLE_VND.VIETNAMESE.toLocaleString('vi-VN');
+
+  const text = `🌐 <b>Choose your font version</b>\n\n` +
+    `• <b>ORIGINAL</b> — exact original font (${originalPrice} VND/style)\n` +
+    `• <b>VIETNAMESE</b> — original + full Vietnamese coverage (${vietnamesePrice} VND/style)\n\n` +
+    `Select a mode to continue:`;
+
+  const keyboard: InlineKeyboardMarkup['inline_keyboard'] = [
+    [
+      {
+        text: `ORIGINAL · ${originalPrice}đ/style`,
+        callback_data: `mode:set:ORIGINAL:${workflowToken}`,
+      },
+    ],
+    [
+      {
+        text: `VIETNAMESE · ${vietnamesePrice}đ/style`,
+        callback_data: `mode:set:VIETNAMESE:${workflowToken}`,
+      },
+    ],
+  ];
+
+  return { text, replyMarkup: { inline_keyboard: keyboard } };
 }
 
 export function renderStyleSelection(
@@ -884,7 +1122,8 @@ function renderOrderConfirmation(
   catalog: FontCatalog,
   selectedStyleIds: string[],
   selectedFormats: FontFormat[],
-  workflowToken: string
+  workflowToken: string,
+  mode: FontMode
 ): { text: string; replyMarkup: InlineKeyboardMarkup } {
   const validStylesMap = new Map<string, Style>();
   for (const s of catalog.styles) validStylesMap.set(s.id, s);
@@ -895,10 +1134,12 @@ function renderOrderConfirmation(
     if (s) selectedStyles.push(s);
   }
 
+  // T-PRICE-01: exact price is mode-bound (identical rule to order creation).
   const totalAmount = selectedStyles.reduce(
-    (sum, s) => sum + (s.price !== undefined ? s.price : 5000),
+    (sum, s) => sum + stylePriceForMode(s.price, mode),
     0
   );
+  const unitPrice = MODE_PRICE_PER_STYLE_VND[mode];
 
   const stylesListText = selectedStyles
     .map((s) => `  • ${escapeHtml(s.displayName)}`)
@@ -912,7 +1153,9 @@ function renderOrderConfirmation(
     catalog.familyName
   )}\n${
     catalog.foundry ? `• <b>Foundry:</b> ${escapeHtml(catalog.foundry)}\n` : ''
-  }• <b>Styles (${selectedStyles.length}):</b>\n${stylesListText}${extraText}\n• <b>Formats:</b> ${selectedFormats.join(
+  }• <b>Mode:</b> <b>${mode}</b> (${unitPrice.toLocaleString('vi-VN')} VND/style)\n• <b>Styles (${
+    selectedStyles.length
+  }):</b>\n${stylesListText}${extraText}\n• <b>Formats:</b> ${selectedFormats.join(
     ', '
   )}\n• <b>Total Amount:</b> <b>${totalAmount.toLocaleString('vi-VN')} VND</b>\n\nConfirm to create your order:`;
 
@@ -975,7 +1218,11 @@ export function renderOrderCreatedMessage(
     statusNote = `\n⏳ <i>Please transfer the exact amount with the transfer content above. Payment is confirmed automatically within 1-2 minutes.</i>\n`;
   }
 
-  const text = `🎉 <b>Order Info:</b>\n\n• <b>Order ID:</b> <code>${order.id}</code>\n• <b>Status:</b> ${statusBadge}\n• <b>Payment Code:</b> <code>${escapeHtml(
+  // T-PRICE-01: the durable mode identity travels with the order and is shown
+  // in every order-info surface. Absent mode = legacy order (shown as ABSENT).
+  const modeLine = order.mode ? `• <b>Mode:</b> <b>${escapeHtml(order.mode)}</b>\n` : `• <b>Mode:</b> <code>ABSENT (legacy)</code>\n`;
+
+  const text = `🎉 <b>Order Info:</b>\n\n• <b>Order ID:</b> <code>${order.id}</code>\n${modeLine}• <b>Status:</b> ${statusBadge}\n• <b>Payment Code:</b> <code>${escapeHtml(
     paymentCode
   )}</code>\n• <b>Amount:</b> <b>${order.total_amount.toLocaleString('vi-VN')} VND</b>\n${order.status === 'AWAITING_PAYMENT' ? bankSection + qrSection : ''}${statusNote}`;
 

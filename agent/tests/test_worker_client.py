@@ -21,6 +21,7 @@ async def test_worker_claim_success(test_settings: Settings):
         "foundry": "Google Fonts",
         "styles": [{"id": "regular", "display_name": "Regular"}],
         "formats": ["TTF", "OTF"],
+        "mode": "ORIGINAL",
     }
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -49,6 +50,7 @@ def test_claimed_job_fail_closed_validation():
         "source_url": "https://www.myfonts.com/collections/roboto-flex",
         "styles": [{"id": "s1", "display_name": "Regular"}],
         "formats": ["TTF"],
+        "mode": "ORIGINAL",
     }
 
     # 1. Sibling/substring host fails closed (BLOCK C)

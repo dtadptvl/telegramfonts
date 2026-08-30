@@ -25,7 +25,7 @@ class ClaimedJob:
     foundry: str | None
     styles: list[ClaimStyle]
     formats: list[str]
-    mode: str = "ORIGINAL"
+    mode: str
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ClaimedJob:
@@ -94,7 +94,12 @@ class ClaimedJob:
             if clean_f not in formats:
                 formats.append(clean_f)
 
-        raw_mode = data.get("mode", "ORIGINAL")
+        # T-PRICE-01/P4: mode is REQUIRED in claim payloads; fail-closed with
+        # no ORIGINAL default. Historical rows with absent mode must surface a
+        # clear error, never run as ORIGINAL.
+        raw_mode = data.get("mode")
+        if raw_mode is None or (isinstance(raw_mode, str) and not raw_mode.strip()):
+            raise ValueError("MISSING_MODE")
         if not isinstance(raw_mode, str) or raw_mode.strip().upper() not in {"ORIGINAL", "VIETNAMESE"}:
             raise ValueError("UNSUPPORTED_MODE")
         mode = raw_mode.strip().upper()

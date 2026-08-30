@@ -212,9 +212,35 @@ export class OutboxService {
 
         // Query canonical order and user chat ID
         const order = await this.db
-          .prepare('SELECT id, user_id, status, metadata FROM orders WHERE id = ?')
+          .prepare('SELECT id, user_id, status, metadata, mode FROM orders WHERE id = ?')
           .bind(orderId)
-          .first<{ id: string; user_id: string; status: string; metadata?: string | null }>();
+          .first<{ id: string; user_id: string; status: string; metadata?: string | null; mode?: string | null }>();
+
+        // T-PRICE-01 fail-closed: delivery is an executable progression route.
+        // Orders with ABSENT mode (historical) fail closed with a clear error;
+        // no ORIGINAL default, no silent inference.
+        const orderMode =
+          order && typeof order.mode === 'string' ? order.mode.trim().toUpperCase() : '';
+        if (!order || (orderMode !== 'ORIGINAL' && orderMode !== 'VIETNAMESE')) {
+          failureCount++;
+          const attempts = event.dispatch_attempts + 1;
+          const backoffSeconds = Math.min(300, 5 * Math.pow(2, attempts - 1));
+          const nextDispatchAt = Date.now() + backoffSeconds * 1000;
+
+          await this.db
+            .prepare(
+              `UPDATE outbox_events
+               SET dispatch_lease_token = NULL,
+                   dispatch_leased_at = NULL,
+                   dispatch_lease_expires_at = NULL,
+                   next_dispatch_at = ?,
+                   last_dispatch_error = 'MODE_ABSENT_LEGACY_ORDER'
+               WHERE id = ? AND status = 'PENDING' AND dispatch_lease_token = ?`
+            )
+            .bind(nextDispatchAt, event.id, leaseToken)
+            .run();
+          continue;
+        }
 
         if (!order || order.status !== 'COMPLETED') {
           failureCount++;
@@ -425,10 +451,11 @@ export class OutboxService {
             }
             const partBuffer = await r2Obj.arrayBuffer();
 
+            // T-PRICE-01: delivery evidence binds the durable mode identity.
             const caption =
               parts.length > 1
-                ? `📦 <b>${escapeHtml(familyName)}</b> (Part ${part.part_index}/${part.total_parts})`
-                : `📦 <b>${escapeHtml(familyName)}</b>`;
+                ? `📦 <b>${escapeHtml(familyName)}</b> · ${orderMode} (Part ${part.part_index}/${part.total_parts})`
+                : `📦 <b>${escapeHtml(familyName)}</b> · ${orderMode}`;
 
             await tg.sendDocument({
               chat_id: userRecord.chat_id,
@@ -469,6 +496,7 @@ export class OutboxService {
               chat_id: userRecord.chat_id,
               event_id: event.id,
               total_parts: parts.length,
+              mode: orderMode,
             });
             emitStructuredLog({
               event: 'outbox_dispatched',

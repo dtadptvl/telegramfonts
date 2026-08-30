@@ -617,6 +617,12 @@ describe('Telegram Webhook & UX Flow', () => {
     });
 
     it('creates and deduplicates catalog request when catalog is pending', async () => {
+      // T-PRICE-01: pre-select mode so the URL message proceeds past the mode gate.
+      const sessionService = new SessionService(env.DB);
+      await sessionService.upsertTelegramUser({ id: 22222, is_bot: false, first_name: 'Bob' });
+      const s0 = await sessionService.getOrCreateSession('22222', '22222');
+      await sessionService.selectMode('22222', s0.workflow_token, 'ORIGINAL', s0.version);
+
       const update: TelegramUpdate = {
         update_id: 1002,
         message: {
@@ -661,6 +667,12 @@ describe('Telegram Webhook & UX Flow', () => {
       const catalogService = new CatalogService(env.DB);
       const catalogId = await catalogService.persistCatalogResult(sampleCatalog);
       expect(catalogId).toBeDefined();
+
+      // T-PRICE-01: pre-select mode so the URL message proceeds past the mode gate.
+      const sessionService = new SessionService(env.DB);
+      await sessionService.upsertTelegramUser({ id: 33333, is_bot: false, first_name: 'Charlie' });
+      const s0 = await sessionService.getOrCreateSession('33333', '33333');
+      await sessionService.selectMode('33333', s0.workflow_token, 'ORIGINAL', s0.version);
 
       const update: TelegramUpdate = {
         update_id: 1003,
@@ -873,6 +885,8 @@ describe('Telegram Webhook & UX Flow', () => {
 
       await sessionService.upsertTelegramUser({ id: 77771, is_bot: false, first_name: 'Grace' });
       await sessionService.getOrCreateSession('77771', '77771');
+      const s0 = await sessionService.getSessionByUserId('77771');
+      await sessionService.selectMode('77771', s0!.workflow_token, 'ORIGINAL', s0!.version);
       await sessionService.updateSessionCatalog('77771', catalogId, 'SELECTING_STYLES');
       
       const sess1 = await sessionService.getSessionByUserId('77771');

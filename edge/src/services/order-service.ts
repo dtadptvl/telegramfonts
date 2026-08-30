@@ -1,6 +1,8 @@
 import type { FontCatalog, Style } from '../types/catalog';
-import type { TelegramSessionRecord, FontFormat } from '../types/session';
+import type { TelegramSessionRecord, FontFormat, FontMode } from '../types/session';
+import { isFontMode } from '../types/session';
 import { generatePaymentCode } from '../utils/vietqr';
+import { stylePriceForMode } from '../utils/pricing';
 import { SessionConflictError } from './session-service';
 
 export interface CreateOrderResult {
@@ -19,6 +21,7 @@ export interface OrderRecord {
   total_amount: number;
   currency: string;
   metadata: string | null;
+  mode: string | null;
   checkout_token: string | null;
   payment_code: string | null;
   created_at: number;
@@ -91,6 +94,16 @@ export class OrderService {
       throw new SessionConflictError('Cannot create order with empty format selection');
     }
 
+    // T-PRICE-01: explicit ORIGINAL/VIETNAMESE mode is required to create an
+    // order. Absent mode is a legacy/invalid state and fails closed here; no
+    // ORIGINAL default, no silent inference, no automatic backfill.
+    const mode: FontMode = session.mode as FontMode;
+    if (!isFontMode(mode)) {
+      throw new SessionConflictError(
+        'Cannot create order without explicit ORIGINAL/VIETNAMESE mode selection'
+      );
+    }
+
     // Validate styles against authoritative persisted catalog (never trust client)
     const validStylesMap = new Map<string, Style>();
     for (const style of catalog.styles) {
@@ -110,8 +123,11 @@ export class OrderService {
     const orderId = `ord_${crypto.randomUUID().replace(/-/g, '')}`;
     const paymentCode = generatePaymentCode(paymentCodePrefix);
 
+    // T-PRICE-01: exact price is mode-bound. ORIGINAL = 5,000 VND/style
+    // (catalog default/overrides); VIETNAMESE = 8,000 VND/style (never the
+    // 5,000 default, so VIETNAMESE can never be silently undercharged).
     const totalAmount = selectedStyles.reduce(
-      (sum, s) => sum + (s.price !== undefined ? s.price : 5000),
+      (sum, s) => sum + stylePriceForMode(s.price, mode),
       0
     );
 
@@ -123,6 +139,7 @@ export class OrderService {
       source_url: catalog.sourceUrl,
       selected_style_ids: selectedStyleIds,
       selected_formats: selectedFormats,
+      mode,
     });
 
     // 3. Build strictly conditional atomic batch statements (BLOCK B)
@@ -132,8 +149,8 @@ export class OrderService {
     statements.push(
       this.db
         .prepare(
-          `INSERT INTO orders (id, user_id, status, total_amount, currency, metadata, checkout_token, payment_code, created_at, updated_at)
-           SELECT ?, ?, 'AWAITING_PAYMENT', ?, 'VND', ?, ?, ?, ?, ?
+          `INSERT INTO orders (id, user_id, status, total_amount, currency, metadata, mode, checkout_token, payment_code, created_at, updated_at)
+           SELECT ?, ?, 'AWAITING_PAYMENT', ?, 'VND', ?, ?, ?, ?, ?, ?
            WHERE EXISTS (
              SELECT 1 FROM telegram_sessions
              WHERE id = ? AND workflow_token = ? AND checkout_token = ? AND status = 'CONFIRMING' AND version = ?
@@ -144,6 +161,7 @@ export class OrderService {
           session.user_id,
           totalAmount,
           metadata,
+          mode,
           checkoutToken,
           paymentCode,
           now,
@@ -158,7 +176,8 @@ export class OrderService {
     // Order items insert: FK order_id references orders(id). If order conditional insert inserted 0 rows, FK constraint fails and rolls back batch!
     for (const style of selectedStyles) {
       const itemId = `item_${crypto.randomUUID().replace(/-/g, '')}`;
-      const price = style.price !== undefined ? style.price : 5000;
+      // T-PRICE-01: per-item price is mode-bound (same rule as the order total).
+      const price = stylePriceForMode(style.price, mode);
       statements.push(
         this.db
           .prepare(

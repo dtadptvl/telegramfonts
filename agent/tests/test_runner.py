@@ -80,6 +80,7 @@ async def test_runner_default_live_preview_and_durable_completion(test_settings:
                     "family_name": "Be Vietnam Pro",
                     "styles": [{"id": "regular", "display_name": "Regular"}],
                     "formats": ["TTF"],
+                    "mode": "ORIGINAL",
                 },
             )
         if "heartbeat" in request.url.path:
@@ -147,6 +148,7 @@ async def test_runner_does_not_ack_queue_when_upload_alone_succeeds(test_setting
                     "family_name": "Be Vietnam Pro",
                     "styles": [{"id": "regular", "display_name": "Regular"}],
                     "formats": ["TTF"],
+                    "mode": "ORIGINAL",
                 },
             )
         if "heartbeat" in request.url.path:
@@ -204,6 +206,7 @@ async def test_runner_ambiguous_completion_failure_does_not_call_fail(test_setti
                     "family_name": "Be Vietnam Pro",
                     "styles": [{"id": "regular", "display_name": "Regular"}],
                     "formats": ["TTF"],
+                    "mode": "ORIGINAL",
                 },
             )
         if "heartbeat" in request.url.path:
@@ -260,6 +263,7 @@ async def test_runner_completion_409_conflict_terminal_acks_queue(test_settings:
                     "family_name": "Be Vietnam Pro",
                     "styles": [{"id": "regular", "display_name": "Regular"}],
                     "formats": ["TTF"],
+                    "mode": "ORIGINAL",
                 },
             )
         if "heartbeat" in request.url.path:
@@ -308,6 +312,7 @@ async def test_missing_or_blocked_live_preview_fails_without_synthetic_success(t
                     "family_name": "Unknown Font",
                     "styles": [{"id": "reg", "display_name": "Regular"}],
                     "formats": ["TTF"],
+                    "mode": "ORIGINAL",
                 },
             )
         if "fail" in request.url.path:
@@ -377,6 +382,7 @@ async def test_runner_known_terminal_format_error_fails_and_acks(test_settings: 
                     "source_url": "https://www.myfonts.com/collections/be-vietnam-pro",
                     "styles": [{"id": "regular", "display_name": "Regular"}],
                     "formats": ["TTF"],
+                    "mode": "ORIGINAL",
                 },
             )
         if "fail" in request.url.path:
@@ -506,6 +512,7 @@ async def test_runner_unexpected_exception_after_claim_fails_and_retries(test_se
                     "source_url": "https://www.myfonts.com/collections/be-vietnam-pro",
                     "styles": [{"id": "regular", "display_name": "Regular"}],
                     "formats": ["TTF"],
+                    "mode": "ORIGINAL",
                 },
             )
         if "heartbeat" in request.url.path:
@@ -578,6 +585,7 @@ async def test_runner_fenced_heartbeat_during_build_aborts(test_settings: Settin
                     "family_name": "Be Vietnam Pro",
                     "styles": [{"id": "regular", "display_name": "Regular"}],
                     "formats": ["TTF"],
+                    "mode": "ORIGINAL",
                 },
             )
         if "heartbeat" in request.url.path:
@@ -758,6 +766,7 @@ async def test_multi_consumer_queue_duplicate_and_ack_loss_redelivery_proves_sin
                     "family_name": "Be Vietnam Pro",
                     "styles": [{"id": "regular", "display_name": "Regular"}],
                     "formats": ["TTF"],
+                    "mode": "ORIGINAL",
                 },
             )
         if "artifact" in request.url.path:

@@ -681,6 +681,7 @@ def _stage9d_worker_handler(state: dict):
                     "family_name": "Stage9DFamily",
                     "styles": [{"id": "regular", "display_name": "Regular"}],
                     "formats": state["formats"],
+                    "mode": "ORIGINAL",
                 },
             )
         if "heartbeat" in request.url.path:

@@ -167,6 +167,7 @@ class CountingAcquirer(SourceAcquirer):
 def _runner_state(formats):
     return {
         "formats": formats,
+        "mode": "ORIGINAL",
         "uploads": [],
         "zip_contents": [],
         "completes": [],
@@ -198,7 +199,7 @@ def _wire_handlers(state):
                     "family_name": state.get("family_name"),
                     "styles": state["styles"],
                     "formats": state["formats"],
-                    "mode": state.get("mode", "ORIGINAL"),
+                    "mode": state["mode"],
                 },
             )
         if "heartbeat" in request.url.path:

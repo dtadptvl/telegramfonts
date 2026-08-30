@@ -333,7 +333,9 @@ async def run_a23_soak_harness(
                     "family_name": job_info.get("family_name", "SoakFont"),
                     "styles": job_info["styles"],
                     "formats": job_info["formats"],
-                    "mode": job_info.get("mode", "ORIGINAL"),
+                    # T-PRICE-01: mode is required; no ORIGINAL default (all
+                    # scenarios set it explicitly).
+                    "mode": job_info["mode"],
                 },
             )
         elif "heartbeat" in path:

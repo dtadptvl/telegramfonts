@@ -509,6 +509,8 @@ describe('Phase 3: SePay Verified Payment & Transactional Outbox', () => {
 
       await sessionService.upsertTelegramUser({ id: 91199, is_bot: false, first_name: 'FallbackUser' });
       await sessionService.getOrCreateSession('91199', '91199');
+      const s0 = await sessionService.getSessionByUserId('91199');
+      await sessionService.selectMode('91199', s0!.workflow_token, 'ORIGINAL', s0!.version);
       await sessionService.updateSessionCatalog('91199', catalogId, 'SELECTING_STYLES');
       const s1 = await sessionService.getSessionByUserId('91199');
       await sessionService.setAllStyles('91199', s1!.workflow_token, ['rf_regular'], s1!.version);
@@ -581,6 +583,8 @@ describe('Phase 3: SePay Verified Payment & Transactional Outbox', () => {
 
       await sessionService.upsertTelegramUser({ id: 91198, is_bot: false, first_name: 'AmountMismatchUser' });
       await sessionService.getOrCreateSession('91198', '91198');
+      const s0 = await sessionService.getSessionByUserId('91198');
+      await sessionService.selectMode('91198', s0!.workflow_token, 'ORIGINAL', s0!.version);
       await sessionService.updateSessionCatalog('91198', catalogId, 'SELECTING_STYLES');
       const s1 = await sessionService.getSessionByUserId('91198');
       await sessionService.setAllStyles('91198', s1!.workflow_token, ['rf_regular'], s1!.version);
@@ -635,6 +639,8 @@ describe('Phase 3: SePay Verified Payment & Transactional Outbox', () => {
 
       await sessionService.upsertTelegramUser({ id: 91102, is_bot: false, first_name: 'SuccessUser' });
       await sessionService.getOrCreateSession('91102', '91102');
+      const s0 = await sessionService.getSessionByUserId('91102');
+      await sessionService.selectMode('91102', s0!.workflow_token, 'ORIGINAL', s0!.version);
       await sessionService.updateSessionCatalog('91102', catalogId, 'SELECTING_STYLES');
       const s1 = await sessionService.getSessionByUserId('91102');
       await sessionService.setAllStyles('91102', s1!.workflow_token, ['rf_regular', 'rf_bold'], s1!.version);
@@ -715,6 +721,8 @@ describe('Phase 3: SePay Verified Payment & Transactional Outbox', () => {
 
       await sessionService.upsertTelegramUser({ id: 91108, is_bot: false, first_name: 'MidBatchUser' });
       await sessionService.getOrCreateSession('91108', '91108');
+      const s0 = await sessionService.getSessionByUserId('91108');
+      await sessionService.selectMode('91108', s0!.workflow_token, 'ORIGINAL', s0!.version);
       await sessionService.updateSessionCatalog('91108', catalogId, 'SELECTING_STYLES');
       const s1 = await sessionService.getSessionByUserId('91108');
       await sessionService.setAllStyles('91108', s1!.workflow_token, ['rf_regular'], s1!.version);
@@ -776,6 +784,8 @@ describe('Phase 3: SePay Verified Payment & Transactional Outbox', () => {
 
       await sessionService.upsertTelegramUser({ id: 91103, is_bot: false, first_name: 'DupUser' });
       await sessionService.getOrCreateSession('91103', '91103');
+      const s0 = await sessionService.getSessionByUserId('91103');
+      await sessionService.selectMode('91103', s0!.workflow_token, 'ORIGINAL', s0!.version);
       await sessionService.updateSessionCatalog('91103', catalogId, 'SELECTING_STYLES');
       const s1 = await sessionService.getSessionByUserId('91103');
       await sessionService.setAllStyles('91103', s1!.workflow_token, ['rf_regular'], s1!.version);
@@ -860,6 +870,8 @@ describe('Phase 3: SePay Verified Payment & Transactional Outbox', () => {
 
       await sessionService.upsertTelegramUser({ id: 91104, is_bot: false, first_name: 'ConcurrentTxUser' });
       await sessionService.getOrCreateSession('91104', '91104');
+      const s0 = await sessionService.getSessionByUserId('91104');
+      await sessionService.selectMode('91104', s0!.workflow_token, 'ORIGINAL', s0!.version);
       await sessionService.updateSessionCatalog('91104', catalogId, 'SELECTING_STYLES');
       const s1 = await sessionService.getSessionByUserId('91104');
       await sessionService.setAllStyles('91104', s1!.workflow_token, ['rf_regular'], s1!.version);
@@ -929,6 +941,8 @@ describe('Phase 3: SePay Verified Payment & Transactional Outbox', () => {
 
       await sessionService.upsertTelegramUser({ id: 91105, is_bot: false, first_name: 'RaceUser' });
       await sessionService.getOrCreateSession('91105', '91105');
+      const s0 = await sessionService.getSessionByUserId('91105');
+      await sessionService.selectMode('91105', s0!.workflow_token, 'ORIGINAL', s0!.version);
       await sessionService.updateSessionCatalog('91105', catalogId, 'SELECTING_STYLES');
       const s1 = await sessionService.getSessionByUserId('91105');
       await sessionService.setAllStyles('91105', s1!.workflow_token, ['rf_regular'], s1!.version);
@@ -1015,6 +1029,8 @@ describe('Phase 3: SePay Verified Payment & Transactional Outbox', () => {
 
       await sessionService.upsertTelegramUser({ id: 91107, is_bot: false, first_name: 'CheckUser' });
       await sessionService.getOrCreateSession('91107', '91107');
+      const s0 = await sessionService.getSessionByUserId('91107');
+      await sessionService.selectMode('91107', s0!.workflow_token, 'ORIGINAL', s0!.version);
       await sessionService.updateSessionCatalog('91107', catalogId, 'SELECTING_STYLES');
       const s1 = await sessionService.getSessionByUserId('91107');
       await sessionService.setAllStyles('91107', s1!.workflow_token, ['rf_regular'], s1!.version);

@@ -1,4 +1,4 @@
-import type { TelegramSessionRecord, SessionStatus, FontFormat } from '../types/session';
+import type { TelegramSessionRecord, SessionStatus, FontFormat, FontMode } from '../types/session';
 import type { TelegramUser } from '../types/telegram';
 
 export class SessionConflictError extends Error {
@@ -89,6 +89,8 @@ export class SessionService {
       active_order_id: null,
       created_at: now,
       updated_at: now,
+      mode: null,
+      pending_source_url: null,
     };
   }
 
@@ -121,6 +123,8 @@ export class SessionService {
            last_message_id = NULL,
            status = 'IDLE',
            active_order_id = NULL,
+           mode = NULL,
+           pending_source_url = NULL,
            version = version + 1,
            updated_at = ?
          WHERE user_id = ?`
@@ -167,6 +171,84 @@ export class SessionService {
          WHERE user_id = ?`
       )
       .bind(workflowToken, checkoutToken, catalogId, initialStatus, now, userId);
+
+    if (updateId !== undefined) {
+      const updateLedgerStmt = this.db
+        .prepare(
+          `UPDATE telegram_updates SET status = 'APPLIED', updated_at = ? WHERE update_id = ?`
+        )
+        .bind(now, updateId);
+
+      await this.db.batch([updateSessionStmt, updateLedgerStmt]);
+    } else {
+      await updateSessionStmt.run();
+    }
+  }
+
+  /**
+   * Persist an explicit ORIGINAL/VIETNAMESE mode selection (T-PRICE-01).
+   * Fails closed (SessionConflictError) unless the session is currently in the
+   * mode-selection window (mode IS NULL) and the workflow_token + version match.
+   * Consumes any pending_source_url atomically with the selection.
+   */
+  async selectMode(
+    userId: string,
+    workflowToken: string,
+    mode: FontMode,
+    expectedVersion: number,
+    updateId?: number
+  ): Promise<void> {
+    const now = Date.now();
+    const updateSessionStmt = this.db
+      .prepare(
+        `UPDATE telegram_sessions SET
+           mode = ?,
+           pending_source_url = NULL,
+           version = version + 1,
+           updated_at = ?
+          WHERE user_id = ? AND workflow_token = ? AND mode IS NULL AND version = ?`
+      )
+      .bind(mode, now, userId, workflowToken, expectedVersion);
+
+    if (updateId !== undefined) {
+      const updateLedgerStmt = this.db
+        .prepare(
+          `UPDATE telegram_updates SET status = 'APPLIED', updated_at = ? WHERE update_id = ?`
+        )
+        .bind(now, updateId);
+
+      const results = await this.db.batch([updateSessionStmt, updateLedgerStmt]);
+      const sessionResult = results[0];
+      if (!sessionResult.meta.changes || sessionResult.meta.changes === 0) {
+        throw new SessionConflictError('Mode selection conflict or mode already set');
+      }
+    } else {
+      const res = await updateSessionStmt.run();
+      if (!res.meta.changes || res.meta.changes === 0) {
+        throw new SessionConflictError('Mode selection conflict or mode already set');
+      }
+    }
+  }
+
+  /**
+   * Record a MyFonts source URL that arrived before mode selection (T-PRICE-01).
+   * Only applies while mode is still absent (mode IS NULL); latest URL wins.
+   * Transient: cleared by selectMode() and resetSession().
+   */
+  async setPendingSourceUrl(
+    userId: string,
+    sourceUrl: string,
+    updateId?: number
+  ): Promise<void> {
+    const now = Date.now();
+    const updateSessionStmt = this.db
+      .prepare(
+        `UPDATE telegram_sessions SET
+           pending_source_url = ?,
+           updated_at = ?
+          WHERE user_id = ? AND mode IS NULL`
+      )
+      .bind(sourceUrl, now, userId);
 
     if (updateId !== undefined) {
       const updateLedgerStmt = this.db

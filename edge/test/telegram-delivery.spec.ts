@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, vi } from 'vitest';
 import { env } from 'cloudflare:test';
 import { OutboxService } from '../src/services/outbox-service';
 import { JobService } from '../src/services/job-service';
@@ -12,7 +12,9 @@ describe('Issue #33: In-Telegram Bot API sendDocument Delivery & Multipart Recov
   const setupOrderWithReceipt = async (params: {
     partsCount?: number;
     partSizes?: number[];
+    mode?: 'ORIGINAL' | 'VIETNAMESE' | null;
   }) => {
+    const orderMode = params.mode === undefined ? 'ORIGINAL' : params.mode;
     const orderId = `ord_tgdel_${crypto.randomUUID().replace(/-/g, '')}`;
     const jobId = `job_tgdel_${crypto.randomUUID().replace(/-/g, '')}`;
     const userId = `user_tgdel_${crypto.randomUUID().replace(/-/g, '')}`;
@@ -25,12 +27,14 @@ describe('Issue #33: In-Telegram Bot API sendDocument Delivery & Multipart Recov
       .bind(userId, now, now)
       .run();
 
-    const metadataJson = JSON.stringify({ family_name: 'Roboto Test' });
+    const metadataJson = orderMode
+      ? JSON.stringify({ family_name: 'Roboto Test', mode: orderMode })
+      : JSON.stringify({ family_name: 'Roboto Test' });
     await env.DB.prepare(
-      `INSERT INTO orders (id, user_id, status, total_amount, currency, metadata, created_at, updated_at, completed_at)
-       VALUES (?, ?, 'COMPLETED', 50000, 'VND', ?, ?, ?, ?)`
+      `INSERT INTO orders (id, user_id, status, total_amount, currency, metadata, mode, created_at, updated_at, completed_at)
+       VALUES (?, ?, 'COMPLETED', 50000, 'VND', ?, ?, ?, ?, ?)`
     )
-      .bind(orderId, userId, metadataJson, now, now, now)
+      .bind(orderId, userId, metadataJson, orderMode, now, now, now)
       .run();
 
     await env.DB.prepare(
@@ -139,7 +143,7 @@ describe('Issue #33: In-Telegram Bot API sendDocument Delivery & Multipart Recov
       expect(fetchCalls.length).toBe(1);
       expect(fetchCalls[0].url).toContain('/sendDocument');
       expect(fetchCalls[0].formData.get('chat_id')).toBe('889977');
-      expect(fetchCalls[0].formData.get('caption')).toBe('📦 <b>Roboto Test</b>');
+      expect(fetchCalls[0].formData.get('caption')).toBe('📦 <b>Roboto Test</b> · ORIGINAL');
 
       const outbox = await env.DB.prepare('SELECT status, dispatched_at, last_dispatch_error FROM outbox_events WHERE id = ?')
         .bind(eventId)
@@ -190,9 +194,9 @@ describe('Issue #33: In-Telegram Bot API sendDocument Delivery & Multipart Recov
 
       // Verify all 3 parts sent in order
       expect(fetchCalls.length).toBe(3);
-      expect(fetchCalls[0].formData.get('caption')).toBe('📦 <b>Roboto Test</b> (Part 1/3)');
-      expect(fetchCalls[1].formData.get('caption')).toBe('📦 <b>Roboto Test</b> (Part 2/3)');
-      expect(fetchCalls[2].formData.get('caption')).toBe('📦 <b>Roboto Test</b> (Part 3/3)');
+      expect(fetchCalls[0].formData.get('caption')).toBe('📦 <b>Roboto Test</b> · ORIGINAL (Part 1/3)');
+      expect(fetchCalls[1].formData.get('caption')).toBe('📦 <b>Roboto Test</b> · ORIGINAL (Part 2/3)');
+      expect(fetchCalls[2].formData.get('caption')).toBe('📦 <b>Roboto Test</b> · ORIGINAL (Part 3/3)');
 
       const outbox = await env.DB.prepare('SELECT status, payload FROM outbox_events WHERE id = ?')
         .bind(eventId)
@@ -272,8 +276,8 @@ describe('Issue #33: In-Telegram Bot API sendDocument Delivery & Multipart Recov
 
       // Total fetch calls = 1 (part 1) + 1 (part 2 fail) + 1 (part 2 retry) + 1 (part 3) = 4
       expect(fetchCalls.length).toBe(4);
-      expect(fetchCalls[2].formData.get('caption')).toBe('📦 <b>Roboto Test</b> (Part 2/3)');
-      expect(fetchCalls[3].formData.get('caption')).toBe('📦 <b>Roboto Test</b> (Part 3/3)');
+      expect(fetchCalls[2].formData.get('caption')).toBe('📦 <b>Roboto Test</b> · ORIGINAL (Part 2/3)');
+      expect(fetchCalls[3].formData.get('caption')).toBe('📦 <b>Roboto Test</b> · ORIGINAL (Part 3/3)');
 
       const outboxFinal = await env.DB.prepare('SELECT status, payload FROM outbox_events WHERE id = ?')
         .bind(eventId)
@@ -338,4 +342,108 @@ describe('Issue #33: In-Telegram Bot API sendDocument Delivery & Multipart Recov
       globalThis.fetch = originalFetch;
     }
   });
-});
+
+  it('binds VIETNAMESE mode into delivery caption and telegram_delivered log (mode-bound delivery identity, distinct from ORIGINAL)', async () => {
+    const { orderId, eventId } = await setupOrderWithReceipt({ partsCount: 1, mode: 'VIETNAMESE' });
+
+    const fetchCalls: Array<{ url: string; formData: FormData }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url.includes('api.telegram.org')) {
+        const formData = init?.body instanceof FormData ? init.body : new FormData();
+        fetchCalls.push({ url, formData });
+        return new Response(JSON.stringify({ ok: true, result: { message_id: 401 } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return originalFetch(input, init);
+    };
+
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    try {
+      const mockQueue = { send: async () => {}, sendBatch: async () => {} } as unknown as Queue<unknown>;
+      const deliveryEnv: Env = {
+        ...(env as unknown as Env),
+        TELEGRAM_BOT_TOKEN: 'test_bot_token',
+        ARTIFACTS_BUCKET: env.ARTIFACTS_BUCKET,
+      };
+
+      const outboxService = new OutboxService(env.DB, mockQueue, deliveryEnv);
+      const res = await outboxService.dispatchPendingEvents({ batchSize: 10 });
+
+      expect(res.dispatchedCount).toBe(1);
+      expect(res.failureCount).toBe(0);
+
+      // Mode-bound delivery evidence (acceptance P3): the VIETNAMESE identity is
+      // embedded in the caption and is distinct from the ORIGINAL identity.
+      expect(fetchCalls.length).toBe(1);
+      const vietnameseCaption = fetchCalls[0].formData.get('caption');
+      expect(vietnameseCaption).toBe('📦 <b>Roboto Test</b> · VIETNAMESE');
+      expect(vietnameseCaption).not.toBe('📦 <b>Roboto Test</b> · ORIGINAL');
+
+      // telegram_delivered structured log carries the durable mode identity.
+      const deliveredLogs = consoleSpy.mock.calls
+        .map((call) => String(call[0]))
+        .filter((line) => line.includes('"event":"telegram_delivered"'));
+      expect(deliveredLogs.length).toBe(1);
+      const parsedLog = JSON.parse(deliveredLogs[0]) as Record<string, unknown>;
+      expect(parsedLog.order_id).toBe(orderId);
+      expect(parsedLog.event_id).toBe(eventId);
+      expect(parsedLog.mode).toBe('VIETNAMESE');
+    } finally {
+      globalThis.fetch = originalFetch;
+      consoleSpy.mockRestore();
+    }
+  });
+
+  it('fails closed DELIVERY_READY for an absent-mode legacy order: stays PENDING with MODE_ABSENT_LEGACY_ORDER, no Telegram call, no backfill', async () => {
+    const { orderId, eventId } = await setupOrderWithReceipt({ partsCount: 1, mode: null });
+
+    let telegramSent = false;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url.includes('api.telegram.org')) {
+        telegramSent = true;
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      return originalFetch(input, init);
+    };
+
+    try {
+      const mockQueue = { send: async () => {}, sendBatch: async () => {} } as unknown as Queue<unknown>;
+      const deliveryEnv: Env = {
+        ...(env as unknown as Env),
+        TELEGRAM_BOT_TOKEN: 'test_bot_token',
+        ARTIFACTS_BUCKET: env.ARTIFACTS_BUCKET,
+      };
+
+      const outboxService = new OutboxService(env.DB, mockQueue, deliveryEnv);
+      const res = await outboxService.dispatchPendingEvents({ batchSize: 10 });
+
+      expect(res.failureCount).toBe(1);
+      expect(res.dispatchedCount).toBe(0);
+      expect(telegramSent).toBe(false);
+
+      const outbox = await env.DB.prepare('SELECT status, last_dispatch_error FROM outbox_events WHERE id = ?')
+        .bind(eventId)
+        .first<{ status: string; last_dispatch_error: string }>();
+
+      expect(outbox?.status).toBe('PENDING');
+      expect(outbox?.last_dispatch_error).toBe('MODE_ABSENT_LEGACY_ORDER');
+
+      // Legacy order is never defaulted to ORIGINAL and never backfilled with a mode.
+      const order = await env.DB.prepare('SELECT status, mode, metadata FROM orders WHERE id = ?')
+        .bind(orderId)
+        .first<{ status: string; mode: string | null; metadata: string }>();
+      expect(order?.status).toBe('COMPLETED');
+      expect(order?.mode).toBeNull();
+      const meta = JSON.parse(order?.metadata || '{}') as Record<string, unknown>;
+      expect(meta.mode).toBeUndefined();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });});

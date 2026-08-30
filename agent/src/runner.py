@@ -76,6 +76,8 @@ TERMINAL_ERROR_CODES = frozenset({
     "MALFORMED_SOURCE_INPUT",
     "CORRUPT_SOURCE_IMAGE",
     "UNSUPPORTED_FORMAT",
+    "MISSING_MODE",
+    "UNSUPPORTED_MODE",
     "NO_FILES_GENERATED",
     "STAGE9D_GATE_FAILED",
     "ACQUISITION_BINARY_INTEGRITY_FAILED",
@@ -127,6 +129,26 @@ def _safe_error_code(exc: Exception) -> str:
         if raw.startswith(prefix):
             return canonical
     return UNEXPECTED_ERROR_CODE
+
+
+SUPPORTED_JOB_MODES = frozenset({"ORIGINAL", "VIETNAMESE"})
+
+
+def _require_job_mode(job: ClaimedJob) -> str:
+    """Fail-closed mode binding (T-PRICE-01).
+
+    A job with an absent or unsupported mode never defaults to ORIGINAL:
+    the run fails with a clear terminal reason code (MISSING_MODE or
+    UNSUPPORTED_MODE). Defense-in-depth under the required-mode claim
+    validation in ClaimedJob.from_dict.
+    """
+    raw = job.mode if isinstance(job.mode, str) else ""
+    if not raw.strip():
+        raise ValueError("MISSING_MODE")
+    mode = raw.strip().upper()
+    if mode not in SUPPORTED_JOB_MODES:
+        raise ValueError("UNSUPPORTED_MODE")
+    return mode
 
 
 class RunnerAction(str, Enum):
@@ -529,7 +551,7 @@ class JobRunner:
         reuse_state: dict[str, Any],
     ) -> tuple[GeneratedFontFile, Any, str, str]:
         """Resolve one style+format through the reuse tiers; fail-closed."""
-        mode = (job.mode or "ORIGINAL").strip().upper()
+        mode = _require_job_mode(job)
         store = getattr(self.source_acquirer, "store", None)
         config = getattr(self.source_acquirer, "observation_config", None)
 
@@ -602,7 +624,14 @@ class JobRunner:
                     self._trace_record(f"L2_{style.id}_{fmt}", "GATE_FAIL", provenance=provenance)
 
         # L3: authorized binary win (zero geometry reconstruction).
+        # T-PRICE-01: BinaryCacheIdentity does not bind mode, so the L3
+        # binary shortcut is ORIGINAL-only (ADR-0002 exact-binary-wins
+        # semantics); VIETNAMESE must fall through to observable
+        # reconstruction and never consume an ORIGINAL binary.
         binary = reuse_state.get("binaries", {}).get(style.id)
+        if binary is not None and mode != "ORIGINAL":
+            self._trace_record(f"L3_{style.id}_{fmt}", "BINARY_REUSE_REFUSED_MODE", mode=mode)
+            binary = None
         if binary is not None:
             self._trace_record(f"L3_{style.id}_{fmt}", "BINARY_REUSE", provenance=binary.provenance)
             font_file = prepare_binary_artifact(
@@ -902,7 +931,7 @@ class JobRunner:
                 reuse_state["gated"] = gated
                 if gated:
                     cfg_h = gate_config.compute_hash()
-                    job_mode = (job.mode or "ORIGINAL").strip().upper()
+                    job_mode = _require_job_mode(job)
                     family_envelope = None
                     needs_acquisition = False
                     for style in job.styles:
@@ -941,11 +970,13 @@ class JobRunner:
                         # provider/network call. Identity binds the actual
                         # acquisition stage provenance; the compatible-reuse
                         # rule probes the deterministic provenance order.
+                        # T-PRICE-01: the L3 binary shortcut is ORIGINAL-only
+                        # (BinaryCacheIdentity does not bind mode).
                         l3_ref_fp = hashlib.sha256(
                             canonical_source_identity(job.source_url).encode("utf-8")
                         ).hexdigest()
                         l3_hit = None
-                        if self.binary_cache is not None:
+                        if job_mode == "ORIGINAL" and self.binary_cache is not None:
                             for prov in BINARY_PROVENANCE_PROBE_ORDER:
                                 l3_identity = BinaryCacheIdentity(
                                     reference_fingerprint=l3_ref_fp,
@@ -963,7 +994,7 @@ class JobRunner:
                                 if cache_status == "HIT" and cached_raw is not None:
                                     l3_hit = (cached_raw, cached_fmt, cached_prov or prov)
                                     break
-                        if l3_hit is not None:
+                        if job_mode == "ORIGINAL" and l3_hit is not None:
                             cached_raw, cached_fmt, cached_prov = l3_hit
                             reuse_state["binaries"][style.id] = AcquiredBinary(
                                 raw_bytes=cached_raw,
@@ -1002,7 +1033,14 @@ class JobRunner:
                             self.last_reuse_trace["acquisition_traces"][style.id] = (
                                 outcome.trace.to_sanitized_dict()
                             )
-                            if outcome.kind == "binary" and outcome.binary is not None:
+                            if outcome.kind == "binary" and outcome.binary is not None and job_mode != "ORIGINAL":
+                                # T-PRICE-01: exact-binary-wins-immediately is ORIGINAL-only
+                                # (ADR-0002); VIETNAMESE must reconstruct through observable
+                                # evidence and never take the binary shortcut.
+                                self._trace_record(
+                                    f"PREACQ_{style.id}", "BINARY_WIN_REFUSED_MODE", mode=job_mode
+                                )
+                            if outcome.kind == "binary" and outcome.binary is not None and job_mode == "ORIGINAL":
                                 if self.binary_cache is not None:
                                     self.binary_cache.put(
                                         BinaryCacheIdentity(

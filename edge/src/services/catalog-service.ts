@@ -5,6 +5,13 @@ import type {
   CatalogRequestRecord,
   Style,
 } from '../types/catalog';
+import { MODE_PRICE_PER_STYLE_VND } from '../utils/pricing';
+
+// Catalogs are mode-independent: the persisted per-style base price is the
+// ORIGINAL-mode rate. VIETNAMESE pricing (8,000 VND/style) is enforced at
+// order-time exact-price computation (T-PRICE-01), never by this default,
+// so catalog defaults can never silently undercharge VIETNAMESE orders.
+const CATALOG_BASE_STYLE_PRICE_VND = MODE_PRICE_PER_STYLE_VND.ORIGINAL;
 
 function deterministicCatalogId(canonicalKey: string): string {
   let hash = 0x811c9dc5;
@@ -153,7 +160,8 @@ export class CatalogService {
     // Insert authoritative style set
     for (const style of catalog.styles) {
       const styleRowId = `style_${catalogId}_${style.id}`;
-      const price = style.price !== undefined ? style.price : 5000;
+      const price =
+        style.price !== undefined ? style.price : CATALOG_BASE_STYLE_PRICE_VND;
       statements.push(
         this.db
           .prepare(

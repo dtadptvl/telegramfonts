@@ -159,6 +159,7 @@ def test_runner_packages_verified_archive_hit_without_builder(test_settings: Set
         foundry=None,
         styles=[ClaimStyle("regular", "Regular")],
         formats=["TTF"],
+        mode="ORIGINAL",
     )
     identity = ArchiveIdentity(
         source_identity=context.source_identity,
@@ -340,6 +341,7 @@ async def test_runner_subset_and_reordered_styles_hit_two_style_archive(
             foundry=None,
             styles=styles,
             formats=["TTF"],
+            mode="ORIGINAL",
         )
         queue = QueueStub()
         worker = WorkerStub(job)

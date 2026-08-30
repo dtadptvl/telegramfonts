@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { env } from 'cloudflare:test';
 import worker from '../src/index';
 import type { TelegramUpdate } from '../src/types/telegram';
+import { SessionService } from '../src/services/session-service';
 
 describe('Phase 7: Fresh-Catalog E2E Resolution & Scheduled Cron Delivery', () => {
   const nodeSecret = 'test_internal_node_secret_32bytes_12345';
@@ -36,6 +37,12 @@ describe('Phase 7: Fresh-Catalog E2E Resolution & Scheduled Cron Delivery', () =
     });
 
     try {
+      // T-PRICE-01: pre-select mode so the URL message proceeds past the mode gate.
+      const sessionService = new SessionService(env.DB);
+      await sessionService.upsertTelegramUser({ id: userId, is_bot: false, first_name: 'TestUser' });
+      const s0 = await sessionService.getOrCreateSession(String(userId), String(chatId));
+      await sessionService.selectMode(String(userId), s0.workflow_token, 'ORIGINAL', s0.version);
+
       // 2. User sends fresh, unseen MyFonts URL to Telegram webhook
       const webhookPayload = {
         update_id: updateId,
@@ -177,6 +184,12 @@ describe('Phase 7: Fresh-Catalog E2E Resolution & Scheduled Cron Delivery', () =
     });
 
     try {
+      // T-PRICE-01: pre-select mode so the URL message proceeds past the mode gate.
+      const sessionService = new SessionService(env.DB);
+      await sessionService.upsertTelegramUser({ id: userId, is_bot: false, first_name: 'RegressionUser' });
+      const s0 = await sessionService.getOrCreateSession(String(userId), String(chatId));
+      await sessionService.selectMode(String(userId), s0.workflow_token, 'ORIGINAL', s0.version);
+
       // 1. User sends fresh MyFonts URL
       const webhookPayload = {
         update_id: updateId,
@@ -324,8 +337,8 @@ describe('Phase 7: Fresh-Catalog E2E Resolution & Scheduled Cron Delivery', () =
       .run();
 
     await env.DB.prepare(
-      `INSERT INTO orders (id, user_id, status, total_amount, currency, created_at, updated_at)
-       VALUES (?, ?, 'COMPLETED', 100000, 'VND', ?, ?)`
+      `INSERT INTO orders (id, user_id, status, total_amount, currency, mode, created_at, updated_at)
+       VALUES (?, ?, 'COMPLETED', 100000, 'VND', 'ORIGINAL', ?, ?)`
     )
       .bind(orderId, userId, now, now)
       .run();
@@ -910,10 +923,12 @@ describe('Phase 7: Fresh-Catalog E2E Resolution & Scheduled Cron Delivery', () =
       active_order_id: null,
       created_at: now,
       updated_at: now,
+      mode: 'ORIGINAL' as const,
+      pending_source_url: null,
     };
     await env.DB.prepare(
-      `INSERT INTO telegram_sessions (id, user_id, chat_id, status, catalog_id, selected_styles, selected_formats, workflow_token, checkout_token, version, created_at, updated_at)
-       VALUES (?, ?, ?, 'CONFIRMING', ?, ?, ?, 'w_tok_1', 'c_tok_1', 1, ?, ?)`
+      `INSERT INTO telegram_sessions (id, user_id, chat_id, status, catalog_id, selected_styles, selected_formats, workflow_token, checkout_token, version, created_at, updated_at, mode, pending_source_url)
+       VALUES (?, ?, ?, 'CONFIRMING', ?, ?, ?, 'w_tok_1', 'c_tok_1', 1, ?, ?, 'ORIGINAL', NULL)`
     )
       .bind('sess_price_1', userId, chatId, catalogId, session1.selected_styles, session1.selected_formats, now, now)
       .run();
@@ -948,10 +963,12 @@ describe('Phase 7: Fresh-Catalog E2E Resolution & Scheduled Cron Delivery', () =
       active_order_id: null,
       created_at: now,
       updated_at: now,
+      mode: 'ORIGINAL' as const,
+      pending_source_url: null,
     };
     await env.DB.prepare(
-      `INSERT INTO telegram_sessions (id, user_id, chat_id, status, catalog_id, selected_styles, selected_formats, workflow_token, checkout_token, version, created_at, updated_at)
-       VALUES (?, ?, ?, 'CONFIRMING', ?, ?, ?, 'w_tok_4', 'c_tok_4', 1, ?, ?)`
+      `INSERT INTO telegram_sessions (id, user_id, chat_id, status, catalog_id, selected_styles, selected_formats, workflow_token, checkout_token, version, created_at, updated_at, mode, pending_source_url)
+       VALUES (?, ?, ?, 'CONFIRMING', ?, ?, ?, 'w_tok_4', 'c_tok_4', 1, ?, ?, 'ORIGINAL', NULL)`
     )
       .bind('sess_price_4', userId4, chatId, catalogId, session4.selected_styles, session4.selected_formats, now, now)
       .run();

@@ -27,12 +27,13 @@ async function setupTestJob(
     family_name: 'Roboto Flex',
     foundry: 'Google Fonts',
     selected_formats: ['TTF', 'OTF'],
+    mode: 'ORIGINAL',
   });
 
-  // 1. Insert order
+  // 1. Insert order (mode = ORIGINAL: T-PRICE-01 durable mode identity)
   await env.DB.prepare(
-    `INSERT INTO orders (id, user_id, status, total_amount, currency, metadata, payment_code, created_at, updated_at)
-     VALUES (?, 12345, ?, 100000, 'VND', ?, ?, ?, ?)`
+    `INSERT INTO orders (id, user_id, status, total_amount, currency, metadata, payment_code, mode, created_at, updated_at)
+     VALUES (?, 12345, ?, 100000, 'VND', ?, ?, 'ORIGINAL', ?, ?)`
   )
     .bind(orderId, orderStatus, metadata, paymentCode, now, now)
     .run();
