@@ -13,14 +13,14 @@ phase:
   id: "fast30-cutover"
   status: active
 
-now:
-  - "T-FAST-ATLAS-ORIGINAL-GOLIVE-01"
+now: []
 next: []
 
 blockers:
-  - "ORIGINAL-FIRST CYCLE BLOCKED AT O5 (E-00028): A23 production-egress smoke failed fail-closed ATLAS_RASTER_SOURCE_UNAVAILABLE in 8.7s (one run, no retry): dump-dom found the family but no style MD5; candidate binaries rejected BINARY_FAMILY_MISMATCH; persistent-browser fallback unconstructible because the PINNED A23 RUNTIME (22-distribution fingerprint, pinned at b8c6994 lineage) does NOT contain playwright (lock diff 0 - never added); Monotype CDN unreachable without MD5; Algolia keyless. O6 NOT executed: Edge still d0d9c4ef, A23 active release still b8c6994 (worker PID 21267 undisturbed), runtime unchanged. ROOT GAP: frozen candidate 34f24b0 (integrated on main at fedf9f3) presupposes Playwright+browser in the runtime; closing requires a NEW bounded decision: new runtime pin (playwright+chromium + fresh runtime manifest/fingerprint + re-staging) OR a browser-free MD5/binary resolution path. Staged side-by-side release/runtime dirs for 34f24b0 remain on device (authorized staging; supervisor NOT switched)."
-  - "VIETNAMESE PRE-PAYMENT GATE LIVE-READY BUT UNDEPLOYED (E-00028): gate implemented + focused-proven (VIETNAMESE_ORDERING_ENABLED default 'false') on integrated main, but Edge deploy did not happen (O5 fail branch); production Edge still pre-gate. VN ordering lock takes effect at the next successful Edge deployment."
+  - "GO-LIVE COMPLETE (E-00032): BOT_ORIGINAL_READY. Edge version 973cf52b-08aa-42f2-b2d6-783332a52df3 (source 8f85b6f; VN gate false + MAX_JOB_AGE_MS live; /health 200; cron+queue triggers intact). A23 release+runtime b63ce6f57d3c26a46005bd7da7ab7d9d05898a14 ACTIVE (worker PID 12279, supervisor PID 11971, NO_LOCAL_ARCHIVE, idle polling). ORIGINAL ready for Human self-testing via bot. Milestone-3 final proof = Human's own bot test order (deliberately Human-executed). Rollback identities verified unused (Edge d0d9c4ef/166e45b; A23 b8c6994)."
+  - "VIETNAMESE FULFILLMENT STILL LOCKED pre-payment (gate live on Edge, VIETNAMESE_ORDERING_ENABLED='false'): unlocks only after a passing live VN AI smoke (providers were UNAVAILABLE at E-00026: Woku gpt-5.6-luna + gemini-3.7-flash UNAVAILABLE; gemma-3-12b-it candidates failed validators). Not blocking ORIGINAL by E-00027/E-00029."
   - "FAILED PAID ORDER ord_2a142f39 preserved for Human resolution: FAILED max_attempts_exhausted at 2026-08-30T12:00:29Z (expired attempt 6 zombie lineage b8c6994; mode ORIGINAL designated; payment VERIFIED 5,000 VND). No recovery executed (no authority). Options are Human-owned."
+  - "RESIDUAL QUALITY NOTE (non-blocking): 3 glyphs (U+00C5, U+0308, U+031B) fail 1024px-canvas geometry gates on the A23 smoke fixture - recorded future work."
   - "MINI-PC MIGRATION BLOCKER (preserved verbatim, DO NOT delete/rename/replay/repair, E-00018 section E): foreign production migration 0007_telegram_message_retention.sql (not in repo lineage) + prior deployed Edge lineage absent from repository history (deployments before 2026-08-30T09:35:22Z, versions eec4fd75..7c582378). Must remain visible for Mini PC migration reconciliation."
 
 exit:
@@ -41,7 +41,7 @@ human_requirements:
     - "E-00018 cycle TERMINAL (E-00022): T-FAST30-A23-FIX failed final acceptance on duration (wall machinery proven; measurement throughput is the remaining gap); T-A23-PROD-02 deployment authority VOID; failed paid order preserved for Human resolution; device idle; any further implementation/recovery/deployment requires fresh Human authorization; Human never executes commands/relays JSON"
     - "E-00023 SPEED-FIRST cycle COMPLETE (E-00024): T-FAST-ATLAS-ULTRA-01 accepted + integrated (merge e2a0b60); FAST_ATLAS_ULTRA_V1 under FAST_30 public name; walls 480s/720s; all fixture targets met with wide margins; NOT DEPLOYED (E-00023 grants no deployment/order-recovery authority); T-FAST30-A23-FIX result at f574d0c immutable with hardening preserved; A23 staging-only boundary honored; any deployment/recovery requires a fresh identity-bound Human envelope; Human never executes commands/relays JSON"
     - "T-PRICE-01 integrated line (head 166e45b) deploys ONLY inside the approved rev-4 envelope; absent-mode legacy orders otherwise fail closed by design and need Human decisions, never automatic repair"
-    - "E-00029 GO-LIVE AUTHORIZATION (gen 13): Prime owns ALL HOW to reach BOT_ORIGINAL_READY; budget <=3 smokes / <=2 runtime rebuilds / <=4h cycle / no blind retries; authorized: code+dep+runtime+packaging changes in scope, staging/rebuild/smoke iterations, reads for safe decisions, then freeze+Edge-deploy-once+A23-activate-once+supervisor-restart-once+readiness; ONE rollback allowed to pre-bound known-good (Edge d0d9c4ef / A23 release+runtime b8c6994) if readiness fails before accepting jobs; boundaries: VN locked pre-payment, ord_2a142f39 untouched, no paid orders/fake payments, no D1/Queue/R2 data mutations beyond normal deployment, no fakes, no MAX profiles, TTF+OTF-only, walls kept, dirty files + Mini PC migratability preserved; BLOCK only for new product decision/unobtainable credentials/out-of-scope mutation/genuine exhaustion"
+    - "E-00029 cycle COMPLETE (E-00032): BOT_ORIGINAL_READY - FAST_ATLAS line live on Edge (973cf52b) + A23 (b63ce6f release+runtime, one activation/one restart, rollback identities unused); ORIGINAL ready for Human bot self-testing; VN still locked pre-payment; failed paid order + Mini-PC blocker remain Human-owned; Human never executes commands/relays JSON"
     - "E-00011 mode proof: NEVER infer ORIGINAL from an absent mode field; fulfillment proceeds only on positive durable row evidence of mode/styles/formats/payment/delivery; VIETNAMESE or unproven -> STOP fail-closed, T-PRICE-01 before fulfillment"
 
 active_decisions:
@@ -64,7 +64,7 @@ recent_invalidations:
   - {generation: 13, scopes: [a23-staging-release, acquisition, atlas-runtime, product-flow], severity: breaking, source_event: E-00029, note: "COMPLETE ORIGINAL GO-LIVE: Prime owns HOW; T-FAST-ATLAS-ORIGINAL-GOLIVE-01 contracted; supersedes E-00027 single-smoke cap with Prime-set finite budget; rollback identities pre-bound"}
 
 reconciliation:
-  status: in_progress
-  event: E-00029
+  status: clean
+  event: E-00032
 
-updated_at: "2026-08-30T17:55:00Z"
+updated_at: "2026-08-30T20:50:00Z"

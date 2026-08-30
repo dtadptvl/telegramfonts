@@ -1,0 +1,72 @@
+schema_version: 8
+governance:
+  policy_rev: "P-20260830.9-LEAN-SAFE-R16"
+  fingerprint: "0fa00f66ee4873bf"
+  generation: 13
+task: T-FAST-ATLAS-ORIGINAL-GOLIVE-01
+contract_rev: 2
+mode: DEEP
+status: completed
+
+proved: [G1, G2, G3, G4, G5]
+unproved: []
+
+acceptance_evidence:
+  G1: >-
+    Runtime capability fixed + proven on device: requirements-lock already pinned
+    playwright 1.62.0 (+greenlet/pyee/websockets); device runtime had been a stale
+    b8c6994 copy never built from the lock -> rebuilt (25 dists exactly; pip
+    26.1.2 unchanged); playwright chromium installed in chroot
+    (/root/.cache/ms-playwright); supervisor probe set updated to the 25-dist
+    fingerprint (task branch). Proof: headless chromium launch, measureText +
+    canvas readback observed on device (proof.json), staged session start 2.02s.
+  G2: >-
+    Side-by-side staging at final candidate b63ce6f: release + runtime dirs by
+    SHA-name pairing; tar sha256 bad461d4...; ALL supervisor verifications PASS
+    (ARCHIVE_HASH, RELEASE_PATH_SET, TAR_DIFF, RUNTIME_MANIFEST 4186 entries,
+    RUNTIME_FINGERPRINT 25-dist); deployment manifest from candidate identity,
+    --verify 0 drift; archive_mode NO_LOCAL_ARCHIVE; current worker undisturbed
+    during staging.
+  G3: >-
+    ONE passing ORIGINAL smoke on A23 at iteration 5/5 (budget rev 2):
+    COMPLETED validation_passed=true wall 389.9s <=480s; easy 194 / refined 0 /
+    failed 3 (U+00C5, U+0308, U+031B honest) of 199 observed cps; TTF 26584B
+    sha256 4be5a95b... + OTF 20132B sha256 9826d3e7...; fonttools TTF+OTF ALL
+    PASS; harfbuzz shaping/positions/kern PASS; freetype load/render PASS;
+    combining marks retained advance 0; raster observed from fonts.gstatic.com
+    production egress (no fakes; Neurath Mono unusable by 4 documented facts,
+    substitute clause invoked); iterations 1-4 each diagnosed+fixed (async
+    unpack; ink convention; canvas dimension overflow; batch-local baselines).
+  G4: >-
+    Activation executed exactly as authorized: Edge deployed ONCE - version
+    973cf52b-08aa-42f2-b2d6-783332a52df3 from source
+    8f85b6fe2d67fb2d09881d3bf6ab5d46c2f9315c (/health 200; cron + queue-producer
+    triggers intact; VIETNAMESE_ORDERING_ENABLED=false + MAX_JOB_AGE_MS=2100000
+    live). A23 activated ONCE: launch copy ~/telefont-releases/b63ce6f...
+    (pristine audit copy byte-verified; constants materialized exactly); ONE
+    graceful supervisor TERM + ONE relaunch; READY in ~6s with all startup
+    verifications PASS; worker PID 12279 on release+runtime b63ce6f; idle
+    polling resumed; zero switch orphans; D1 post-read changed_db=false.
+    Rollback identities pre-bound (Edge d0d9c4ef/166e45b; A23 b8c6994) - UNUSED.
+  G5: >-
+    Boundaries preserved end-to-end: VN locked pre-payment (gate live on Edge);
+    ord_2a142f39 untouched; no paid orders/fake payments; zero D1/Queue/R2
+    product-data mutations (all reads changed_db=false); validation strictness
+    unchanged (negative gate test proves corrupted geometry still fails); no
+    fakes; no BALANCED_MAX/FULL_MAX; TTF+OTF only; walls kept (480s ORIGINAL
+    enforced live at iteration 3); unrelated dirty files preserved; no
+    A23-specific hardcoding (config-driven knobs; Debian-portable supervisor
+    convention).
+
+production_counts:
+  edge_deploys: 1
+  a23_activations: 1
+  supervisor_restarts: 1
+  d1_queue_r2_mutations: 0
+  smoke_iterations: 5   # all diagnosed; budget rev 2 (3->5)
+  runtime_rebuilds: 1
+
+residual_notes:
+  - "3 glyphs (U+00C5, U+0308, U+031B) fail 1024px-canvas geometry gates on the smoke fixture - recorded future work, non-blocking for ORIGINAL readiness."
+  - "VIETNAMESE fulfillment remains locked pre-payment until the live VN AI smoke passes (providers were unavailable at E-00026; gate active on Edge)."
+  - "Rollback identities remain verified but unused: Edge d0d9c4ef (source 166e45b), A23 release+runtime b8c6994."

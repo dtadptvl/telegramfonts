@@ -6,7 +6,7 @@ contract_rev: 2
 mode: DEEP
 validated_at_generation: 13
 scope_tags: [a23-staging-release, acquisition, atlas-runtime, product-flow]
-status: active
+status: completed   # E-00032: BOT_ORIGINAL_READY - G1-G5 proven; Edge 973cf52b (source 8f85b6f) + A23 release/runtime b63ce6f activated exactly once each; rollback identities unused
 
 objective: "Complete ORIGINAL go-live on A23 (E-00029): fix the runtime capability gap, pass one real production-egress ORIGINAL smoke on A23 within the approved wall, then freeze one final candidate and activate Edge + A23 exactly once each, reaching BOT_ORIGINAL_READY so Human can self-test ORIGINAL via the bot. Prime owns the HOW within the budget and boundaries below."
 

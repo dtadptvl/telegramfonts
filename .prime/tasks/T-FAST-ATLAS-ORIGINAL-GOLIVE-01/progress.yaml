@@ -3,7 +3,7 @@ policy_rev: "P-20260830.9-LEAN-SAFE-R16"
 policy_fingerprint: "0fa00f66ee4873bf"
 task: T-FAST-ATLAS-ORIGINAL-GOLIVE-01
 contract_rev: 2
-status: in_progress
+status: completed
 budget_extension: "contract rev 2 / E-00030: smoke budget 3->5 iterations (diagnosed-cause rule); rebuilds <=2; cycle wall +2h"
 
 milestones:
@@ -31,3 +31,6 @@ milestones:
   - id: M4_BOUNDARIES
     status: completed
     evidence: "Zero production mutations throughout (D1/Queue/R2/payment/order/Telegram untouched; queue idle; FONT_ARCHIVE_MODE untouched; no supervisor switch/restart during staging/smoke; worker 21267 + supervisor 23985 alive; zero smoke-orphan chromium; pre-existing 3785 tree intact). No secrets read/logged. No fakes (all raster/metrics observed from fonts.gstatic.com production egress). Budget used: iterations 5/5, rebuilds 1/2, no blind retries. G4 handoff: staged /opt/telefont-release-b63ce6f... + runtime b63ce6f (25 dists); launch constants RELEASE_SHA=b63ce6f, RELEASE_ARCHIVE_SHA256=bad461d4..., 25-dist runtime fingerprint; playwright chromium in /root/.cache/ms-playwright; ATLAS_PLAYWRIGHT_CDP_URL fallback available. Note: 3 glyphs (U+00C5, U+0308, U+031B) fail 1024px-canvas geometry gates - recorded future work, non-blocking."
+  - id: M7_G4_ACTIVATION
+    status: completed
+    evidence: "EDGE deployed exactly once: version 973cf52b-08aa-42f2-b2d6-783332a52df3 from source 8f85b6f (/health 200; cron+queue-producer intact; VIETNAMESE_ORDERING_ENABLED=false + MAX_JOB_AGE_MS live). A23 activated exactly once: launch copy b63ce6f (pristine byte-verified; constants exact; fingerprint match); ONE TERM + ONE relaunch; READY ~6s all startup verifications PASS; worker PID 12279 on release+runtime b63ce6f; idle polling; zero orphans; D1 changed_db=false. Rollback identities UNUSED. Bot ORIGINAL READY."
