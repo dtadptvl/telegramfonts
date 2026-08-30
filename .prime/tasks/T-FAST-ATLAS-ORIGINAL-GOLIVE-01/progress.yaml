@@ -1,0 +1,13 @@
+schema_version: 8
+policy_rev: "P-20260830.9-LEAN-SAFE-R16"
+policy_fingerprint: "0fa00f66ee4873bf"
+task: T-FAST-ATLAS-ORIGINAL-GOLIVE-01
+contract_rev: 1
+status: in_progress
+milestones:
+  - id: M0_DISCOVERY
+    status: completed
+    evidence: "Conventions discovered: runtime = chroot venv /opt/telefont-runtime-<SHA> + manifest (fingerprint header + sha256sum entries); probe set defined in scripts/debian_worker_supervisor.sh (names tuple + EXPECTED_RUNTIME_FINGERPRINT); release<->runtime pairing is by SHA name; per-release constants materialized in device launch copy ~/telefont-releases/<SHA>/scripts/debian_worker_supervisor.sh (verified for b8c6994: RELEASE_SHA + RELEASE_ARCHIVE_SHA256 dae00f72... match actual tar); staged-tree script is the frozen template. Live state verified: supervisor PID 23985 + worker PID 21267 (release b8c6994) RUNNING as root (hidden from non-root ps by hidepid; confirmed via su + /proc), actively polling empty queue; pre-existing chromium PID 3785 (port 56891) untouched. agent/requirements-lock.txt at candidate base ALREADY pins playwright==1.62.0 + greenlet==3.5.5 + pyee==13.0.1 + websockets==17.0.1 (verified at 34f24b0; zero diff to f87f6c8); device runtime (22 dists) was built as a copy of the b8c6994 runtime, not from the lock - that is the playwright gap."
+  - id: M1_G1_RUNTIME_CAPABILITY
+    status: in_progress
+    evidence: ""
