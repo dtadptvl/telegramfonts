@@ -1,0 +1,92 @@
+task: T-A23-PROD-01
+contract_rev: 5
+policy_rev: "P-20260830.9-LEAN-SAFE-R16"
+policy_fingerprint: "0fa00f66ee4873bf"
+branch: prime-v12-cutover
+immutable_product_source: "166e45b72b55e2c1f04e30ec7a73a07179e2ed62"
+mode: TERMINAL (FAST30_FAILED wall; fail-closed STOP per contract stop conditions + A6 unused-authority expiry)
+wall: "30 min from P0 liveness 2026-08-30T09:31:11Z -> deadline 2026-08-30T10:01:11Z (conservative single-deadline reading; zero-mutation active path)"
+
+milestones:
+  - id: P0
+    ts: "2026-08-30T09:31:11Z"
+    status: done
+    summary: >-
+      Fresh inspection (7 SELECTs, 0 mutations): classification
+      GENUINELY_ACTIVE - job PROCESSING attempt 6/6, lease
+      a23-termux-primary-01 token e3fd2050-b9f2-4464-bd4d-b87d07960d6b,
+      lease renewing (~5-min windows), updated_at 09:28:59Z at read;
+      payment SEPAY/77506129/VERIFIED/5000/VND confirmed; order
+      PROCESSING 5000 VND metadata exact captured (updated_at
+      1788032751138); receipts empty; outbox JOB_READY SENT.
+      ANOMALY: production d1_migrations already contained
+      0007_telegram_message_retention.sql (not in repo lineage -
+      deployed D1 had a migration the repo does not carry; explains
+      telegram_message_retention table seen at PA2). Device process
+      observation surface unavailable; liveness proven by lease
+      evidence only (recorded as such).
+  - id: M1
+    ts: "2026-08-30T09:33:30Z"
+    status: done
+    summary: >-
+      Migration 0007_font_mode.sql applied to production D1 exactly
+      once (wrangler-tracked, applied cleanly alongside foreign
+      0007_telegram_message_retention.sql); read-back verified
+      orders.mode + telegram_sessions.mode/pending_source_url columns.
+  - id: M2
+    ts: "2026-08-30T09:34:22Z"
+    status: done
+    summary: >-
+      Strong CAS mode designation (A3): immediately fresh snapshot
+      matched all P0 values (no drift); single UPDATE binding exact
+      order id + mode IS NULL + status PROCESSING + total_amount 5000
+      + currency VND + prior updated_at 1788032751138 + exact prior
+      metadata; payment identity precondition verified; rows_changed
+      EXACTLY 1; read-back mode=ORIGINAL updated_at=1788082462893.
+      No session/other-order/metadata backfill. Remediation complete
+      for this order only; never general backfill.
+  - id: M3
+    ts: "2026-08-30T09:35:22Z"
+    status: done
+    summary: >-
+      Edge deployed ONCE from clean worktree
+      E:\cv\telefont-deploy-166e45b checked out at exact
+      166e45b (A1; origin/main containment verified pre-checkout).
+      Worker telegramfonts-edge version
+      d0d9c4ef-47db-42ca-8940-cbeeb72d6d4f; triggers intact (cron
+      per-minute, queue producer); liveness GET / -> 404 (worker
+      serving). Prior production deployment was 2026-08-29T19:43:29Z
+      (lineage not in repo) - replaced by exact 166e45b.
+  - id: M4
+    status: expired_unused
+    summary: >-
+      A23 release authority EXPIRED UNUSED (A6): attempt 6 remained
+      GENUINELY_ACTIVE through the entire wall (A2 hold condition
+      never released before deadline); no interruption performed.
+  - id: M5
+    status: expired_unused
+    summary: >-
+      Dispatch authority EXPIRED UNUSED: zero mutation while attempt
+      genuinely active (active valid lease -> do not dispatch, A4);
+      wall expired before any attempt termination.
+  - id: P6
+    status: done
+    summary: >-
+      Monitoring: 12 polls x 4 SELECTs (09:37:05Z..10:00:11Z). Job
+      heartbeating throughout (lease renewed every ~5 min; final poll
+      lease_expires_at 1788084299366 ~= 10:04:59Z, updated_at
+      1788083999366 ~= 09:59:59Z); order+job PROCESSING entire wall;
+      no receipt, no delivery outbox event, last_error null.
+      STILL_ACTIVE_WALL_REACHED at deadline -> FAST30_FAILED STOP.
+
+terminal:
+  outcome: "FAST30_FAILED (30-minute delivery wall exceeded; attempt still genuinely active and healthy at deadline)"
+  delivery: "NOT delivered within the wall; attempt 6 continues running untouched under its own momentum (device agent old identity + edge exact 166e45b; order mode=ORIGINAL designated, so the new edge delivery gate will pass if/when the attempt completes)"
+  order_state: "ord_2a142f39 PROCESSING, mode=ORIGINAL, payment VERIFIED - preserved unchanged apart from the authorized mode designation"
+  mutations_executed: 3
+  mutations_expired_unused: 2
+
+production_counts:
+  read_sessions: 16   # P0 (7 SELECTs) + M1 verify (3) + M2 snapshot+readback (5) + P6 monitor 12 polls x 4 SELECTs (48) = 63 SELECTs
+  mutations: 3        # M1 tracked migration application, M2 one CAS row, M3 one edge deployment
+  deploy_identity: "telegramfonts-edge version d0d9c4ef-47db-42ca-8940-cbeeb72d6d4f from exact 166e45b"

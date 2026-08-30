@@ -6,7 +6,7 @@ contract_rev: 5
 mode: NORMAL
 validated_at_generation: 8
 scope_tags: [a23-production-dispatch, product-flow, pricing, production-remediation]
-status: approved   # E-00016: approved with binding amendments A1-A6; faithful transcription of rev 4 + amendments; execution authorized without further approval
+status: terminal   # E-00017: FAST30_FAILED wall terminal (attempt genuinely active through entire wall); M4/M5 authority expired unused per A6; no interruption performed
 
 objective: "Remediation fulfillment (E-00015, approved with binding amendments E-00016) of legacy paid order ord_2a142f39 under Human-designated mode ORIGINAL at the already-paid price: fresh inspection with branch semantics, migration 0007, one strong CAS-bound mode designation for this order only, exact 166e45b deployment to edge (clean worktree) + A23 with active-attempt protection, at most one identity-bound dispatch/recovery mutation, 30-minute delivery wall, all-or-nothing delivery of exactly the ordered format [TTF]."
 

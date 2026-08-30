@@ -18,9 +18,9 @@ now:
 next: []
 
 blockers:
-  - "REV 5 APPROVED WITH BINDING AMENDMENTS A1-A6 (E-00016); T-A23-PROD-01 executing as faithful transcription: fresh inspection -> migration 0007 -> strong one-order CAS mode=ORIGINAL -> exact 166e45b edge deploy from clean worktree -> A23 release with active-attempt protection -> at most one identity-bound dispatch -> 30-min wall monitoring. Terminal report once."
-  - "DEPLOYMENT IDENTITY RULE (A1): immutable product source = exact 166e45b72b55e2c1f04e30ec7a73a07179e2ed62; deploy from clean worktree checked out at exact 166e45b after verifying origin/main contains it; origin/main tip MAY advance (authorization-memory commits)."
-  - "JOB STATE UNKNOWN SINCE PA2 (2026-08-30T07:30Z live lease attempt 6/6, expiry ~07:31:57Z): resolved by P0 fresh inspection with A2 branching (GENUINELY_ACTIVE never interrupted; COMPLETED/FAILED reduce mutation counts; STUCK proceeds under guards)."
+  - "REV-5 ENVELOPE TERMINAL (E-00017): FAST30_FAILED wall - attempt 6 stayed GENUINELY_ACTIVE (healthy heartbeats every ~5 min) through the entire 30-min wall; delivery did not complete within the wall; fail-closed STOP executed; M4 (A23 release) and M5 (dispatch) authority EXPIRED UNUSED per A6; nothing interrupted. Executed: M1 migration 0007 applied, M2 strong CAS mode=ORIGINAL (1 row), M3 edge deployed exact 166e45b (version d0d9c4ef)."
+  - "ATTEMPT 6 STILL RUNNING AT WALL (last observed 10:00:11Z, lease to ~10:04:59Z, no last_error): the job continues under its own momentum on device agent (pre-166e45b identity) against edge exact 166e45b; order mode=ORIGINAL designated so the new edge delivery gate passes if/when it completes. Current state unobserved since 10:00:11Z - fresh authorized read needed to learn outcome."
+  - "A23 AGENT IDENTITY STALE ON DEVICE: edge is exact 166e45b but device agent still runs pre-166e45b identity (M4 expired unused); any future device-side product behavior requires a new authorized release envelope."
 
 exit:
   - "one controlled bot order completed end-to-end on A23 under FAST_30 with verified TTF/OTF delivery within the 30-minute wall limit (requires separate consequential authorization for the A23 production leg)"
@@ -36,7 +36,7 @@ human_requirements:
     - "runtime model failover only for capacity/unavailability with unchanged contract and reusable evidence"
     - "never fake/bypass/weaken external-ext4/filesystem identity checks; loopback never posed as canonical archive"
     - "stale A23 retired-profile job: read-only inspection only; no mutation without explicit authorization"
-    - "REV 5 APPROVED + EXECUTING (E-00016): binding amendments A1-A6 transcribed faithfully into contract_rev 5 (deployment via clean worktree at exact 166e45b; A2 P0 branching; A3 strong CAS binding all identity fields; A4 race protection; A5 acceptance = exactly ordered format [TTF] all-or-nothing; A6 mutation maximums, unused authority expires); Human remediation designation mode=ORIGINAL for ord_2a142f39 ONLY, never general backfill; Human never executes commands/relays JSON"
+    - "REV-5 ENVELOPE TERMINAL (E-00017): FAST30_FAILED wall with attempt still active; M4/M5 expired unused (A6); remediation mode designation + product-line edge activation completed within the envelope; any further action (continued observation, A23 release, new fulfillment envelope) requires fresh Human authorization; Human never executes commands/relays JSON"
     - "T-PRICE-01 integrated line (head 166e45b) deploys ONLY inside the approved rev-4 envelope; absent-mode legacy orders otherwise fail closed by design and need Human decisions, never automatic repair"
     - "E-00011 mode proof: NEVER infer ORIGINAL from an absent mode field; fulfillment proceeds only on positive durable row evidence of mode/styles/formats/payment/delivery; VIETNAMESE or unproven -> STOP fail-closed, T-PRICE-01 before fulfillment"
 
@@ -54,7 +54,7 @@ recent_invalidations:
   - {generation: 8, scopes: [production-dispatch, product-flow, pricing, production-remediation], severity: breaking, source_event: E-00016, note: "envelope approved with binding amendments A1-A6; rev 4 superseded by rev 5; execution authorized as faithful transcription"}
 
 reconciliation:
-  status: in_progress
-  event: E-00016
+  status: clean
+  event: E-00017
 
-updated_at: "2026-08-30T09:30:00Z"
+updated_at: "2026-08-30T10:05:00Z"
