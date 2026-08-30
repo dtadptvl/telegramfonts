@@ -88,6 +88,12 @@ class Settings(BaseSettings):
         le=120.0,
         description="Default HTTP timeout in seconds",
     )
+    HEARTBEAT_TIMEOUT_SECONDS: float = Field(
+        default=10.0,
+        ge=0.05,
+        le=120.0,
+        description="HTTP timeout in seconds for sync lease heartbeat calls",
+    )
 
     # T-FAST30-A23-FIX F1: hard monotonic job wall (claim -> ACK). Independent
     # of the heartbeat-moved lease expiry: breach raises terminal FAST30_FAILED

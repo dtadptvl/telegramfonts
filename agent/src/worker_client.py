@@ -262,15 +262,20 @@ class WorkerJobClient:
             logger.warning(f"Network error on heartbeat ({job_id}): {type(exc).__name__}")
             return HeartbeatResult(success=False, fenced=False)
 
-    def heartbeat_sync(self, job_id: str, lease_token: str) -> HeartbeatResult:
+    def heartbeat_sync(
+        self,
+        job_id: str,
+        lease_token: str,
+        timeout: float | None = None,
+    ) -> HeartbeatResult:
         """Blocking lease heartbeat for the dedicated heartbeat thread.
 
         Exact mirror of async heartbeat() (same endpoint, payload, auth, and
         response semantics) but safe to call OFF the event loop: synchronous
         compute that blocks the loop can therefore never starve lease
         extensions (Issue #90 attempt 5: zero heartbeats over ~21 minutes of
-        healthy compute). Uses a short-lived sync client; never shares the
-        loop-bound async client across threads.
+        healthy compute). Uses a bounded sync timeout (default HEARTBEAT_TIMEOUT_SECONDS = 10s);
+        never shares the loop-bound async client across threads.
         """
         url = f"{self.base_url}/{job_id}/heartbeat"
         payload = {
@@ -278,13 +283,17 @@ class WorkerJobClient:
             "lease_token": lease_token,
             "extend_seconds": self.settings.LEASE_DURATION_SECONDS,
         }
+        hb_timeout = timeout if timeout is not None else getattr(self.settings, "HEARTBEAT_TIMEOUT_SECONDS", 10.0)
 
         try:
             if self._sync_client is not None:
                 resp = self._sync_client.post(url, headers=self.headers, json=payload)
             else:
-                with httpx.Client(timeout=self.settings.HTTP_TIMEOUT_SECONDS) as client:
+                with httpx.Client(timeout=hb_timeout) as client:
                     resp = client.post(url, headers=self.headers, json=payload)
+        except httpx.TimeoutException as exc:
+            logger.warning(f"Heartbeat timed out ({job_id}): {type(exc).__name__}")
+            raise
         except httpx.RequestError as exc:
             logger.warning(f"Network error on heartbeat ({job_id}): {type(exc).__name__}")
             return HeartbeatResult(success=False, fenced=False)
