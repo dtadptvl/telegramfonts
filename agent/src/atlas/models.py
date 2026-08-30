@@ -59,7 +59,12 @@ class CellMapping:
 
 @dataclass(frozen=True)
 class PlacedCell:
-    """One glyph cell placed inside an atlas page."""
+    """One glyph cell placed inside an atlas page.
+
+    ``pen_left_px`` is the pen x offset inside the cell (R2): combining-mark
+    cells extend it by the observed left-of-pen ink extent so zero-advance
+    mark ink is captured.
+    """
 
     code_point: int
     page_index: int
@@ -70,6 +75,7 @@ class PlacedCell:
     size_px: int
     phase_x: float = 0.0
     phase_y: float = 0.0
+    pen_left_px: int = 128
 
 
 @dataclass(frozen=True)

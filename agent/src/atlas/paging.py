@@ -25,21 +25,32 @@ CELL_PAD_Y_PX = 128
 MAX_CANVAS_DIMENSION_PX = 16384
 
 
+def pen_left_px(extra_left_px: float = 0.0) -> int:
+    """Pen x offset inside the cell: base padding + observed left ink extent.
+
+    Combining marks (R2) frequently carry ink LEFT of the pen origin; the
+    pen offset grows by exactly the observed extent so mark ink is captured.
+    """
+    return int(CELL_PAD_X_PX + max(0.0, float(extra_left_px)) + 0.5)
+
+
 def cell_dimensions(
     advance_px: float,
     ascent_px: float,
     descent_px: float,
     size_px: int,
+    extra_left_px: float = 0.0,
 ) -> tuple[int, int]:
     """Deterministic cell size for one glyph at one render size.
 
-    Width covers the regressed advance plus padding; height covers the
+    Width covers the regressed advance plus padding plus any observed
+    left-of-pen ink extent (combining marks, R2); height covers the
     regressed ink column (ascent + descent, floored at the em size) plus
     padding. Never smaller than the em box so whole-glyph ink is captured.
     """
     if size_px <= 0:
         raise ValueError("ATLAS_CELL_SIZE_INVALID")
-    w = int(max(1.0, advance_px) + 2 * CELL_PAD_X_PX + 0.9999)
+    w = int(max(1.0, advance_px) + max(0.0, float(extra_left_px)) + 2 * CELL_PAD_X_PX + 0.9999)
     ink_h = max(float(size_px), float(ascent_px) + float(descent_px))
     h = int(ink_h + 2 * CELL_PAD_Y_PX + 0.9999)
     if w > MAX_CANVAS_DIMENSION_PX or h > MAX_CANVAS_DIMENSION_PX:
@@ -55,6 +66,7 @@ class PagePlanInput:
     size_px: int
     phase_x: float = 0.0
     phase_y: float = 0.0
+    extra_left_px: float = 0.0
 
 
 class AtlasBudgetExceeded(ValueError):
@@ -127,6 +139,7 @@ def plan_atlas_pages(
                     PlacedCell(
                         item.code_point, len(pages), shelf_x, shelf_y, w, h,
                         item.size_px, item.phase_x, item.phase_y,
+                        pen_left_px=pen_left_px(item.extra_left_px),
                     )
                 )
                 shelf_x += w
@@ -156,6 +169,7 @@ def plan_atlas_pages(
                 PlacedCell(
                     item.code_point, len(pages), 0, 0, w, h,
                     item.size_px, item.phase_x, item.phase_y,
+                    pen_left_px=pen_left_px(item.extra_left_px),
                 )
             )
             shelf_x = w
@@ -169,6 +183,7 @@ def plan_atlas_pages(
                 PlacedCell(
                     item.code_point, len(pages), 0, 0, w, h,
                     item.size_px, item.phase_x, item.phase_y,
+                    pen_left_px=pen_left_px(item.extra_left_px),
                 )
             )
             shelf_x = w
@@ -192,15 +207,23 @@ def estimate_cell_plan(
     size_px: int,
     target_mb: int,
     max_mb: int,
+    extra_left_px: dict[int, float] | None = None,
 ) -> list[AtlasPage]:
-    """Convenience planner from regressed pixel metrics (fast pass)."""
+    """Convenience planner from regressed pixel metrics (fast pass).
+
+    ``extra_left_px`` carries the observed left-of-pen ink extent for
+    combining-mark cells (R2); absent entries default to zero.
+    """
+    extras = extra_left_px or {}
     inputs: list[PagePlanInput] = []
     for cp in code_points:
+        extra = float(extras.get(cp, 0.0))
         w, h = cell_dimensions(
             advances_px.get(cp, float(size_px) * 0.6),
             ascents_px.get(cp, float(size_px) * 0.8),
             descents_px.get(cp, float(size_px) * 0.2),
             size_px,
+            extra_left_px=extra,
         )
-        inputs.append(PagePlanInput(cp, w, h, size_px))
+        inputs.append(PagePlanInput(cp, w, h, size_px, extra_left_px=extra))
     return plan_atlas_pages(inputs, target_mb * 1024 * 1024, max_mb * 1024 * 1024)
