@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import hashlib
 import json
 import logging
@@ -273,52 +274,71 @@ class JobRunner:
         expiry_holder: list[int],
         fenced_event: threading.Event,
         stop_event: threading.Event,
+        last_successful_beat_holder: list[float] | None = None,
     ) -> None:
         """Lease heartbeat loop on a dedicated thread (independent scheduler).
 
-        The heartbeat MUST keep extending the lease for the full duration of
-        acquisition/reconstruction/optimization/delivery. Running it as an
-        asyncio task on the compute loop was proven to starve it whenever
-        synchronous compute blocked the loop (Issue #90 attempt 5: zero
-        heartbeat requests and zero D1 lease extensions over ~21 minutes of
-        healthy compute; the cron reaper then correctly fenced the run). A
-        dedicated thread keeps beating regardless of event-loop blocking.
-        Cadence, endpoint payload, and fenced/transient reactions are
-        unchanged; reaper/lease semantics live on the edge and are untouched.
-        Renewals log at INFO so lease extensions are observable in
-        production logs.
+        Loop-progress guarantee (Incident E-00035 F1): executes each beat as a submitted
+        callable on a dedicated single-worker ThreadPoolExecutor with a HARD per-beat
+        deadline (HEARTBEAT_TIMEOUT_SECONDS). On TimeoutError or any exception: logs a
+        WARNING, abandons the stuck worker thread (never joins it), increments streak
+        counter, and proceeds to the next interval. The loop NEVER blocks beyond timeout+epsilon.
         """
         interval = self.settings.HEARTBEAT_INTERVAL_SECONDS
-        last_beat_attempted: float = 0.0
-        last_beat_ok: float = 0.0
-        while not stop_event.wait(timeout=interval):
-            if stop_event.is_set():
-                break
+        hb_timeout = getattr(self.settings, "HEARTBEAT_TIMEOUT_SECONDS", 10.0)
+        last_beat_failed_streak = 0
+        abandoned_beats = 0
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"hb-beat-{job_id}")
 
-            # T-FAST30-A23-FIX F5: a beating heartbeat IS progress; the
-            # supervisor watchdog kills only when this goes stale.
-            self._touch_progress_beacon("heartbeat")
-            last_beat_attempted = time.time()
+        try:
+            while not stop_event.wait(timeout=interval):
+                if stop_event.is_set():
+                    break
 
-            try:
-                hb_res = self.worker_client.heartbeat_sync(job_id, lease_token)
-            except Exception as exc:
-                logger.warning(
-                    "Heartbeat exception for %s; class=%s",
-                    job_id,
-                    type(exc).__name__,
-                )
-                continue
-            if hb_res.success and hb_res.lease_expires_at:
-                last_beat_ok = time.time()
-                expiry_holder[0] = hb_res.lease_expires_at
-                logger.info(f"Heartbeat renewed for job {job_id}, new expiry={hb_res.lease_expires_at}")
-            elif hb_res.fenced:
-                logger.warning(f"Job {job_id} lease was fenced or expired during execution")
-                fenced_event.set()
-                break
-            else:
-                logger.warning(f"Heartbeat transient failure for job {job_id}")
+                self._touch_progress_beacon("heartbeat")
+                fut = pool.submit(self.worker_client.heartbeat_sync, job_id, lease_token)
+                try:
+                    hb_res = fut.result(timeout=hb_timeout)
+                except TimeoutError as exc:
+                    abandoned_beats += 1
+                    last_beat_failed_streak += 1
+                    logger.warning(
+                        "Heartbeat timed out for %s; class=%s (abandoned=%d, streak=%d)",
+                        job_id,
+                        type(exc).__name__,
+                        abandoned_beats,
+                        last_beat_failed_streak,
+                    )
+                    # Abandon stuck thread: replace pool with a fresh single-worker pool
+                    pool.shutdown(wait=False, cancel_futures=True)
+                    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"hb-beat-{job_id}")
+                    continue
+                except Exception as exc:
+                    last_beat_failed_streak += 1
+                    logger.warning(
+                        "Heartbeat exception for %s; class=%s (streak=%d)",
+                        job_id,
+                        type(exc).__name__,
+                        last_beat_failed_streak,
+                    )
+                    continue
+
+                if hb_res.success and hb_res.lease_expires_at:
+                    now_mono = time.monotonic()
+                    last_beat_failed_streak = 0
+                    expiry_holder[0] = hb_res.lease_expires_at
+                    if last_successful_beat_holder is not None:
+                        last_successful_beat_holder[0] = now_mono
+                    logger.info(f"Heartbeat renewed for job {job_id}, new expiry={hb_res.lease_expires_at}")
+                elif hb_res.fenced:
+                    logger.warning(f"Job {job_id} lease was fenced or expired during execution")
+                    fenced_event.set()
+                    break
+                else:
+                    last_beat_failed_streak += 1
+                    logger.warning(f"Heartbeat transient failure for job {job_id} (streak={last_beat_failed_streak})")
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
 
     def _touch_progress_beacon(self, stage: str = "") -> None:
         touch_progress_beacon(
@@ -956,6 +976,33 @@ class JobRunner:
         )
         return font_file, attestation, PROVENANCE_STAGE9D_RASTER, ""
 
+    def _check_liveness_fence(
+        self,
+        fenced_event: threading.Event,
+        last_successful_beat_holder: list[float] | None = None,
+    ) -> None:
+        """Compute-side liveness fence guard (Incident E-00035 F1(c)).
+
+        If a heartbeat loop is running for this job and now - last_successful_beat_at
+        > 3 * HEARTBEAT_INTERVAL_SECONDS + 15s margin, treat as fenced and raise
+        orderly RuntimeError('LEASE_FENCED_OR_EXPIRED') so the job fails cleanly
+        while the lease is still likely valid on Edge instead of dying in limbo.
+        """
+        if fenced_event.is_set():
+            raise RuntimeError("LEASE_FENCED_OR_EXPIRED")
+        if last_successful_beat_holder is not None and last_successful_beat_holder:
+            interval = self.settings.HEARTBEAT_INTERVAL_SECONDS
+            liveness_limit = 3.0 * interval + 15.0
+            elapsed = time.monotonic() - last_successful_beat_holder[0]
+            if elapsed > liveness_limit:
+                logger.warning(
+                    "Heartbeat liveness lost: elapsed=%.2fs > limit=%.2fs (3*interval+margin)",
+                    elapsed,
+                    liveness_limit,
+                )
+                fenced_event.set()
+                raise RuntimeError("LEASE_FENCED_OR_EXPIRED")
+
     def _sync_build_validate_and_package(
         self,
         source_payload: SourcePayload | None,
@@ -967,6 +1014,7 @@ class JobRunner:
         cached_files: list[GeneratedFontFile] | None = None,
         reuse_state: dict[str, Any] | None = None,
         job_deadline: float | None = None,
+        last_successful_beat_holder: list[float] | None = None,
     ) -> JobPackageManifest:
         """Build/validate/archive on a miss, or package verified archive files on a hit.
 
@@ -999,8 +1047,7 @@ class JobRunner:
                     raise ValueError(f"STYLE_MISSING_IN_SOURCE_{style.id}")
 
                 for fmt in job.formats:
-                    if fenced_event.is_set():
-                        raise RuntimeError("LEASE_FENCED_OR_EXPIRED")
+                    self._check_liveness_fence(fenced_event, last_successful_beat_holder)
                     if (
                         job_deadline is not None
                         and time.monotonic() + WALL_SAFETY_MARGIN_MS / 1000.0 >= job_deadline
@@ -1087,8 +1134,7 @@ class JobRunner:
         if not generated_files:
             raise ValueError("NO_FILES_GENERATED")
 
-        if fenced_event.is_set():
-            raise RuntimeError("LEASE_FENCED_OR_EXPIRED")
+        self._check_liveness_fence(fenced_event, last_successful_beat_holder)
         if (
             job_deadline is not None
             and time.monotonic() + WALL_SAFETY_MARGIN_MS / 1000.0 >= job_deadline
@@ -1103,7 +1149,11 @@ class JobRunner:
             output_dir=job_dir,
         )
 
-        if fenced_event.is_set():
+        if fenced_event.is_set() or (
+            last_successful_beat_holder is not None
+            and time.monotonic() - last_successful_beat_holder[0] > 3.0 * self.settings.HEARTBEAT_INTERVAL_SECONDS + 15.0
+        ):
+            self._check_liveness_fence(fenced_event, last_successful_beat_holder)
             self.scratch_manager.cleanup_job_dir(job_dir)
             raise RuntimeError("LEASE_FENCED_OR_EXPIRED")
         if (
@@ -1153,6 +1203,7 @@ class JobRunner:
         fenced_event = threading.Event()
         stop_event = threading.Event()
         expiry_holder = [job.lease_expires_at]
+        last_successful_beat_holder = [time.monotonic()]
 
         # T-FAST30-A23-FIX F1: hard monotonic job wall born at claim.
         # T-FAST-ATLAS-ULTRA-01 (ADR-0004, U11): re-targeted to the
@@ -1179,7 +1230,7 @@ class JobRunner:
         # the event loop can never starve lease extensions (Issue #90).
         heartbeat_thread = threading.Thread(
             target=self._heartbeat_thread_main,
-            args=(job.job_id, job.lease_token, expiry_holder, fenced_event, stop_event),
+            args=(job.job_id, job.lease_token, expiry_holder, fenced_event, stop_event, last_successful_beat_holder),
             name=f"lease-heartbeat-{job.job_id}",
             daemon=True,
         )
@@ -1200,6 +1251,7 @@ class JobRunner:
                         expiry_holder=expiry_holder,
                         job_deadline=job_deadline,
                         preview_input=preview_input,
+                        last_successful_beat_holder=last_successful_beat_holder,
                     )
             except TimeoutError:
                 # Wall breach: stop the heartbeat FIRST so the edge observes
@@ -1268,6 +1320,7 @@ class JobRunner:
         expiry_holder: list[int],
         job_deadline: float,
         preview_input: bytes | dict[str, Any] | None = None,
+        last_successful_beat_holder: list[float] | None = None,
     ) -> ProcessResult:
         """Run Steps A-F for one claimed job inside the job-level wall.
 
@@ -1534,12 +1587,12 @@ class JobRunner:
             cached_files,
             reuse_state,
             job_deadline,
+            last_successful_beat_holder,
         )
         self._touch_progress_beacon("build_done")
 
         # Step D: Upload ZIP artifact(s) to private R2 storage endpoint
-        if fenced_event.is_set():
-            raise RuntimeError("LEASE_FENCED_OR_EXPIRED")
+        self._check_liveness_fence(fenced_event, last_successful_beat_holder)
         # T-FAST30-A23-FIX F1: never upload after the monotonic wall breach
         # (all-or-nothing).
         if time.monotonic() >= job_deadline:
@@ -1559,8 +1612,7 @@ class JobRunner:
         ]
 
         for part in parts_to_upload:
-            if fenced_event.is_set():
-                raise RuntimeError("LEASE_FENCED_OR_EXPIRED")
+            self._check_liveness_fence(fenced_event, last_successful_beat_holder)
             if time.monotonic() >= job_deadline:
                 raise JobWallLimitExceeded()
 
@@ -1600,8 +1652,7 @@ class JobRunner:
         self._touch_progress_beacon("upload_done")
 
         # Step E: Fenced atomic D1 completion
-        if fenced_event.is_set():
-            raise RuntimeError("LEASE_FENCED_OR_EXPIRED")
+        self._check_liveness_fence(fenced_event, last_successful_beat_holder)
         # T-FAST30-A23-FIX F1: never complete after the monotonic wall
         # breach (all-or-nothing).
         if time.monotonic() >= job_deadline:

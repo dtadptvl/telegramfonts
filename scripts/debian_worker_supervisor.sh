@@ -425,6 +425,10 @@ while :; do
   # run_worker execs the worker chain; worker_pid is the actual worker PID.
   run_worker </dev/null >>"$LOG_FILE" 2>&1 &
   worker_pid=$!
+  # Incident E-00035 F2: touch progress beacon immediately after worker spawn
+  # so watchdog grants a full fresh grace window to every spawned worker.
+  mkdir -p "$(dirname "$WATCHDOG_PROGRESS_FILE_HOST")" 2>/dev/null || true
+  : > "$WATCHDOG_PROGRESS_FILE_HOST" 2>/dev/null || touch "$WATCHDOG_PROGRESS_FILE_HOST" 2>/dev/null || true
   watchdog_wait_or_kill || fail "clock is unavailable for the hang watchdog"
   worker_pid=""
   if [ "$watchdog_kill" -eq 1 ]; then

@@ -421,6 +421,9 @@ def test_supervisor_watchdog_is_config_driven_and_exports_beacon() -> None:
     assert 'worker was killed by the hang watchdog; restart budget applies' in source
     assert 'readonly MAX_RESTARTS=3' in source
 
+    # Incident E-00035 F2: watchdog beacon is touched on worker spawn
+    assert ': > "$WATCHDOG_PROGRESS_FILE_HOST"' in source or 'touch "$WATCHDOG_PROGRESS_FILE_HOST"' in source
+
 
 def _watchdog_probe(function_source: str, temp_dir: str, scenario: str) -> str:
     # Causal watchdog probe: the extracted watchdog_wait_or_kill runs against
