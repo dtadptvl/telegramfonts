@@ -46,7 +46,7 @@ from compute.archive import (
 from compute.binary_cache import AuthorizedBinaryCache, BinaryCacheIdentity
 from compute.binary_gate import BINARY_PIPELINE_VERSION, BinaryConsumerValidator, BinaryGateReport, prepare_binary_artifact
 from compute.font_builder import FontBuilderService
-from compute.models import ArchiveSourceContext, GeneratedFontFile, JobPackageManifest, SourcePayload
+from compute.models import ArchiveSourceContext, GeneratedFontFile, JobPackageManifest, ManifestPart, SourcePayload
 from compute.model_cache import CanonicalFontModelCache, FontModelCacheIdentity
 from compute.packager import PackagerService
 from compute.source import SourceAcquirer
@@ -62,7 +62,39 @@ from worker_client import ClaimedJob, WorkerJobClient
 QueueClient = CloudflareQueueClient
 logger = logging.getLogger("telegramfonts.agent.runner")
 
-LEASE_SAFETY_MARGIN_MS = 15000  # 15s deadline safety margin
+# T-FAST30-A23-FIX F1: safety margin applied to the job-level monotonic wall
+# (claim -> ACK). Guards keep enough budget for package/upload/complete/ACK
+# and fail closed (all-or-nothing) instead of starting work they cannot
+# finish inside the wall.
+WALL_SAFETY_MARGIN_MS = 15000
+
+
+class JobWallLimitExceeded(RuntimeError):
+    """Job-level monotonic wall breached: terminal FAST30_FAILED.
+
+    The message is the exact bounded terminal code so the sanitized error
+    mapping surfaces FAST30_FAILED (no fallback/escalation, no
+    upload/archive after the breach). Independent of the heartbeat-moved
+    lease expiry by construction.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("FAST30_FAILED")
+
+
+def touch_progress_beacon(path: Path | str | None, stage: str = "") -> None:
+    """T-FAST30-A23-FIX F5: touch the supervisor progress beacon file.
+
+    Process-lifecycle signal only (stage transitions / heartbeat beats);
+    never part of pipeline semantics. Absent path disables the beacon.
+    Failures are logged at debug and never affect the pipeline.
+    """
+    if path is None:
+        return
+    try:
+        Path(path).touch(exist_ok=True)
+    except OSError as exc:
+        logger.debug("progress beacon touch failed (stage=%s): %s", stage, type(exc).__name__)
 
 FENCED_ERROR_CODE = "LEASE_FENCED_OR_EXPIRED"
 UNEXPECTED_ERROR_CODE = "UNEXPECTED_RUNTIME_ERROR"
@@ -247,6 +279,10 @@ class JobRunner:
             if stop_event.is_set():
                 break
 
+            # T-FAST30-A23-FIX F5: a beating heartbeat IS progress; the
+            # supervisor watchdog kills only when this goes stale.
+            self._touch_progress_beacon("heartbeat")
+
             try:
                 hb_res = self.worker_client.heartbeat_sync(job_id, lease_token)
             except Exception as exc:
@@ -265,6 +301,22 @@ class JobRunner:
                 break
             else:
                 logger.warning(f"Heartbeat transient failure for job {job_id}")
+
+    def _touch_progress_beacon(self, stage: str = "") -> None:
+        touch_progress_beacon(
+            getattr(self.settings, "PROGRESS_BEACON_FILE", None), stage
+        )
+
+    def _durable_checkpoint_root(self, job_id: str) -> Path:
+        """T-FAST30-A23-FIX F6: durable checkpoint root scoped to the job.
+
+        Lives in the durable scratch-root cache namespace (analogous to
+        font_model_cache), NOT in the lease-token-bound job dir, so a
+        re-claimed attempt of the same job resumes from persisted
+        identity-bound checkpoints instead of restarting. Distinct jobs are
+        isolated by construction; identity-hash validation stays fail-closed.
+        """
+        return self.scratch_manager.get_durable_job_cache_dir(job_id, "glyph_checkpoints")
 
     @staticmethod
     def _family_name_from_url(source_url: str) -> str:
@@ -549,8 +601,19 @@ class JobRunner:
         fmt: str,
         build_dir: Path,
         reuse_state: dict[str, Any],
+        job_deadline: float | None = None,
     ) -> tuple[GeneratedFontFile, Any, str, str]:
         """Resolve one style+format through the reuse tiers; fail-closed."""
+        # T-FAST30-A23-FIX F1: clamp the gate wall to the remaining job-level
+        # monotonic budget (never exceeding the FAST_30 profile limit). The
+        # gate wall is no longer born at gate entry with the full profile
+        # limit; it inherits the claim->ACK job wall.
+        wall_budget: float | None = None
+        if job_deadline is not None:
+            wall_budget = job_deadline - time.monotonic()
+            if wall_budget <= 0:
+                raise JobWallLimitExceeded()
+            wall_budget = min(wall_budget, float(FAST_30_PROFILE.wall_limit_seconds))
         mode = _require_job_mode(job)
         store = getattr(self.source_acquirer, "store", None)
         config = getattr(self.source_acquirer, "observation_config", None)
@@ -608,6 +671,7 @@ class JobRunner:
                         provider_capability=self._sealed_provider_capability(
                             store, family_key, style_key, bv, cfg
                         ),
+                        wall_limit_seconds=wall_budget,
                     )
                     if result.is_publishable and result.attestation is not None:
                         artifact_path = Path(result.candidate_file_path)
@@ -679,6 +743,12 @@ class JobRunner:
                     # reconstruction profile (ADR-0001); no
                     # fallback/escalation of any trigger type.
                     reconstruction_profile=FAST_30_PROFILE,
+                    wall_limit_seconds=wall_budget,
+                    # T-FAST30-A23-FIX F6: durable, stable-identity
+                    # checkpoint placement (job-scoped root + snapshot
+                    # identity) so an interrupted attempt resumes instead
+                    # of restarting on re-claim.
+                    checkpoint_root=self._durable_checkpoint_root(job.job_id),
                 )
                 if not result.is_publishable or result.attestation is None:
                     # FAST_30 regime: deadline or quality failure returns
@@ -735,8 +805,16 @@ class JobRunner:
         archive_context: ArchiveSourceContext | None = None,
         cached_files: list[GeneratedFontFile] | None = None,
         reuse_state: dict[str, Any] | None = None,
+        job_deadline: float | None = None,
     ) -> JobPackageManifest:
-        """Build/validate/archive on a miss, or package verified archive files on a hit."""
+        """Build/validate/archive on a miss, or package verified archive files on a hit.
+
+        T-FAST30-A23-FIX F1: the wall guards below are monotonic job-deadline
+        checks (claim -> ACK), independent of the heartbeat-moved
+        ``expiry_holder`` (kept for interface stability; no longer the wall
+        source). A breach raises JobWallLimitExceeded (terminal FAST30_FAILED)
+        before any further archive/package work: all-or-nothing holds.
+        """
         reuse_state = reuse_state if reuse_state is not None else {}
         family_name = job.family_name or (
             source_payload.family_name if source_payload is not None else self._family_name_from_url(job.source_url)
@@ -760,9 +838,13 @@ class JobRunner:
                     raise ValueError(f"STYLE_MISSING_IN_SOURCE_{style.id}")
 
                 for fmt in job.formats:
-                    now_ms = int(time.time() * 1000)
-                    if fenced_event.is_set() or (now_ms + LEASE_SAFETY_MARGIN_MS >= expiry_holder[0]):
+                    if fenced_event.is_set():
                         raise RuntimeError("LEASE_FENCED_OR_EXPIRED")
+                    if (
+                        job_deadline is not None
+                        and time.monotonic() + WALL_SAFETY_MARGIN_MS / 1000.0 >= job_deadline
+                    ):
+                        raise JobWallLimitExceeded()
 
                     if gated:
                         font_file, attestation, provenance, ai_binding = self._tiered_resolve_artifact(
@@ -773,6 +855,7 @@ class JobRunner:
                             fmt=fmt,
                             build_dir=build_dir,
                             reuse_state=reuse_state,
+                            job_deadline=job_deadline,
                         )
                         if not validate_font_file(font_file.file_path, fmt):
                             raise ValueError(f"GENERATED_FONT_INVALID_{fmt}")
@@ -843,9 +926,13 @@ class JobRunner:
         if not generated_files:
             raise ValueError("NO_FILES_GENERATED")
 
-        now_ms_pre_pkg = int(time.time() * 1000)
-        if fenced_event.is_set() or (now_ms_pre_pkg + LEASE_SAFETY_MARGIN_MS >= expiry_holder[0]):
+        if fenced_event.is_set():
             raise RuntimeError("LEASE_FENCED_OR_EXPIRED")
+        if (
+            job_deadline is not None
+            and time.monotonic() + WALL_SAFETY_MARGIN_MS / 1000.0 >= job_deadline
+        ):
+            raise JobWallLimitExceeded()
 
         manifest = self.packager.package_job_output(
             job_id=job.job_id,
@@ -855,10 +942,15 @@ class JobRunner:
             output_dir=job_dir,
         )
 
-        now_ms_post_pkg = int(time.time() * 1000)
-        if fenced_event.is_set() or (now_ms_post_pkg + LEASE_SAFETY_MARGIN_MS >= expiry_holder[0]):
+        if fenced_event.is_set():
             self.scratch_manager.cleanup_job_dir(job_dir)
             raise RuntimeError("LEASE_FENCED_OR_EXPIRED")
+        if (
+            job_deadline is not None
+            and time.monotonic() + WALL_SAFETY_MARGIN_MS / 1000.0 >= job_deadline
+        ):
+            self.scratch_manager.cleanup_job_dir(job_dir)
+            raise JobWallLimitExceeded()
 
         return manifest
 
@@ -901,6 +993,11 @@ class JobRunner:
         stop_event = threading.Event()
         expiry_holder = [job.lease_expires_at]
 
+        # T-FAST30-A23-FIX F1: hard monotonic job wall born at claim
+        # (JOB_WALL_SECONDS, default 1800s = the 30-minute production wall).
+        job_deadline = time.monotonic() + float(self.settings.JOB_WALL_SECONDS)
+        self._touch_progress_beacon(f"job_start:{job.job_id}")
+
         # Lease liveness runs on a dedicated thread so blocking compute on
         # the event loop can never starve lease extensions (Issue #90).
         heartbeat_thread = threading.Thread(
@@ -912,353 +1009,26 @@ class JobRunner:
         heartbeat_thread.start()
 
         try:
-            # Step A: tiered reuse. L1 exact archive hit -> package directly.
-            # Otherwise resolve L2/L3 capabilities before any browser acquisition.
-            family_name = job.family_name or self._family_name_from_url(job.source_url)
-            archive_context = self._get_archive_context(job)
-            self.last_reuse_trace = {"events": [], "acquisition_traces": {}}
-            # D21: archive-mode truth is observable in every job report trace.
-            self.last_reuse_trace["archive_mode"] = self.archive_mode.to_dict()
-            cached_files = self._get_archive_hit(job, family_name, archive_context)
-            reuse_state: dict[str, Any] = {"gated": False, "binaries": {}}
-            if cached_files is not None:
-                logger.info("Final-font archive hit for job %s (%d files)", job.job_id, len(cached_files))
-                source_payload = None
-            else:
-                gate_store = getattr(self.source_acquirer, "store", None)
-                gate_config = getattr(self.source_acquirer, "observation_config", None)
-                gated = preview_input is None and gate_store is not None and gate_config is not None
-                reuse_state["gated"] = gated
-                if gated:
-                    cfg_h = gate_config.compute_hash()
-                    job_mode = _require_job_mode(job)
-                    family_envelope = None
-                    needs_acquisition = False
-                    for style in job.styles:
-                        family_key, style_key = self._observation_keys(job.source_url, style.id)
-                        completed = self._completed_identities(gate_store, family_key, style_key, cfg_h)
-                        l2_candidate = False
-                        if self.model_cache is not None and completed and archive_context is not None:
-                            for bv, cfg in completed:
-                                coverage = gate_store.get_coverage(
-                                    family_key, style_key, browser_version=bv, config_hash=cfg
-                                )
-                                if not coverage:
-                                    continue
-                                cov_fp = self._coverage_fingerprint(coverage)
-                                ref_fp = self._reference_fingerprint(
-                                    archive_context, style.id, bv, cfg, cov_fp
-                                )
-                                for provenance in PROVENANCE_PROBE_ORDER:
-                                    probe = FontModelCacheIdentity(
-                                        reference_fingerprint=ref_fp,
-                                        family_name=family_name,
-                                        style_id=style.id,
-                                        mode=job_mode,
-                                        coverage_fingerprint=cov_fp,
-                                        provenance=provenance,
-                                    )
-                                    if self.model_cache.get(probe) is not None:
-                                        l2_candidate = True
-                                        break
-                                if l2_candidate:
-                                    break
-                        if completed or l2_candidate:
-                            self._trace_record(f"PREACQ_{style.id}", "SKIP_BROWSER", l2=l2_candidate)
-                            continue
-                        # L3 durable authorized-binary cache probe before any
-                        # provider/network call. Identity binds the actual
-                        # acquisition stage provenance; the compatible-reuse
-                        # rule probes the deterministic provenance order.
-                        # T-PRICE-01: the L3 binary shortcut is ORIGINAL-only
-                        # (BinaryCacheIdentity does not bind mode).
-                        l3_ref_fp = hashlib.sha256(
-                            canonical_source_identity(job.source_url).encode("utf-8")
-                        ).hexdigest()
-                        l3_hit = None
-                        if job_mode == "ORIGINAL" and self.binary_cache is not None:
-                            for prov in BINARY_PROVENANCE_PROBE_ORDER:
-                                l3_identity = BinaryCacheIdentity(
-                                    reference_fingerprint=l3_ref_fp,
-                                    family_name=family_name,
-                                    style_id=style.id,
-                                    provenance=prov,
-                                )
-                                cached_raw, cached_fmt, cached_prov, cache_status = self.binary_cache.get(
-                                    l3_identity
-                                )
-                                if cache_status == "CORRUPT":
-                                    raise ValueError(
-                                        "ACQUISITION_BINARY_INTEGRITY_FAILED:L3_CACHE_CORRUPT"
-                                    )
-                                if cache_status == "HIT" and cached_raw is not None:
-                                    l3_hit = (cached_raw, cached_fmt, cached_prov or prov)
-                                    break
-                        if job_mode == "ORIGINAL" and l3_hit is not None:
-                            cached_raw, cached_fmt, cached_prov = l3_hit
-                            reuse_state["binaries"][style.id] = AcquiredBinary(
-                                raw_bytes=cached_raw,
-                                format=cached_fmt,
-                                family_name=family_name,
-                                style_name=style.display_name,
-                                provenance=cached_prov,
-                            )
-                            self._trace_record(
-                                f"PREACQ_{style.id}", "L3_CACHE_HIT", provenance=cached_prov
-                            )
-                            continue
-                        if self.acquisition_pipeline is not None:
-                            if family_envelope is None:
-                                family_envelope = await self.acquisition_pipeline.acquire_family_preflight(
-                                    job.source_url,
-                                    expected_family=family_name,
-                                    expected_styles=job.styles,
-                                )
-                            outcome = await self.acquisition_pipeline.acquire(
-                                job.source_url,
-                                family_name,
-                                style.display_name,
-                                raster_request={
-                                    # Observable render-size passes: the closed
-                                    # capability's disjoint fit+held-out sizes.
-                                    "acs_pts": [
-                                        int(r)
-                                        for r in ProviderRasterCapability.deterministic_size_schedule(
-                                            PROVIDER_MONOTYPE_RENDER, gate_config.resolutions
-                                        ).all_sizes()
-                                    ]
-                                },
-                                family_envelope=family_envelope,
-                            )
-                            self.last_reuse_trace["acquisition_traces"][style.id] = (
-                                outcome.trace.to_sanitized_dict()
-                            )
-                            if outcome.kind == "binary" and outcome.binary is not None and job_mode != "ORIGINAL":
-                                # T-PRICE-01: exact-binary-wins-immediately is ORIGINAL-only
-                                # (ADR-0002); VIETNAMESE must reconstruct through observable
-                                # evidence and never take the binary shortcut.
-                                self._trace_record(
-                                    f"PREACQ_{style.id}", "BINARY_WIN_REFUSED_MODE", mode=job_mode
-                                )
-                            if outcome.kind == "binary" and outcome.binary is not None and job_mode == "ORIGINAL":
-                                if self.binary_cache is not None:
-                                    self.binary_cache.put(
-                                        BinaryCacheIdentity(
-                                            reference_fingerprint=l3_ref_fp,
-                                            family_name=family_name,
-                                            style_id=style.id,
-                                            provenance=outcome.binary.provenance,
-                                        ),
-                                        outcome.binary.raw_bytes,
-                                        outcome.binary.format,
-                                        stage_provenance=outcome.binary.provenance,
-                                    )
-                                reuse_state["binaries"][style.id] = outcome.binary
-                                self._trace_record(
-                                    f"PREACQ_{style.id}", "BINARY_WIN", provenance=outcome.binary.provenance
-                                )
-                                continue
-                            if outcome.kind == "raster_authorized" and outcome.raster_pages:
-                                # Raster evidence is never discarded: the
-                                # bounds-checked CDN sprite slices ARE the
-                                # reconstruction pixels and are persisted
-                                # directly as observations. The browser path
-                                # supplements observable metrics/pairs/
-                                # features only; it never recaptures rasters
-                                # from the source page.
-                                raster_cps = sorted({
-                                    int(g["code_point"])
-                                    for page in outcome.raster_pages
-                                    for g in (page.payload or {}).get("glyphs", [])
-                                })
-                                if not raster_cps:
-                                    raise ValueError("ACQUISITION_RASTER_IDENTITY_MISSING")
-                                family_key, style_key = self._observation_keys(
-                                    job.source_url, style.id
-                                )
-                                supplement = await collect_browser_measurement(
-                                    job.source_url,
-                                    family_name,
-                                    style.display_name,
-                                    raster_cps,
-                                    gate_config,
-                                )
-                                # Closed capability descriptor: size axis only,
-                                # deterministic disjoint fit/held-out render
-                                # sizes, sealed into the collection identity.
-                                # Provider identity is derived from the pages
-                                # that actually produced the raster; dump/
-                                # Playwright evidence is never relabeled as
-                                # the Monotype CDN provider. Unknown/absent/
-                                # mixed provenance fails closed (no default).
-                                try:
-                                    raster_provider_id = resolve_raster_provider(outcome.raster_pages)
-                                except ValueError:
-                                    raise ValueError("ACQUISITION_RASTER_PROVIDER_IDENTITY_FAILED")
-                                raster_capability = ProviderRasterCapability.deterministic_size_schedule(
-                                    raster_provider_id, gate_config.resolutions
-                                )
-                                attestation = page_slice_attestation(outcome.raster_pages)
-                                ingested = ingest_raster_pages(
-                                    gate_store,
-                                    gate_config,
-                                    family_key,
-                                    style_key,
-                                    supplement,
-                                    outcome.raster_pages,
-                                    raster_capability,
-                                    source_url=job.source_url,
-                                )
-                                raster_trace_prov = (
-                                    RASTER_FALLBACK_PROVENANCE
-                                    if raster_provider_id == PROVIDER_MONOTYPE_RENDER
-                                    else str((outcome.raster_pages[0].payload or {}).get("provenance", ""))
-                                )
-                                self._trace_record(
-                                    f"PREACQ_{style.id}",
-                                    "RASTER_HANDOFF",
-                                    glyphs=ingested,
-                                    browser_version=supplement.browser_version,
-                                    raster_provenance=raster_trace_prov,
-                                    capability_hash=raster_capability.compute_hash(),
-                                    capability_fit_sizes=list(raster_capability.fit_sizes),
-                                    capability_held_out_sizes=list(raster_capability.held_out_sizes),
-                                    sprite_sha256=attestation["sprite_sha256"],
-                                    slice_bindings=attestation["bindings"],
-                                )
-                                continue
-                            if outcome.kind == "insufficient" and outcome.terminal_reason_code.startswith(
-                                "ACQUISITION_BINARY_INTEGRITY_FAILED"
-                            ):
-                                raise ValueError(outcome.terminal_reason_code)
-                        needs_acquisition = True
-                    if needs_acquisition:
-                        source_payload = await self.source_acquirer.acquire_source(
-                            source_url=job.source_url,
-                            styles=job.styles,
-                            preview_input=preview_input,
-                        )
-                        archive_context = source_payload.archive_context or archive_context
-                    else:
-                        source_payload = None
-                        if archive_context is None:
-                            archive_context = self.source_acquirer.get_archive_context(
-                                job.source_url, job.styles
-                            )
-                else:
-                    source_payload = await self.source_acquirer.acquire_source(
-                        source_url=job.source_url,
-                        styles=job.styles,
+            try:
+                # T-FAST30-A23-FIX F1: job-level monotonic deadline, claim ->
+                # ACK. The timeout is born at claim from JOB_WALL_SECONDS and
+                # is independent of the heartbeat-moved expiry_holder.
+                async with asyncio.timeout(max(0.0, job_deadline - time.monotonic())):
+                    return await self._execute_claimed_job(
+                        msg=msg,
+                        job=job,
+                        job_dir=job_dir,
+                        fenced_event=fenced_event,
+                        stop_event=stop_event,
+                        expiry_holder=expiry_holder,
+                        job_deadline=job_deadline,
                         preview_input=preview_input,
                     )
-                    archive_context = source_payload.archive_context or archive_context
-
-            # Step B & C: Build fonts, validate, and package in a worker thread off the event loop
-            manifest = await asyncio.to_thread(
-                self._sync_build_validate_and_package,
-                source_payload,
-                job,
-                job_dir,
-                fenced_event,
-                expiry_holder,
-                archive_context,
-                cached_files,
-                reuse_state,
-            )
-
-            # Step D: Upload ZIP artifact(s) to private R2 storage endpoint
-            if fenced_event.is_set():
-                raise RuntimeError("LEASE_FENCED_OR_EXPIRED")
-
-            uploaded_parts: list[dict[str, Any]] = []
-            parts_to_upload = manifest.parts if manifest.parts else [
-                ManifestPart(
-                    part_index=1,
-                    total_parts=1,
-                    filename=manifest.zip_filename,
-                    file_path=manifest.zip_file_path,
-                    size_bytes=manifest.zip_size_bytes,
-                    sha256_hex=manifest.zip_sha256_hex,
-                    file_count=len(manifest.files),
-                )
-            ]
-
-            for part in parts_to_upload:
-                if fenced_event.is_set():
-                    raise RuntimeError("LEASE_FENCED_OR_EXPIRED")
-
-                upload_res = await self.worker_client.upload_artifact(
-                    job_id=job.job_id,
-                    lease_token=job.lease_token,
-                    zip_path=part.file_path,
-                    sha256_hex=part.sha256_hex,
-                )
-
-                if upload_res.fenced:
-                    logger.warning(f"Upload for job {job.job_id} was fenced")
-                    self.scratch_manager.cleanup_job_dir(job_dir)
-                    return ProcessResult(action=RunnerAction.FENCED_ABORT, job_id=job.job_id, reason="upload_fenced")
-
-                if not upload_res.success or not upload_res.artifact_key:
-                    logger.warning(f"Upload failed for job {job.job_id}: {upload_res.reason}")
-                    await self.worker_client.fail(
-                        job.job_id,
-                        job.lease_token,
-                        retryable=True,
-                        reason_code="UPLOAD_FAILED",
-                    )
-                    await self.queue_client.retry_messages([(msg.lease_id, 30)])
-                    self.scratch_manager.cleanup_job_dir(job_dir)
-                    return ProcessResult(action=RunnerAction.RETRIED, job_id=job.job_id, reason="upload_failed")
-
-                uploaded_parts.append({
-                    "part_index": part.part_index,
-                    "total_parts": part.total_parts,
-                    "filename": part.filename,
-                    "artifact_key": upload_res.artifact_key,
-                    "artifact_size_bytes": part.size_bytes,
-                    "artifact_sha256": part.sha256_hex,
-                })
-
-            # Step E: Fenced atomic D1 completion
-            if fenced_event.is_set():
-                raise RuntimeError("LEASE_FENCED_OR_EXPIRED")
-
-            complete_res = await self.worker_client.complete(
-                job_id=job.job_id,
-                lease_token=job.lease_token,
-                artifact_key=uploaded_parts[0]["artifact_key"],
-                sha256_hex=uploaded_parts[0]["artifact_sha256"],
-                size=uploaded_parts[0]["artifact_size_bytes"],
-                parts=uploaded_parts,
-            )
-
-            # Step F: Finalize and ACK Queue boundary (BLOCK 6)
-            if complete_res.success:
-                # Durable completion committed to D1 -> Acknowledge Queue message
-                await self.queue_client.acknowledge_messages([msg.lease_id])
-                self.scratch_manager.cleanup_job_dir(job_dir)
-                logger.info(f"Job {job.job_id} durably completed and ACKed from queue")
-                return ProcessResult(action=RunnerAction.ACKED, job_id=job.job_id, manifest=manifest)
-
-            if complete_res.status == "EXPIRED_OR_FENCED":
-                logger.warning(f"Completion for job {job.job_id} was fenced")
-                self.scratch_manager.cleanup_job_dir(job_dir)
-                return ProcessResult(action=RunnerAction.FENCED_ABORT, job_id=job.job_id, reason="completion_fenced")
-
-            if complete_res.status == "AMBIGUOUS_ERROR":
-                logger.warning(f"Ambiguous network failure on complete for {job.job_id}; retrying message")
-                await self.queue_client.retry_messages([(msg.lease_id, 30)])
-                return ProcessResult(action=RunnerAction.RETRIED, job_id=job.job_id, reason="ambiguous_completion_network_error")
-
-            self.scratch_manager.cleanup_job_dir(job_dir)
-            if complete_res.queue_action == "ack":
-                await self.queue_client.acknowledge_messages([msg.lease_id])
-                return ProcessResult(action=RunnerAction.ACKED, job_id=job.job_id, reason=complete_res.reason)
-            else:
-                await self.queue_client.retry_messages([(msg.lease_id, 30)])
-                return ProcessResult(action=RunnerAction.RETRIED, job_id=job.job_id, reason=complete_res.reason)
-
+            except TimeoutError:
+                # Wall breach: stop the heartbeat FIRST so the edge observes
+                # the fence/expiry instead of further lease extensions.
+                stop_event.set()
+                raise JobWallLimitExceeded() from None
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -1276,6 +1046,12 @@ class JobRunner:
                 return ProcessResult(action=RunnerAction.FENCED_ABORT, job_id=job.job_id, reason="fenced")
 
             is_terminal = err_code in TERMINAL_ERROR_CODES
+
+            # T-FAST30-A23-FIX F1: on a terminal FAST30_FAILED wall breach,
+            # stop the heartbeat BEFORE failing so the edge observes the
+            # fence/expiry instead of further lease extensions.
+            if err_code == "FAST30_FAILED":
+                stop_event.set()
 
             fail_res = await self.worker_client.fail(
                 job_id=job.job_id,
@@ -1304,6 +1080,391 @@ class JobRunner:
                     "Heartbeat thread for job %s did not exit promptly after stop",
                     job.job_id,
                 )
+
+    async def _execute_claimed_job(
+        self,
+        msg: QueueMessage,
+        job: ClaimedJob,
+        job_dir: Path,
+        fenced_event: threading.Event,
+        stop_event: threading.Event,
+        expiry_holder: list[int],
+        job_deadline: float,
+        preview_input: bytes | dict[str, Any] | None = None,
+    ) -> ProcessResult:
+        """Run Steps A-F for one claimed job inside the job-level wall.
+
+        T-FAST30-A23-FIX F1: this entire claim->ACK body executes under the
+        caller's ``asyncio.timeout`` born from the monotonic job deadline.
+        Every inner guard additionally checks the same deadline so a breach
+        surfaces as a deterministic JobWallLimitExceeded (terminal
+        FAST30_FAILED) rather than a mid-flight cancellation whenever
+        possible. All-or-nothing: after a breach nothing is uploaded,
+        archived, or completed.
+        """
+        # Step A: tiered reuse. L1 exact archive hit -> package directly.
+        # Otherwise resolve L2/L3 capabilities before any browser acquisition.
+        family_name = job.family_name or self._family_name_from_url(job.source_url)
+        archive_context = self._get_archive_context(job)
+        self.last_reuse_trace = {"events": [], "acquisition_traces": {}}
+        # D21: archive-mode truth is observable in every job report trace.
+        self.last_reuse_trace["archive_mode"] = self.archive_mode.to_dict()
+        cached_files = self._get_archive_hit(job, family_name, archive_context)
+        reuse_state: dict[str, Any] = {"gated": False, "binaries": {}}
+        if cached_files is not None:
+            logger.info("Final-font archive hit for job %s (%d files)", job.job_id, len(cached_files))
+            source_payload = None
+        else:
+            gate_store = getattr(self.source_acquirer, "store", None)
+            gate_config = getattr(self.source_acquirer, "observation_config", None)
+            gated = preview_input is None and gate_store is not None and gate_config is not None
+            reuse_state["gated"] = gated
+            if gated:
+                cfg_h = gate_config.compute_hash()
+                job_mode = _require_job_mode(job)
+                family_envelope = None
+                needs_acquisition = False
+                for style in job.styles:
+                    family_key, style_key = self._observation_keys(job.source_url, style.id)
+                    completed = self._completed_identities(gate_store, family_key, style_key, cfg_h)
+                    l2_candidate = False
+                    if self.model_cache is not None and completed and archive_context is not None:
+                        for bv, cfg in completed:
+                            coverage = gate_store.get_coverage(
+                                family_key, style_key, browser_version=bv, config_hash=cfg
+                            )
+                            if not coverage:
+                                continue
+                            cov_fp = self._coverage_fingerprint(coverage)
+                            ref_fp = self._reference_fingerprint(
+                                archive_context, style.id, bv, cfg, cov_fp
+                            )
+                            for provenance in PROVENANCE_PROBE_ORDER:
+                                probe = FontModelCacheIdentity(
+                                    reference_fingerprint=ref_fp,
+                                    family_name=family_name,
+                                    style_id=style.id,
+                                    mode=job_mode,
+                                    coverage_fingerprint=cov_fp,
+                                    provenance=provenance,
+                                )
+                                if self.model_cache.get(probe) is not None:
+                                    l2_candidate = True
+                                    break
+                            if l2_candidate:
+                                break
+                    if completed or l2_candidate:
+                        self._trace_record(f"PREACQ_{style.id}", "SKIP_BROWSER", l2=l2_candidate)
+                        continue
+                    # L3 durable authorized-binary cache probe before any
+                    # provider/network call. Identity binds the actual
+                    # acquisition stage provenance; the compatible-reuse
+                    # rule probes the deterministic provenance order.
+                    # T-PRICE-01: the L3 binary shortcut is ORIGINAL-only
+                    # (BinaryCacheIdentity does not bind mode).
+                    l3_ref_fp = hashlib.sha256(
+                        canonical_source_identity(job.source_url).encode("utf-8")
+                    ).hexdigest()
+                    l3_hit = None
+                    if job_mode == "ORIGINAL" and self.binary_cache is not None:
+                        for prov in BINARY_PROVENANCE_PROBE_ORDER:
+                            l3_identity = BinaryCacheIdentity(
+                                reference_fingerprint=l3_ref_fp,
+                                family_name=family_name,
+                                style_id=style.id,
+                                provenance=prov,
+                            )
+                            cached_raw, cached_fmt, cached_prov, cache_status = self.binary_cache.get(
+                                l3_identity
+                            )
+                            if cache_status == "CORRUPT":
+                                raise ValueError(
+                                    "ACQUISITION_BINARY_INTEGRITY_FAILED:L3_CACHE_CORRUPT"
+                                )
+                            if cache_status == "HIT" and cached_raw is not None:
+                                l3_hit = (cached_raw, cached_fmt, cached_prov or prov)
+                                break
+                    if job_mode == "ORIGINAL" and l3_hit is not None:
+                        cached_raw, cached_fmt, cached_prov = l3_hit
+                        reuse_state["binaries"][style.id] = AcquiredBinary(
+                            raw_bytes=cached_raw,
+                            format=cached_fmt,
+                            family_name=family_name,
+                            style_name=style.display_name,
+                            provenance=cached_prov,
+                        )
+                        self._trace_record(
+                            f"PREACQ_{style.id}", "L3_CACHE_HIT", provenance=cached_prov
+                        )
+                        continue
+                    if self.acquisition_pipeline is not None:
+                        if family_envelope is None:
+                            family_envelope = await self.acquisition_pipeline.acquire_family_preflight(
+                                job.source_url,
+                                expected_family=family_name,
+                                expected_styles=job.styles,
+                            )
+                        outcome = await self.acquisition_pipeline.acquire(
+                            job.source_url,
+                            family_name,
+                            style.display_name,
+                            raster_request={
+                                # Observable render-size passes: the closed
+                                # capability's disjoint fit+held-out sizes.
+                                "acs_pts": [
+                                    int(r)
+                                    for r in ProviderRasterCapability.deterministic_size_schedule(
+                                        PROVIDER_MONOTYPE_RENDER, gate_config.resolutions
+                                    ).all_sizes()
+                                ]
+                            },
+                            family_envelope=family_envelope,
+                        )
+                        self.last_reuse_trace["acquisition_traces"][style.id] = (
+                            outcome.trace.to_sanitized_dict()
+                        )
+                        if outcome.kind == "binary" and outcome.binary is not None and job_mode != "ORIGINAL":
+                            # T-PRICE-01: exact-binary-wins-immediately is ORIGINAL-only
+                            # (ADR-0002); VIETNAMESE must reconstruct through observable
+                            # evidence and never take the binary shortcut.
+                            self._trace_record(
+                                f"PREACQ_{style.id}", "BINARY_WIN_REFUSED_MODE", mode=job_mode
+                            )
+                        if outcome.kind == "binary" and outcome.binary is not None and job_mode == "ORIGINAL":
+                            if self.binary_cache is not None:
+                                self.binary_cache.put(
+                                    BinaryCacheIdentity(
+                                        reference_fingerprint=l3_ref_fp,
+                                        family_name=family_name,
+                                        style_id=style.id,
+                                        provenance=outcome.binary.provenance,
+                                    ),
+                                    outcome.binary.raw_bytes,
+                                    outcome.binary.format,
+                                    stage_provenance=outcome.binary.provenance,
+                                )
+                            reuse_state["binaries"][style.id] = outcome.binary
+                            self._trace_record(
+                                f"PREACQ_{style.id}", "BINARY_WIN", provenance=outcome.binary.provenance
+                            )
+                            continue
+                        if outcome.kind == "raster_authorized" and outcome.raster_pages:
+                            # Raster evidence is never discarded: the
+                            # bounds-checked CDN sprite slices ARE the
+                            # reconstruction pixels and are persisted
+                            # directly as observations. The browser path
+                            # supplements observable metrics/pairs/
+                            # features only; it never recaptures rasters
+                            # from the source page.
+                            raster_cps = sorted({
+                                int(g["code_point"])
+                                for page in outcome.raster_pages
+                                for g in (page.payload or {}).get("glyphs", [])
+                            })
+                            if not raster_cps:
+                                raise ValueError("ACQUISITION_RASTER_IDENTITY_MISSING")
+                            family_key, style_key = self._observation_keys(
+                                job.source_url, style.id
+                            )
+                            supplement = await collect_browser_measurement(
+                                job.source_url,
+                                family_name,
+                                style.display_name,
+                                raster_cps,
+                                gate_config,
+                            )
+                            # Closed capability descriptor: size axis only,
+                            # deterministic disjoint fit/held-out render
+                            # sizes, sealed into the collection identity.
+                            # Provider identity is derived from the pages
+                            # that actually produced the raster; dump/
+                            # Playwright evidence is never relabeled as
+                            # the Monotype CDN provider. Unknown/absent/
+                            # mixed provenance fails closed (no default).
+                            try:
+                                raster_provider_id = resolve_raster_provider(outcome.raster_pages)
+                            except ValueError:
+                                raise ValueError("ACQUISITION_RASTER_PROVIDER_IDENTITY_FAILED")
+                            raster_capability = ProviderRasterCapability.deterministic_size_schedule(
+                                raster_provider_id, gate_config.resolutions
+                            )
+                            attestation = page_slice_attestation(outcome.raster_pages)
+                            ingested = ingest_raster_pages(
+                                gate_store,
+                                gate_config,
+                                family_key,
+                                style_key,
+                                supplement,
+                                outcome.raster_pages,
+                                raster_capability,
+                                source_url=job.source_url,
+                            )
+                            raster_trace_prov = (
+                                RASTER_FALLBACK_PROVENANCE
+                                if raster_provider_id == PROVIDER_MONOTYPE_RENDER
+                                else str((outcome.raster_pages[0].payload or {}).get("provenance", ""))
+                            )
+                            self._trace_record(
+                                f"PREACQ_{style.id}",
+                                "RASTER_HANDOFF",
+                                glyphs=ingested,
+                                browser_version=supplement.browser_version,
+                                raster_provenance=raster_trace_prov,
+                                capability_hash=raster_capability.compute_hash(),
+                                capability_fit_sizes=list(raster_capability.fit_sizes),
+                                capability_held_out_sizes=list(raster_capability.held_out_sizes),
+                                sprite_sha256=attestation["sprite_sha256"],
+                                slice_bindings=attestation["bindings"],
+                            )
+                            continue
+                        if outcome.kind == "insufficient" and outcome.terminal_reason_code.startswith(
+                            "ACQUISITION_BINARY_INTEGRITY_FAILED"
+                        ):
+                            raise ValueError(outcome.terminal_reason_code)
+                    needs_acquisition = True
+                if needs_acquisition:
+                    source_payload = await self.source_acquirer.acquire_source(
+                        source_url=job.source_url,
+                        styles=job.styles,
+                        preview_input=preview_input,
+                    )
+                    archive_context = source_payload.archive_context or archive_context
+                else:
+                    source_payload = None
+                    if archive_context is None:
+                        archive_context = self.source_acquirer.get_archive_context(
+                            job.source_url, job.styles
+                        )
+            else:
+                source_payload = await self.source_acquirer.acquire_source(
+                    source_url=job.source_url,
+                    styles=job.styles,
+                    preview_input=preview_input,
+                )
+                archive_context = source_payload.archive_context or archive_context
+
+        self._touch_progress_beacon("acquisition_done")
+
+        # Step B & C: Build fonts, validate, and package in a worker thread off the event loop
+        manifest = await asyncio.to_thread(
+            self._sync_build_validate_and_package,
+            source_payload,
+            job,
+            job_dir,
+            fenced_event,
+            expiry_holder,
+            archive_context,
+            cached_files,
+            reuse_state,
+            job_deadline,
+        )
+        self._touch_progress_beacon("build_done")
+
+        # Step D: Upload ZIP artifact(s) to private R2 storage endpoint
+        if fenced_event.is_set():
+            raise RuntimeError("LEASE_FENCED_OR_EXPIRED")
+        # T-FAST30-A23-FIX F1: never upload after the monotonic wall breach
+        # (all-or-nothing).
+        if time.monotonic() >= job_deadline:
+            raise JobWallLimitExceeded()
+
+        uploaded_parts: list[dict[str, Any]] = []
+        parts_to_upload = manifest.parts if manifest.parts else [
+            ManifestPart(
+                part_index=1,
+                total_parts=1,
+                filename=manifest.zip_filename,
+                file_path=manifest.zip_file_path,
+                size_bytes=manifest.zip_size_bytes,
+                sha256_hex=manifest.zip_sha256_hex,
+                file_count=len(manifest.files),
+            )
+        ]
+
+        for part in parts_to_upload:
+            if fenced_event.is_set():
+                raise RuntimeError("LEASE_FENCED_OR_EXPIRED")
+            if time.monotonic() >= job_deadline:
+                raise JobWallLimitExceeded()
+
+            upload_res = await self.worker_client.upload_artifact(
+                job_id=job.job_id,
+                lease_token=job.lease_token,
+                zip_path=part.file_path,
+                sha256_hex=part.sha256_hex,
+            )
+
+            if upload_res.fenced:
+                logger.warning(f"Upload for job {job.job_id} was fenced")
+                self.scratch_manager.cleanup_job_dir(job_dir)
+                return ProcessResult(action=RunnerAction.FENCED_ABORT, job_id=job.job_id, reason="upload_fenced")
+
+            if not upload_res.success or not upload_res.artifact_key:
+                logger.warning(f"Upload failed for job {job.job_id}: {upload_res.reason}")
+                await self.worker_client.fail(
+                    job.job_id,
+                    job.lease_token,
+                    retryable=True,
+                    reason_code="UPLOAD_FAILED",
+                )
+                await self.queue_client.retry_messages([(msg.lease_id, 30)])
+                self.scratch_manager.cleanup_job_dir(job_dir)
+                return ProcessResult(action=RunnerAction.RETRIED, job_id=job.job_id, reason="upload_failed")
+
+            uploaded_parts.append({
+                "part_index": part.part_index,
+                "total_parts": part.total_parts,
+                "filename": part.filename,
+                "artifact_key": upload_res.artifact_key,
+                "artifact_size_bytes": part.size_bytes,
+                "artifact_sha256": part.sha256_hex,
+            })
+
+        self._touch_progress_beacon("upload_done")
+
+        # Step E: Fenced atomic D1 completion
+        if fenced_event.is_set():
+            raise RuntimeError("LEASE_FENCED_OR_EXPIRED")
+        # T-FAST30-A23-FIX F1: never complete after the monotonic wall
+        # breach (all-or-nothing).
+        if time.monotonic() >= job_deadline:
+            raise JobWallLimitExceeded()
+
+        complete_res = await self.worker_client.complete(
+            job_id=job.job_id,
+            lease_token=job.lease_token,
+            artifact_key=uploaded_parts[0]["artifact_key"],
+            sha256_hex=uploaded_parts[0]["artifact_sha256"],
+            size=uploaded_parts[0]["artifact_size_bytes"],
+            parts=uploaded_parts,
+        )
+
+        # Step F: Finalize and ACK Queue boundary (BLOCK 6)
+        if complete_res.success:
+            # Durable completion committed to D1 -> Acknowledge Queue message
+            await self.queue_client.acknowledge_messages([msg.lease_id])
+            self.scratch_manager.cleanup_job_dir(job_dir)
+            self._touch_progress_beacon("completed")
+            logger.info(f"Job {job.job_id} durably completed and ACKed from queue")
+            return ProcessResult(action=RunnerAction.ACKED, job_id=job.job_id, manifest=manifest)
+
+        if complete_res.status == "EXPIRED_OR_FENCED":
+            logger.warning(f"Completion for job {job.job_id} was fenced")
+            self.scratch_manager.cleanup_job_dir(job_dir)
+            return ProcessResult(action=RunnerAction.FENCED_ABORT, job_id=job.job_id, reason="completion_fenced")
+
+        if complete_res.status == "AMBIGUOUS_ERROR":
+            logger.warning(f"Ambiguous network failure on complete for {job.job_id}; retrying message")
+            await self.queue_client.retry_messages([(msg.lease_id, 30)])
+            return ProcessResult(action=RunnerAction.RETRIED, job_id=job.job_id, reason="ambiguous_completion_network_error")
+
+        self.scratch_manager.cleanup_job_dir(job_dir)
+        if complete_res.queue_action == "ack":
+            await self.queue_client.acknowledge_messages([msg.lease_id])
+            return ProcessResult(action=RunnerAction.ACKED, job_id=job.job_id, reason=complete_res.reason)
+        else:
+            await self.queue_client.retry_messages([(msg.lease_id, 30)])
+            return ProcessResult(action=RunnerAction.RETRIED, job_id=job.job_id, reason=complete_res.reason)
 
     async def process_pending_catalogs(self, max_requests: int = 1) -> int:
         """Resolve at most max_requests pending catalog request(s) per loop to protect Queue latency."""
@@ -1392,6 +1553,9 @@ class JobRunner:
             max_iterations is None or iterations < max_iterations
         ):
             iterations += 1
+            # T-FAST30-A23-FIX F5: an iterating (even idle) worker IS
+            # progress; the watchdog kills only when this goes stale.
+            self._touch_progress_beacon("loop")
             try:
                 results = await self.run_once()
                 if not results:

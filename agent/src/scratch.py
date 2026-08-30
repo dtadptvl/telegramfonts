@@ -41,6 +41,30 @@ class ScratchManager:
         job_dir.mkdir(parents=True, exist_ok=True)
         return job_dir
 
+    def get_durable_job_cache_dir(self, job_id: str, namespace: str) -> Path:
+        """Durable per-job cache directory that survives lease re-claims.
+
+        Unlike ``get_job_dir`` (which binds the lease token and is deleted on
+        cleanup), this path is keyed ONLY by the sanitized job id under a
+        namespaced cache root (analogous to ``font_model_cache``). A re-claimed
+        attempt of the same job resolves the same directory, so persisted
+        identity-bound state (checkpoints) resumes instead of restarting.
+        Distinct jobs never share a directory; traversal fails closed.
+        """
+        clean_job = re.sub(r"[^a-zA-Z0-9_-]", "", job_id.strip())
+        clean_ns = re.sub(r"[^a-zA-Z0-9_-]", "", namespace.strip())
+
+        if not clean_job or not clean_ns:
+            raise ValueError("EMPTY_JOB_OR_NAMESPACE_IDENTIFIER")
+
+        target = (self.root / clean_ns / clean_job).resolve()
+
+        if not is_path_contained_within(target, self.root) or target == self.root:
+            raise ValueError(f"Path traversal detected for durable cache dir: {target}")
+
+        target.mkdir(parents=True, exist_ok=True)
+        return target
+
     def resolve_safe_path(self, base_dir: Path, relative_name: str) -> Path:
         base_resolved = base_dir.resolve()
         target = (base_resolved / relative_name).resolve()

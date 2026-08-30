@@ -27,6 +27,7 @@ import datetime
 import hashlib
 import io
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
@@ -497,12 +498,24 @@ def ingest_raster_pages(
     return len(coverage_cdn)
 
 
+class BrowserMeasurementWallExceeded(RuntimeError):
+    """Aggregate browser-measurement wall breached: terminal FAST30_FAILED.
+
+    The message is the exact bounded terminal code so the runner's sanitized
+    error mapping surfaces FAST30_FAILED (no fallback, no escalation).
+    """
+
+    def __init__(self) -> None:
+        super().__init__("FAST30_FAILED")
+
+
 async def collect_browser_measurement(
     source_url: str,
     family_name: str,
     style_name: str,
     code_points: Sequence[int],
     config: ObservationConfig,
+    aggregate_deadline: float | None = None,
 ) -> BrowserSupplementalEvidence:
     """Approved browser supplemental path for the raster fallback.
 
@@ -511,12 +524,23 @@ async def collect_browser_measurement(
     NEVER captures rasters: reconstruction pixels come exclusively from the
     CDN sprite slices. Any failure raises (fail closed); nothing is
     synthesized.
+
+    ``aggregate_deadline`` (optional monotonic timestamp, born from the
+    job-level wall) bounds the ENTIRE per-codepoint x per-size measurement
+    loop aggregate: a breach raises BrowserMeasurementWallExceeded, which
+    maps to terminal FAST30_FAILED upstream. Per-call session timeouts and
+    the observation schedule/identity binding are unchanged.
     """
     from measurement.browser_session import ChromiumSession, close_browser_session
     from typography.models import BOUNDED_FIT_PAIRS
 
+    def _assert_aggregate_wall() -> None:
+        if aggregate_deadline is not None and time.monotonic() >= aggregate_deadline:
+            raise BrowserMeasurementWallExceeded()
+
     if not code_points:
         raise ValueError("RASTER_FALLBACK_NO_CODE_POINTS")
+    _assert_aggregate_wall()
     session = ChromiumSession(timeout_seconds=config.timeout_seconds)
     try:
         await session.start()
@@ -533,13 +557,16 @@ async def collect_browser_measurement(
         metrics: dict[int, DirectMetrics] = {}
         metric_schedule: dict[int, dict[float, DirectMetrics]] = {}
         for cp in code_points:
+            _assert_aggregate_wall()
             per_size: dict[float, DirectMetrics] = {}
             for size in metric_sizes:
+                _assert_aggregate_wall()
                 per_size[size] = await session.measure_glyph_direct(
                     font, cp, font_size_px=size, upem=config.upem
                 )
             anchor = per_size.get(anchor_size)
             if anchor is None:
+                _assert_aggregate_wall()
                 anchor = await session.measure_glyph_direct(
                     font, cp, font_size_px=anchor_size, upem=config.upem
                 )
@@ -566,12 +593,14 @@ async def collect_browser_measurement(
         pairs: list[dict[str, Any]] = []
         pair_schedule: dict[tuple[int, int], list[dict[str, Any]]] = {}
         for left_cp, right_cp in target_pairs:
+            _assert_aggregate_wall()
             text = chr(left_cp) + chr(right_cp)
             # Sealed raw per-size pair evidence across the exact metric
             # schedule; the derived kerning must recompute from these rows.
             size_rows: list[dict[str, Any]] = []
             anchor_pair_adv: float | None = None
             for size in metric_sizes:
+                _assert_aggregate_wall()
                 pair_adv_size = await session.measure_text_advance(
                     font, text, size, config.upem
                 )
@@ -589,6 +618,7 @@ async def collect_browser_measurement(
                     }
                 )
             if anchor_pair_adv is None:
+                _assert_aggregate_wall()
                 anchor_pair_adv = await session.measure_text_advance(
                     font, text, anchor_size, config.upem
                 )
@@ -605,6 +635,7 @@ async def collect_browser_measurement(
 
         features: list[dict[str, Any]] = []
         for tag, text in config.feature_probes:
+            _assert_aggregate_wall()
             probe = await session.probe_opentype_feature(
                 font, tag, text, config.font_size_px, config.upem
             )
