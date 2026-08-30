@@ -91,17 +91,51 @@ class Settings(BaseSettings):
 
     # T-FAST30-A23-FIX F1: hard monotonic job wall (claim -> ACK). Independent
     # of the heartbeat-moved lease expiry: breach raises terminal FAST30_FAILED
-    # and nothing is uploaded/archived after a breach. Production default 1800
-    # seconds = the 30-minute FAST_30 production wall.
+    # and nothing is uploaded/archived after a breach.
+    # T-FAST-ATLAS-ULTRA-01 (ADR-0004): re-targeted to the speed-first walls -
+    # ORIGINAL default 480 s (8 min), VIETNAMESE 720 s (12 min), selected
+    # mode-aware at claim (atlas.policy.resolve_job_wall_seconds). Wall expiry
+    # is FAST30_FAILED with no retry and no heavier profile. The wall machinery
+    # itself (monotonic deadline, guards, all-or-nothing) is the unchanged
+    # T-FAST30-A23-FIX hardening.
     JOB_WALL_SECONDS: int = Field(
-        default=1800,
+        default=480,
         ge=2,
         le=7200,
         description=(
-            "Hard monotonic job wall (seconds) from claim to ACK; breach fails "
-            "terminal FAST30_FAILED with no upload/archive after the breach"
+            "Hard monotonic ORIGINAL job wall (seconds) from claim to ACK; "
+            "breach fails terminal FAST30_FAILED with no upload/archive after "
+            "the breach (ADR-0004 speed-first wall)"
         ),
     )
+    JOB_WALL_SECONDS_VIETNAMESE: int = Field(
+        default=720,
+        ge=2,
+        le=7200,
+        description=(
+            "Hard monotonic VIETNAMESE job wall (seconds) from claim to ACK; "
+            "mode-aware selection at claim (ADR-0004 speed-first wall)"
+        ),
+    )
+    # T-FAST-ATLAS-ULTRA-01 (ADR-0004): FAST_ATLAS_ULTRA_V1 runtime defaults,
+    # documented for the i3-7100 / 8 GB Debian worker. All configuration-
+    # driven; nothing here is A23-device-specific.
+    ATLAS_ULTRA_ENABLED: bool = Field(
+        default=True,
+        description=(
+            "Bind FAST_ATLAS_ULTRA_V1 internally under the FAST_30 public "
+            "profile name (ADR-0004). When enabled the exhaustive legacy MAX "
+            "gate paths are gated off fail-closed for reconstruction jobs"
+        ),
+    )
+    ATLAS_BROWSER_SESSIONS: int = Field(default=1, ge=1, le=32)
+    ATLAS_HTTP_CONCURRENCY: int = Field(default=8, ge=1, le=32)
+    ATLAS_GLYPH_WORKERS: int = Field(default=2, ge=1, le=8)
+    ATLAS_PAGES_IN_MEMORY: int = Field(default=1, ge=1, le=2)
+    ATLAS_TARGET_MB: int = Field(default=96, ge=1, le=512)
+    ATLAS_MAX_MB: int = Field(default=128, ge=1, le=512)
+    ATLAS_CHECKPOINT_BATCH: int = Field(default=32, ge=1, le=512)
+
     # T-FAST30-A23-FIX F5: optional progress beacon file touched on stage
     # transitions and heartbeat beats. The supervisor hang watchdog kills the
     # worker when this file goes stale (process-lifecycle only; no pipeline

@@ -1,0 +1,59 @@
+schema_version: 8
+policy_rev: "P-20260830.9-LEAN-SAFE-R16"
+policy_fingerprint: "0fa00f66ee4873bf"
+id: T-FAST-ATLAS-ULTRA-01
+contract_rev: 1
+mode: DEEP
+validated_at_generation: 10
+scope_tags: [reconstruction-profile, validation-regime, fast30-performance, production-behavior]
+status: active
+
+objective: "Replace the heavy FAST_30 reconstruction schedule with the speed-first FAST_ATLAS_ULTRA_V1 atlas pipeline (E-00023 / ADR-0004): FAST_30 stays the only public profile name; walls ORIGINAL 8 min / VIETNAMESE 12 min; targets 2-5 min ordinary and 5-10 min large ORIGINAL styles, reuse <1 min; speed-first final validation; T-FAST30-A23-FIX hardening preserved and re-targeted."
+
+routing:
+  reason: "cross-subsystem pipeline rebuild spanning acquisition, atlas raster, batched metrics, geometry/refinement, streaming caches, typography, font build and validation; strict memory/performance budgets and supersession semantics require deep reliable reasoning"
+  fallback_safe: true
+
+task_wall: "4 hours from first delegation; never wait through another 30-minute run; no blind retry; budget exhaustion -> BUDGET_EXCEEDED STOP preserving the last proven boundary"
+
+acceptance:
+  U1: "policy identity: FAST_ATLAS_ULTRA_V1 bound internally; FAST_30 remains the sole public profile name; BALANCED_MAX/FULL_MAX retired paths untouched (no fallback/escalation reintroduced)"
+  U2: "fast raster pass per ADR-0004: size 1024 phase x=0/y=0; bounded atlas pages (target 96MB, hard max 128MB); one page in memory at a time; HTTP/CDN first, browser canvas atlas only for missing observations; one readback per page; crop+release page memory; no 512/2048/4096/extra-phase pre-collection"
+  U3: "batched metrics: measureText for the complete glyph set at 512/1024/2048 (width, actual bbox, ascent/descent, font bbox); multi-size regression to UPEM=1000; few batched JS calls (never per-glyph); concurrent with HTTP atlas acquisition"
+  U4: "fast geometry per glyph (alpha decode -> normalization -> direct contour -> topology cleanup -> cubic fit -> bounded simplification -> cheap FIT-confidence); easy glyphs skip SDF/heavy optimizer; PASS freezes GlyphModel and releases transient memory"
+  U5: "one refinement only for failed glyphs (1024@0.5,0 + 2048@0,0 -> merge -> SDF -> local refit -> bounded local optimizer -> confidence); no 512/4096/quarter-phases/second tier/whole-font optimizer/whole-font retry; structurally valid best candidate accepted with recorded low-confidence IDs; structural/outline/shaping/rendering invalidity stays FAILED_GLYPH"
+  U6: "streaming + caches: page N+1 downloads while N decodes; frozen glyphs insert immediately into the canonical FontModel; persistent exact-identity caches (compressed raster observations, metrics, final cubic GlyphModels, canonical FontModel, TTF/OTF, validation report); ephemeral-only decoded alpha/SDF/temp contours/merge buffers; checkpoint per completed page or 32 frozen glyphs + graceful shutdown; no fsync per glyph"
+  U7: "typography: selective bounded kerning pairs; GPOS kern only for measured material deltas; liga/calt preserved from authorized binaries; reconstructed liga/calt only on exact observable mapping; no ss01-ss20 probing"
+  U8: "VIETNAMESE optional path per ADR-0004 (skip when vietnamese=false; deterministic composition first; AI only for remaining failed classes, never per glyph/raster; ADR-0003 cascade + secret boundary preserved; AI capped by glyph class; one StyleProfile reuse; no global geometry rerun)"
+  U9: "font build: canonical cubic FontModel single source of truth; OTF via CFF, TTF via cu2qu/glyf; optimize/form once; never independent TTF/OTF reconstruction; TTF+OTF the only outputs"
+  U10: "speed-first final validation runs ONCE (FontTools structural/load/table/cmap/metrics/outline; HarfBuzz representative shaping/positioning/kern; FreeType representative load/render; bounded NFC/NFD + VN corpus when selected); prohibited list honored (no exhaustive Chromium validation, four-consumer MAX gate, complete held-out schedule, full repo suite, soak, retired E2E, second heavy pass); after temporary TTF passes, final TTF+OTF built with cheap FontTools structural/load checks on both"
+  U11: "walls and runtime defaults configuration-driven: ORIGINAL 480s / VIETNAMESE 720s hard walls (FAST30_FAILED on expiry, no retry, no heavier profile); defaults browser_sessions=1 http_concurrency=8 glyph_workers=2 atlas_pages_in_memory=1 atlas_target_mb=96 atlas_max_mb=128 checkpoint_batch=32 (i3-7100/8GB Debian); native NumPy/SciPy/Pillow/FontTools ops, no Python per-pixel loops"
+  U12: "final bounded speed fixture at stable final HEAD proves: ordinary ORIGINAL 150-250 glyphs 2-5 min; large ORIGINAL 400-500 glyphs 5-10 min; reuse <1 min where practical; evidence records atlas/CDP call counts, stage timings, total fixture wall, easy/refined/failed/low-confidence glyph counts, peak memory, TTF/OTF structural validation outcomes"
+  U13: "T-FAST30-A23-FIX hardening preserved and re-targeted (job wall config now 480/720; watchdog, durable checkpoints, edge age backstop unchanged); A23 boundary honored: staging/compatibility only, read-only reconciliation of stale-prone claims, zero stop/restart/deploy/D1/Queue/R2/order-recovery/production-job actions"
+
+budget:
+  - "during implementation: exact repros and focused tests only; small ORIGINAL fixture; small VIETNAMESE fixture only if causally changed"
+  - "ONE final bounded speed fixture at stable final HEAD; never wait through another 30-minute run; no blind retry"
+  - "do not run: full repository suite, soak, retired FULLMAX/BALANCEDMAX E2E"
+  - "overall task wall 4 hours; exhaustion -> BUDGET_EXCEEDED STOP with last proven boundary"
+
+constraints:
+  - "T-FAST30-A23-FIX terminal result at f574d0c immutable; its wall/watchdog/checkpoint/zombie-prevention hardening preserved"
+  - "no production deployment or order-recovery authority granted; A23 is staging/compatibility only"
+  - "commit only intended task delta on the task branch in the isolated worktree; never commit secrets; preserve unrelated dirty files"
+  - "no A23-specific hardcoding that prevents the Debian Mini PC migration"
+
+gates: [NO_LOOP]
+extra_policies: [evidence, adversarial, budget]
+
+identity:
+  repo: "E:\\cv\\telefont"
+  worktree: "E:\\cv\\telefont-atlas-ultra"
+  branch: "task/T-FAST-ATLAS-ULTRA-01"
+  base: "f574d0c51d1a4bcd596b6bdbe1fd06f5674f51be"
+
+depends_on:
+  decisions: [decisions/ADR-0002.md, decisions/ADR-0003.md, decisions/ADR-0004.md]
+  evidence: [".prime/journal/events.jsonl", ".prime/tasks/T-FAST30-A23-FIX/diagnosis.md"]
+
+note: "Created at generation 10 (E-00023). ADR-0004 owns the speed-first policy; ADR-0001 keeps profile-retirement semantics with its performance/validation regime superseded. Prime reviews and non-force integrates after acceptance (exact identity + governance sync); deployment remains separately authorized."

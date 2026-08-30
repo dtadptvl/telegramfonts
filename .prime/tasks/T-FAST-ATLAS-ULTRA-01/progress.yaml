@@ -1,0 +1,36 @@
+schema_version: 1
+task: T-FAST-ATLAS-ULTRA-01
+contract_rev: 1
+policy: P-20260830.9-LEAN-SAFE-R16 / 0fa00f66ee4873bf
+generation: 10
+branch: task/T-FAST-ATLAS-ULTRA-01
+worktree: E:\cv\telefont-atlas-ultra
+base: f574d0c51d1a4bcd596b6bdbe1fd06f5674f51be
+status: in_progress
+wall_hours: 4
+milestones:
+  - id: M0
+    name: discovery+setup
+    status: done
+    note: >-
+      contract/ADR-0001-amendment/ADR-0004/diagnosis read; worktree created at
+      base f574d0c; npm ci ok; python 3.14.6 + numpy/scipy/pillow/fonttools/
+      uharfbuzz/freetype-py verified; reusable components mapped
+      (candidate_builder OTF-CFF/TTF-cu2qu, font_model, sdf, validator).
+  - id: M1
+    name: policy+walls+runtime-defaults
+    status: in_progress
+    note: atlas/policy.py written (FAST_ATLAS_ULTRA_V1 bound under FAST_30)
+next_actions:
+  - retarget JOB_WALL_SECONDS default 480 + VIETNAMESE 720 mode-aware walls
+  - atlas runtime defaults config-driven
+  - focused wall/policy tests green, commit boundary
+budget_state:
+  elapsed_min: ~35
+  remaining_min: ~205
+  fixture_runs_used: 0
+constraints_ack:
+  production_access: none
+  parent_worktree: untouched (dirty files preserved)
+  secrets: key names only
+  a23: staging-only; no reliance on stale claims

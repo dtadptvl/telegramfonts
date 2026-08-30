@@ -23,9 +23,13 @@ attestation, deterministic identity, and publication requirements are
 unchanged. Reduced fitting work is permitted only when the artifact
 passes the complete unchanged final gates.
 
-WALL LIMIT: the end-to-end wall limit is 30 minutes per font; deadline
-or quality failure returns FAST30_FAILED and stops (no fallback or
-escalation of any trigger type).
+WALL LIMIT (re-targeted by ADR-0004 / T-FAST-ATLAS-ULTRA-01): the
+end-to-end wall is the speed-first job wall born at claim - ORIGINAL
+480 s / VIETNAMESE 720 s (configuration-driven; the profile field
+carries the 720 s mode ceiling while the job-level monotonic wall is
+the binding deadline). Deadline or quality failure returns
+FAST30_FAILED and stops (no fallback or escalation of any trigger
+type). The 30-minute wall of ADR-0001 is superseded by ADR-0004.
 
 SEARCH LADDER (FAST_30, deterministic, versioned):
 - CORE FIT on versioned core fit resolutions (512/1024/2048 on the
@@ -259,7 +263,7 @@ FAST_30_PROFILE = ReconstructionProfile(
     confidence_thresholds=ConfidenceThresholds(),
     calibration_corpus_identity=CALIBRATION_CORPUS_IDENTITY,
     calibration_policy_version=CALIBRATION_POLICY_VERSION,
-    wall_limit_seconds=1800.0,
+    wall_limit_seconds=720.0,  # ADR-0004: mode-wall ceiling (480/720)
 )
 
 

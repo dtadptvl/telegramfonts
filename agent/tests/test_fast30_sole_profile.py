@@ -83,7 +83,11 @@ def test_select_production_profile_fast30_sole():
     assert select_production_profile(FAST_30_PROFILE) is FAST_30_PROFILE
     assert PROFILE_FAST_30 == "FAST_30"
     assert FAST_30_PROFILE.name == PROFILE_FAST_30
-    assert FAST_30_PROFILE.wall_limit_seconds == 1800.0  # 30-minute wall
+    # ADR-0004 (T-FAST-ATLAS-ULTRA-01): speed-first walls re-target the
+    # profile ceiling to the mode-wall maximum (ORIGINAL 480 /
+    # VIETNAMESE 720); the binding deadline is the mode-aware job
+    # wall born at claim.
+    assert FAST_30_PROFILE.wall_limit_seconds == 720.0
     assert RETIRED_PROFILES == frozenset({PROFILE_BALANCED_MAX, PROFILE_FULL_MAX})
 
 

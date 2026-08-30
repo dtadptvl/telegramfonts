@@ -53,6 +53,7 @@ from compute.source import SourceAcquirer
 from measurement.models import ObservationConfig
 from compute.validator import validate_font_file
 from config import Settings
+from atlas.policy import resolve_job_wall_seconds
 from fidelity.profiles import FAST_30_PROFILE
 from fidelity.release_gate import STAGE9D_ATTESTATION_SCHEMA_VERSION, Stage9DAttestation, Stage9DReleaseGate
 from queue_client import CloudflareQueueClient, QueueMessage
@@ -993,9 +994,25 @@ class JobRunner:
         stop_event = threading.Event()
         expiry_holder = [job.lease_expires_at]
 
-        # T-FAST30-A23-FIX F1: hard monotonic job wall born at claim
-        # (JOB_WALL_SECONDS, default 1800s = the 30-minute production wall).
-        job_deadline = time.monotonic() + float(self.settings.JOB_WALL_SECONDS)
+        # T-FAST30-A23-FIX F1: hard monotonic job wall born at claim.
+        # T-FAST-ATLAS-ULTRA-01 (ADR-0004, U11): re-targeted to the
+        # speed-first walls with mode-aware selection - ORIGINAL
+        # JOB_WALL_SECONDS (default 480 s) / VIETNAMESE
+        # JOB_WALL_SECONDS_VIETNAMESE (default 720 s). Wall expiry is
+        # terminal FAST30_FAILED: no retry, no heavier profile. Absent/
+        # unsupported modes keep the ORIGINAL wall value here and fail
+        # closed with MISSING_MODE/UNSUPPORTED_MODE at the unchanged
+        # downstream mode binding.
+        try:
+            wall_mode = _require_job_mode(job)
+        except ValueError:
+            wall_mode = "ORIGINAL"
+        job_wall_seconds = resolve_job_wall_seconds(
+            wall_mode,
+            self.settings.JOB_WALL_SECONDS,
+            self.settings.JOB_WALL_SECONDS_VIETNAMESE,
+        )
+        job_deadline = time.monotonic() + float(job_wall_seconds)
         self._touch_progress_beacon(f"job_start:{job.job_id}")
 
         # Lease liveness runs on a dedicated thread so blocking compute on
