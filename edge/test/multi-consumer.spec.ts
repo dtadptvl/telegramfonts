@@ -31,8 +31,8 @@ async function setupOrderAndJob(): Promise<{ orderId: string; jobId: string }> {
     .run();
 
   await env.DB.prepare(
-    `INSERT INTO orders (id, user_id, status, total_amount, currency, metadata, created_at, updated_at)
-     VALUES (?, ?, 'PAID', 100000, 'VND', ?, ?, ?)`
+    `INSERT INTO orders (id, user_id, status, total_amount, currency, metadata, mode, created_at, updated_at)
+     VALUES (?, ?, 'PAID', 100000, 'VND', ?, 'ORIGINAL', ?, ?)`
   )
     .bind(
       orderId,
@@ -40,6 +40,7 @@ async function setupOrderAndJob(): Promise<{ orderId: string; jobId: string }> {
       JSON.stringify({
         source_url: 'https://www.myfonts.com/fonts/foundry/mc-font/',
         selected_formats: ['TTF', 'OTF'],
+        mode: 'ORIGINAL',
       }),
       now,
       now

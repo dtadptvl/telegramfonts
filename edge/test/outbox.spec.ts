@@ -302,10 +302,10 @@ describe('Phase 4: Transactional Outbox Dispatcher', () => {
         .bind(userId, now, now)
         .run();
 
-      // Insert completed order
+      // Insert completed order (mode = ORIGINAL: T-PRICE-01 delivery binds mode)
       await env.DB.prepare(
-        `INSERT INTO orders (id, user_id, status, total_amount, currency, created_at, updated_at, completed_at)
-         VALUES (?, ?, 'COMPLETED', 100000, 'VND', ?, ?, ?)`
+        `INSERT INTO orders (id, user_id, status, total_amount, currency, mode, created_at, updated_at, completed_at)
+         VALUES (?, ?, 'COMPLETED', 100000, 'VND', 'ORIGINAL', ?, ?, ?)`
       )
         .bind(orderId, userId, now, now, now)
         .run();
@@ -414,8 +414,8 @@ describe('Phase 4: Transactional Outbox Dispatcher', () => {
         .run();
 
       await env.DB.prepare(
-        `INSERT INTO orders (id, user_id, status, total_amount, currency, created_at, updated_at, completed_at)
-         VALUES (?, ?, 'COMPLETED', 100000, 'VND', ?, ?, ?)`
+        `INSERT INTO orders (id, user_id, status, total_amount, currency, mode, created_at, updated_at, completed_at)
+         VALUES (?, ?, 'COMPLETED', 100000, 'VND', 'ORIGINAL', ?, ?, ?)`
       )
         .bind(orderId, userId, now, now, now)
         .run();

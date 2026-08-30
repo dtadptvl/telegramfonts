@@ -73,11 +73,12 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     source_url: 'https://www.myfonts.com/collections/roboto-flex',
     family_name: 'Roboto Flex',
     selected_formats: ['TTF'],
+    mode: 'ORIGINAL',
   });
 
   await env.DB.prepare(
-    `INSERT INTO orders (id, user_id, status, total_amount, currency, metadata, payment_code, created_at, updated_at)
-     VALUES (?, '12345', ?, 100000, 'VND', ?, ?, ?, ?)`
+    `INSERT INTO orders (id, user_id, status, total_amount, currency, metadata, payment_code, mode, created_at, updated_at)
+     VALUES (?, '12345', ?, 100000, 'VND', ?, ?, 'ORIGINAL', ?, ?)`
   ).bind(orderId, orderStatus, metadata, paymentCode, now, now).run();
   await env.DB.prepare(
     `INSERT INTO order_items (id, order_id, font_id, font_name, price, created_at)
