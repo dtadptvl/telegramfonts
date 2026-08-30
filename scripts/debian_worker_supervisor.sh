@@ -57,6 +57,14 @@ readonly LOG_FILE="$TERMUX_PREFIX/tmp/telefont-debian-worker.log"
 readonly MAX_RESTARTS=3
 readonly RESTART_WINDOW_SECONDS=300
 readonly RESTART_DELAY_SECONDS=5
+# T-FAST30-A23-FIX F5 hang watchdog defaults (all overridable via env below):
+# the worker touches a progress beacon file on stage transitions/heartbeat
+# beats; the supervisor kills the worker when the beacon is stale beyond
+# WATCHDOG_STALE_MULTIPLIER x heartbeat interval. Process-lifecycle only.
+readonly WATCHDOG_PROGRESS_FILE_DEFAULT="/root/.telefont_worker_progress"
+readonly WATCHDOG_STALE_MULTIPLIER_DEFAULT=6
+readonly WATCHDOG_POLL_SECONDS_DEFAULT=15
+readonly WATCHDOG_TERM_GRACE_SECONDS=10
 readonly HOST_PATH="$PATH"
 readonly FLOCK_BIN="$(command -v flock 2>/dev/null || true)"
 readonly WORKER_PATH="$RUNTIME_ROOT/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -271,6 +279,39 @@ else
   log "archive_mode=NO_LOCAL_ARCHIVE: canonical external ext4 archive identity checks skipped by explicit D21 mode"
 fi
 
+# T-FAST30-A23-FIX F5: hang watchdog configuration (config-driven; no
+# A23-specific hardcoding). The heartbeat interval is read from the same
+# canonical environment file the worker consumes, so the stale threshold
+# tracks the worker's actual heartbeat cadence.
+WATCHDOG_PROGRESS_FILE="$(printenv TELEFONT_WATCHDOG_PROGRESS_FILE 2>/dev/null || true)"
+[ -n "$WATCHDOG_PROGRESS_FILE" ] || WATCHDOG_PROGRESS_FILE="$WATCHDOG_PROGRESS_FILE_DEFAULT"
+case "$WATCHDOG_PROGRESS_FILE" in
+  /*) : ;;
+  *) fail "watchdog progress file must be an absolute chroot path" ;;
+esac
+
+WATCHDOG_STALE_MULTIPLIER="$(printenv TELEFONT_WATCHDOG_STALE_MULTIPLIER 2>/dev/null || true)"
+case "$WATCHDOG_STALE_MULTIPLIER" in
+  ''|*[!0-9]*) WATCHDOG_STALE_MULTIPLIER="$WATCHDOG_STALE_MULTIPLIER_DEFAULT" ;;
+esac
+[ "$WATCHDOG_STALE_MULTIPLIER" -ge 1 ] || fail "watchdog stale multiplier must be >= 1"
+
+WATCHDOG_POLL_SECONDS="$(printenv TELEFONT_WATCHDOG_POLL_SECONDS 2>/dev/null || true)"
+case "$WATCHDOG_POLL_SECONDS" in
+  ''|*[!0-9]*) WATCHDOG_POLL_SECONDS="$WATCHDOG_POLL_SECONDS_DEFAULT" ;;
+esac
+[ "$WATCHDOG_POLL_SECONDS" -ge 1 ] || fail "watchdog poll seconds must be >= 1"
+
+worker_heartbeat_interval="$(printenv HEARTBEAT_INTERVAL_SECONDS 2>/dev/null || true)"
+case "$worker_heartbeat_interval" in
+  ''|*[!0-9]*) worker_heartbeat_interval=60 ;;
+esac
+if [ "$worker_heartbeat_interval" -lt 1 ] || [ "$worker_heartbeat_interval" -gt 600 ]; then
+  worker_heartbeat_interval=60
+fi
+WATCHDOG_STALE_SECONDS=$((WATCHDOG_STALE_MULTIPLIER * worker_heartbeat_interval))
+WATCHDOG_PROGRESS_FILE_HOST="$DEBIAN_ROOT$WATCHDOG_PROGRESS_FILE"
+
 export PATH="$HOST_PATH"
 
 exec 9>"$LOCK_FILE" || fail "supervisor lock is unavailable"
@@ -310,6 +351,7 @@ run_worker() {
     PATH="$WORKER_PATH" \
     PYTHONPATH="$RELEASE_ROOT/agent/src" \
     PYTHONDONTWRITEBYTECODE=1 \
+    PROGRESS_BEACON_FILE="$WATCHDOG_PROGRESS_FILE" \
     FONT_ARCHIVE_MODE="NO_LOCAL_ARCHIVE" \
     "$CHROOT_BIN" "$DEBIAN_ROOT" "$RUNTIME_PYTHON" "$WORKER_ENTRYPOINT"
   else
@@ -318,10 +360,58 @@ run_worker() {
     PATH="$WORKER_PATH" \
     PYTHONPATH="$RELEASE_ROOT/agent/src" \
     PYTHONDONTWRITEBYTECODE=1 \
+    PROGRESS_BEACON_FILE="$WATCHDOG_PROGRESS_FILE" \
     FONT_ARCHIVE_ROOT="$ARCHIVE_ROOT" \
     FONT_ARCHIVE_MODE="EXTERNAL_EXT4" \
     "$CHROOT_BIN" "$DEBIAN_ROOT" "$RUNTIME_PYTHON" "$WORKER_ENTRYPOINT"
   fi
+}
+
+watchdog_wait_or_kill() {
+  # T-FAST30-A23-FIX F5 hang watchdog: waits for worker_pid and kills it
+  # when the progress beacon stays stale beyond WATCHDOG_STALE_SECONDS
+  # (N x heartbeat interval). A healthy worker touches the beacon on
+  # heartbeat beats during long compute and on every idle loop iteration,
+  # so only a truly hung process trips this. Sets exit_code and
+  # watchdog_kill; the existing restart budget then applies unchanged.
+  # Process-lifecycle only: no pipeline semantics are interpreted here.
+  watchdog_kill=0
+  exit_code=0
+  worker_start="$(date -u +%s)" || return 1
+  while :; do
+    if ! kill -0 "$worker_pid" 2>/dev/null; then
+      wait "$worker_pid"
+      exit_code=$?
+      return 0
+    fi
+    now="$(date -u +%s)" || { wait "$worker_pid"; exit_code=$?; return 0; }
+    if [ -f "$WATCHDOG_PROGRESS_FILE_HOST" ]; then
+      progress_mtime="$("$STAT_BIN" -c %Y "$WATCHDOG_PROGRESS_FILE_HOST" 2>/dev/null || true)"
+    else
+      progress_mtime=""
+    fi
+    case "$progress_mtime" in
+      ''|*[!0-9]*) progress_mtime="$worker_start" ;;
+    esac
+    stale_for=$((now - progress_mtime))
+    if [ "$stale_for" -gt "$WATCHDOG_STALE_SECONDS" ]; then
+      log "watchdog: progress stale ${stale_for}s (> ${WATCHDOG_STALE_SECONDS}s); killing worker pid=$worker_pid"
+      watchdog_kill=1
+      kill -TERM "$worker_pid" 2>/dev/null || true
+      grace=0
+      while kill -0 "$worker_pid" 2>/dev/null && [ "$grace" -lt "$WATCHDOG_TERM_GRACE_SECONDS" ]; do
+        sleep 1
+        grace=$((grace + 1))
+      done
+      if kill -0 "$worker_pid" 2>/dev/null; then
+        kill -KILL "$worker_pid" 2>/dev/null || true
+      fi
+      wait "$worker_pid"
+      exit_code=$?
+      return 0
+    fi
+    sleep "$WATCHDOG_POLL_SECONDS"
+  done
 }
 
 while :; do
@@ -331,9 +421,11 @@ while :; do
   # run_worker execs the worker chain; worker_pid is the actual worker PID.
   run_worker </dev/null >>"$LOG_FILE" 2>&1 &
   worker_pid=$!
-  wait "$worker_pid"
-  exit_code=$?
+  watchdog_wait_or_kill || fail "clock is unavailable for the hang watchdog"
   worker_pid=""
+  if [ "$watchdog_kill" -eq 1 ]; then
+    log "worker was killed by the hang watchdog; restart budget applies"
+  fi
 
   [ "$stop_requested" -eq 0 ] || break
 
