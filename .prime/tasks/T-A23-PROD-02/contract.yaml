@@ -60,8 +60,9 @@ extra_policies: [consequential, production, evidence]
 
 identity:
   repo: "E:\\cv\\telefont"
-  candidate_sha: null   # MUST be frozen and recorded here before any deployment
-  retained_edge_version: "d0d9c4ef-47db-42ca-8940-cbeeb72d6d4f"
+  candidate_sha: "2c50715336a5e7f2a69ea365f5b7593437889fc4"   # FROZEN 2026-08-30T12:05Z (E-00021): T-FAST30-A23-FIX branch head; derived solely from that task; merged into main via cdee2b4; deployment authority activates ONLY after the <=25-minute A23 device acceptance passes at exactly this SHA
+  candidate_status: "frozen_pending_device_acceptance"
+  retained_edge_version: "d0d9c4ef-47db-42ca-8940-cbeeb72d6d4f"   # F4 edge changes ARE causal to the wall fix -> Edge will be redeployed at the candidate line when deployment activates (E-00018 C: NO_CHANGE only if unchanged)
   deployed_edge: "telegramfonts-edge.dienluanphien98.workers.dev"
   d1: "telegramfonts-d1 / 4ab4ab25-37cc-4044-acc9-66fc98b9f831"
   queue: "telegramfonts-fulfillment"
