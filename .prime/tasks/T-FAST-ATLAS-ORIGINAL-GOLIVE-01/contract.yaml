@@ -46,7 +46,7 @@ identity:
   staged_release_dirs: "/data/local/chroot/debian/opt/telefont-release-34f24b0... (+ runtime dir) - from E-00028 O4"
   worktree: "E:\\cv\\telefont-golive"
   branch: "task/T-FAST-ATLAS-ORIGINAL-GOLIVE-01"
-  final_candidate_sha: null   # frozen at G3 pass
+  final_candidate_sha: "b63ce6f57d3c26a46005bd7da7ab7d9d05898a14"   # FROZEN at G3 PASS (E-00031): staged on device (tar bad461d4..., 25-dist runtime, manifest 0 drift); integrated into main via merge 38e8269
   edge_known_good_version: "d0d9c4ef-47db-42ca-8940-cbeeb72d6d4f"
   a23_known_good: "release+runtime b8c6994cd207380683e5e08501537faad71248d2"
 
