@@ -1,0 +1,46 @@
+schema_version: 8
+governance:
+  policy_rev: "P-20260830.9-LEAN-SAFE-R16"
+  policy_fingerprint: "0fa00f66ee4873bf"
+  generation: 11
+task: T-FAST-ATLAS-PROD-READY-01
+contract_rev: 1
+mode: DEEP
+status: in_progress
+identity:
+  repo: "E:\\cv\\telefont"
+  worktree: "E:\\cv\\telefont-prod-ready"
+  branch: "task/T-FAST-ATLAS-PROD-READY-01"
+  base: "97073f10710f0f14b9b48f6a88fbf975520fe72e"
+setup:
+  worktree_created: true
+  base_verified: "97073f10710f0f14b9b48f6a88fbf975520fe72e"
+  connectivity_probe:
+    myfonts_https_head: "status=403 elapsed=0.36s (real server response; egress OPEN, not NETWORK_BLOCKED)"
+    monotype_cdn_https_head: "status=403 elapsed=0.59s (real server response; egress OPEN)"
+  environment:
+    python: "3.14.6"
+    chromium: "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe"
+    playwright: "installed"
+    uharfbuzz_freetype: "installed"
+    dev_vars_present: true
+    ground_truth_binary: "agent/benchmark_data/ground_truth/BeVietnamPro-Regular.ttf"
+milestones:
+  - id: M0
+    name: "bounded discovery + setup"
+    status: done
+  - id: M1
+    name: "R1 production transport providers + factory wiring"
+    status: pending
+  - id: M2
+    name: "R2 combining-mark semantics"
+    status: pending
+  - id: M3
+    name: "R3 Vietnamese AI runtime"
+    status: pending
+  - id: M4
+    name: "R4 live Vietnamese smoke (conditional)"
+    status: pending
+  - id: M5
+    name: "R5 bounded validation + live R1 smoke + task files"
+    status: pending
