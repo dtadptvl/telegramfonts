@@ -1,20 +1,23 @@
-"""Causal tests for the G3 iteration-3 root cause fix.
+"""Causal tests for the G3 iteration-3/4 root cause fixes.
 
-Root cause (proven on A23, iteration 3 + bounded diagnostics): the planner
-area-budgets atlas pages (up to ~128 Mpx), but fetch_cell_pages stacked every
-cell of a page into ONE vertical canvas. Real pages reach ~118k px height and
-the browser rejects canvas dimensions silently (empty data URL), losing the
-entire page's observations. Fix: bounded stacked batches (<=
-MAX_CANVAS_DIMENSION_PX), one readback per batch; per-cell crops identical.
+Root cause A (iteration 3, proven on A23): fetch_cell_pages stacked every
+cell of an area-budgeted planner page into ONE vertical canvas (~118k px);
+the browser silently rejects canvas dimensions beyond the limit (empty data
+URL), losing the entire page's observations. Fix: stacked batches bounded by
+atlas.paging.MAX_CANVAS_DIMENSION_PX, one readback per batch.
+
+Root cause B (iteration 4, proven on A23): the batch split kept the
+PAGE-RELATIVE y0 offsets inside each batch canvas, so batch 2+ cells were
+drawn off-canvas (zero ink). Fix: batch-local baselines matching the crop
+loop. The fake renderer below draws from the PAYLOAD baselines, so any
+off-canvas regression fails the crop-fidelity assertions.
 
 The negative gate test proves the IOU comparator still rejects corrupted
-contours (the fix must not weaken validation meaning).
+contours (the fixes must not weaken validation meaning).
 """
 import asyncio
 import base64
 import io
-import sys
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -32,23 +35,30 @@ from atlas.transport import AtlasTransportCounters, PersistentBrowserAtlasSessio
 
 CELL_W = 1029
 CELL_H = 1449
+BASELINE0 = CELL_PAD_Y_PX + 951
 
 
 def _make_specs(n: int) -> list[dict]:
-    return [
-        {
-            "cp": 33 + i,
-            "w": CELL_W,
-            "h": CELL_H,
-            "y0": 0,
-            "pen_left": CELL_PAD_X_PX,
-            "baseline_y": CELL_PAD_Y_PX + 951,
-            "phase_x": 0.0,
-            "phase_y": 0.0,
-            "size_px": 1024,
-        }
-        for i in range(n)
-    ]
+    # Page-relative y0 exactly as ProductionRasterProvider.fetch_page_cells
+    # computes it (cumulative over the whole page).
+    specs = []
+    y0 = 0
+    for i in range(n):
+        specs.append(
+            {
+                "cp": 33 + i,
+                "w": CELL_W,
+                "h": CELL_H,
+                "y0": y0,
+                "pen_left": CELL_PAD_X_PX,
+                "baseline_y": BASELINE0,
+                "phase_x": 0.0,
+                "phase_y": 0.0,
+                "size_px": 1024,
+            }
+        )
+        y0 += CELL_H
+    return specs
 
 
 def _stub_session() -> tuple[PersistentBrowserAtlasSession, list[dict]]:
@@ -70,14 +80,24 @@ def _stub_session() -> tuple[PersistentBrowserAtlasSession, list[dict]]:
             f"unbounded canvas height {page_h} exceeds {MAX_CANVAS_DIMENSION_PX}"
         )
         assert page_w <= MAX_CANVAS_DIMENSION_PX
-        calls.append({"n": len(arg["cells"]), "w": page_w, "h": page_h})
+        calls.append(
+            {
+                "n": len(arg["cells"]),
+                "w": page_w,
+                "h": page_h,
+                "baselines": [float(c["baseline_y"]) for c in arg["cells"]],
+            }
+        )
         img = Image.new("L", (page_w, page_h), 0)
         draw = ImageDraw.Draw(img)
-        y = 0
         for c in arg["cells"]:
-            cw, ch = int(c["w"]), int(c["h"])
-            draw.rectangle([64, y + 200, min(cw, 400), y + min(ch, 900)], fill=255)
-            y += ch
+            base = int(c["baseline_y"])
+            # Ink band anchored at the PAYLOAD baseline (causal: off-canvas
+            # baselines draw nothing and the crop assertions fail).
+            draw.rectangle(
+                [64, max(0, base - 700), min(int(c["w"]), 400), min(page_h, base + 200)],
+                fill=255,
+            )
         buf = io.BytesIO()
         img.save(buf, format="PNG")
         return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
@@ -98,7 +118,22 @@ def test_fetch_cell_pages_batches_canvas_height() -> None:
     for cp, png in out.items():
         img = Image.open(io.BytesIO(png))
         assert img.size == (CELL_W, CELL_H)
-        assert np.asarray(img.convert("L")).max() == 255
+        assert np.asarray(img.convert("L")).max() == 255, (
+            f"cell U+{cp:04X} lost its ink (off-canvas batch placement)"
+        )
+
+
+def test_batches_reset_baseline_origin() -> None:
+    session, calls = _stub_session()
+    asyncio.run(session.fetch_cell_pages(_make_specs(20)))
+    assert len(calls) >= 2
+    # Every batch restarts its stack at y=0: first baselines are identical
+    # across batches (batch-local), never page-offset.
+    assert calls[0]["baselines"][0] == BASELINE0
+    for c in calls[1:]:
+        assert c["baselines"][0] == BASELINE0
+    for c in calls:
+        assert all(0 <= b < c["h"] for b in c["baselines"])
 
 
 def test_fetch_cell_pages_small_stays_single_readback() -> None:

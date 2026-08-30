@@ -866,24 +866,31 @@ class PersistentBrowserAtlasSession:
         return out
 
     async def _fetch_cell_batch(self, cell_specs: list[dict]) -> dict[int, bytes]:
-        """ONE bounded stacked canvas -> ONE readback -> crops in Python."""
+        """ONE bounded stacked canvas -> ONE readback -> crops in Python.
+
+        Baselines are BATCH-LOCAL: the incoming specs carry page-relative
+        y0 offsets (valid only for the whole-page canvas); within a batch
+        canvas the stack restarts at y=0, exactly matching the crop loop.
+        """
         out: dict[int, bytes] = {}
         page_w = max(int(s["w"]) for s in cell_specs)
         page_h = sum(int(s["h"]) for s in cell_specs)
         payload_cells = []
+        local_y = 0
         for s in cell_specs:
             payload_cells.append(
                 {
                     "ch": chr(int(s["cp"])),
                     "font_spec": self.font_spec(int(s["size_px"])),
                     "pen_left": float(s["pen_left"]),
-                    "baseline_y": float(s["y0"]) + float(s["baseline_y"]),
+                    "baseline_y": float(local_y) + float(s["baseline_y"]),
                     "phase_x": float(s.get("phase_x", 0.0)),
                     "phase_y": float(s.get("phase_y", 0.0)),
                     "w": int(s["w"]),
                     "h": int(s["h"]),
                 }
             )
+            local_y += int(s["h"])
         data_url = await self._evaluate(
             CELL_PAGE_JS, {"cells": payload_cells, "page_w": page_w, "page_h": page_h}
         )
