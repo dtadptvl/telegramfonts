@@ -1,0 +1,57 @@
+schema_version: 8
+policy_rev: "P-20260830.8-LEAN-SAFE-R15"
+policy_fingerprint: "d059a83646a03543"
+id: T-INSPECT-01
+contract_rev: 1
+mode: MICRO
+validated_at_generation: 2
+scope_tags: [a23-stale-job-reconciliation]
+
+objective: "Exact READ-ONLY inspection and reconciliation of the retired A23 job/order: job_477b205f4aff41cb89c2dd005ecf8009 (attempt 6, retired BALANCED_MAX/FULL_MAX profile) and paid order ord_2a142f39c5d2443492d1d8410d18bf9f (payment tx 77506129). Establish the factual terminal disposition + order fulfillment state from read-only evidence only, or precisely prove which surfaces are unreachable. Produce a reconciliation verdict for Prime. NO mutation of any kind."
+
+acceptance:
+  I1: "All reachable read-only surfaces for A23 job/lease/order state enumerated with exact refs (control-plane GET endpoints in edge/src, queue/job client read paths, device reachability) and which are pure-read vs side-effect-capable"
+  I2: "Factual terminal disposition of job_477b205f attempt 6 established to the extent read-only evidence allows (status, lease state, attempt count, last transition) OR exact unreachability proof (which surface, observed evidence, error)"
+  I3: "Factual state of order ord_2a142f39 + payment tx 77506129 (fulfilled/unfulfilled evidence; delivery artifacts present/absent) from read-only evidence OR exact unreachability proof"
+  I4: "Reconciliation verdict for Prime: exact state.blockers updates warranted; what remains unprovable from this workspace; what mutations (if any) would require a separate Human-authorized consequential contract"
+
+gates: [READ_ONLY, NO_LOOP, SINGLE_SHOT]
+extra_policies: [evidence, diagnosis, consequential]
+
+validation:
+  required:
+    - "static identification of read routes in edge/src handlers + agent job/queue clients (no execution needed)"
+    - "at most 3 causally related live read-only probes total (diagnosis budget); each probe executed at most once (SINGLE_SHOT)"
+  max_runs: 3
+  max_wall: "15m"
+
+forbidden:
+  - "ANY mutation: no stop/signal/rearm/retry/cancel/complete/ack/claim/receive/delete/update on any queue/job/lease/order/device surface"
+  - "any POST/PUT/PATCH/DELETE or any endpoint whose static analysis shows side effects (including queue receive/claim which can lock or extend leases)"
+  - "deployment, redeploys, wrangler publish, migrations, device shell commands that change state"
+  - "secrets in results: never echo tokens/API keys/credentials into result.yaml/progress.yaml/reports (credential references by name only)"
+  - "BALANCED_MAX/FULL_MAX runs; any fidelity-profile execution"
+
+stop:
+  - "if no pure-read surface exists to answer I2/I3: report exact unreachability proof and STOP (do not attempt workarounds)"
+  - "if any probe returns ambiguity that would require mutation to resolve: record it as unprovable and STOP"
+
+identity:
+  repo: "E:\\cv\\telefont"
+  branch: "prime-v12-cutover"
+  head: "8f08e67"
+  stable_ids:
+    job: "job_477b205f4aff41cb89c2dd005ecf8009"
+    order: "ord_2a142f39c5d2443492d1d8410d18bf9f"
+    payment_tx: "77506129"
+    job_attempt: 6
+    deployed_edge: "7c582378"
+    device_staged_release: "b8c6994"
+
+routing_note: "Delegated to inspector (read-mostly diagnosis). Worker-fast/deep not required: zero source changes."
+
+refs:
+  - ".prime/archive/legacy-import.md#stable-identities"
+  - ".prime/decisions/ADR-0001.md (consequences: stale job drains fail-closed; paid order requires fulfillment post-restart)"
+  - "edge/src/handlers (read routes), agent/src/worker_client.py, agent/src/queue_client.py, scripts/a23_preflight.py"
+  - ".local-artifacts/issue53/issue53_recovery_controller.py (historical read-only-d1-guard / read-only-a23-preflight patterns; untrusted legacy reference only)"
