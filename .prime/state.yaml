@@ -13,15 +13,14 @@ phase:
   id: "fast30-cutover"
   status: active
 
-now:
-  - "T-FAST-ATLAS-ULTRA-01"
+now: []
 next: []
 
 blockers:
-  - "FAST_30 A23 PERFORMANCE GAP (E-00022 terminal): wall enforcement is PROVEN (on-device deterministic fail-closed at exactly 1800.93s, clean lifecycle, zero orphans) but the headless-Chromium MEASUREMENT phase does not fit the wall on A23 (~29.5 min for 171 glyphs, incomplete) -> final acceptance FAILED DURATION; deployment authority VOID per E-00018 C. Candidate 2c50715 frozen-not-deployable on origin/main (head 15d6113). A deeper measurement-throughput fix requires NEW Human-authorized scope (E-00018 capped one implementation round + one acceptance run)."
+  - "PERFORMANCE GAP RESOLVED IN CODE (E-00024): FAST_ATLAS_ULTRA_V1 integrated (merge e2a0b60; origin/main sync pending this commit): ordinary 200-glyph fixture 74.6s (target 2-5 min), large 457-glyph 255.7s (target 5-10 min), reuse <25s (<1 min target), ORIGINAL wall 480s / VIETNAMESE 720s, exhaustive regime fail-closed gated off. Remaining gap to Milestone 3: deployment of the integrated line requires a NEW identity-bound Human authorization envelope (T-FAST30-A23-FIX acceptance stays immutable; T-A23-PROD-02 authority remains void; candidate for any new envelope = integrated head)."
   - "FAILED PAID ORDER ord_2a142f39 preserved for Human resolution: FAILED max_attempts_exhausted at 2026-08-30T12:00:29Z (expired attempt 6 zombie lineage b8c6994; mode ORIGINAL designated; payment VERIFIED 5,000 VND). No recovery executed (deployment authority void). Options are Human-owned (e.g., refund/cancel, manual re-order after a performance fix, or other product handling)."
-  - "A23 DEVICE IDLE: zombie worker terminated (PID 24039, preserved evidence); old release b8c6994 artifacts remain on device; supervisor not restarted; no worker process running; edge still d0d9c4ef (pre-wall-fix). Device reachable (sshd 8022)."
-  - "MINI-PC MIGRATION BLOCKER (preserved verbatim, DO NOT delete/rename/replay/repair during T-FAST30-A23-FIX, E-00018 section E): foreign production migration 0007_telegram_message_retention.sql (not in repo lineage) + prior deployed Edge lineage absent from repository history (deployments before 2026-08-30T09:35:22Z, versions eec4fd75..7c582378). Must remain visible for Mini PC migration reconciliation."
+  - "A23 DEVICE IDLE: zombie worker terminated (PID 24039, preserved evidence); old release b8c6994 artifacts remain on device; supervisor not restarted; no worker process running; edge still d0d9c4ef (pre-wall-fix, pre-atlas). Device reachable (sshd 8022). A23 is staging/compatibility only per E-00023."
+  - "MINI-PC MIGRATION BLOCKER (preserved verbatim, DO NOT delete/rename/replay/repair, E-00018 section E): foreign production migration 0007_telegram_message_retention.sql (not in repo lineage) + prior deployed Edge lineage absent from repository history (deployments before 2026-08-30T09:35:22Z, versions eec4fd75..7c582378). Must remain visible for Mini PC migration reconciliation."
 
 exit:
   - "one controlled bot order completed end-to-end on A23 under FAST_30 (FAST_ATLAS_ULTRA_V1) with verified TTF/OTF delivery within the 8-minute ORIGINAL wall (requires separate consequential authorization for the A23 production leg)"
@@ -39,7 +38,7 @@ human_requirements:
     - "stale A23 retired-profile job: read-only inspection only; no mutation without explicit authorization"
     - "REV-5 ENVELOPE TERMINAL (E-00017): FAST30_FAILED wall with attempt still active; M4/M5 expired unused (A6); remediation mode designation + product-line edge activation completed within the envelope; any further action (continued observation, A23 release, new fulfillment envelope) requires fresh Human authorization; Human never executes commands/relays JSON"
     - "E-00018 cycle TERMINAL (E-00022): T-FAST30-A23-FIX failed final acceptance on duration (wall machinery proven; measurement throughput is the remaining gap); T-A23-PROD-02 deployment authority VOID; failed paid order preserved for Human resolution; device idle; any further implementation/recovery/deployment requires fresh Human authorization; Human never executes commands/relays JSON"
-    - "E-00023 SPEED-FIRST rebaseline: latest Human priority is speed; T-FAST30-A23-FIX result at f574d0c immutable with its wall/watchdog/checkpoint/zombie hardening preserved and re-targeted; A23 is staging/compatibility ONLY (stale-prone claims need read-only reconciliation; no stop/restart/deploy/D1/Queue/R2/order-recovery/production job under E-00023); T-FAST-ATLAS-ULTRA-01 grants no production deployment or order-recovery authority"
+    - "E-00023 SPEED-FIRST cycle COMPLETE (E-00024): T-FAST-ATLAS-ULTRA-01 accepted + integrated (merge e2a0b60); FAST_ATLAS_ULTRA_V1 under FAST_30 public name; walls 480s/720s; all fixture targets met with wide margins; NOT DEPLOYED (E-00023 grants no deployment/order-recovery authority); T-FAST30-A23-FIX result at f574d0c immutable with hardening preserved; A23 staging-only boundary honored; any deployment/recovery requires a fresh identity-bound Human envelope; Human never executes commands/relays JSON"
     - "T-PRICE-01 integrated line (head 166e45b) deploys ONLY inside the approved rev-4 envelope; absent-mode legacy orders otherwise fail closed by design and need Human decisions, never automatic repair"
     - "E-00011 mode proof: NEVER infer ORIGINAL from an absent mode field; fulfillment proceeds only on positive durable row evidence of mode/styles/formats/payment/delivery; VIETNAMESE or unproven -> STOP fail-closed, T-PRICE-01 before fulfillment"
 
@@ -60,7 +59,7 @@ recent_invalidations:
   - {generation: 10, scopes: [reconstruction-profile, validation-regime, fast30-performance, production-behavior], severity: breaking, source_event: E-00023, note: "SPEED-FIRST FAST_ATLAS_ULTRA_V1 rebaseline (ADR-0004): supersedes exhaustive MAX schedules, four-consumer validation, held-out schedules, high-confidence publication, 30-minute wall; T-FAST-ATLAS-ULTRA-01 contracted"}
 
 reconciliation:
-  status: in_progress
-  event: E-00023
+  status: clean
+  event: E-00024
 
-updated_at: "2026-08-30T14:15:00Z"
+updated_at: "2026-08-30T15:50:00Z"
