@@ -14,7 +14,7 @@ phase:
   status: active
 
 now:
-  - "T-FAST30-01 (contract_rev 2): implement FAST_30 sole-profile retirement layer (LOCAL_ONLY; A23 production acceptance requires a later separate consequential contract)"
+  - "T-FAST30-01"
 next: []
 
 blockers:
