@@ -218,3 +218,83 @@ def test_zero_advance_marks_survive_model_build_and_cmap(tmp_path: Path):
             assert mark_glyph_count == len(REQUESTED_MARKS)
         finally:
             font.close()
+
+
+# ----------------------------------------------------------------------
+# End-to-end: the integrated pipeline keeps the requested marks through
+# metrics -> cell plan -> geometry -> model -> TTF/OTF cmap.
+# ----------------------------------------------------------------------
+
+FIXTURE_FONT = (
+    Path(__file__).parent.parent
+    / "benchmark_data"
+    / "ground_truth"
+    / "BeVietnamPro-Regular.ttf"
+)
+
+
+def test_requested_marks_survive_full_pipeline_and_output_cmap(tmp_path: Path):
+    """E-00024 correction proof: the 7 requested standalone combining marks
+    are NOT FAILED_GLYPH for zero advance; they survive into GlyphModel,
+    cmap and TTF/OTF outputs (cmap entries + mark glyph count asserted)."""
+    import asyncio
+    import time
+
+    from atlas.cache import AtlasCacheStore, AtlasCheckpointStore
+    from atlas.local_fixture import LocalFontMetricsProvider, LocalFontRasterProvider
+    from atlas.pipeline import AtlasStyleSpec, AtlasUltraPipeline
+    from atlas.policy import AtlasRuntimeDefaults
+
+    if not FIXTURE_FONT.exists():
+        pytest.skip("ground-truth binary absent")
+
+    cps = sorted(
+        [0x20, 0x41, 0x61, 0x65, 0x6F, 0x75, 0xE0, 0xE1] + list(REQUESTED_MARKS)
+    )
+    spec = AtlasStyleSpec(
+        source_url="repro://pipeline-marks",
+        family_name="Pipeline Mark Proof",
+        style_name="Regular",
+        style_id="regular",
+        mode="ORIGINAL",
+        code_points=cps,
+    )
+    pipeline = AtlasUltraPipeline(
+        spec=spec,
+        runtime=AtlasRuntimeDefaults(),
+        metrics_provider=LocalFontMetricsProvider(FIXTURE_FONT),
+        raster_provider=LocalFontRasterProvider(FIXTURE_FONT),
+        cache=AtlasCacheStore(tmp_path / "cache"),
+        checkpoint_store=AtlasCheckpointStore(tmp_path / "ckpt"),
+        deadline=time.monotonic() + 240,
+    )
+    result = asyncio.run(pipeline.run())
+
+    # None of the requested marks failed solely for zero advance.
+    for cp in REQUESTED_MARKS:
+        assert cp not in result.evidence.failed_glyph_ids, f"U+{cp:04X} FAILED"
+        assert cp in result.frozen_glyphs, f"U+{cp:04X} not frozen"
+        glyph = result.frozen_glyphs[cp]
+        assert glyph.advance_width_upem == 0.0
+        assert glyph.contours, f"U+{cp:04X} lost its outline"
+
+    # Coverage proven present in BOTH built outputs (cmap + mark count).
+    from fontTools.ttLib import TTFont
+
+    for artifact_path in (result.ttf_path, result.otf_path):
+        font = TTFont(artifact_path)
+        try:
+            cmap = font.getBestCmap() or {}
+            present = [cp for cp in REQUESTED_MARKS if cp in cmap]
+            assert len(present) == len(REQUESTED_MARKS)
+            hmtx = font["hmtx"]
+            mark_count = 0
+            for cp in REQUESTED_MARKS:
+                name = cmap[cp]
+                adv, _lsb = hmtx.metrics[name]
+                assert adv == 0
+                mark_count += 1
+            assert mark_count == len(REQUESTED_MARKS)
+        finally:
+            font.close()
+    assert result.report["passed"] is True
