@@ -289,7 +289,16 @@ class WorkerJobClient:
             if self._sync_client is not None:
                 resp = self._sync_client.post(url, headers=self.headers, json=payload)
             else:
-                with httpx.Client(timeout=hb_timeout) as client:
+                # Fresh short-lived client per beat (no shared pool reuse);
+                # explicit connect and read timeouts bounded by HEARTBEAT_TIMEOUT_SECONDS.
+                timeout_config = httpx.Timeout(
+                    timeout=hb_timeout,
+                    connect=hb_timeout,
+                    read=hb_timeout,
+                    write=hb_timeout,
+                    pool=hb_timeout,
+                )
+                with httpx.Client(timeout=timeout_config) as client:
                     resp = client.post(url, headers=self.headers, json=payload)
         except httpx.TimeoutException as exc:
             logger.warning(f"Heartbeat timed out ({job_id}): {type(exc).__name__}")

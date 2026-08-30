@@ -423,14 +423,25 @@ def launch_chromium_process(
 
 
 async def close_browser_session(session: Any) -> Any:
-    """Await owned browser cleanup while retaining compatibility with test doubles."""
+    """Await owned browser cleanup while retaining compatibility with test doubles.
+
+    Incident E-00035 F1(d): bounded timeout (5.0s) so session cleanup hangs never
+    block post-fence abort or prevent terminal error handling.
+    """
     closer = getattr(session, "aclose", None)
     if closer is not None:
         result = closer()
     else:
         result = session.close()
     if inspect.isawaitable(result):
-        return await result
+        try:
+            return await asyncio.wait_for(result, timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning("session close bounded-timeout: cleanup exceeded 5.0s deadline")
+            return None
+        except Exception as exc:
+            logger.warning("session close exception: %s", type(exc).__name__)
+            return None
     return result
 
 
