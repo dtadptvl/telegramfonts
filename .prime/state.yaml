@@ -1,5 +1,5 @@
 schema_version: 7
-generation: 6
+generation: 7
 
 governance:
   policy_rev: "P-20260830.9-LEAN-SAFE-R16"
@@ -18,9 +18,9 @@ now:
 next: []
 
 blockers:
-  - "PRICING/MODE DIVERGENCE RESOLVED IN CODE (E-00014): T-PRICE-01 accepted and integrated (merge f16ac39; task commits 660f468/e8bcaa2/bab9c5c/eed3a94/ec3e723/2029510/dee6a96): explicit ORIGINAL/VIETNAMESE selection+persistence (migration 0007), ORIGINAL 5,000 / VIETNAMESE 8,000 VND per style, mode bound session->order->claim->agent->reuse->delivery, absent-mode fail-closed everywhere (MODE_ABSENT_LEGACY_ORDER / MODE_IDENTITY_MISMATCH / MISSING_MODE / UNSUPPORTED_MODE), L3 binary reuse ORIGINAL-only. Edge 201/201 tests, agent 9+106 pass, typecheck clean. INTEGRATED ONLY - NOT DEPLOYED; deploy requires later identity-bound Human authorization (E-00012 D)."
-  - "LEGACY PAID ORDER ord_2a142f39 (tx 77506129): mode absent in all durable rows (PA2, E-00013); under the integrated line every executable route fails it closed deterministically (by approved Human rule: no default, no backfill). Its resolution is a Human product decision: explicit handling (e.g., re-order/manual fulfillment with explicit mode and price treatment, or refund/cancel) - never automatic."
-  - "JOB STATE UNKNOWN SINCE PA2: at 2026-08-30T07:26:57Z job_477b205f held a LIVE lease (a23-termux-primary-01, attempt 6/6, expiry ~07:31:57Z); no production read authorized since. Fresh authorized read required before any future dispatch decision."
+  - "REMEDIATION ENVELOPE DRAFTED, AWAITING ONE-SHOT HUMAN APPROVAL (E-00015): T-A23-PROD-01 rev 4 (DRAFT, NOT executed) covers fresh inspection, migration 0007, one CAS-bound mode=ORIGINAL designation for ord_2a142f39 ONLY (Human remediation decision; never general backfill), exact origin/main@166e45b edge+A23 deployment, at most one identity-bound dispatch/recovery mutation, 30-min wall, all-or-nothing delivery. No production action until approval."
+  - "DEPLOYMENT GATE: integrated T-PRICE-01 line (merge f16ac39; head 166e45b72b55e2c1f04e30ec7a73a07179e2ed62 on origin/main + origin/prime-recovery) deploys ONLY inside the approved rev-4 envelope (E-00012 D identity-bound requirement satisfied by the envelope)."
+  - "JOB STATE UNKNOWN SINCE PA2 (2026-08-30T07:30Z it held a live lease a23-termux-primary-01 attempt 6/6, expiry ~07:31:57Z): resolved by envelope P0 fresh inspection; non-interruption rule holds if attempt 6 is genuinely active."
 
 exit:
   - "one controlled bot order completed end-to-end on A23 under FAST_30 with verified TTF/OTF delivery within the 30-minute wall limit (requires separate consequential authorization for the A23 production leg)"
@@ -36,8 +36,8 @@ human_requirements:
     - "runtime model failover only for capacity/unavailability with unchanged contract and reusable evidence"
     - "never fake/bypass/weaken external-ext4/filesystem identity checks; loopback never posed as canonical archive"
     - "stale A23 retired-profile job: read-only inspection only; no mutation without explicit authorization"
-    - "TERMINAL FOR CYCLE (E-00014): T-A23-PROD-01 rev 3 PAUSED - branch C void (mode unproven at PA2), branch D completed (T-PRICE-01 accepted + integrated, NOT deployed). Any future fulfillment/deploy requires new identity-bound Human authorization; E-00009 remains historical/unconfirmed; Human never executes commands/relays JSON"
-    - "T-PRICE-01 integrated line (merge f16ac39) must NOT be deployed without later identity-bound Human authorization (E-00012 D); absent-mode legacy orders fail closed by design and need a Human product decision, never automatic repair"
+    - "REV-4 REMEDIATION ENVELOPE PENDING ONE-SHOT APPROVAL (E-00015): Human designated mode ORIGINAL for ord_2a142f39 ONLY at already-paid price - explicit remediation decision, NOT inference, NEVER general backfill; T-A23-PROD-01 rev 4 DRAFT executes solely on that approval; E-00009 remains historical/unconfirmed; Human never executes commands/relays JSON"
+    - "T-PRICE-01 integrated line (head 166e45b) deploys ONLY inside the approved rev-4 envelope; absent-mode legacy orders otherwise fail closed by design and need Human decisions, never automatic repair"
     - "E-00011 mode proof: NEVER infer ORIGINAL from an absent mode field; fulfillment proceeds only on positive durable row evidence of mode/styles/formats/payment/delivery; VIETNAMESE or unproven -> STOP fail-closed, T-PRICE-01 before fulfillment"
 
 active_decisions:
@@ -50,9 +50,10 @@ recent_invalidations:
   - {generation: 4, scopes: [product-flow, acquisition, reuse, vietnamese-ai, production-dispatch], severity: breaking, source_event: E-00010, note: "omitted pre-migration truths recovered; T-A23-PROD-01 rev 1 superseded by rev 2"}
   - {generation: 5, scopes: [production-dispatch, product-flow, pricing], severity: breaking, source_event: E-00011, note: "fail-closed mode proof; T-A23-PROD-01 rev 2 superseded by rev 3"}
   - {generation: 6, scopes: [production-dispatch, product-flow, pricing], severity: breaking, source_event: E-00012, note: "overnight bounded autonomous cycle; rev 3 envelope conditionally granted; T-PRICE-01 spec pre-authorized for VIETNAMESE/unproven branch"}
+  - {generation: 7, scopes: [production-dispatch, product-flow, pricing], severity: breaking, source_event: E-00015, note: "Human remediation: mode ORIGINAL designated for ord_2a142f39 only (never general backfill); T-A23-PROD-01 rev 3 superseded by rev 4 DRAFT envelope"}
 
 reconciliation:
-  status: clean
-  event: E-00014
+  status: in_progress
+  event: E-00015
 
-updated_at: "2026-08-30T08:50:00Z"
+updated_at: "2026-08-30T09:15:00Z"

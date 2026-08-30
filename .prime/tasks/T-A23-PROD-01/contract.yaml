@@ -2,59 +2,78 @@ schema_version: 8
 policy_rev: "P-20260830.9-LEAN-SAFE-R16"
 policy_fingerprint: "0fa00f66ee4873bf"
 id: T-A23-PROD-01
-contract_rev: 3
+contract_rev: 4
 mode: NORMAL
-validated_at_generation: 6
-scope_tags: [a23-production-dispatch, product-flow, acquisition, reuse, vietnamese-ai, production-dispatch, pricing]
-status: PAUSED   # E-00013: PA2 proved mode absent -> branch D; C-branch authorization void; resume requires T-PRICE-01 integrated + new identity-bound Human authorization
+validated_at_generation: 7
+scope_tags: [a23-production-dispatch, product-flow, pricing, production-remediation]
+status: draft   # E-00015 remediation envelope; NOT executed; awaits one-shot Human approval
 
-objective: "Milestone 3 (PAUSED after branch-D resolution, E-00013): one controlled bot fulfillment of paid order ord_2a142f39 on A23 under FAST_30 within the 30-minute wall limit, after deploying the accepted FAST_30 source identity from origin/main. PA2 proved the durable rows contain NO mode; per E-00011/E-00012 the order may proceed only after T-PRICE-01 and a new identity-bound Human authorization."
+objective: "Remediation fulfillment (E-00015) of legacy paid order ord_2a142f39 under Human-designated mode ORIGINAL at the already-paid price: fresh inspection, migration 0007, one CAS-bound mode designation for this order only, exact origin/main@166e45b deployment to edge + A23, at most one identity-bound dispatch/recovery mutation, 30-minute delivery wall, all-or-nothing delivery of the ordered formats. Executes ONLY on one-shot Human approval of the identity-bound envelope."
+
+remediation:
+  authority: "Human E-00015 (generation 7): explicit mode ORIGINAL designation for THIS order only, at the already-paid 5,000 VND (tx 77506129)"
+  nature: "new Human remediation decision; NOT an inference from the absent mode field"
+  scope_guard: "never a general backfill: the CAS update is bound to the exact order id + mode IS NULL + status guard; no other row may be written"
 
 authorization:
-  status: "VOID FOR THIS CYCLE - conditional branch resolved at PA2 (E-00013): mode unproven -> route D taken; zero deploys and zero production mutations executed"
-  granted_scope:
-    - "PA2: executed 2026-08-30 ~07:30Z - one batched authenticated read-only inspection (9 SELECTs, 0 mutations); evidence in journal E-00013"
-    - "PA1/PA3/PA4: NOT REACHED - required positive mode=ORIGINAL proof; mode was absent from all durable rows"
-    - "resumption requires: T-PRICE-01 integrated AND new identity-bound Human authorization (E-00012 section D)"
+  status: "PENDING ONE-SHOT HUMAN APPROVAL of the identity-bound envelope; NO production action authorized yet"
+  envelope: "phases P0-P6 below are the complete mutation set; approval covers M1-M5 + reads; execution order is causally fixed (migration -> CAS -> edge deploy -> A23 release -> dispatch)"
   historical_evidence:
-    - "journal E-00009: retained ONLY as historical/unconfirmed authorization evidence; superseded by E-00012"
+    - "E-00009 historical/unconfirmed only; E-00012 branch D completed (T-PRICE-01 integrated); rev 3 branch C void (mode unproven)"
   owner: human
   max_attempts: 1
-  stop: ["409 CONFLICT -> STOP reconcile", "500/ambiguous -> STOP preserve evidence", "30-min wall -> FAST30_FAILED", "unexpected state -> STOP", "mode VIETNAMESE or mode/identity unproven -> STOP fail-closed; T-PRICE-01 before fulfillment"]
+  stop: ["409/500/ambiguous/unexpected -> STOP preserve evidence", "CAS rows_changed != 1 (and order not COMPLETED) -> STOP reconcile", "30-min wall exceeded -> FAST30_FAILED STOP", "attempt genuinely active -> zero mutation, monitor only, never interrupt", "order already FAILED at P0 -> STOP reconcile (new Human decision required)"]
   rollback: "none authorized; any rollback requires its own new Human authorization"
 
 acceptance:
-  PA1: "Device agent runs the accepted FAST_30 source implementation identity containing commit b385ab1, deployed only from origin/main after authoritative origin/main containment is verified; performed by an authorized production worker using existing A23 access (never by Human relay)"
-  PA2: "Fresh exact D1 rows for job_477b205f4aff41cb89c2dd005ecf8009 / ord_2a142f39c5d2443492d1d8410d18bf9f / payments / outbox obtained by an authorized production worker using an authenticated Cloudflare/wrangler session (never by Human command relay); rows MUST affirmatively prove requested mode, styles, formats, payment (tx 77506129), and delivery identity. ORIGINAL is accepted ONLY from positive row evidence; an absent/missing/ambiguous mode field proves nothing"
-  PA3: "Exactly ONE identity-bound dispatch mutation (rearm/rescue/recover chosen by exact fresh row state, or zero-mutation auto-pickup) built ONLY from PA2 proven rows; no retry; no guessed/stale values; executed only after explicit rev-3 Human authorization; if PA2 shows VIETNAMESE or fails to prove mode/identity -> zero mutations, STOP, route T-PRICE-01 before any fulfillment"
-  PA4: "End-to-end delivery of ord_2a142f39 within the 30-minute wall: TTF+OTF artifact reaches the buyer in Telegram; Human may provide the final delivery observation"
+  PA1: "one fresh read-only inspection session proves exact current rows (orders, order_items, payments, fulfillment_jobs, fulfillment_receipts, outbox_events for the stable IDs) plus A23 process/lease state (device agent process via existing authorized access; D1 lease fields); zero mutations in this phase; output = GENUINELY_ACTIVE | STUCK | COMPLETED | FAILED"
+  PA2: "migration 0007_font_mode.sql applied to telegramfonts-d1 exactly once (wrangler-tracked); verified by read-back: orders.mode + telegram_sessions.mode/pending_source_url columns exist; no row writes in this phase"
+  PA3: "exactly ONE CAS-bound UPDATE designates mode ORIGINAL for ord_2a142f39c5d2443492d1d8410d18bf9f only: UPDATE orders SET mode='ORIGINAL', updated_at=? WHERE id='ord_2a142f39c5d2443492d1d8410d18bf9f' AND mode IS NULL AND status='PROCESSING'; rows_changed MUST equal 1 (0 while order still PROCESSING -> STOP); NO-OP record if P0 proved COMPLETED; no other row written; never general backfill"
+  PA4: "edge deployed at exact origin/main@166e45b72b55e2c1f04e30ec7a73a07179e2ed62 by an authorized production worker with authenticated Cloudflare session; deployed identity verified"
+  PA5: "A23 release at identity containing 166e45b by an authorized production worker with existing A23 access: fresh deployment manifest generated + verified (NEVER the stale uncommitted ops/a23_deployment_manifest.json), release fingerprint PASS, archive_mode=NO_LOCAL_ARCHIVE, device manifest identity verified; held until any genuinely active attempt terminates - never interrupted"
+  PA6: "at most ONE identity-bound dispatch/recovery mutation (rescue/recover/rearm class, chosen by exact fresh post-release rows) or zero if the job is genuinely active or the queue already picked it up; no retry"
+  PA7: "delivery within the 30-minute wall: all-or-nothing Telegram delivery of the ordered formats (durable record selected_formats [TTF]; system outputs TTF/OTF only) to chat 901652398; deadline or gate failure -> FAST30_FAILED and STOP"
 
 phases:
-  P1_device_update:
+  P0_inspect:
+    executor: "authorized production worker (authenticated Cloudflare session + existing A23 access)"
+    surface: "one read-only batched SELECT session on telegramfonts-d1 for the stable IDs + read-only A23 process/lease observation"
+    decides: "job liveness: GENUINELY_ACTIVE (valid lease + current heartbeat + agent process on this job) | STUCK | COMPLETED | FAILED"
+  P1_migration:
+    executor: "authorized production worker"
+    action: "M1: wrangler d1 migrations apply DB --remote - applies ONLY 0007_font_mode.sql (0001-0006 already tracked)"
+    verify: "d1_migrations tracking row + column presence read-back"
+  P2_mode_cas:
+    executor: "authorized production worker"
+    action: "M2: single CAS UPDATE (exact PA3 statement), one invocation"
+    guard: "rows_changed == 1 (or NO-OP record if P0 proved COMPLETED); anything else -> STOP"
+  P3_edge_deploy:
+    executor: "authorized production worker"
+    action: "M3: wrangler deploy of edge/ at exact origin/main@166e45b"
+    verify: "deployed identity matches 166e45b"
+  P4_a23_release:
     executor: "authorized production worker with existing A23 access"
-    bind: "source identity containing b385ab1, present on origin/main; NEVER deploy from an unreviewed recovery-only branch"
-    verification: "device manifest main_commit_sha/policy identity matches the accepted implementation; supervisor release fingerprint PASS; archive_mode=NO_LOCAL_ARCHIVE"
-    note: "uncommitted local ops/a23_deployment_manifest.json is STALE (pre-cutover identity b8c6994); never use it as deployment evidence"
-  P2_d1_read:
-    executor: "authorized production worker with authenticated Cloudflare/wrangler session"
-    surface: "read-only SELECT on telegramfonts-d1: fulfillment_jobs, orders, payments, outbox_events rows for the stable IDs; must surface requested mode/styles/formats/payment/delivery fields"
-  P3_dispatch:
+    action: "M4: release agent identity containing 166e45b; fresh manifest generation + verification; release fingerprint PASS; archive_mode=NO_LOCAL_ARCHIVE"
+    hold_condition: "if attempt GENUINELY_ACTIVE: hold until that attempt terminates (any outcome); never interrupt"
+  P5_dispatch:
     executor: "Prime (identity-bound, single-attempt)"
-    precondition: "PA2 rows proving mode ORIGINAL + identity, plus explicit Human rev-3 authorization"
-  P4_verify:
-    executor: "Prime observation + optional Human Telegram delivery observation"
+    precondition: "fresh post-release rows (short scoped read)"
+    action: "M5: exactly one dispatch/recovery mutation chosen by exact row state, OR zero if genuinely active / queue auto-pickup"
+  P6_monitor:
+    executor: "Prime (scoped reads of the same rows/outbox/receipts) + optional Human Telegram delivery observation"
+    wall: "30 minutes from P5 dispatch (or from P0 liveness confirmation on the zero-mutation active path)"
+    success: "orders COMPLETED + fulfillment_receipts row + delivery SENT + ordered formats delivered all-or-nothing"
 
 human_role:
-  - "Human must NOT execute commands or relay JSON merely because an agent lacks access"
-  - "If physical device/network/session access is unavailable, Prime asks Human only for the smallest genuinely Human-owned action: make the device reachable, authenticate the session securely, or supply authorization"
-  - "Human may provide the final Telegram delivery observation (PA4)"
+  - "one-shot approval of the envelope (M1-M5 + reads); Human never executes commands or relays JSON"
+  - "Human may provide the final Telegram delivery observation (PA7)"
 
 constraints:
-  - "30-minute end-to-end wall limit per font; deadline or quality failure returns FAST30_FAILED and stops"
-  - "honor ADR-0001 (FAST_30 sole profile, no fallback/escalation), ADR-0002 (product/acquisition/reuse invariants, all-or-nothing delivery, approved pricing ORIGINAL 5,000 / VIETNAMESE 8,000 VND per style), ADR-0003 (Vietnamese AI cascade) without weakening"
-  - "never infer ORIGINAL from an absent mode field; ORIGINAL requires positive durable row evidence (E-00011)"
-  - "if edge pricing/mode gap affects the order (VIETNAMESE or unproven), T-PRICE-01 must complete and integrate before fulfillment resumes"
-  - "no production access, deploy, query, or mutation while status PAUSED or authorization NOT GRANTED"
+  - "E-00015 designation is remediation for THIS order only; it never becomes general backfill or a precedent for inference"
+  - "honor ADR-0001/ADR-0002/ADR-0003 without weakening; FAST_30 30-minute wall; no fallback/escalation"
+  - "no production action while authorization PENDING; SINGLE_SHOT + NO_LOOP; no retry of any mutation"
+  - "never use the stale uncommitted ops/a23_deployment_manifest.json; preserve all unrelated dirty files"
+  - "no secret values in logs/evidence/commits/reports"
 
 gates: [SINGLE_SHOT, NO_LOOP]
 extra_policies: [consequential, production, evidence]
@@ -62,11 +81,12 @@ extra_policies: [consequential, production, evidence]
 identity:
   repo: "E:\\cv\\telefont"
   branch: "prime-v12-cutover"
-  accepted_source_commit: "b385ab1"   # accepted FAST_30 implementation delta
-  deploy_line: "origin/main ONLY after verified containment of b385ab1; recovery-only branches are not deploy sources"
+  accepted_source_commit: "166e45b72b55e2c1f04e30ec7a73a07179e2ed62"   # origin/main head: FAST_30 (b385ab1) + T-PRICE-01 (merge f16ac39) + canonical terminal
+  deploy_line: "origin/main ONLY at exact 166e45b; recovery-only branches are not deploy sources"
   job: "job_477b205f4aff41cb89c2dd005ecf8009"
   order: "ord_2a142f39c5d2443492d1d8410d18bf9f"
   payment_tx: "77506129"
+  buyer_chat: "901652398"
   deployed_edge: "telegramfonts-edge.dienluanphien98.workers.dev"
   d1: "telegramfonts-d1 / 4ab4ab25-37cc-4044-acc9-66fc98b9f831"
   queue: "telegramfonts-fulfillment"
@@ -74,6 +94,6 @@ identity:
 
 depends_on:
   decisions: [decisions/ADR-0001.md, decisions/ADR-0002.md, decisions/ADR-0003.md]
-  evidence: [".prime/tasks/T-INSPECT-01/result.yaml"]
+  evidence: [".prime/journal/events.jsonl", ".prime/tasks/T-PRICE-01/result.yaml"]
 
-note: "Rev 2 superseded at generation 5 (E-00011) before any execution or authorization: rev 3 adds fail-closed mode proof (never infer ORIGINAL from an absent mode field), the T-PRICE-01 gate for VIETNAMESE/unproven cases, and excludes the stale uncommitted local deployment manifest. Contract stays PAUSED; authorization NOT GRANTED."
+note: "Rev 3 superseded at generation 7 (E-00015): rev 4 adds the Human-designated mode ORIGINAL remediation for this order only (never general backfill), migration 0007 + exact 166e45b deployment identity, non-interruption of a genuinely active attempt, and one CAS-bound mode designation. DRAFT ONLY - executes solely on one-shot Human approval of the identity-bound envelope."
