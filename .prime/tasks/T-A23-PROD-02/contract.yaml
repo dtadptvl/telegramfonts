@@ -1,0 +1,76 @@
+schema_version: 8
+policy_rev: "P-20260830.9-LEAN-SAFE-R16"
+policy_fingerprint: "0fa00f66ee4873bf"
+id: T-A23-PROD-02
+contract_rev: 1
+mode: NORMAL
+validated_at_generation: 9
+scope_tags: [a23-production-dispatch, production-remediation]
+status: pending_activation   # activates only when ALL E-00018 section C conditions are satisfied
+
+objective: "Minimal successor production envelope (E-00018 C/D): deploy the unique frozen accepted T-FAST30-A23-FIX candidate SHA to A23 (Edge NO_CHANGE unless the accepted performance fix causally changes Edge), then at most one identity-bound recovery/dispatch of ord_2a142f39 under a fresh 30-minute wall."
+
+authorization:
+  status: "PENDING ACTIVATION - deployment authority exists only for the unique final candidate SHA satisfying ALL activation conditions; any scope expansion, quality weakening, failed acceptance or identity ambiguity voids it"
+  activation_conditions:
+    - "candidate derived solely from T-FAST30-A23-FIX"
+    - "actual reviewed diff remains inside the contracted performance/runtime scope"
+    - "final focused evidence and A23 <=25-minute acceptance pass"
+    - "candidate SHA frozen and recorded in THIS contract (candidate_sha field) before deployment"
+    - "origin/main contains that exact SHA"
+    - "governance and recovery state durably synced first"
+  owner: human
+  rollback: "none authorized; no retry"
+
+deployment:
+  edge: "NO_CHANGE unless the accepted performance fix causally changes Edge; if unchanged retain deployed Edge version d0d9c4ef-47db-42ca-8940-cbeeb72d6d4f"
+  a23: "exactly ONE release of the frozen accepted SHA after proving no old exact job process or valid lease can be interrupted; generate and verify a fresh device manifest; NEVER use the stale local ops/a23_deployment_manifest.json; require exact release fingerprint PASS; require archive_mode=NO_LOCAL_ARCHIVE; verify deployed A23 SHA, service identity and readiness; no retry and no rollback"
+
+recovery:
+  order_identity:
+    order: "ord_2a142f39c5d2443492d1d8410d18bf9f"
+    job: "job_477b205f4aff41cb89c2dd005ecf8009"
+    payment: "tx 77506129, SEPAY, VERIFIED, 5,000 VND"
+    mode: "ORIGINAL (Human-designated remediation, E-00015)"
+    ordered_output: "[TTF]"
+    buyer_chat: "901652398"
+  precondition_fresh_rows_must_prove:
+    - "no active valid lease and no exact old process"
+    - "payment/order/mode/style/format/chat identities match"
+    - "no completed receipt/delivery already exists"
+    - "failure/stuck state is causally compatible with the expired old attempt"
+    - "the mutation is exact CAS-bound to the fresh row values"
+  rules:
+    - "order already completed -> zero recovery mutations (preserve DELIVERED_LATE; it never proves FAST_30)"
+    - "failure reason unrelated, ambiguous or quality-related, or identities drift -> zero mutation and STOP"
+    - "at most ONE identity-bound recovery/dispatch mutation; no retry"
+    - "new 30-minute wall begins at the successful dispatch/recovery mutation"
+    - "success requires order COMPLETED, receipt/artifact identity, and Telegram delivery SENT for exactly [TTF]"
+    - "wall expiry -> FAST30_FAILED and STOP"
+    - "late completion from the prior attempt never counts as this proof"
+
+acceptance:
+  D1: "frozen candidate SHA recorded in this contract; origin/main containment verified; governance + recovery state durably synced before deployment"
+  D2: "exactly one A23 release of the frozen SHA with fresh manifest verified, release fingerprint PASS, archive_mode NO_LOCAL_ARCHIVE, deployed SHA + service identity + readiness verified; Edge unchanged (d0d9c4ef retained) or causally redeployed"
+  D3: "recovery gate evaluated from immediately fresh rows: zero or exactly one exact-CAS-bound mutation per the rules above"
+  D4: "fresh 30-minute wall outcome recorded: COMPLETED + receipt + delivery SENT for exactly [TTF] = Milestone 3 passed within a fresh wall; wall expiry = FAST30_FAILED STOP; DELIVERED_LATE never counts"
+
+gates: [SINGLE_SHOT, NO_LOOP]
+extra_policies: [consequential, production, evidence]
+
+identity:
+  repo: "E:\\cv\\telefont"
+  candidate_sha: null   # MUST be frozen and recorded here before any deployment
+  retained_edge_version: "d0d9c4ef-47db-42ca-8940-cbeeb72d6d4f"
+  deployed_edge: "telegramfonts-edge.dienluanphien98.workers.dev"
+  d1: "telegramfonts-d1 / 4ab4ab25-37cc-4044-acc9-66fc98b9f831"
+  queue: "telegramfonts-fulfillment"
+  r2: "telegramfonts-artifacts"
+  device: "a23-termux-primary-01"
+
+depends_on:
+  decisions: [decisions/ADR-0001.md, decisions/ADR-0002.md, decisions/ADR-0003.md]
+  tasks: []
+  evidence: [".prime/journal/events.jsonl", ".prime/tasks/T-FAST30-A23-FIX/contract.yaml"]
+
+note: "Minimal successor production contract per E-00018. T-A23-PROD-01 rev 5 remains terminal FAST30_FAILED (never rewritten as PASS). Deployment authority is conditional, identity-bound, single-attempt, no rollback."

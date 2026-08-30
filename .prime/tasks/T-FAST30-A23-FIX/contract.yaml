@@ -1,0 +1,83 @@
+schema_version: 8
+policy_rev: "P-20260830.9-LEAN-SAFE-R16"
+policy_fingerprint: "0fa00f66ee4873bf"
+id: T-FAST30-A23-FIX
+contract_rev: 1
+mode: DEEP
+validated_at_generation: 9
+scope_tags: [fast30-performance, a23-runtime, reconstruction-profile]
+status: active
+
+objective: "Diagnose and fix FAST_30 so one production-equivalent A23 job completes within the 30-minute hard production wall (target <=25-minute final controlled fixture wall, leaving operational margin), then hand the frozen accepted candidate SHA to T-A23-PROD-02 for deployment. Authorized by E-00018; runs autonomously within an 8-hour task wall."
+
+routing:
+  reason: "cross-subsystem runtime performance diagnosis across the agent pipeline (acquisition/reconstruction/measurement/composition/validation), checkpoint/resume identity, runner wall enforcement, process lifecycle, and device resource configuration; causal analysis on real device evidence with strict validation budget"
+  fallback_safe: true
+
+task_wall: "8 hours from first delegation; budget exhaustion -> STOP with BUDGET_EXCEEDED preserving the last proven boundary"
+
+phases:
+  RA_reconciliation:
+    executor: "Prime-delegated production worker (before implementation)"
+    actions:
+      - "one fresh batched D1 read for the exact order/job/payment/outbox/receipt"
+      - "maximum three causally discriminating read-only A23 observations: exact PID/service, executable/release SHA, command line, job + lease-token binding, checkpoint/progress identity, minimum relevant logs (start points: ops/RUNBOOK.md, ops/OBSERVABILITY.md, docs/A23_OPERATOR_GUIDE.md)"
+      - "no repeated polling window"
+      - "if the old process is still active AND exact attribution is proven: exactly ONE graceful stop of only that bound process/service AFTER preserving logs and checkpoints"
+      - "after a graceful stop: wait only for the already-issued lease to expire and verify that state by bounded reads; do not dispatch"
+      - "if the old order already completed: preserve it as DELIVERED_LATE (does not prove FAST_30, does not complete Milestone 3)"
+    prohibited: ["broad kill/pkill/killall/process-name targeting", "cache/checkpoint deletion", "unrelated process interruption", "stop when exact attribution is unavailable"]
+  RB_diagnosis:
+    - "determine actual A23 stage timings from existing reusable evidence first (observations/, ops benchmark reports, prior soak/benchmark artifacts)"
+    - "maximum ONE additional diagnostic device profile, only if current evidence cannot identify the dominant stage"
+  RC_implementation:
+    - "fix the dominant cause under all invariant constraints"
+    - "persist useful timing/checkpoint evidence so interruption resumes instead of restarting"
+
+requirements:
+  - "hard end-to-end production wall: 30 minutes"
+  - "target final controlled A23 fixture wall: <=25 minutes"
+  - "FAST_30 remains the sole profile; no BALANCED_MAX/FULL_MAX fallback or escalation"
+  - "do not weaken held-out, four-consumer, all-or-nothing or output gates"
+  - "TTF and OTF remain the only permitted outputs"
+  - "preserve acquisition order, binary-wins, reuse ladder and Vietnamese AI decisions (ADR-0001/0002/0003)"
+  - "no A23-specific hardcoding that prevents Debian Mini PC migration"
+  - "concurrency/capability/resource choices remain configuration-driven"
+  - "preserve deterministic identity, checkpoint/resume and reusable evidence"
+
+acceptance:
+  F1: "proven root cause with actual A23 stage timings (from reusable evidence; diagnostic device run used only if the dominant stage was otherwise unidentified)"
+  F2: "exact A23 production-equivalent one-style run completes <=25 minutes at the stable final candidate (maximum ONE such final acceptance run)"
+  F3: "resulting TTF valid under all unchanged final gates; OTF support remains causally verified without rerunning geometry"
+  F4: "optimize/form the model once and reuse it across requested outputs/repeat"
+  F5: "no uncontrolled orphan browser/Python process remains after the run; timing/checkpoint evidence persisted (interruption resumes instead of restarting)"
+  F6: "invariants preserved exactly as listed in requirements; diff stays inside contracted performance/runtime scope"
+  F7: "device/runtime evidence binds exact candidate SHA and configuration; final candidate device test used an isolated scratch/cache namespace (no production cache deletion/contamination)"
+
+budget:
+  - "during implementation: exact repros, focused tests and small fixtures only; DO NOT run the full repository suite"
+  - "reuse existing accepted evidence unless causally invalidated"
+  - "maximum ONE diagnostic A23 performance run; maximum ONE final production-equivalent A23 acceptance run at the stable final candidate"
+  - "final candidate device test uses an isolated scratch/cache namespace"
+  - "overall autonomous task wall 8 hours; exhaustion -> BUDGET_EXCEEDED STOP preserving last proven boundary"
+
+constraints:
+  - "production anomaly boundary (E-00018 section E) untouched: foreign migration 0007_telegram_message_retention.sql and pre-existing unknown Edge lineage are neither deleted, renamed, replayed nor repaired here; they remain visible for Mini PC migration reconciliation"
+  - "never use the stale uncommitted ops/a23_deployment_manifest.json; preserve all unrelated dirty files"
+  - "commit only intended task delta on branch task/T-FAST30-A23-FIX in the isolated worktree"
+  - "no secret values in logs/evidence/commits/reports"
+
+gates: [NO_LOOP]
+extra_policies: [evidence, adversarial, budget, diagnosis]
+
+identity:
+  repo: "E:\\cv\\telefont"
+  worktree: "E:\\cv\\telefont-fast30fix"
+  branch: "task/T-FAST30-A23-FIX"
+  base: "bc3a2f241aa4acbc07ef6a2063823f93f54aa454"
+
+depends_on:
+  decisions: [decisions/ADR-0001.md, decisions/ADR-0002.md, decisions/ADR-0003.md]
+  evidence: [".prime/journal/events.jsonl", ".prime/tasks/T-FAST30-01/result.yaml", ".prime/tasks/T-A23-PROD-01/progress.yaml"]
+
+note: "Created at generation 9 (E-00018). Rev 5 of T-A23-PROD-01 remains terminal FAST30_FAILED and is never rewritten as PASS; DELIVERED_LATE never proves FAST_30. Successor production envelope: T-A23-PROD-02."

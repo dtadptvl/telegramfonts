@@ -90,3 +90,16 @@ production_counts:
   read_sessions: 16   # P0 (7 SELECTs) + M1 verify (3) + M2 snapshot+readback (5) + P6 monitor 12 polls x 4 SELECTs (48) = 63 SELECTs
   mutations: 3        # M1 tracked migration application, M2 one CAS row, M3 one edge deployment
   deploy_identity: "telegramfonts-edge version d0d9c4ef-47db-42ca-8940-cbeeb72d6d4f from exact 166e45b"
+
+correction:
+  ts: "2026-08-30T10:42:00Z"
+  source: "E-00018 evidence correction (Human), recorded E-00019"
+  corrects: "P0 derived classification 'GENUINELY_ACTIVE' (2026-08-30T09:31:11Z)"
+  corrected_to: "LEASE_ONLY_ACTIVE / PROCESS_UNATTRIBUTED"
+  reason: >-
+    Continuous D1 lease renewals prove lease-owner activity only. Exact A23
+    process observation was unavailable, so process attribution was never
+    proven. The original observations above (lease windows, heartbeat
+    freshness, D1 row values, DEVICE_PROCESS_OBSERVATION_UNAVAILABLE) are
+    preserved unchanged; only the derived claim is corrected. Rev 5 remains
+    terminal FAST30_FAILED and is never rewritten as PASS.

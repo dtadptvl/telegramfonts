@@ -1,5 +1,5 @@
 schema_version: 7
-generation: 8
+generation: 9
 
 governance:
   policy_rev: "P-20260830.9-LEAN-SAFE-R16"
@@ -14,13 +14,14 @@ phase:
   status: active
 
 now:
-  - "T-A23-PROD-01"
-next: []
+  - "T-FAST30-A23-FIX"
+next:
+  - "T-A23-PROD-02"
 
 blockers:
-  - "REV-5 ENVELOPE TERMINAL (E-00017): FAST30_FAILED wall - attempt 6 stayed GENUINELY_ACTIVE (healthy heartbeats every ~5 min) through the entire 30-min wall; delivery did not complete within the wall; fail-closed STOP executed; M4 (A23 release) and M5 (dispatch) authority EXPIRED UNUSED per A6; nothing interrupted. Executed: M1 migration 0007 applied, M2 strong CAS mode=ORIGINAL (1 row), M3 edge deployed exact 166e45b (version d0d9c4ef)."
-  - "ATTEMPT 6 STILL RUNNING AT WALL (last observed 10:00:11Z, lease to ~10:04:59Z, no last_error): the job continues under its own momentum on device agent (pre-166e45b identity) against edge exact 166e45b; order mode=ORIGINAL designated so the new edge delivery gate passes if/when it completes. Current state unobserved since 10:00:11Z - fresh authorized read needed to learn outcome."
-  - "A23 AGENT IDENTITY STALE ON DEVICE: edge is exact 166e45b but device agent still runs pre-166e45b identity (M4 expired unused); any future device-side product behavior requires a new authorized release envelope."
+  - "FAST_30 A23 WALL FAILURE UNDER DIAGNOSIS (E-00018, T-FAST30-A23-FIX active): attempt 6 of job_477b205f ran far beyond the 30-min wall without artifact (LEASE_ONLY_ACTIVE / PROCESS_UNATTRIBUTED - derived claim corrected per E-00019); fix must make one production-equivalent A23 job complete <=25-min fixture wall (30-min hard production wall); terminal report in Vietnamese."
+  - "MINI-PC MIGRATION BLOCKER (preserved verbatim, DO NOT delete/rename/replay/repair during T-FAST30-A23-FIX, E-00018 section E): foreign production migration 0007_telegram_message_retention.sql (not in repo lineage) + prior deployed Edge lineage absent from repository history (deployments before 2026-08-30T09:35:22Z, versions eec4fd75..7c582378). Must remain visible for Mini PC migration reconciliation."
+  - "A23 PROCESS ATTRIBUTION GAP: exact device process observation unavailable from workspace so far (E-00017/E-00019); phase RA authorized up to three causally discriminating read-only observations (PID/service, executable SHA, cmdline, job+lease binding, checkpoint identity, logs) via surfaces in ops/RUNBOOK.md, ops/OBSERVABILITY.md, docs/A23_OPERATOR_GUIDE.md; graceful stop authorized ONLY on proven exact attribution."
 
 exit:
   - "one controlled bot order completed end-to-end on A23 under FAST_30 with verified TTF/OTF delivery within the 30-minute wall limit (requires separate consequential authorization for the A23 production leg)"
@@ -37,6 +38,7 @@ human_requirements:
     - "never fake/bypass/weaken external-ext4/filesystem identity checks; loopback never posed as canonical archive"
     - "stale A23 retired-profile job: read-only inspection only; no mutation without explicit authorization"
     - "REV-5 ENVELOPE TERMINAL (E-00017): FAST30_FAILED wall with attempt still active; M4/M5 expired unused (A6); remediation mode designation + product-line edge activation completed within the envelope; any further action (continued observation, A23 release, new fulfillment envelope) requires fresh Human authorization; Human never executes commands/relays JSON"
+    - "E-00018 autonomous repair cycle: T-FAST30-A23-FIX active (diagnose+fix FAST_30 to <=25-min fixture wall; 8h task wall; focused validation budget only); T-A23-PROD-02 pending activation (frozen-SHA deploy + conditional one-shot recovery); rev 5 stays terminal FAST30_FAILED forever (never rewritten as PASS); DELIVERED_LATE from the prior attempt never proves FAST_30 nor completes Milestone 3; production anomaly boundary preserved untouched for Mini PC reconciliation; terminal report in Vietnamese"
     - "T-PRICE-01 integrated line (head 166e45b) deploys ONLY inside the approved rev-4 envelope; absent-mode legacy orders otherwise fail closed by design and need Human decisions, never automatic repair"
     - "E-00011 mode proof: NEVER infer ORIGINAL from an absent mode field; fulfillment proceeds only on positive durable row evidence of mode/styles/formats/payment/delivery; VIETNAMESE or unproven -> STOP fail-closed, T-PRICE-01 before fulfillment"
 
@@ -52,9 +54,10 @@ recent_invalidations:
   - {generation: 6, scopes: [production-dispatch, product-flow, pricing], severity: breaking, source_event: E-00012, note: "overnight bounded autonomous cycle; rev 3 envelope conditionally granted; T-PRICE-01 spec pre-authorized for VIETNAMESE/unproven branch"}
   - {generation: 7, scopes: [production-dispatch, product-flow, pricing], severity: breaking, source_event: E-00015, note: "Human remediation: mode ORIGINAL designated for ord_2a142f39 only (never general backfill); T-A23-PROD-01 rev 3 superseded by rev 4 DRAFT envelope"}
   - {generation: 8, scopes: [production-dispatch, product-flow, pricing, production-remediation], severity: breaking, source_event: E-00016, note: "envelope approved with binding amendments A1-A6; rev 4 superseded by rev 5; execution authorized as faithful transcription"}
+  - {generation: 9, scopes: [fast30-performance, a23-runtime, production-dispatch, reconstruction-profile], severity: breaking, source_event: E-00018, note: "autonomous FAST_30 A23 repair/acceptance/release cycle; T-FAST30-A23-FIX + T-A23-PROD-02 contracted; GENUINELY_ACTIVE derived claim narrowed to LEASE_ONLY_ACTIVE (E-00019)"}
 
 reconciliation:
-  status: clean
-  event: E-00017
+  status: in_progress
+  event: E-00018
 
-updated_at: "2026-08-30T10:05:00Z"
+updated_at: "2026-08-30T10:42:00Z"
