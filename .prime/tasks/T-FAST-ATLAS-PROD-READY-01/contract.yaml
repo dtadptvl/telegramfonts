@@ -1,0 +1,54 @@
+schema_version: 8
+policy_rev: "P-20260830.9-LEAN-SAFE-R16"
+policy_fingerprint: "0fa00f66ee4873bf"
+id: T-FAST-ATLAS-PROD-READY-01
+contract_rev: 1
+mode: DEEP
+validated_at_generation: 11
+scope_tags: [acquisition, atlas-runtime, combining-marks, vietnamese-ai, a23-staging-release]
+status: active
+
+objective: "Close ALL FAST_ATLAS_ULTRA_V1 production-readiness gaps in one autonomous cycle (E-00025): production transport wiring, combining-mark semantics, Vietnamese AI runtime; then - only if every acceptance passes - integrate once and release once to A23 staging under the conditional release gate. Correction task: T-FAST-ATLAS-ULTRA-01/E-00024 history stays immutable."
+
+routing:
+  reason: "cross-subsystem production-readiness work: real acquisition transport chain, Unicode mark semantics in geometry/build, AI cascade runtime with secret boundary, plus identity-bound release operations; causally intertwined with atlas pipeline internals"
+  fallback_safe: true
+
+acceptance:
+  R1: "production transport wired end-to-end into the real runner (no 'deployment-phase work' remainder): exact cache/binary wins immediately -> Chrome native --dump-dom metadata/MD5 -> persistent Playwright/Chromium session (one session, kept) -> exact-MD5 Monotype CDN primary raster -> Algolia MD5 resolution then back to CDN; browser atlas supplements only missing/unattestable raster/metrics; batched metrics + atlas pages; no screenshot, no per-glyph navigation/CDP, no fake data, no unobserved CDN phases; causal repros + one small ORIGINAL live acquisition smoke PASS"
+  R2: "combining marks corrected: zero advance valid for Unicode combining marks; marks with valid ink/outline/bbox/anchor kept in GlyphModel/cmap/TTF/OTF (never FAILED_GLYPH solely for zero advance); fail-closed preserved for genuinely malformed/disallowed-zero-ink/degenerate outlines; minimal repros for U+0300,U+0301,U+0303,U+0306,U+0309,U+031B,U+0323 pass; requested combining-mark coverage proven present in output"
+  R3: "Vietnamese AI runtime: production hardcode ai_provider=None removed; runtime secrets loaded ONLY from E:\\cv\\telefont\\dev.vars by exact names wokushop_api_key/openrouter_api_key; values never logged/echoed/committed/hashed/reported/artifacted; exact cascade (Woku https://llm.wokushop.com/v1 PRIMARY gpt-5.6-luna -> capacity/unavailable fallback gemini-3.7-flash; OpenRouter google/gemma-3-12b-it, difficult google/gemma-3-27b-it, rare final arbiter google/gemini-3.1-flash-lite); AI only for classes failing after deterministic composition - never per-glyph, never raster-generating, never altering achieved geometry; hermetic tests prove cascade + fail-closed"
+  R4: "exactly ONE live Vietnamese representative smoke: max 3 model calls TOTAL, no retry, wall <=12 minutes; credentials missing or provider unavailable -> STOP with blocker, no production-ready claim; evidence records call count, classes, outcomes (never secret values)"
+  R5: "bounded validation honored: causal repros + affected focused tests + the two smokes only; final speed fixture rerun ONLY if changes causally invalidate prior timing evidence (record the causality finding either way); full suite/soak/FULL_MAX/BALANCED_MAX/legacy four-consumer E2E/long benchmarks/blind retry never run; walls 480s/720s preserved; timeout -> FAST30_FAILED"
+  R6: "exactly ONE final candidate SHA frozen by Prime after exact-diff review; non-force integrated into origin/main and origin/prime-recovery; governance/runtime lint OK"
+  R7: "pre-release safety gate: read-only A23 process + D1 lease inspection immediately before release; valid active production lease OR unidentifiable process identity -> no interrupt, no release, STOP with blocker"
+  R8: "conditional release executed at most once each, no retries, no rollback: Edge deployed at the final integrated SHA (production Edge currently lacks wall/backstop/atlas line); fresh A23 deployment manifest generated (NEVER the dirty ops/a23_deployment_manifest.json); A23 release of the final SHA; release fingerprint PASS; service identity + readiness verified; archive_mode=NO_LOCAL_ARCHIVE; exactly ONE isolated A23 staging smoke with zero order/payment/D1/Queue/R2 mutations; FAILED ord_2a142f39 untouched (no recovery/rearm/refund/cancel/mutation)"
+
+budget:
+  - "validation limited to R5 list; no blind retry; any ambiguity or anomaly -> STOP"
+  - "live Vietnamese smoke: <=3 model calls total, no retry, <=12-minute wall"
+  - "one deployment attempt per target; no rollback"
+
+constraints:
+  - "T-FAST-ATLAS-ULTRA-01 and E-00024 history immutable; this task corrects forward only"
+  - "secret handling: dev.vars values readable for runtime tests ONLY; never logged, echoed, committed, hashed, reported, or placed in artifacts"
+  - "A23 staging release does not touch production D1/Queue/R2 state, creates no order, sends no payment webhook"
+  - "preserve all unrelated dirty files (including the dirty ops manifest - never use it, never overwrite it)"
+  - "commit only intended task delta on the task branch in the isolated worktree"
+
+gates: [NO_LOOP]
+extra_policies: [consequential, production, evidence, adversarial, security]
+
+identity:
+  repo: "E:\\cv\\telefont"
+  worktree: "E:\\cv\\telefont-prod-ready"
+  branch: "task/T-FAST-ATLAS-PROD-READY-01"
+  base: "97073f10710f0f14b9b48f6a88fbf975520fe72e"
+  retained_edge_version_until_release: "d0d9c4ef-47db-42ca-8940-cbeeb72d6d4f"
+  a23_prior_release: "b8c6994 (device idle since zombie stop; reconcile read-only before relying)"
+
+depends_on:
+  decisions: [decisions/ADR-0002.md, decisions/ADR-0003.md, decisions/ADR-0004.md]
+  evidence: [".prime/journal/events.jsonl", ".prime/tasks/T-FAST-ATLAS-ULTRA-01/result.yaml"]
+
+note: "Created at generation 11 (E-00025) as the correction task closing E-00024 production-readiness gaps. Release authority is conditional on ALL acceptance IDs and the R7 safety gate; no order-recovery authority of any kind."
