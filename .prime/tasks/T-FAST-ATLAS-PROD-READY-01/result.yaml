@@ -1,7 +1,7 @@
 schema_version: 8
 governance:
   policy_rev: "P-20260830.9-LEAN-SAFE-R16"
-  policy_fingerprint: "0fa00f66ee4873bf"
+  fingerprint: "0fa00f66ee4873bf"
   generation: 11
 task: T-FAST-ATLAS-PROD-READY-01
 contract_rev: 1
@@ -25,7 +25,7 @@ closure: >-
   path. All evidence is recorded honestly; no fakes, no retries.
 
 proved: [R2, R3, R5]
-unproved: [R1_live_happy_path_smoke, R4]
+unproved: [R1, R4]   # R1 unproved solely for the live happy-path smoke (hermetic chain proof passed; live run was bot-gated and proved the fail-closed path); R4 VN_BLOCKED on providers
 
 acceptance_evidence:
   R1: >-

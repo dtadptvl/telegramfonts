@@ -41,7 +41,7 @@ identity:
   proven_correction_head: "01f83c5c1bc574b1f3ce6f6b9a2973c8600c709b"
   worktree: "E:\\cv\\telefont-original-release"
   branch: "task/T-FAST-ATLAS-A23-ORIGINAL-RELEASE-01"
-  candidate_sha: null   # frozen by Prime at O3
+  candidate_sha: "34f24b0de58743318a3bab1869f114ccca5335e9"   # FROZEN by Prime at O3 (2026-08-30T17:45Z): proven head 01f83c5 + gate commits 34d8c4c/b6f251e/34f24b0; exact diff reviewed; focused specs 33/33 at this SHA
   retained_edge_version_until_activation: "d0d9c4ef-47db-42ca-8940-cbeeb72d6d4f"
 
 depends_on:

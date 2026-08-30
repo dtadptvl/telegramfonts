@@ -1,7 +1,7 @@
 schema_version: 8
 policy_rev: "P-20260830.9-LEAN-SAFE-R16"
 policy_fingerprint: "0fa00f66ee4873bf"
-task_id: T-FAST-ATLAS-A23-ORIGINAL-RELEASE-01
+task: T-FAST-ATLAS-A23-ORIGINAL-RELEASE-01
 contract_rev: 1
 status: in_progress
 milestones:
