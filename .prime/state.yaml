@@ -13,14 +13,13 @@ phase:
   id: "fast30-cutover"
   status: active
 
-now:
-  - "T-FAST-ATLAS-A23-ORIGINAL-RELEASE-01"
+now: []
 next: []
 
 blockers:
-  - "PRODUCTION-READINESS BLOCKED (E-00026): T-FAST-ATLAS-PROD-READY-01 result blocked - R2/R3/R5 proven; OPEN: (1) VN AI providers unavailable (gpt-5.6-luna UNAVAILABLE, gemini-3.7-flash UNAVAILABLE, gemma-3-12b-it candidates VALIDATION_FAILED -> VI_AI_ALL_ROUTES_FAILED fail-closed; R4 smoke ran exactly once, 3/3 calls, cap enforced); (2) live acquisition happy path unobserved from workstation (Cloudflare bot-gate; fail-closed path proven live). Implementation preserved on task/T-FAST-ATLAS-PROD-READY-01 head 01f83c5 (NOT integrated; envelope conditions unmet -> no freeze/integrate/release per E-00025 E)."
-  - "FAILED PAID ORDER ord_2a142f39 preserved for Human resolution: FAILED max_attempts_exhausted at 2026-08-30T12:00:29Z (expired attempt 6 zombie lineage b8c6994; mode ORIGINAL designated; payment VERIFIED 5,000 VND). No recovery executed (deployment authority void). Options are Human-owned (e.g., refund/cancel, manual re-order after a performance fix, or other product handling)."
-  - "DEPLOYMENT GAP: production Edge d0d9c4ef lacks wall/backstop/atlas line; A23 device idle-polling on old lineage (release dirs 582dba8/6a23e9d/b8c6994); both integrated+staging release await the production-readiness blockers closing (or a fresh Human envelope re-scoping the conditions)."
+  - "ORIGINAL-FIRST CYCLE BLOCKED AT O5 (E-00028): A23 production-egress smoke failed fail-closed ATLAS_RASTER_SOURCE_UNAVAILABLE in 8.7s (one run, no retry): dump-dom found the family but no style MD5; candidate binaries rejected BINARY_FAMILY_MISMATCH; persistent-browser fallback unconstructible because the PINNED A23 RUNTIME (22-distribution fingerprint, pinned at b8c6994 lineage) does NOT contain playwright (lock diff 0 - never added); Monotype CDN unreachable without MD5; Algolia keyless. O6 NOT executed: Edge still d0d9c4ef, A23 active release still b8c6994 (worker PID 21267 undisturbed), runtime unchanged. ROOT GAP: frozen candidate 34f24b0 (integrated on main at fedf9f3) presupposes Playwright+browser in the runtime; closing requires a NEW bounded decision: new runtime pin (playwright+chromium + fresh runtime manifest/fingerprint + re-staging) OR a browser-free MD5/binary resolution path. Staged side-by-side release/runtime dirs for 34f24b0 remain on device (authorized staging; supervisor NOT switched)."
+  - "VIETNAMESE PRE-PAYMENT GATE LIVE-READY BUT UNDEPLOYED (E-00028): gate implemented + focused-proven (VIETNAMESE_ORDERING_ENABLED default 'false') on integrated main, but Edge deploy did not happen (O5 fail branch); production Edge still pre-gate. VN ordering lock takes effect at the next successful Edge deployment."
+  - "FAILED PAID ORDER ord_2a142f39 preserved for Human resolution: FAILED max_attempts_exhausted at 2026-08-30T12:00:29Z (expired attempt 6 zombie lineage b8c6994; mode ORIGINAL designated; payment VERIFIED 5,000 VND). No recovery executed (no authority). Options are Human-owned."
   - "MINI-PC MIGRATION BLOCKER (preserved verbatim, DO NOT delete/rename/replay/repair, E-00018 section E): foreign production migration 0007_telegram_message_retention.sql (not in repo lineage) + prior deployed Edge lineage absent from repository history (deployments before 2026-08-30T09:35:22Z, versions eec4fd75..7c582378). Must remain visible for Mini PC migration reconciliation."
 
 exit:
@@ -41,7 +40,7 @@ human_requirements:
     - "E-00018 cycle TERMINAL (E-00022): T-FAST30-A23-FIX failed final acceptance on duration (wall machinery proven; measurement throughput is the remaining gap); T-A23-PROD-02 deployment authority VOID; failed paid order preserved for Human resolution; device idle; any further implementation/recovery/deployment requires fresh Human authorization; Human never executes commands/relays JSON"
     - "E-00023 SPEED-FIRST cycle COMPLETE (E-00024): T-FAST-ATLAS-ULTRA-01 accepted + integrated (merge e2a0b60); FAST_ATLAS_ULTRA_V1 under FAST_30 public name; walls 480s/720s; all fixture targets met with wide margins; NOT DEPLOYED (E-00023 grants no deployment/order-recovery authority); T-FAST30-A23-FIX result at f574d0c immutable with hardening preserved; A23 staging-only boundary honored; any deployment/recovery requires a fresh identity-bound Human envelope; Human never executes commands/relays JSON"
     - "T-PRICE-01 integrated line (head 166e45b) deploys ONLY inside the approved rev-4 envelope; absent-mode legacy orders otherwise fail closed by design and need Human decisions, never automatic repair"
-    - "E-00027 MODE-SPLIT AUTHORIZATION (gen 12): ORIGINAL may integrate/stage/deploy/smoke independently; VN AI blocker must not block ORIGINAL; VIETNAMESE locked before order creation/payment (VIETNAMESE_ORDERING_ENABLED=false default) until live AI smoke passes; supersedes E-00025 all-modes-pass condition ONLY within mode-specific deployment scope; E-00025/E-00026 + old results immutable; no recovery of ord_2a142f39, no new paid orders, no D1/Queue/R2 job mutation, no live VN AI retry, no rollback/blind retry/alternate profile"
+    - "E-00027 cycle TERMINAL BLOCKED at O5 (E-00028): gate + freeze + integration + staging done (candidate 34f24b0 on main fedf9f3; staged side-by-side on device, supervisor untouched); smoke fail-closed on runtime capability gap (no playwright in pinned runtime); O6 not executed - Edge/A23/runtime unchanged per fail branch; next step requires fresh Human decision (new runtime pin with playwright+chromium, or browser-free acquisition path); Human never executes commands/relays JSON"
     - "E-00011 mode proof: NEVER infer ORIGINAL from an absent mode field; fulfillment proceeds only on positive durable row evidence of mode/styles/formats/payment/delivery; VIETNAMESE or unproven -> STOP fail-closed, T-PRICE-01 before fulfillment"
 
 active_decisions:
@@ -63,7 +62,7 @@ recent_invalidations:
   - {generation: 12, scopes: [a23-staging-release, acquisition, atlas-runtime, product-flow], severity: breaking, source_event: E-00027, note: "ORIGINAL-FIRST mode-split: VN blocker must not block ORIGINAL; VIETNAMESE pre-payment gate default disabled; T-FAST-ATLAS-A23-ORIGINAL-RELEASE-01 contracted; supersedes E-00025 all-modes condition within mode-specific deployment scope only"}
 
 reconciliation:
-  status: in_progress
-  event: E-00027
+  status: clean
+  event: E-00028
 
-updated_at: "2026-08-30T17:15:00Z"
+updated_at: "2026-08-30T18:40:00Z"

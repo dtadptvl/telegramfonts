@@ -6,7 +6,7 @@ contract_rev: 1
 mode: NORMAL
 validated_at_generation: 12
 scope_tags: [a23-staging-release, acquisition, atlas-runtime, product-flow]
-status: active
+status: terminal   # E-00028: O1/O2/O3/O4 done; O5 smoke FAILED fail-closed (ATLAS_RASTER_SOURCE_UNAVAILABLE - pinned runtime lacks playwright); O6 NOT executed per fail branch; Edge/A23/runtime unchanged
 
 objective: "ORIGINAL-first mode-split release (E-00027): integrate the proven correction head with the smallest mode-safe gate (VIETNAMESE locked pre-payment, default disabled), freeze one candidate, then side-by-side stage on A23, run exactly one production-egress ORIGINAL smoke, and conditionally activate Edge + A23 exactly once each - reaching BOT_ORIGINAL_READY without touching VIETNAMESE fulfillment or the failed paid order."
 

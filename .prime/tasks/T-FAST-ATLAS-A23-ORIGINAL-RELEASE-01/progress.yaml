@@ -14,3 +14,15 @@ milestones:
   - id: M3_O2_FOCUSED_TESTS
     status: completed
     evidence: "Added edge/test/vietnamese-gate.spec.ts proving disabled unavailable reply, zero order/payment side effects, enabled behavior, and defense-in-depth guard; edge typecheck clean; 33 focused tests passed across vietnamese-gate.spec.ts, mode-price.spec.ts, and telegram.spec.ts"
+  - id: M4_O3_FREEZE_INTEGRATE
+    status: completed
+    evidence: "Prime reviewed exact diff; candidate frozen 34f24b0de58743318a3bab1869f114ccca5335e9; non-force merged into main (d9ff191); lint OK; synced origin/main + origin/prime-recovery to fedf9f3b22db77f0f448030f0df592f771c3f9be with candidate containment verified"
+  - id: M5_O4_STAGING
+    status: completed
+    evidence: "SAFE_TO_STAGE (zero leases, worker PID 21267 idle); staged release+runtime dirs for 34f24b0 side-by-side (tar sha256 6f7ed49d...; runtime manifest 3880 entries; ALL supervisor verifications PASS incl. runtime fingerprint 22 pinned dists - no playwright); fresh manifest from frozen worktree (main_commit_sha 34f24b0, on-device 0 drift); archive_mode NO_LOCAL_ARCHIVE; zero supervisor switch/restart"
+  - id: M6_O5_SMOKE
+    status: failed
+    evidence: "exactly ONE smoke, no retry, wall 8.682s: ATLAS_RASTER_SOURCE_UNAVAILABLE fail-closed - dump_dom found family but no style MD5; binaries BINARY_FAMILY_MISMATCH; persistent-browser fallback unconstructible (playwright absent from pinned runtime fingerprint set); CDN unreachable without MD5; Algolia keyless. Counters: dump_dom_calls=1, http/cdp/browser_readbacks/cache_hits=0. Evidence sha256 5a721ea4.../1198d4e5... in .local-artifacts/a23-original-smoke-34f24b0/. Zero production mutations; worker undisturbed; zero orphans from smoke"
+  - id: M7_O6_ACTIVATION
+    status: skipped
+    evidence: "NOT executed per E-00027 step 6 fail branch: no Edge deploy, no A23 switch, runtime unchanged; exact acquisition failure reported; STOP"
