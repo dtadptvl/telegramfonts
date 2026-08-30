@@ -1,0 +1,101 @@
+task: T-PRICE-01
+contract_rev: 1
+policy_rev: "P-20260830.9-LEAN-SAFE-R16"
+policy_fingerprint: "0fa00f66ee4873bf"
+worker: single-delegated-writer (RECOVERY CONTINUATION -> FINAL NARROWED slice)
+branch: task/T-PRICE-01
+base_head: 4eb4c3b49259b0430bf36d3d7f47b6bebb67612c
+mode: RECOVERY_CONTINUATION
+
+milestones:
+  - id: R0
+    ts: "2026-08-30T08:00:20Z"
+    status: done
+    summary: >-
+      RESUME. Inherited boundary verified via git status in
+      E:\cv\telefont-price01 (branch task/T-PRICE-01, base 4eb4c3b):
+      Modified (written, NOT typechecked, NOT committed):
+      edge/src/handlers/internal-catalog.ts (mode-independent base style
+      price), edge/src/handlers/telegram-webhook.ts (+271: mode gate,
+      mode:set callback, renderModeSelection, mode-aware confirmation/
+      order-info, fail-closed guards in fmt:nxt & ord:cnf),
+      edge/src/services/catalog-service.ts (CATALOG_BASE_STYLE_PRICE_VND),
+      edge/src/services/job-service.ts (+112: mode in ClaimComputePayload,
+      claimJob fail-closed gate + metadata cross-check,
+      failClosedForAbsentMode() job+order FAILED w/ TERMINAL ack,
+      MODE_ABSENT_LEGACY_ORDER_REASON / MODE_IDENTITY_MISMATCH_REASON),
+      edge/src/services/order-service.ts (fail-closed mode validation,
+      mode-aware totals/per-item price, mode in metadata+INSERT),
+      edge/src/services/outbox-service.ts (delivery fail-closed on absent
+      mode; mode in caption + telegram_delivered log),
+      edge/src/services/session-service.ts (selectMode/setPendingSourceUrl;
+      session create/reset handle new fields), edge/src/types/session.ts
+      (FontMode, SUPPORTED_MODES, isFontMode(), record fields).
+      New files: edge/migrations/0007_font_mode.sql (nullable mode +
+      pending_source_url; CHECK allows NULL = legacy fail-closed; no
+      backfill), edge/src/utils/pricing.ts (MODE_PRICE_PER_STYLE_VND
+      {ORIGINAL:5000, VIETNAMESE:8000}, stylePriceForMode() with
+      Math.max so VIETNAMESE never falls to 5000).
+      NOT yet done: install deps, typecheck, agent Python surfaces,
+      broken-test fixes, focused causal tests, final validation, commits.
+  - id: R1
+    ts: "2026-08-30T08:20:00Z"
+    status: done
+    summary: >-
+      Edge deps installed; npm run typecheck green with the full mode
+      delta; edge work committed as 660f468 feat(mode) (migration 0007 +
+      8 services/handlers + pricing util).
+  - id: R3
+    ts: "2026-08-30T08:22:00Z"
+    status: done
+    summary: >-
+      Existing edge suites aligned with mode-bound contract semantics
+      (e8bcaa2: jobs/telegram/fresh-catalog/sepay/schema fixtures;
+      migration tracker lists 0007); delivery assertions bound to durable
+      mode evidence incl. VIETNAMESE identity + absent-mode fail-closed
+      delivery (bab9c5c).
+  - id: R4
+    ts: "2026-08-30T08:25:00Z"
+    status: done
+    summary: >-
+      Focused causal edge tests: edge/test/mode-price.spec.ts (eed3a94):
+      mode selection+persistence, ORIGINAL 5000 vs VIETNAMESE 8000 totals
+      (multi-style), claim payload carries mode, absent-mode order fails
+      closed (FAILED + TERMINAL ack, clear reason, no default/backfill),
+      reuse-identity separation between modes.
+  - id: R2
+    ts: "2026-08-30T08:45:00Z"
+    status: done
+    summary: >-
+      FINAL NARROWED slice: agent Python committed (ec3e723).
+      worker_client.py: mode REQUIRED in claim payloads; absent ->
+      MISSING_MODE, unsupported -> UNSUPPORTED_MODE; dataclass default
+      removed. runner.py: (job.mode or "ORIGINAL") defaulting replaced
+      with fail-closed _require_job_mode; MISSING_MODE/UNSUPPORTED_MODE
+      added to TERMINAL_ERROR_CODES; L3 binary reuse consumption,
+      pre-acquisition L3 cache probe, and acquisition binary wins gated
+      ORIGINAL-only (BinaryCacheIdentity intentionally unchanged; L1
+      ArchiveIdentity and L2 FontModelCacheIdentity already bind mode).
+      soak.py: claim mock requires explicit mode. Test fixtures updated
+      to the required-mode contract (9 existing modules).
+  - id: R5
+    ts: "2026-08-30T08:50:00Z"
+    status: done
+    summary: >-
+      Agent tests: new agent/tests/test_mode_fail_closed.py 9/9 PASS
+      (2029510); all 9 pre-existing modules touched by the fixture ripple
+      run once: 106 passed in 192.20s. Final validation ONCE: edge
+      typecheck clean; edge vitest 18 files / 201 passed / 0 failed
+      (24.08s).
+  - id: R6
+    ts: "2026-08-30T08:55:00Z"
+    status: done
+    summary: >-
+      All task delta committed on task/T-PRICE-01 with conventional
+      commits: edge 660f468, e8bcaa2, bab9c5c, eed3a94; agent ec3e723,
+      2029510; task files (this progress.yaml + result.yaml claiming
+      PROVEN P1-P8) in the final chore(prime) commit. LOCAL_ONLY honored
+      throughout: zero wrangler deploy/remote, zero git push, zero
+      production mutation; ord_2a142f39/job_477b205f untouched.
+
+final_status: completed

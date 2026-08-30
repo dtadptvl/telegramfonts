@@ -1,0 +1,155 @@
+task: T-PRICE-01
+contract_rev: 1
+policy_rev: "P-20260830.9-LEAN-SAFE-R16"
+policy_fingerprint: "0fa00f66ee4873bf"
+worker: logical-worker-deep
+branch: task/T-PRICE-01
+base_head: 4eb4c3b
+mode: DEEP
+status: completed
+
+proved: [P1, P2, P3, P4, P5, P6, P7, P8]
+
+acceptance_evidence:
+  P1: >-
+    PROVEN. Explicit ORIGINAL/VIETNAMESE selection in /muahang and durable
+    persistence: telegram-webhook.ts mode gate + mode:set callback +
+    renderModeSelection + mode-aware confirmation/order-info;
+    session-service.ts selectMode/setPendingSourceUrl; order-service.ts
+    writes mode into order metadata and the orders INSERT; migration
+    0007_font_mode.sql adds telegram_sessions.mode,
+    telegram_sessions.pending_source_url, orders.mode. Mode travels with
+    the order (session -> order metadata -> order identity). Commits
+    660f468 + migration 0007; causal tests in eed3a94
+    (edge/test/mode-price.spec.ts).
+  P2: >-
+    PROVEN. edge/src/utils/pricing.ts MODE_PRICE_PER_STYLE_VND
+    {ORIGINAL: 5000, VIETNAMESE: 8000} with stylePriceForMode() guarded
+    by Math.max so VIETNAMESE can never fall to 5000; order-service.ts
+    computes per-item price and totals mode-aware; SePay payment
+    verification enforces the exact mode-aware total; catalog-service.ts
+    CATALOG_BASE_STYLE_PRICE_VND + internal-catalog.ts keep catalog
+    per-style defaults mode-independent so they cannot silently
+    undercharge VIETNAMESE. Tests: mode-price.spec.ts covers both price
+    points and multi-style totals (201/201 edge suite green).
+  P3: >-
+    PROVEN. Mode bound end-to-end: Telegram session (P1), order metadata
+    + durable order identity (order-service), queue claim payload
+    (job-service ClaimComputePayload.mode + metadata cross-check), agent
+    worker validation (worker_client.ClaimedJob.from_dict REQUIRED mode),
+    runner fail-closed propagation (_require_job_mode; MISSING_MODE /
+    UNSUPPORTED_MODE terminal), archive/reuse identity (L1 ArchiveIdentity
+    and L2 FontModelCacheIdentity bind mode; L3 BinaryCacheIdentity
+    deliberately mode-free but all three L3 surfaces - pre-acquisition
+    cache probe, acquisition binary win, binary-reuse consumption - are
+    gated ORIGINAL-only so VIETNAMESE never takes an ORIGINAL binary
+    shortcut), delivery evidence (outbox caption/log bound to durable
+    mode, bab9c5c). Tests: mode-price.spec.ts claim-payload-mode and
+    reuse-identity separation; agent/tests/test_mode_fail_closed.py
+    (9 tests) proves L3 refusal for VIETNAMESE and preserved ORIGINAL
+    exact-binary-wins (ADR-0002). Commits 660f468, bab9c5c, eed3a94,
+    ec3e723, 2029510.
+  P4: >-
+    PROVEN. Historical absent-mode orders fail closed on every executable
+    route with zero ORIGINAL defaults: edge job-service
+    failClosedForAbsentMode() marks job+order FAILED with TERMINAL ack
+    (MODE_ABSENT_LEGACY_ORDER_REASON / MODE_IDENTITY_MISMATCH_REASON);
+    migration 0007 leaves mode NULL-able with no backfill; agent
+    worker_client raises MISSING_MODE (dataclass default removed - absent
+    mode cannot propagate), runner _require_job_mode raises
+    MISSING_MODE/UNSUPPORTED_MODE as TERMINAL_ERROR_CODES, soak harness
+    requires explicit mode. Tests: mode-price.spec.ts absent-mode
+    fail-closed; test_mode_fail_closed.py missing/unsupported-mode
+    fail-closed at claim, construction, client, and runner levels.
+  P5: >-
+    PROVEN. Product invariants preserved by diff inspection + tests:
+    TTF+OTF-only outputs untouched (worker_client allowed_formats,
+    ARCHIVEABLE_FORMATS); ORIGINAL makes zero AI calls
+    (runner._vietnamese_service returns None unless VIETNAMESE; the
+    ORIGINAL-only binary path has no AI stage); VIETNAMESE cascade
+    untouched (compute/vietnamese.py, compute/openrouter_client.py,
+    release-gate AI routes not modified by this task - exact ADR-0003
+    routes retained); FAST_30 sole profile, all-or-nothing delivery,
+    acquisition order, and 30-min wall unchanged (agent diff touches only
+    mode handling and L3 gating; existing agent suites 106/106 pass).
+  P6: >-
+    PROVEN. edge/migrations/0007_font_mode.sql is forward-safe and
+    idempotent against the live 0001-0006 schema shape: three ADD COLUMN
+    statements for columns absent in 0001-0006, NULL-allowing CHECK
+    constraints (mode IS NULL OR mode IN ('ORIGINAL','VIETNAMESE')),
+    explicit no-backfill design (NULL = legacy fail-closed). Verified
+    locally via schema.spec.ts migration-tracker coverage (0007 listed)
+    and the full miniflare-D1 vitest suite: 201 passed / 0 failed.
+  P7: >-
+    PROVEN. Focused causal tests: edge mode-price.spec.ts (mode
+    selection+persistence, both price points, claim payload mode,
+    absent-mode fail-closed, reuse-identity separation) +
+    telegram-delivery.spec.ts mode-bound delivery assertions; agent
+    test_mode_fail_closed.py (claim missing/unsupported fail-closed,
+    required-mode construction, runner terminal codes, L3/pre-acq binary
+    wins refused for VIETNAMESE, ORIGINAL binary reuse still wins).
+    Smallest sufficient final validation ran ONCE: edge typecheck clean;
+    edge vitest 18 files / 201 passed / 0 failed; agent focused module
+    9/9 passed; the 9 pre-existing agent modules touched by the fixture
+    ripple ran once: 106 passed in 192.20s.
+  P8: >-
+    PROVEN. LOCAL_ONLY gate honored: zero wrangler deploy/--remote, zero
+    git push, zero production/remote mutation of any kind; no new live
+    orders; ord_2a142f39 / job_477b205f untouched (no production D1/R2/
+    queue access at any point; every test hermetic via mocks/tmp dirs).
+    Task delta committed on task/T-PRICE-01 only; parent worktree
+    E:\cv\telefont untouched; no secrets, dev.vars, or .telefont.env in
+    the diff.
+
+commits:
+  - sha: 660f468
+    title: "feat(mode): bind ORIGINAL/VIETNAMESE mode through pricing, claim payload, and delivery evidence (T-PRICE-01)"
+    note: "edge delta incl. migration 0007_font_mode.sql + pricing util (10 files, +593/-28)"
+  - sha: e8bcaa2
+    title: "test(mode): align existing edge suites with mode-bound contract semantics"
+    note: "9 edge test files adapted (fixtures + migration tracker)"
+  - sha: bab9c5c
+    title: "fix(delivery): bind Telegram caption/log assertions to durable mode evidence; cover VIETNAMESE identity and absent-mode fail-closed delivery"
+    note: "edge/test/telegram-delivery.spec.ts (+120/-12)"
+  - sha: eed3a94
+    title: "test(pricing): focused causal tests for mode selection, mode-bound pricing, claim payload mode, and fail-closed identity"
+    note: "edge/test/mode-price.spec.ts (+323)"
+  - sha: ec3e723
+    title: "feat(agent): fail-closed mode handling + ORIGINAL-only L3 binary reuse (T-PRICE-01)"
+    note: "agent/src/{worker_client,runner,soak}.py + 7 fixture modules (+71/-9)"
+  - sha: 2029510
+    title: "test(agent): focused fail-closed mode + ORIGINAL-only L3 binary reuse tests (T-PRICE-01)"
+    note: "agent/tests/test_mode_fail_closed.py (+365, 9 tests)"
+
+evidence:
+  contract_verification: >-
+    .prime/tasks/T-PRICE-01/contract.yaml re-read first: id T-PRICE-01,
+    contract_rev 1, policy_fingerprint 0fa00f66ee4873bf, mode DEEP all
+    match; ADR-0002 (reuse ladder, exact-binary-wins ORIGINAL scope) and
+    ADR-0003 (AI cascade untouched) constraints applied.
+  focused_validation:
+    - cmd: "python -m pytest agent/tests/test_mode_fail_closed.py -v"
+      result: "9 passed in 28.23s"
+    - cmd: "python -m pytest agent/tests/test_worker_client.py agent/tests/test_archive.py agent/tests/test_runner.py agent/tests/test_issue90_archive_mode.py agent/tests/test_issue90_heartbeat_liveness.py agent/tests/test_stage9d_release_gate.py agent/tests/test_issue71_adversarial.py agent/tests/test_issue72_review_repros.py agent/tests/test_pr72_workflow_repros.py -q"
+      result: "106 passed in 192.20s (every pre-existing module touched by the required-mode fixture ripple, run once)"
+  final_validation_once:
+    - cmd: "npm run typecheck"
+      result: "tsc --noEmit clean (edge)"
+    - cmd: "npm test"
+      result: "vitest run: Test Files 18 passed (18), Tests 201 passed (201), 0 failed (24.08s)"
+  local_only_attestation: >-
+    Zero production deploy, zero live orders, zero mutation of
+    ord_2a142f39/job_477b205f. No wrangler --remote, no git push, no
+    network mutations; all validation hermetic (mock transports, tmp
+    dirs). Parent worktree E:\cv\telefont untouched.
+
+preservation_notes:
+  - "BinaryCacheIdentity (L3 key) intentionally NOT extended with mode: correct fix per discovery is ORIGINAL-only gating at the three L3 surfaces; L1 ArchiveIdentity and L2 FontModelCacheIdentity already bind mode."
+  - "ORIGINAL keeps exact-binary-wins-immediately semantics (ADR-0002); refusals are observable via trace events BINARY_REUSE_REFUSED_MODE and BINARY_WIN_REFUSED_MODE."
+  - "compute/vietnamese.py, compute/openrouter_client.py, fidelity/release_gate.py AI routes, FAST_30 profile, acquisition order, all-or-nothing delivery: untouched."
+  - "Forbidden zones untouched: ops/a23_deployment_manifest.json, .github/workflows, .telefont.env, dev.vars, .kilo/, scratch/, observations/ runtime stores."
+  - "CRLF preserved in every edited file (verified byte-level: zero bare LF / CR-CR-LF)."
+
+files:
+  result: ".prime/tasks/T-PRICE-01/result.yaml"
+  progress: ".prime/tasks/T-PRICE-01/progress.yaml"
