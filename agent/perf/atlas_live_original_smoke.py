@@ -30,11 +30,16 @@ from atlas.transport import (  # noqa: E402
     ProductionAtlasPipeline,
 )
 
-SOURCE_URL = "https://www.myfonts.com/collections/be-vietnam-pro"
-FAMILY = "Be Vietnam Pro"
-STYLE = "Regular"
-STYLE_ID = "regular"
-COVERAGE_CAP = 24
+# Target selection: canonical smoke default (Be Vietnam Pro) is preserved;
+# the A23 ORIGINAL go-live smoke overrides these via env so the SAME staged
+# script can target the contracted family WITHOUT touching the staged tree.
+SOURCE_URL = os.environ.get(
+    "ATLAS_ORIG_SMOKE_SOURCE_URL", "https://www.myfonts.com/collections/be-vietnam-pro"
+)
+FAMILY = os.environ.get("ATLAS_ORIG_SMOKE_FAMILY", "Be Vietnam Pro")
+STYLE = os.environ.get("ATLAS_ORIG_SMOKE_STYLE", "Regular")
+STYLE_ID = os.environ.get("ATLAS_ORIG_SMOKE_STYLE_ID", "regular")
+COVERAGE_CAP = int(os.environ.get("ATLAS_ORIG_SMOKE_COVERAGE_CAP", "24"))
 PIPELINE_DEADLINE_SECONDS = 480
 WATCHDOG_KILL_SECONDS = 600
 CACHE_ROOT = Path(os.environ.get(
@@ -181,11 +186,17 @@ def main() -> int:
         "within_cap": bool(time.monotonic() - t_boot < WATCHDOG_KILL_SECONDS),
     }
 
-    out_path = (
-        Path(__file__).resolve().parent.parent.parent
-        / ".prime" / "tasks" / "T-FAST-ATLAS-PROD-READY-01"
-        / "original-live-smoke-evidence.yaml"
-    )
+    out_override = os.environ.get("ATLAS_ORIG_SMOKE_EVIDENCE_OUT", "").strip()
+    if out_override:
+        # Isolated evidence path: the staged release tree must never be
+        # mutated by a smoke run (supervisor path-set verification).
+        out_path = Path(out_override)
+    else:
+        out_path = (
+            Path(__file__).resolve().parent.parent.parent
+            / ".prime" / "tasks" / "T-FAST-ATLAS-PROD-READY-01"
+            / "original-live-smoke-evidence.yaml"
+        )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(_yaml(ev), encoding="utf-8")
     print(_yaml(ev))

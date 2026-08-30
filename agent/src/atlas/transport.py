@@ -30,6 +30,8 @@ import asyncio
 import base64
 import io
 import logging
+import os
+import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -475,7 +477,13 @@ async ({ cells, page_w, page_h }) => {
     canvas.width = page_w;
     canvas.height = page_h;
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    // Coverage convention (atlas/geometry.decode_alpha: value/255 = ink):
+    // WHITE ink on a BLACK background, matching LocalFontRasterProvider.
+    // The background fill also bakes anti-aliased edge alpha into RGB so
+    // the grayscale decode carries true fractional coverage.
     ctx.fillStyle = '#000000';
+    ctx.fillRect(0, 0, page_w, page_h);
+    ctx.fillStyle = '#ffffff';
     ctx.textBaseline = 'alphabetic';
     for (const cell of cells) {
         ctx.font = cell.font_spec;
@@ -525,6 +533,20 @@ def parse_unicode_ranges_to_codepoints(ranges: list[str], cap: int = 4096) -> li
     return sorted(cp for cp in declared if cp > 0x20)
 
 
+def _chrome_channel_or_none() -> str | None:
+    """Use the "chrome" channel only when a real Google Chrome exists.
+
+    The A23 Debian chroot (and the Mini PC target) ships chromium, not
+    Google Chrome; forcing channel="chrome" there makes every Playwright
+    launch fail closed. Returning None lets Playwright use its managed
+    (bundled) Chromium build instead.
+    """
+    for name in ("google-chrome", "google-chrome-stable"):
+        if shutil.which(name):
+            return "chrome"
+    return None
+
+
 class PersistentBrowserAtlasSession:
     """The single persistent Chromium session (ADR-0004 browser_sessions=1).
 
@@ -557,6 +579,7 @@ class PersistentBrowserAtlasSession:
         self.counters = counters or AtlasTransportCounters()
         self._playwright_launcher = playwright_launcher
         self._pw = None
+        self._cdp_browser = None
         self._context = None
         self._page = None
         self.started = False
@@ -606,33 +629,65 @@ class PersistentBrowserAtlasSession:
                     user_agent=APPROVED_DESKTOP_UA,
                     timeout=self.timeout_seconds * 1000,
                 )
+            elif os.environ.get("ATLAS_PLAYWRIGHT_CDP_URL", "").strip():
+                # CDP bridge: attach to an ALREADY LAUNCHED Chromium endpoint
+                # (e.g. the native /usr/bin/chromium of the A23 Debian chroot)
+                # when a Playwright-managed browser is unavailable. The browser
+                # process is owned by its launcher; close() terminates it via
+                # CDP (Browser.close).
+                from playwright.async_api import async_playwright
+
+                self._pw = async_playwright()
+                p = await self._pw.start()
+                self._cdp_browser = await p.chromium.connect_over_cdp(
+                    os.environ["ATLAS_PLAYWRIGHT_CDP_URL"].strip(),
+                    timeout=self.timeout_seconds * 1000,
+                )
+                contexts = list(self._cdp_browser.contexts)
+                self._context = (
+                    contexts[0]
+                    if contexts
+                    else await self._cdp_browser.new_context(user_agent=APPROVED_DESKTOP_UA)
+                )
             else:
                 from playwright.async_api import async_playwright
 
                 self._pw = async_playwright()
                 p = await self._pw.start()
+                channel = _chrome_channel_or_none()
                 launcher = p.chromium.launch_persistent_context
                 if self.user_data_dir is not None:
-                    self._context = await launcher(
-                        user_data_dir=str(self.user_data_dir),
-                        channel="chrome",
-                        headless=True,
-                        args=[
+                    launch_kwargs: dict[str, Any] = {
+                        "headless": True,
+                        "args": [
                             "--disable-blink-features=AutomationControlled",
                             "--no-sandbox",
                             "--disable-dev-shm-usage",
                             "--disable-gpu",
                         ],
-                        user_agent=APPROVED_DESKTOP_UA,
-                        timeout=self.timeout_seconds * 1000,
+                        "user_agent": APPROVED_DESKTOP_UA,
+                        "timeout": self.timeout_seconds * 1000,
+                    }
+                    if channel is not None:
+                        launch_kwargs["channel"] = channel
+                    self._context = await launcher(
+                        user_data_dir=str(self.user_data_dir), **launch_kwargs
                     )
                 else:
-                    self._context = await p.chromium.launch(
-                        channel="chrome",
-                        headless=True,
-                        args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
-                        timeout=self.timeout_seconds * 1000,
-                    )
+                    launch_args = ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
+                    if channel is not None:
+                        self._context = await p.chromium.launch(
+                            channel=channel,
+                            headless=True,
+                            args=launch_args,
+                            timeout=self.timeout_seconds * 1000,
+                        )
+                    else:
+                        self._context = await p.chromium.launch(
+                            headless=True,
+                            args=launch_args,
+                            timeout=self.timeout_seconds * 1000,
+                        )
             self._page = await self._context.new_page()
             if hasattr(self._page, "on") and callable(self._page.on):
                 sub = self._page.on("response", self._on_response)
@@ -698,6 +753,12 @@ class PersistentBrowserAtlasSession:
         return True
 
     async def close(self) -> None:
+        try:
+            if self._cdp_browser is not None:
+                await self._cdp_browser.close()
+        except Exception:
+            pass
+        self._cdp_browser = None
         try:
             if self._context is not None:
                 await self._context.close()
@@ -770,30 +831,66 @@ class PersistentBrowserAtlasSession:
     async def fetch_cell_pages(
         self, cell_specs: list[dict]
     ) -> dict[int, bytes]:
-        """Render the given cells on ONE page canvas, ONE readback, crop in
-        Python. Each spec: {cp, w, h, y0, pen_left, baseline_y, phase_x,
-        phase_y, size_px}. Returns per-cp PNG bytes."""
-        import json as _json
+        """Render the given cells on stacked page canvases, crop in Python.
+        Each spec: {cp, w, h, y0, pen_left, baseline_y, phase_x,
+        phase_y, size_px}. Returns per-cp PNG bytes.
+
+        Canvas-height bounding (G3 iteration-3 root cause): the stacked
+        canvas height is bounded by atlas.paging.MAX_CANVAS_DIMENSION_PX.
+        Planner pages are area-budgeted (up to ~128 Mpx) and their full
+        vertical stack can exceed the browser canvas dimension limit, which
+        the browser rejects SILENTLY (empty data URL -> the whole page's
+        observations are lost). Cells are therefore rendered in stacked
+        batches, each one readback; per-cell crops/geometry are identical.
+        """
+        from atlas.paging import MAX_CANVAS_DIMENSION_PX
 
         out: dict[int, bytes] = {}
         if not cell_specs:
             return out
+        batches: list[list[dict]] = []
+        current: list[dict] = []
+        current_h = 0
+        for s in cell_specs:
+            h = int(s["h"])
+            if current and current_h + h > MAX_CANVAS_DIMENSION_PX:
+                batches.append(current)
+                current = []
+                current_h = 0
+            current.append(s)
+            current_h += h
+        if current:
+            batches.append(current)
+        for batch in batches:
+            out.update(await self._fetch_cell_batch(batch))
+        return out
+
+    async def _fetch_cell_batch(self, cell_specs: list[dict]) -> dict[int, bytes]:
+        """ONE bounded stacked canvas -> ONE readback -> crops in Python.
+
+        Baselines are BATCH-LOCAL: the incoming specs carry page-relative
+        y0 offsets (valid only for the whole-page canvas); within a batch
+        canvas the stack restarts at y=0, exactly matching the crop loop.
+        """
+        out: dict[int, bytes] = {}
         page_w = max(int(s["w"]) for s in cell_specs)
         page_h = sum(int(s["h"]) for s in cell_specs)
         payload_cells = []
+        local_y = 0
         for s in cell_specs:
             payload_cells.append(
                 {
                     "ch": chr(int(s["cp"])),
                     "font_spec": self.font_spec(int(s["size_px"])),
                     "pen_left": float(s["pen_left"]),
-                    "baseline_y": float(s["y0"]) + float(s["baseline_y"]),
+                    "baseline_y": float(local_y) + float(s["baseline_y"]),
                     "phase_x": float(s.get("phase_x", 0.0)),
                     "phase_y": float(s.get("phase_y", 0.0)),
                     "w": int(s["w"]),
                     "h": int(s["h"]),
                 }
             )
+            local_y += int(s["h"])
         data_url = await self._evaluate(
             CELL_PAGE_JS, {"cells": payload_cells, "page_w": page_w, "page_h": page_h}
         )

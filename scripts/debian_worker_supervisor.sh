@@ -68,7 +68,10 @@ readonly WATCHDOG_TERM_GRACE_SECONDS=10
 readonly HOST_PATH="$PATH"
 readonly FLOCK_BIN="$(command -v flock 2>/dev/null || true)"
 readonly WORKER_PATH="$RUNTIME_ROOT/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-readonly EXPECTED_RUNTIME_FINGERPRINT="python=3.11.2|arch=aarch64|annotated-types=0.8.0|anyio=4.14.2|brotli=1.2.0|certifi=2026.7.22|fonttools=4.63.0|freetype-py=2.5.1|h11=0.16.0|httpcore=1.0.9|httpx=0.28.1|idna=3.19|numpy=2.2.3|pillow=12.2.0|pip=26.1.2|pydantic=2.13.4|pydantic-core=2.46.4|pydantic-settings=2.15.0|python-dotenv=1.2.3|scipy=1.15.2|typing-extensions=4.16.0|typing-inspection=0.4.4|uharfbuzz=0.56.0|websockets=17.0.1"
+# T-FAST-ATLAS-ORIGINAL-GOLIVE-01 G1: runtime rebuild #1 extends the accepted
+# pin set with the persistent-browser capability (playwright + greenlet + pyee,
+# lock pins; versions observed from the rebuilt ARM64 runtime).
+readonly EXPECTED_RUNTIME_FINGERPRINT="python=3.11.2|arch=aarch64|annotated-types=0.8.0|anyio=4.14.2|brotli=1.2.0|certifi=2026.7.22|fonttools=4.63.0|freetype-py=2.5.1|greenlet=3.5.5|h11=0.16.0|httpcore=1.0.9|httpx=0.28.1|idna=3.19|numpy=2.2.3|pillow=12.2.0|pip=26.1.2|playwright=1.62.0|pydantic=2.13.4|pydantic-core=2.46.4|pydantic-settings=2.15.0|pyee=13.0.1|python-dotenv=1.2.3|scipy=1.15.2|typing-extensions=4.16.0|typing-inspection=0.4.4|uharfbuzz=0.56.0|websockets=17.0.1"
 
 fail_if_not_regular() {
   local path="$1"
@@ -186,9 +189,10 @@ import sys
 
 names = (
     "annotated-types", "anyio", "brotli", "certifi", "fonttools", "freetype-py",
-    "h11", "httpcore", "httpx", "idna", "numpy", "pillow", "pip", "pydantic",
-    "pydantic-core", "pydantic-settings", "python-dotenv", "scipy",
-    "typing-extensions", "typing-inspection", "uharfbuzz", "websockets",
+    "greenlet", "h11", "httpcore", "httpx", "idna", "numpy", "pillow", "pip",
+    "playwright", "pydantic", "pydantic-core", "pydantic-settings", "pyee",
+    "python-dotenv", "scipy", "typing-extensions", "typing-inspection",
+    "uharfbuzz", "websockets",
 )
 installed = {
     str(dist.metadata.get("Name", "")).lower()
