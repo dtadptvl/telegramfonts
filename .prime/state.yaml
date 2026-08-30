@@ -17,9 +17,11 @@ now: []
 next: []
 
 blockers:
-  - "LIVE ORDER INCIDENT (E-00033): Human test order ord_4937b71e (Neurath Mono MEDIUM, 459 glyphs, ORIGINAL) STUCK PROCESSING limbo: reconstruction exceeded 480s wall + lease died mid-compute (heartbeat hang defect) + no reaper for non-exhausted expired leases. Defect fixes INTEGRATED at e258181 (heartbeat 10s timeout + edge recoverExpiredLeaseJobs reaper; 31+46 focused tests) but NOT DEPLOYED - deliberately withheld so the reaper does not burn the order's remaining attempts before the Human fate decision. PENDING HUMAN: (A) one-off supervised extended-wall envelope for this order, (B) bounded large-style performance task first, (C) cancel/refund; + deploy authority for the fix line under any option."
-  - "PERFORMANCE REALITY (E-00033): large ORIGINAL styles (400-500 glyphs) cannot fit the 480s wall on A23 at current per-glyph reconstruction rate (~9-10 min projected for 459 glyphs); E-00029 large-style target (5-10 min) conflicts with the 8-min wall on the slow end - product-level reconciliation may be needed."
-  - "GO-LIVE BASE COMPLETE (E-00032): Edge 973cf52b + A23 b63ce6f live; BOT_ORIGINAL_READY for ordinary styles (proven 389.9s/199-glyph pass); VN locked pre-payment; rollback identities verified unused (Edge d0d9c4ef/166e45b; A23 b8c6994)."
+  - "INCIDENT ORDER FAILED (E-00036): ord_4937b71e (Neurath Mono Medium, payment VERIFIED 5,000 VND) finalized FAILED max_attempts_exhausted at 22:47:02Z after 3 attempts - NOT delivered. Attempt chain: (1) wall exceeded at 480s on 459-glyph reconstruction; (2) lease died mid-compute via silent heartbeat block, degraded 171-glyph discovery, watchdog cascade took device down; (3) post-discovery stall, wall unenforced (event-loop block + doze monotonic stall), terminated by edge age backstop + finalizer. REFUND/product resolution is Human-owned. Extended-wall override REVERTED (default 480 restored, marker removed)."
+  - "RELIABILITY DEFECT SET for next bounded cycle (E-00036): W1 wall-enforcement placement must be thread-level/event-loop-independent/doze-safe; W2 discovery determinism (459 vs 171 glyphs after ~21:11Z page-state change); W3 post-discovery compute stall (attempts 2-3 zero progress); W4 device power/session health (Android killed Termux ~19:50Z: sshd+DNS dead, doze stalls monotonic - needs wakelock/foreground strategy). PROVEN HEALTHY under load: heartbeat liveness fix, expired-lease reaper, edge age backstop, spawn-beacon watchdog, all-or-nothing fencing."
+  - "PRODUCT GUARD DECISION PENDING: consider temporarily locking ORIGINAL ordering (like the VN gate) until W1-W3 are fixed - paid orders can currently fail undelivered; Human-owned product decision."
+  - "RESIDUAL HYGIENE: attempt-3 orphaned chromium tree (16 procs, root 20021) awaits authorized cleanup; inactive d936df1 launch copy retains stale TEMP_EXTENDED_WALL marker."
+  - "CURRENT DEVICE STATE: A23 release ce8ed82 (F1/F2 fix line) active with DEFAULT 480s wall; supervisor+worker healthy idle-polling; Edge ca0ec3a0 (reaper + VN gate false live); VN ordering still locked pre-payment."
   - "FAILED PAID ORDER ord_2a142f39 preserved for Human resolution: FAILED max_attempts_exhausted at 2026-08-30T12:00:29Z (expired attempt 6 zombie lineage b8c6994; mode ORIGINAL designated; payment VERIFIED 5,000 VND). Options are Human-owned."
   - "MINI-PC MIGRATION BLOCKER (preserved verbatim, DO NOT delete/rename/replay/repair, E-00018 section E): foreign production migration 0007_telegram_message_retention.sql (not in repo lineage) + prior deployed Edge lineage absent from repository history (deployments before 2026-08-30T09:35:22Z, versions eec4fd75..7c582378). Must remain visible for Mini PC migration reconciliation."
 
@@ -41,7 +43,7 @@ human_requirements:
     - "E-00018 cycle TERMINAL (E-00022): T-FAST30-A23-FIX failed final acceptance on duration (wall machinery proven; measurement throughput is the remaining gap); T-A23-PROD-02 deployment authority VOID; failed paid order preserved for Human resolution; device idle; any further implementation/recovery/deployment requires fresh Human authorization; Human never executes commands/relays JSON"
     - "E-00023 SPEED-FIRST cycle COMPLETE (E-00024): T-FAST-ATLAS-ULTRA-01 accepted + integrated (merge e2a0b60); FAST_ATLAS_ULTRA_V1 under FAST_30 public name; walls 480s/720s; all fixture targets met with wide margins; NOT DEPLOYED (E-00023 grants no deployment/order-recovery authority); T-FAST30-A23-FIX result at f574d0c immutable with hardening preserved; A23 staging-only boundary honored; any deployment/recovery requires a fresh identity-bound Human envelope; Human never executes commands/relays JSON"
     - "T-PRICE-01 integrated line (head 166e45b) deploys ONLY inside the approved rev-4 envelope; absent-mode legacy orders otherwise fail closed by design and need Human decisions, never automatic repair"
-    - "E-00029 cycle COMPLETE (E-00032): BOT_ORIGINAL_READY - FAST_ATLAS line live on Edge (973cf52b) + A23 (b63ce6f release+runtime, one activation/one restart, rollback identities unused); ORIGINAL ready for Human bot self-testing; VN still locked pre-payment; failed paid order + Mini-PC blocker remain Human-owned; Human never executes commands/relays JSON"
+    - "E-00034 envelope TERMINAL (E-00036): extended-wall attempt FAILED - order ord_4937b71e finalized FAILED undelivered; override reverted (480 restored); device on ce8ed82 healthy idle; refund/product resolution + ORIGINAL-ordering-guard decision + next reliability cycle (W1-W4) are Human-owned; Human never executes commands/relays JSON"
     - "E-00011 mode proof: NEVER infer ORIGINAL from an absent mode field; fulfillment proceeds only on positive durable row evidence of mode/styles/formats/payment/delivery; VIETNAMESE or unproven -> STOP fail-closed, T-PRICE-01 before fulfillment"
 
 active_decisions:
@@ -65,6 +67,6 @@ recent_invalidations:
 
 reconciliation:
   status: clean
-  event: E-00032
+  event: E-00036
 
-updated_at: "2026-08-30T20:50:00Z"
+updated_at: "2026-08-30T23:05:00Z"
