@@ -6,7 +6,7 @@ governance:
 task: T-FAST-ATLAS-PROD-READY-01
 contract_rev: 1
 mode: DEEP
-status: in_progress
+status: blocked
 identity:
   repo: "E:\\cv\\telefont"
   worktree: "E:\\cv\\telefont-prod-ready"
@@ -24,6 +24,7 @@ setup:
     playwright: "installed"
     uharfbuzz_freetype: "installed"
     dev_vars_present: true
+    dev_vars_key_names_present: ["wokushop_api_key", "openrouter_api_key"]
     ground_truth_binary: "agent/benchmark_data/ground_truth/BeVietnamPro-Regular.ttf"
 milestones:
   - id: M0
@@ -31,16 +32,21 @@ milestones:
     status: done
   - id: M1
     name: "R1 production transport providers + factory wiring"
-    status: pending
+    status: done
+    outcome: "chain 1->2->3(lazy)->4->5->4 implemented and wired as default factory; 9 hermetic causal tests green; live smoke observed fail-closed under bot-gate (see M5)"
   - id: M2
     name: "R2 combining-mark semantics"
-    status: pending
+    status: done
+    outcome: "zero advance valid for Mn/Mc/Me; all 7 requested marks survive into GlyphModel/cmap/TTF/OTF; fail-closed preserved; 8 tests green"
   - id: M3
     name: "R3 Vietnamese AI runtime"
-    status: pending
+    status: done
+    outcome: "stage-5b hardcode removed; exact-name dev.vars loader + redaction canary proven; cascade order/capacity/fail-closed/per-class batching proven hermetically; 11 tests + issue80 suite green"
   - id: M4
-    name: "R4 live Vietnamese smoke (conditional)"
-    status: pending
+    name: "R4 live Vietnamese smoke (exactly one)"
+    status: done_blocked
+    outcome: "one bounded run executed (20 glyphs, wall 249.7s <= 720s): deterministic-first, then ONE batched provider call (77 glyphs); 3 model calls fired (gpt-5.6-luna UNAVAILABLE, gemini-3.7-flash UNAVAILABLE, google/gemma-3-12b-it VALIDATION_FAILED); 4th call raised BEFORE firing (cap enforced); cascade fail-closed VI_AI_ALL_ROUTES_FAILED -> VN_BLOCKED (providers); no publish, no retry; evidence: vn-live-smoke-evidence.yaml"
   - id: M5
-    name: "R5 bounded validation + live R1 smoke + task files"
-    status: pending
+    name: "R5 bounded validation + live ORIGINAL smoke + task files"
+    status: done
+    outcome: "focused affected suites green (no full suite/soak/retired E2E); live ORIGINAL smoke ran once through the real chain and proved the chain's FAIL-CLOSED path under Cloudflare bot-gate (dump-dom 1 call, no parseable discovery -> ATLAS_RASTER_SOURCE_UNAVAILABLE; http_requests=0; wall 2.2s); causality finding recorded: U12 timing evidence NOT invalidated -> no fixture rerun; walls 480/720 untouched"

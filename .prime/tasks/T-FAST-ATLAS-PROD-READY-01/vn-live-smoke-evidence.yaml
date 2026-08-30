@@ -1,0 +1,84 @@
+task: "T-FAST-ATLAS-PROD-READY-01"
+acceptance: "R4"
+run_label: "vn_live_smoke_single"
+bounds:
+  watchdog_kill_seconds: 720
+  pipeline_deadline_seconds: 660
+  max_model_calls: 3
+  retry: "none (exactly one run)"
+  glyph_subset_count: 20
+  glyph_subset:
+    - "U+0020"
+    - "U+0061"
+    - "U+0065"
+    - "U+006F"
+    - "U+0075"
+    - "U+00E0"
+    - "U+00E1"
+    - "U+00E3"
+    - "U+0300"
+    - "U+0301"
+    - "U+0303"
+    - "U+0309"
+    - "U+0323"
+    - "U+1EA1"
+    - "U+1EA3"
+    - "U+1EA5"
+    - "U+1EAD"
+    - "U+1EC1"
+    - "U+1EDF"
+    - "U+1EE9"
+transport_substitution: "raster/metrics: LocalFont* file-read providers over the repo benchmark ground truth BeVietnamPro-Regular.ttf (same authorized substitution as E-00024 U8); AI cascade: REAL production runtime path from the explicit dev.vars boundary"
+secret_boundary:
+  dev_vars_path: "E:\\cv\\telefont\\dev.vars"
+  keys_loaded_names_only:
+    - "openrouter_api_key"
+    - "wokushop_api_key"
+  values_logged_or_written: false
+run:
+  outcome: "FAIL_CLOSED"
+  error_type: "VietnameseAIIntegrityError"
+  error: "VI_AI_ALL_ROUTES_FAILED"
+  note: "provider unavailable/invalid or cap-exhausted: the cascade failed CLOSED (no publish, no retry) - honest VN runtime evidence"
+  wall_seconds: 249.648
+ai_runtime:
+  model_calls_made: 3
+  models_called:
+    - "gpt-5.6-luna"
+    - "gemini-3.7-flash"
+    - "google/gemma-3-12b-it"
+  cap_enforced_before_firing: true
+  provider_generate_calls: 1
+  provider_batch_sizes:
+    - 77
+  route: "openrouter-route"
+  fallback_reason: "woku_primary_unavailable+woku_fallback_unavailable"
+  cascade_calls:
+    -
+      provider: "woku"
+      model: "gpt-5.6-luna"
+      role: "woku-primary"
+      status: "UNAVAILABLE"
+      served_model: ""
+    -
+      provider: "woku"
+      model: "gemini-3.7-flash"
+      role: "woku-fallback"
+      status: "UNAVAILABLE"
+      served_model: ""
+    -
+      provider: "openrouter"
+      model: "google/gemma-3-12b-it"
+      role: "downstream-route"
+      status: "VALIDATION_FAILED"
+      served_model: "google/gemma-3-12b-it"
+    -
+      provider: "openrouter"
+      model: "google/gemma-3-27b-it"
+      role: "downstream-route"
+      status: "VALIDATION_FAILED"
+      served_model: "google/gemma-3-27b-it"
+timing:
+  total_wall_seconds: 249.74
+  wall_cap_seconds: 720
+  within_cap: true

@@ -1,0 +1,178 @@
+schema_version: 8
+governance:
+  policy_rev: "P-20260830.9-LEAN-SAFE-R16"
+  policy_fingerprint: "0fa00f66ee4873bf"
+  generation: 11
+task: T-FAST-ATLAS-PROD-READY-01
+contract_rev: 1
+mode: DEEP
+status: blocked
+closure: >-
+  Production-readiness gaps R1-R3 are PROVEN: the real transport chain is
+  implemented and wired as the DEFAULT production atlas factory (no
+  deployment-phase remainder) with hermetic causal proof of ordering/MD5
+  verification/batching/session persistence; combining-mark zero-advance
+  semantics are corrected end-to-end (E-00024's failed marks now survive
+  into cmap/TTF/OTF); the Vietnamese AI runtime loads the exact dev.vars
+  key names under redaction guards and injects the exact ADR-0003 cascade
+  at stage 5b (hardcode removed). Status is BLOCKED - not production-ready
+  claimed - because the two LIVE observations could not prove their happy
+  paths from this workstation: R4's providers failed (Woku exact models
+  UNAVAILABLE; OpenRouter candidates VALIDATION_FAILED; cascade correctly
+  fail-closed with the 3-call cap enforced before firing) => VN_BLOCKED
+  per contract; R1's live acquisition smoke hit the MyFonts Cloudflare
+  bot-gate and proved the chain's FAIL-CLOSED path instead of the happy
+  path. All evidence is recorded honestly; no fakes, no retries.
+
+proved: [R2, R3, R5]
+unproved: [R1_live_happy_path_smoke, R4]
+
+acceptance_evidence:
+  R1: >-
+    IMPLEMENTED + WIRED + HERMETICALLY PROVEN; LIVE HAPPY PATH UNOBSERVED.
+    Chain 1->2->3(lazy)->4->5->4 in agent/src/atlas/transport.py: exact
+    cache/authorized binary wins immediately (atlas/cache.py exact-identity
+    semantics); ChromeDumpDomMetadataProvider (bounded native --dump-dom
+    subprocess); ONE persistent Playwright/Chromium session started lazily
+    and kept for the run (batched measureText via the atlas/metrics.py JS
+    protocol + canvas atlas pages ONLY for missing/unattestable
+    observations); MonotypeCdnRasterSource PRIMARY raster with exact-MD5
+    verification (mismatched/absent MD5 binding fails closed); Algolia
+    MD5 resolution then back to the CDN. Wired as the default factory:
+    composition.build_production_components -> main.py -> A23Runner
+    (atlas_pipeline_factory; fail-closed readiness when chromium absent).
+    No screenshot, no per-glyph navigation/CDP, no fake data, no unobserved
+    CDN phases; counters record observed activity only. Causal repros
+    (tests/test_atlas_transport.py, 9 passed): cache/binary wins BEFORE any
+    network touch; MD5 mismatch fails closed and falls back to the browser
+    canvas atlas; CDN-primary full chain with ONE session (starts==1), zero
+    canvas readbacks, honest counters (http==pages consumed, cdp==batched
+    metric calls+face+kern); batched metrics never per-glyph (9 calls for
+    1200 glyphs); Algolia resolves MD5 then CDN; factory wiring. Fixed a
+    latent bug that prevented the real measureText JS from ever rendering
+    (str.format vs literal braces). LIVE SMOKE (exactly one, no retry):
+    Cloudflare bot-gated - dump-dom (1 call) produced no parseable
+    discovery, MD5 unresolved, Algolia keyless, browser fallback face
+    resolution failed -> terminal ATLAS_RASTER_SOURCE_UNAVAILABLE with
+    honest counters (http_requests=0, cdp_calls=1, browser_readbacks=0,
+    dump_dom_calls=1, wall 2.2s). The chain's FAIL-CLOSED path is proven
+    live; the happy path remains proven only hermetically.
+  R2: >-
+    PROVEN. Zero advance is VALID for Unicode combining marks (Mn/Mc/Me):
+    atlas/marks.py helpers; mark-aware cell planning (observed left/right
+    ink extents drive pen offset and width); geometry structural_check
+    bounds mark X by the observed ink bbox, never the (zero) advance;
+    fixture providers honor the planned pen offset. Minimal repros for
+    U+0300/U+0301/U+0303/U+0306/U+0309/U+031B/U+0323 pass (8 tests):
+    every mark survives metrics -> cell plan -> geometry -> GlyphModel
+    (advance 0.0, real outlines) and is proven present in BOTH built TTF
+    and OTF outputs (cmap entries + mark glyph count + hmtx advance==0).
+    Fail-closed preserved: negative advance, empty outlines, degenerate
+    segments, disallowed zero-ink, and non-mark advance-bound bbox checks
+    all still reject (explicit negative tests).
+  R3: >-
+    PROVEN. Production hardcode ai_provider=None removed: stage 5b consumes
+    the runtime provider injected through the runner factory (VIETNAMESE
+    mode only; ORIGINAL zero-AI by construction). compute/ai_secret_loader.py
+    reads ONLY the exact key names wokushop_api_key / openrouter_api_key
+    from the runtime dev.vars (explicit path from the entrypoint; resolves
+    to E:\cv\telefont\dev.vars on this workstation via portable
+    checkout/worktree resolution; absent path reads NOTHING - hermetic
+    construction preserved). Values are in-memory only, never
+    logged/echoed/hashed/reported/committed; redaction guards proven by a
+    canary test (no secret substring can surface in logs; [REDACTED]
+    substituted). Exact cascade hermetically proven (11 tests + the
+    existing 16-test issue-80 suite green): gpt-5.6-luna PRIMARY one
+    bounded call; capacity fallback 429/503 -> gemini-3.7-flash with
+    reason woku_primary_unavailable; downstream OpenRouter
+    google/gemma-3-12b-it route unchanged; fail-closed
+    VI_AI_ALL_ROUTES_FAILED on provider error; AI invoked per glyph CLASS
+    batch (ONE call carries every unresolved glyph; never per-glyph; class
+    budget honored); pipeline stage-5b end-to-end with the injected
+    provider (single batched call; AI-resolved coverage present in the
+    built TTF cmap). AICandidateSpec accepts zero advance for marks
+    (anchors still mandatory) for R2 consistency.
+  R4: >-
+    VN_BLOCKED (providers) - exactly one bounded run executed, recorded
+    honestly (vn-live-smoke-evidence.yaml). Bounds honored: 20 glyphs
+    across diacritic classes from the Be Vietnam Pro ground truth;
+    mode=VIETNAMESE; wall 249.7s <= 720s hard-kill watchdog; no retry;
+    LocalFont transport substitution recorded. Runtime: REAL cascade built
+    from the explicit dev.vars boundary (key NAMES only; values never
+    written). Observations: deterministic-first composition ran before any
+    AI contact; ONE batched provider call for 77 unresolved glyphs
+    (per-class/never-per-glyph confirmed live); model calls fired = 3 of
+    cap 3: gpt-5.6-luna UNAVAILABLE, gemini-3.7-flash UNAVAILABLE,
+    google/gemma-3-12b-it VALIDATION_FAILED (model responded; candidates
+    failed the deterministic validators); the 4th call (google/gemma-3-27b-it)
+    raised BEFORE firing - cap enforcement recorded (cap_enforced_before_firing=true);
+    cascade failed CLOSED with VI_AI_ALL_ROUTES_FAILED (no publish, no
+    retry). Per contract: credentials present but providers unreachable /
+    failing -> STOP this section, VN_BLOCKED, no production-ready claim;
+    the rest of the task completed.
+  R5: >-
+    PROVEN (bounded-validation discipline). Focused affected suites only
+    (no full suite/soak/FULL_MAX/BALANCED_MAX/legacy four-consumer E2E/long
+    benchmarks/blind retry): test_atlas_ultra 16, test_atlas_marks 8,
+    test_atlas_transport 9, test_atlas_vietnamese_ai_runtime 11,
+    test_issue80_woku_cascade 16, test_atlas_ultra_vietnamese 1,
+    test_atlas_ultra_licensed_binary 1, test_mode_fail_closed - all green
+    at final HEAD. The two live smokes ran exactly once each (R4 VN smoke:
+    VN_BLOCKED fail-closed; R5 ORIGINAL smoke: chain fail-closed under
+    bot-gate, honest counters). SPEED-FIXTURE CAUSALITY FINDING: the R1-R3
+    changes do NOT causally invalidate the E-00024 U12 timing evidence -
+    (a) mark-aware planning adds a branch ONLY for Mn/Mc/Me code points and
+    the non-mark cell formula is bit-identical (extra_left=0); (b) async
+    transport support is transport-type-agnostic: synchronous LocalFont*
+    fixture providers take the unchanged synchronous executor path; (c) the
+    metrics JS template fix touches only the production browser transport
+    (fixtures never use it); (d) Vietnamese AI wiring is mode-gated and
+    U12 ran ORIGINAL; (e) walls 480s/720s, policy identity hash and
+    runtime defaults are untouched (policy.py unchanged). Therefore NO
+    speed-fixture rerun was performed (contract: rerun only if invalidated).
+    Walls 480/720 preserved.
+  R6: "Prime/release phase - not this task's authority (contract: R6-R8 are Prime phases)."
+  R7: "Prime/release phase - not this task's authority."
+  R8: "Prime/release phase - not this task's authority."
+
+evidence:
+  commits:
+    - "ded676f chore(prime): worktree setup + M0 discovery milestone"
+    - "2801b58 fix(marks): zero advance valid for Unicode combining marks (R2)"
+    - "e346aa1 feat(transport): production atlas transport chain wired as default factory (R1)"
+    - "f4dc5b5 test(marks): end-to-end pipeline proof of combining-mark coverage (R2)"
+    - "6dabd62 feat(vietnamese-ai): runtime secret loader + cascade wiring at stage 5b (R3)"
+    - "see git log for R4 harness (amended) + R5 smoke knob/harness + this task-files commit"
+  tests:
+    atlas_ultra: "tests/test_atlas_ultra.py 16 passed"
+    marks_r2: "tests/test_atlas_marks.py 8 passed (incl. TTF/OTF cmap + mark-count proof)"
+    transport_r1: "tests/test_atlas_transport.py 9 passed (hermetic causal repros)"
+    vietnamese_ai_r3: "tests/test_atlas_vietnamese_ai_runtime.py 11 passed"
+    woku_cascade_existing: "tests/test_issue80_woku_cascade.py 16 passed"
+    vn_pipeline_existing: "tests/test_atlas_ultra_vietnamese.py 1 passed"
+    licensed_binary_existing: "tests/test_atlas_ultra_licensed_binary.py 1 passed"
+    mode_fail_closed_existing: "tests/test_mode_fail_closed.py passed"
+  smokes:
+    vn_live_smoke: ".prime/tasks/T-FAST-ATLAS-PROD-READY-01/vn-live-smoke-evidence.yaml (VN_BLOCKED: 3 model calls, cap enforced before the 4th, wall 249.7s, fail-closed VI_AI_ALL_ROUTES_FAILED)"
+    original_live_smoke: ".prime/tasks/T-FAST-ATLAS-PROD-READY-01/original-live-smoke-evidence.yaml (fail-closed path proven live under Cloudflare bot-gate; ATLAS_RASTER_SOURCE_UNAVAILABLE; http_requests=0, dump_dom_calls=1, cdp_calls=1, browser_readbacks=0, wall 2.2s)"
+  causality_finding: >-
+    E-00024 U12 timing evidence NOT causally invalidated by R1-R3 (mark-only
+    branch; transport-type-agnostic async; fixture transports never use the
+    fixed JS template; AI wiring mode-gated; walls/policy/runtime untouched)
+    -> no speed-fixture rerun performed, per contract.
+  blocked_notes:
+    R4: "VN_BLOCKED (providers): Woku exact models UNAVAILABLE; OpenRouter candidates VALIDATION_FAILED; cascade fail-closed; cap enforced at 3; credentials present (names verified, values never touched)."
+    R1_live: "MyFonts Cloudflare bot-gate prevented the live happy-path acquisition smoke from this workstation; the chain's fail-closed terminal behavior is what the single live run observed (no fake, no retry)."
+
+candidate:
+  branch: task/T-FAST-ATLAS-PROD-READY-01
+  worktree: E:\cv\telefont-prod-ready
+  base: "97073f10710f0f14b9b48f6a88fbf975520fe72e"
+  head: "terminal task-files commit of this cycle (git rev-parse HEAD)"
+  note: >-
+    Branch head SHA for Prime freeze after exact-diff review. Status BLOCKED:
+    R1-R3 proven; R4 VN_BLOCKED (providers) and R1 live happy-path smoke
+    unobserved (bot-gate) - production-ready NOT claimed per contract. R6-R8
+    remain Prime/release phases. Zero production mutations performed (no
+    wrangler/D1/Queue/R2/device); no secret values in any output; T-FAST-ATLAS-ULTRA-01
+    and E-00024 files untouched; parent worktree untouched.
