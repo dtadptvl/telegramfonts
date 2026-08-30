@@ -1124,6 +1124,7 @@ class ProductionAtlasPipeline:
         ai_provider: Any = None,
         playwright_launcher: Callable[..., Awaitable[Any]] | None = None,
         counters: AtlasTransportCounters | None = None,
+        coverage_cap: int | None = None,
     ) -> None:
         self.job_id = job_id
         self.mode = str(mode).strip().upper()
@@ -1144,6 +1145,11 @@ class ProductionAtlasPipeline:
         self.runtime = runtime or AtlasRuntimeDefaults()
         self.ai_provider = ai_provider
         self.playwright_launcher = playwright_launcher
+        # Bounded live-smoke knob (R5): when set, the observed coverage is
+        # capped to the FIRST N code points of the observed set (deterministic
+        # subset of OBSERVED glyphs - never invented coverage). Recorded in
+        # the run evidence.
+        self.coverage_cap = coverage_cap
         self.evidence_extras: dict[str, Any] = {}
 
     # -- identities ---------------------------------------------------------
@@ -1357,6 +1363,9 @@ class ProductionAtlasPipeline:
                     cdn_obs = observed
 
             coverage = sorted(cp for cp in cdn_obs.keys())
+            if coverage and self.coverage_cap is not None:
+                coverage = coverage[: max(1, int(self.coverage_cap))]
+                self.evidence_extras["coverage_cap_applied"] = int(self.coverage_cap)
             if not coverage:
                 # Stage 3 fallback: the browser session discovers coverage
                 # from @font-face unicode-range (bounded); its canvas pages
@@ -1365,6 +1374,9 @@ class ProductionAtlasPipeline:
                 if session is None:
                     raise ValueError("ATLAS_RASTER_SOURCE_UNAVAILABLE")
                 coverage = await session.scan_coverage()
+                if coverage and self.coverage_cap is not None:
+                    coverage = coverage[: max(1, int(self.coverage_cap))]
+                    self.evidence_extras["coverage_cap_applied"] = int(self.coverage_cap)
                 if not coverage:
                     raise ValueError("ATLAS_RASTER_SOURCE_UNAVAILABLE")
 
@@ -1416,6 +1428,11 @@ class ProductionAtlasPipeline:
                 except OSError as exc:
                     logger.warning("atlas font cache write skipped: %s", type(exc).__name__)
             result.evidence.total_wall_seconds = time.perf_counter() - t_start
+            if self.evidence_extras:
+                result.evidence.pages_by_source.update(
+                    {f"extra_{k}": v for k, v in self.evidence_extras.items()
+                     if isinstance(v, int)}
+                )
             return result
         finally:
             await holder.close()
