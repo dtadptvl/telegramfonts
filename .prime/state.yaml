@@ -13,13 +13,12 @@ phase:
   id: "fast30-cutover"
   status: active
 
-now:
-  - "T-INSPECT-01"
+now: []
 next: []
 
 blockers:
-  - "stale retired-profile work on A23 (job_477b205f attempt 6, order ord_2a142f39): terminal disposition UNPROVEN - requires exact read-only process/job/lease inspection and reconciliation; no stop/signal/rearm/retry/mutation authorized"
-  - "paid order ord_2a142f39 (tx 77506129) unfulfilled: reconciliation remains unresolved work for Prime"
+  - "A23 stale job job_477b205f attempt 6 / order ord_2a142f39: terminal disposition PROVEN READ-UNREACHABLE from workspace under READ_ONLY (T-INSPECT-01, E-00008): deployed edge+D1 live, but no pure-read surface exposes job/order rows (no GET route; queue all-mutating; local D1/R2 empty; signed /downloads SIGNATURE_MISMATCH - workspace secret copies diverge from deployed). Cron finalizer may already have set job/order FAILED (static inference only). Read-enabling or remediation requires Human authorization."
+  - "paid order ord_2a142f39 (tx 77506129): governance prior says unfulfilled; canonical fulfillment state read-unreachable (same evidence). Human decision required: read-enabling, FAST_30 fulfillment under consequential authorization, or monetary handling."
 
 exit:
   - "one controlled bot order completed end-to-end on A23 under FAST_30 with verified TTF/OTF delivery within the 30-minute wall limit (requires separate consequential authorization for the A23 production leg)"
@@ -35,6 +34,7 @@ human_requirements:
     - "runtime model failover only for capacity/unavailability with unchanged contract and reusable evidence"
     - "never fake/bypass/weaken external-ext4/filesystem identity checks; loopback never posed as canonical archive"
     - "stale A23 retired-profile job: read-only inspection only; no mutation without explicit authorization"
+    - "PENDING HUMAN DECISION (E-00008): authorize one of - (a) read-enabling: deployed DOWNLOAD_SIGNING_SECRET disclosure/rotation OR Human-authorized SELECT on production D1 (4 rows: job/order/payment/receipts); (b) milestone-3 consequential envelope: deploy FAST_30 to A23 + one controlled bot fulfillment of ord_2a142f39 within the 30-minute wall; (c) monetary handling of the unfulfilled paid order. Milestones 3-4 are otherwise blocked."
 
 active_decisions:
   - "decisions/ADR-0001.md"
@@ -44,6 +44,6 @@ recent_invalidations:
 
 reconciliation:
   status: clean
-  event: E-00007
+  event: E-00008
 
-updated_at: "2026-08-30T05:16:00Z"
+updated_at: "2026-08-30T06:10:00Z"

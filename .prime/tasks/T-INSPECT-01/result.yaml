@@ -1,0 +1,119 @@
+# T-INSPECT-01 result (READ-ONLY inspection; zero mutations performed)
+task: T-INSPECT-01
+contract_rev: 1
+policy_binding:
+  policy_rev: "P-20260830.8-LEAN-SAFE-R15"
+  policy_fingerprint: "d059a83646a03543"
+  gates: [READ_ONLY, NO_LOOP, SINGLE_SHOT]
+  runtime: failover (inspector runtime unavailable; delegated worker)
+generated_at: "2026-08-30T06:02:00Z"
+status: completed
+
+proved: [I1, I2, I3, I4]   # I2/I3 proved via contract-authorized alternate branch: exact unreachability proof
+
+budget_consumed:
+  live_read_only_probes: 3        # max 3; each executed exactly once (SINGLE_SHOT)
+  static_analyses: unlimited_used
+  wall_time: "~8m (limit 15m)"
+  mutations_performed: 0
+  workspace_files_modified: [".prime/tasks/T-INSPECT-01/result.yaml"]   # only writable file
+  preexisting_workspace_dirt_untouched: ["ops/a23_deployment_manifest.json (M before and after; never staged/touched by this task)"]
+
+identity_checks:
+  branch: prime-v12-cutover            # confirmed via git status --short --branch
+  contract_head: "8f08e67 (present in history; current HEAD f832e4c = contract rev-1 commit)"
+  deployed_edge: "telegramfonts-edge.dienluanphien98.workers.dev (BASE_URL edge/wrangler.jsonc:37; EDGE_BASE_URL edge/.telefont.env)"
+  storage_identity:                    # edge/wrangler.jsonc:9-30
+    d1: "telegramfonts-d1 / 4ab4ab25-37cc-4044-acc9-66fc98b9f831"
+    queue: "telegramfonts-fulfillment"
+    r2: "telegramfonts-artifacts"
+
+evidence:
+  I1_surface_map:
+    pure_read_deployed:
+      - "GET /health — edge/src/index.ts:31-36 — static JSON, no I/O"
+      - "GET /ready — edge/src/index.ts:38-81, SCHEMA_CHECK_QUERY index.ts:12-24 — SELECT sqlite_master/pragma_table_info only; proves 13 tables incl. fulfillment_receipts + lease/artifact/payment_code/completed_at columns"
+      - "GET /downloads/:order_id?expires&sig — edge/src/handlers/downloads.ts:5-113 — HMAC gate (31-46), SELECT orders id/status (56-59), SELECT fulfillment_receipts (72-75), R2 get stream (86-92); zero writes; auth DOWNLOAD_SIGNING_SECRET"
+      - "GET /internal/catalog-requests/pending — edge/src/handlers/internal-catalog.ts:44-71 — SELECT catalog_requests only; auth A23_NODE_SECRET (catalog surface; not job/order state)"
+    side_effect_capable_excluded:
+      - "POST /internal/jobs/:id/claim — edge/src/handlers/internal-jobs.ts:838-923 (lease write via job-service.claimJob)"
+      - "POST /internal/jobs/:id/heartbeat — internal-jobs.ts:926-995 (lease extension)"
+      - "POST /internal/jobs/:id/fail — internal-jobs.ts:998-1099 (status/attempt writes)"
+      - "PUT /internal/jobs/:id/artifact — internal-jobs.ts:101-279 (R2 put)"
+      - "POST /internal/jobs/:id/complete — internal-jobs.ts:282-503 (D1 completion tx)"
+      - "POST /internal/jobs/:id/rearm|rescue|recover — internal-jobs.ts:531-615 / 618-727 / 730-835 (CAS state writes)"
+      - "NO GET job-read route exists: action regex internal-jobs.ts:84 enumerates only claim|heartbeat|fail|artifact|complete|rearm|rescue|recover; non-POST/PUT -> 405 (internal-jobs.ts:506-511)"
+      - "POST /internal/outbox — internal-outbox.ts:25-55 (dispatchPendingEvents -> queue send + outbox UPDATE)"
+      - "POST /internal/catalog-requests/:id/complete|fail — internal-catalog.ts:75-291 / 294-405 (D1 writes + Telegram sends)"
+      - "POST /webhooks/sepay — sepay-webhook.ts:78+ (payment/order creation); POST /webhooks/telegram — telegram-webhook.ts (session writes + sends)"
+      - "scheduled() cron — index.ts:119-125 — internal mutations (finalizeExpiredExhaustedJobs + dispatch); not HTTP-reachable but autonomously mutates stale jobs"
+      - "Cloudflare Queues API — agent/src/queue_client.py:79-108 pull (visibility lease), 110-121 ack, 123-140 retry — ALL mutating; no pure-read peek endpoint exists; auth CF_QUEUES_TOKEN"
+      - "Cloudflare D1/R2 remote APIs — query endpoint is POST verb (forbidden by contract); no wrangler auth on machine (~/.wrangler/config absent, static check); no D1-scoped token in workspace env files (only CF_QUEUES_TOKEN)"
+    local_readonly_file_surfaces:
+      - "local miniflare D1 edge/.wrangler/state/v3/d1/.../026d164e...sqlite (opened sqlite mode=ro): migrations 0001-0003 only; ZERO rows in orders/payments/fulfillment_jobs/outbox_events/artifacts; no fulfillment_receipts table — stale local dev snapshot, nothing decision-relevant"
+      - "second local D1 8cd0a8bb...sqlite: empty (no tables)"
+      - "local miniflare R2 (.wrangler/state/v3/r2/...): _mf_objects rows=0 — no local delivery artifacts"
+      - "workspace-wide grep for job_477b205f/ord_2a142f39/77506129: matches only in .prime governance docs (contract.yaml, state.yaml, ROADMAP.md, ADR-0001.md, legacy-import.md) — no captured D1 row evidence exists in workspace"
+
+  I2_job_terminal_disposition:
+    outcome: "UNREACHABLE via pure-read from this workspace (exact proof below); factual D1 row state unproven"
+    facts_established:
+      - "deployed control plane LIVE: probe1 GET /health -> 200 {\"status\":\"ok\"} (cf-ray a33184927ca74aaa-SIN, server cloudflare)"
+      - "production D1 bound + fully migrated: probe2 GET /ready -> 200 {\"status\":\"ready\",\"database\":\"connected\"} (cf-ray a33184beef9513b2-SIN); SCHEMA_CHECK_QUERY (index.ts:12-24) passing implies all 13 tables + lease/artifact/payment/completion columns"
+      - "job_477b205f4aff41cb89c2dd005ecf8009 row therefore resides in production D1 (telegramfonts-d1), not readable by any pure-read surface reachable here"
+    unreachability_proof:
+      - "surface: control-plane HTTP — no GET route exposes fulfillment_jobs rows (internal-jobs.ts:84,506-511); every /internal/jobs action is lease/status-mutating POST/PUT"
+      - "surface: local D1 snapshot — opened mode=ro; zero rows total; migrations stop at 0003 (pre-lease-token schema) — cannot contain or reflect production state"
+      - "surface: queue telegramfonts-fulfillment — only POST /messages/pull|ack (queue_client.py:79-140) which locks/acks messages (mutating, forbidden); no peek API"
+      - "surface: Cloudflare D1 remote query — POST verb forbidden by contract; additionally no wrangler auth (~/.wrangler/config absent) and no D1-scoped token in workspace"
+      - "device A23 process/lease inspection: not reachable from this workspace (device not local; only history refs in .local-artifacts/, untrusted)"
+    static_inference_NOT_fact:
+      - "cron scheduled() (index.ts:119-125) calls job-service.finalizeExpiredExhaustedJobs (job-service.ts:328-419): any job PROCESSING + lease expired + attempt_count>=max_attempts is set FAILED with last_error=max_attempts_exhausted, and its order PROCESSING->FAILED. Days have passed since the retired-profile run, so any lease is expired."
+      - "HOWEVER rescue/recover CAS paths increment max_attempts (max_attempts+1, job-service.ts:516,752), so attempt_count=6 does NOT statically establish exhaustion; terminal FAILED cannot be asserted as fact without the D1 row."
+
+  I3_order_payment_state:
+    outcome: "UNREACHABLE via pure-read from this workspace (exact proof below); fulfilled/unfulfilled unproven from canonical state"
+    probe3_record:
+      request: "GET https://telegramfonts-edge.dienluanphien98.workers.dev/downloads/ord_2a142f39c5d2443492d1d8410d18bf9f?expires=1788069169&sig=605296df...(64-hex, truncated here; signed per download-signer.ts:48-75 canonical 'v1:<order>:<expires>' with DOWNLOAD_SIGNING_SECRET from edge/.dev.vars, capability window 120s, now expired)"
+      response: "403 {\"error\":\"Forbidden\",\"reason\":\"SIGNATURE_MISMATCH\"} (cf-ray a331853a8a8c4d8c-SIN; body 51 bytes sha256 5911380392dae2e1701afc07d20c51f9e28c1af33cff94f6b33c983e6ae0bd47)"
+      semantics_per_code: >
+        downloads.ts + download-signer.ts:133-181: reason SIGNATURE_MISMATCH is returned only after
+        (a) deployed DOWNLOAD_SIGNING_SECRET confirmed configured (else SIGNING_SECRET_NOT_CONFIGURED),
+        (b) expires format valid and not past (else EXPIRED_SIGNATURE/INVALID_EXPIRES_PARAM),
+        (c) HMAC comparison failed. Conclusion: deployed signing secret is configured and differs from the
+        edge/.dev.vars workspace copy (sha256 prefix 2D4E50E7BA3C0729, len 64). The other workspace copy in
+        root .telefont.env (sha256 prefix 814C14A78CE53803, len 44) differs from it and was NOT tested
+        (SINGLE_SHOT: probe executed once; budget 3/3). Either deployed matches the root copy or neither;
+        undecidable without a further probe, which is not authorized.
+    unreachability_proof:
+      - "surface: /downloads is the ONLY pure-read order surface (reads orders.status + fulfillment_receipts + R2); blocked by credential divergence above before any order data is exposed"
+      - "surface: control-plane HTTP — no GET route for orders/payments/fulfillment_receipts exists (full route inventory in I1)"
+      - "surface: local D1 snapshot — zero rows (no order, no payment tx 77506129, no receipt); local R2 store — zero objects (no delivery artifact)"
+      - "surface: D1 remote query / R2 listing — POST-verb or out-of-scope credentials (see I1); unreachable"
+    untrusted_prior: ".prime/archive/legacy-import.md:19 records the order as 'unfulfilled; reconciliation unresolved' and ADR-0001.md:31 requires fulfillment post-restart — governance priors only, NOT canonical D1 evidence"
+
+verdict_I4:
+  state_blockers_updates_warranted:
+    - "Blocker 1 (stale job terminal disposition): refine from 'UNPROVEN' to 'PROVEN READ-UNREACHABLE under READ_ONLY from workspace': deployed edge + D1 confirmed live (probes 1-2), but no pure-read surface exposes fulfillment_jobs rows; cron may already have finalized it FAILED/max_attempts_exhausted (static inference, not fact)"
+    - "Blocker 2 (paid order unfulfilled): keep; ADD root cause detail: fulfillment state unreachable because workspace DOWNLOAD_SIGNING_SECRET copies diverge from the deployed secret (probe 3 SIGNATURE_MISMATCH) and no other pure-read order surface exists"
+    - "No blocker can be cleared by this task; both remain active for Prime"
+  unprovable_from_this_workspace:
+    - "exact production D1 rows: fulfillment_jobs (status/attempt_count/max_attempts/lease_*/last_error/updated_at) for job_477b205f4aff41cb89c2dd005ecf8009"
+    - "orders.status/completed_at for ord_2a142f39c5d2443492d1d8410d18bf9f; payments row for tx 77506129; outbox_events dispatch state; fulfillment_receipts presence"
+    - "queue telegramfonts-fulfillment contents (whether a stale message for this job remains)"
+    - "production R2 bucket telegramfonts-artifacts listing (whether a delivery artifact exists)"
+    - "A23 device process/lease runtime state (device not reachable from workspace)"
+  mutations_requiring_separate_human_authorization:
+    - "read-enabling actions (themselves out of scope here): rotation/disclosure of the deployed DOWNLOAD_SIGNING_SECRET, or a Human-authorized SELECT against production D1 (D1 query API is POST-verb; needs explicit contract exemption + D1-scoped credential), or Cloudflare console export of the four target rows"
+    - "remediation (consequential): POST /internal/jobs/:id/recover|rescue|rearm CAS re-arming of the job (internal-jobs.ts:531-835); POST /internal/outbox re-dispatch (internal-outbox.ts); queue ack/retry management; new fulfillment run under FAST_30 for the paid order per ADR-0001 consequence (monetary handling by Human if unfulfillable)"
+  reconciliation_note: "Prime state reconciliation: no contradiction found between governance priors (legacy-import.md: order unfulfilled; job attempt 6 stale) and observed live surfaces; canonical confirmation pending one of the Human-authorized read-enabling actions above"
+
+zero_mutation_attestation:
+  http_methods_used: [GET]                     # probes 1-3 only; no POST/PUT/PATCH/DELETE issued
+  endpoints_hit: [/health, /ready, "/downloads/:order_id (signed)"]
+  queue_operations: none
+  wrangler_publish_or_migrations: none
+  device_commands: none
+  files_written: [".prime/tasks/T-INSPECT-01/result.yaml"]
+  files_modified_in_repo: none_other
+  secrets_handling: "credentials referenced by name/hash-prefix only; no secret value written to this file or the report; signed-URL capability issued with 120s expiry and has since expired"
