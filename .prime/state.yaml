@@ -18,9 +18,9 @@ now:
 next: []
 
 blockers:
-  - "PERFORMANCE GAP RESOLVED IN CODE (E-00024): FAST_ATLAS_ULTRA_V1 integrated (merge e2a0b60; origin/main sync pending this commit): ordinary 200-glyph fixture 74.6s (target 2-5 min), large 457-glyph 255.7s (target 5-10 min), reuse <25s (<1 min target), ORIGINAL wall 480s / VIETNAMESE 720s, exhaustive regime fail-closed gated off. Remaining gap to Milestone 3: deployment of the integrated line requires a NEW identity-bound Human authorization envelope (T-FAST30-A23-FIX acceptance stays immutable; T-A23-PROD-02 authority remains void; candidate for any new envelope = integrated head)."
+  - "PRODUCTION-READINESS BLOCKED (E-00026): T-FAST-ATLAS-PROD-READY-01 result blocked - R2/R3/R5 proven; OPEN: (1) VN AI providers unavailable (gpt-5.6-luna UNAVAILABLE, gemini-3.7-flash UNAVAILABLE, gemma-3-12b-it candidates VALIDATION_FAILED -> VI_AI_ALL_ROUTES_FAILED fail-closed; R4 smoke ran exactly once, 3/3 calls, cap enforced); (2) live acquisition happy path unobserved from workstation (Cloudflare bot-gate; fail-closed path proven live). Implementation preserved on task/T-FAST-ATLAS-PROD-READY-01 head 01f83c5 (NOT integrated; envelope conditions unmet -> no freeze/integrate/release per E-00025 E)."
   - "FAILED PAID ORDER ord_2a142f39 preserved for Human resolution: FAILED max_attempts_exhausted at 2026-08-30T12:00:29Z (expired attempt 6 zombie lineage b8c6994; mode ORIGINAL designated; payment VERIFIED 5,000 VND). No recovery executed (deployment authority void). Options are Human-owned (e.g., refund/cancel, manual re-order after a performance fix, or other product handling)."
-  - "A23 DEVICE IDLE: zombie worker terminated (PID 24039, preserved evidence); old release b8c6994 artifacts remain on device; supervisor not restarted; no worker process running; edge still d0d9c4ef (pre-wall-fix, pre-atlas). Device reachable (sshd 8022). A23 is staging/compatibility only per E-00023."
+  - "DEPLOYMENT GAP: production Edge d0d9c4ef lacks wall/backstop/atlas line; A23 device idle-polling on old lineage (release dirs 582dba8/6a23e9d/b8c6994); both integrated+staging release await the production-readiness blockers closing (or a fresh Human envelope re-scoping the conditions)."
   - "MINI-PC MIGRATION BLOCKER (preserved verbatim, DO NOT delete/rename/replay/repair, E-00018 section E): foreign production migration 0007_telegram_message_retention.sql (not in repo lineage) + prior deployed Edge lineage absent from repository history (deployments before 2026-08-30T09:35:22Z, versions eec4fd75..7c582378). Must remain visible for Mini PC migration reconciliation."
 
 exit:
@@ -41,7 +41,7 @@ human_requirements:
     - "E-00018 cycle TERMINAL (E-00022): T-FAST30-A23-FIX failed final acceptance on duration (wall machinery proven; measurement throughput is the remaining gap); T-A23-PROD-02 deployment authority VOID; failed paid order preserved for Human resolution; device idle; any further implementation/recovery/deployment requires fresh Human authorization; Human never executes commands/relays JSON"
     - "E-00023 SPEED-FIRST cycle COMPLETE (E-00024): T-FAST-ATLAS-ULTRA-01 accepted + integrated (merge e2a0b60); FAST_ATLAS_ULTRA_V1 under FAST_30 public name; walls 480s/720s; all fixture targets met with wide margins; NOT DEPLOYED (E-00023 grants no deployment/order-recovery authority); T-FAST30-A23-FIX result at f574d0c immutable with hardening preserved; A23 staging-only boundary honored; any deployment/recovery requires a fresh identity-bound Human envelope; Human never executes commands/relays JSON"
     - "T-PRICE-01 integrated line (head 166e45b) deploys ONLY inside the approved rev-4 envelope; absent-mode legacy orders otherwise fail closed by design and need Human decisions, never automatic repair"
-    - "E-00025 production-readiness cycle AUTHORIZED (gen 11): close transport/combining-marks/Vietnamese-AI gaps in one cycle, then ONE conditional A23 staging release if ALL acceptance passes; secrets wokushop_api_key/openrouter_api_key may be READ from dev.vars in runtime tests but NEVER logged/echoed/committed/hashed/reported/artifacted; live VN smoke max 3 model calls no retry <=12 min wall; no mutation of FAILED ord_2a142f39; no deploy/release/smoke retries or rollback; T-FAST-ATLAS-ULTRA-01/E-00024 history immutable"
+    - "E-00025 cycle TERMINAL BLOCKED (E-00026): R2 combining marks + R3 VN runtime + R5 discipline proven on task/T-FAST-ATLAS-PROD-READY-01 (head 01f83c5, NOT integrated); R4 VN_BLOCKED (providers unavailable), R1 live happy path bot-gated from workstation; envelope conditions unmet -> no freeze/integrate/release executed; secrets handling honored (values never touched/logged); re-activation needs provider recovery + fresh Human authorization; Human never executes commands/relays JSON"
     - "E-00011 mode proof: NEVER infer ORIGINAL from an absent mode field; fulfillment proceeds only on positive durable row evidence of mode/styles/formats/payment/delivery; VIETNAMESE or unproven -> STOP fail-closed, T-PRICE-01 before fulfillment"
 
 active_decisions:
@@ -62,7 +62,7 @@ recent_invalidations:
   - {generation: 11, scopes: [acquisition, atlas-runtime, combining-marks, vietnamese-ai, a23-staging-release], severity: breaking, source_event: E-00025, note: "consolidated production-readiness + conditional A23 staging release; T-FAST-ATLAS-PROD-READY-01 contracted (corrects E-00024 gaps without rewriting its history); marks zero-advance semantics + ai_provider hardcode removal + transport wiring"}
 
 reconciliation:
-  status: in_progress
-  event: E-00025
+  status: clean
+  event: E-00026
 
-updated_at: "2026-08-30T15:55:00Z"
+updated_at: "2026-08-30T16:55:00Z"
