@@ -6,7 +6,8 @@ import signal
 import sys
 from pathlib import Path
 
-from composition import build_production_components, default_dev_vars_path
+from composition import build_production_components
+from compute.ai_secret_loader import default_dev_vars_path
 from compute.archive import resolve_archive_mode
 from config import Settings
 from logging_utils import setup_logging
