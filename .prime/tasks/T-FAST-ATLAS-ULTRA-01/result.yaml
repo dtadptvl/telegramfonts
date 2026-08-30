@@ -15,7 +15,9 @@ closure: >-
   retries). AI-dependent limitations are recorded honestly below and in the
   evidence files.
 
-proved:
+proved: [U1, U2, U3, U4, U5, U6, U7, U8, U9, U10, U11, U12, U13]
+
+acceptance_evidence:
   U1: "policy identity: FAST_ATLAS_ULTRA_V1 bound internally; FAST_30 sole public name; BALANCED_MAX/FULL_MAX fail-closed PROFILE_RETIRED (atlas/policy.py; tests/test_atlas_ultra.py policy binding; commit 509c548)"
   U2: "fast raster pass: size 1024 phase 0,0; bounded pages target 96MB/hard max 128MB (ordinary run 2 pages, large run 6 pages, all <= cap); one page in memory + streaming prefetch; crop+release; zero per-glyph CDP (cdp_calls=0 in all fixture evidence). Production HTTP/CDN transport wiring is deployment-phase (separately authorized); fixture used the injectable local provider."
   U3: "batched metrics: <=512 glyphs per batched JS call; 250-500 glyphs = 3 calls; multi-size through-origin regression to UPEM=1000 (tests + fixture metrics_js_calls=4 including kern pairs)"
