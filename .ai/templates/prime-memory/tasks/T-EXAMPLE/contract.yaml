@@ -1,11 +1,11 @@
-schema_version: 6
+schema_version: 8
 policy_rev: "<from .ai/POLICY-REV>"
 policy_fingerprint: "<16-hex current governance fingerprint>"
 id: T-EXAMPLE
 contract_rev: 1
 mode: NORMAL  # MICRO | NORMAL | DEEP
-created_at_generation: 1
-scope_tags: []
+validated_at_generation: 1
+scope_tags: []  # REQUIRED; replace with bounded causal tags when known; empty => unknown/global
 
 objective: "<single bounded outcome>"
 
@@ -18,7 +18,10 @@ acceptance:
 
 # Add only decision-relevant context/refs; omit empty/default sections.
 # context: {human_requirements: [], decisions: [], constraints: [], relevant_refs: []}
-# depends_on: []
+# depends_on:
+#   decisions: []  # ADR refs whose supersession may affect this contract
+#   tasks: []      # task refs whose accepted outcome is required
+#   evidence: []   # stable evidence refs required by this contract
 # identity: {repo: null, worktree: null, branch: null, base: null, head: null, artifact: null}
 # gates: []              # READ_ONLY | LOCAL_ONLY | NO_LOOP | SINGLE_SHOT
 # known_repro: []
@@ -27,13 +30,13 @@ acceptance:
 # stop: []
 # change_budget: {...}   # omitted => all zero
 # validation: {required: [], max_runs: null, max_wall: null}
-# routing: {role: worker-deep, reason: "<causal reason>", fallback_safe: true}
+# routing: {reason: "<causal DEEP reason>", fallback_safe: true}  # DEEP only; mode selects worker
 # extra_policies: []     # additive exceptions only; Prime/worker derive the mandatory set from task surfaces.
 # recovery: {strategy: RESUME}  # omitted => REDO
 # authorization: {...}
 # rollback: {trigger: "<when needed>", action: "<bounded rollback>", auth_ref: null}  # planning != authority
 
 # Runtime/model/failover metadata is not semantic contract truth and does not belong here.
-# Defaults: worker-fast, zero change budget, REDO, cheapest causal validation.
+# Defaults: NORMAL -> worker-fast, zero change budget, REDO, cheapest causal validation.
 # MICRO additionally defaults to LIGHT/no-inspector/no-progress unless specifically needed.
 # STOP WHEN ACCEPTANCE PASSES. Prefer refs/deltas over prose.

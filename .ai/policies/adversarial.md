@@ -32,7 +32,14 @@ Select only causally relevant cases, such as:
 - malformed/untrusted boundary input;
 - bypass of validation/authorization path;
 - stale artifact/HEAD/environment binding;
-- partial failure around a non-idempotent action.
+- partial failure around a non-idempotent action;
+- cross-artifact / cross-job substitution;
+- caller-forged success, identity, or derived values;
+- NaN / Inf / other non-finite or internally inconsistent derived values;
+- test-only adapter/path reachable from production;
+- optional argument/default bypassing mandatory evidence, validation, or authorization;
+- partial success incorrectly promoted to complete success;
+- unavailable required dependency/capability accidentally treated as success.
 
 ## Completion
 

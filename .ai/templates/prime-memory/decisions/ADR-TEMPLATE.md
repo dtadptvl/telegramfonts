@@ -4,6 +4,7 @@ status: active
 authority: prime  # human | prime
 generation: 1
 scope: []
+affects: []  # bounded scope tags/task/evidence surfaces for impact analysis
 supersedes: []
 superseded_by: []
 triggered_by: []
@@ -24,4 +25,4 @@ triggered_by: []
 - <affected scopes/tasks/trade-offs>
 
 ## Supersession
-If replaced, mark `superseded`, link both directions, and preserve history. Routine implementation choices do not need ADRs.
+If replaced, mark `superseded`, link both directions, preserve the original decision text, and record the replacement as new truth. Routine implementation choices do not need ADRs.

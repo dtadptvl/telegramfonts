@@ -1,15 +1,17 @@
-schema_version: 5
+schema_version: 7
 generation: 1
 
 governance:
   policy_rev: "<from .ai/POLICY-REV>"
   fingerprint: "<16-hex current governance fingerprint>"
 
-persistence:
-  remote_sync: unverified  # current | pending | unavailable | unverified
-  # Git is authoritative for commit/branch/worktree/remote identity. Do not cache SHAs here.
-
 objective: "<current project objective>"
+
+roadmap_ref: null
+# Optional pointer to canonical decisions/ROADMAP.md. Create it when >=2 durable milestones/phases
+# have ordering that must outlive the current 1-2 outcome NEXT horizon. ROADMAP owns durable ordering
+# only; state.yaml remains the sole owner of current phase/NOW/NEXT. If ROADMAP exists, this ref must
+# point to it. Keep roadmap content lazy and resolve only at horizon-changing triggers.
 
 phase:
   id: "<phase-id>"
@@ -30,6 +32,7 @@ human_requirements:
   # Current explicit Human constraints/preferences/acceptance only.
 
 active_decisions: []
+# Active ADR refs only; do not copy decision prose here.
 
 recent_invalidations: []
 # Example: {generation: 2, scopes: [auth], severity: breaking, source_event: E-00002}
@@ -40,7 +43,6 @@ reconciliation:
   status: clean
   event: null
 
-last_event: null
 updated_at: "<ISO-8601>"
 
 # SOFT TARGET <= 4 KiB; HARD CAP <= 12 KiB.

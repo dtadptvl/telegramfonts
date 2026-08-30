@@ -19,6 +19,8 @@ prepare locally
 
 Know the exact artifact/commit/config/environment/process identity that is being changed or observed. Do not infer process/deployment identity from labels or stale summaries.
 
+For chroot/container/package/runtime operations where environment identity can affect the action or evidence, use an explicit/minimal target environment instead of silently inheriting host variables; prove critical commands resolve inside the intended target environment before mutation; observe package/runtime identity inside that authoritative environment.
+
 ## Process-control safety
 
 Never kill, signal, restart, or otherwise mutate processes using a broad name/pattern merely for convenience (`killall`, broad `pkill`, wildcard service targeting, etc.). Bind the intended PID/service/executable/release/replica set sufficiently to exclude unrelated processes, verify the binding immediately before action, and respect consequential authorization/attempt accounting.

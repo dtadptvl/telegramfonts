@@ -26,7 +26,7 @@ runtime process       -> authoritative runtime/process observation
 production behavior   -> deployed production path, not local simulation
 ```
 
-Do not infer authoritative identity from filenames, labels, summaries, or stale chat.
+Do not infer authoritative identity from filenames, labels, summaries, or stale chat. `diff --stat` is change metadata, never semantic proof of correctness or acceptance.
 
 ## Reference discipline
 
@@ -40,7 +40,7 @@ When a value is derived from mutable inputs, verify/recompute from current autho
 
 ## Causal invalidation
 
-Accepted evidence remains valid unless the current delta can causally invalidate what it proved. Changing worker/session/model alone does not invalidate evidence. A source delta does not invalidate unrelated evidence merely because HEAD changed.
+Accepted evidence remains valid unless the current delta can causally invalidate what it proved. Changing worker/session/model alone does not invalidate evidence. A source delta does not invalidate unrelated evidence merely because HEAD changed. Contract/result staleness is not evidence staleness by itself; preserve and reuse causally unaffected observations/evidence after re-resolving identity-sensitive refs.
 
 For a claimed correction of a reproduced material failure:
 

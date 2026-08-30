@@ -1,10 +1,10 @@
-schema_version: 6
-policy_rev: "P-20260830.4-LEAN-SAFE-R10"
-policy_fingerprint: "caeb9d57b32cb996"
+schema_version: 8
+policy_rev: "P-20260830.8-LEAN-SAFE-R15"
+policy_fingerprint: "d059a83646a03543"
 id: T-FAST30-01
 contract_rev: 2
 mode: DEEP
-created_at_generation: 2
+validated_at_generation: 2
 scope_tags: [reconstruction-profile]
 
 objective: "Implement FAST_30 as the sole production reconstruction/fidelity profile and retire BALANCED_MAX/FULL_MAX from every executable production/runtime/config/CLI/CI/profile-selection route; enforce the 30-minute E2E wall with FAST30_FAILED halt and no fidelity fallback/escalation of any trigger type. Pointer-only LOCAL_ONLY contract; A23 physical validation and production acceptance are out of scope and require a later separate identity-bound consequential/production contract."
@@ -18,7 +18,6 @@ acceptance:
   A6: "CI lanes updated: quick-tests lane remains; fullmax-final lane semantics retired with the profiles"
 
 routing:
-  role: worker-deep
   reason: "cross-subsystem profile retirement + FAST_30 layer across runtime/config/CLI/CI routes"
   fallback_safe: true
 

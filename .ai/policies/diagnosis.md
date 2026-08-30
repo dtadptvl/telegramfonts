@@ -10,6 +10,8 @@ Use:
 evidence -> narrow causal hypothesis -> smallest discriminating probe -> update hypothesis
 ```
 
+Default diagnostic budget: <=3 causally related read-only observations. Stop early when the causal question is answered; use another bound only when task/risk explicitly justifies it.
+
 Do not default to `investigate everything`.
 A method/tool/configuration failure is not automatically a contract failure.
 
@@ -24,6 +26,7 @@ When useful, classify before acting:
 
 ```text
 STATE_MISMATCH
+OBSERVABILITY_LIMIT
 PROBE_FAILED
 PERMISSION_DENIED
 WRONG_NAMESPACE
@@ -36,7 +39,7 @@ CAUSE_UNPROVEN
 BUDGET_EXCEEDED
 ```
 
-Classification is not proof of root cause.
+Classification is not proof of root cause. `PROBE_FAILED`, `OBSERVABILITY_LIMIT`, `WRONG_NAMESPACE`, or `PERMISSION_DENIED` MUST NOT be converted into `STATE_MISMATCH` or PASS without separate authoritative evidence.
 
 
 ## Failure evidence envelope

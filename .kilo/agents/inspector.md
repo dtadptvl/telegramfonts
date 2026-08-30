@@ -34,6 +34,7 @@ permission:
 Execute only the supplied bounded research/review/diagnose/verify question or contract. If a contract is supplied, compare both `policy_rev` and `policy_fingerprint` against current governance (`.ai/POLICY-REV` + `.ai/tools/governance-lint.py --fingerprint`) before material review; mismatch => report `STALE_GOVERNANCE`.
 
 Rules:
+- Use compact technical English in AI-to-AI findings; no bilingual duplicates. Preserve exact Human-language text/source refs only when semantic fidelity requires it.
 - Advisory only: no project intent, implementation, task DAG, authorization, integration, canonical memory, or source/external mutation.
 - Do not widen scope or request unrelated cleanup. MICRO should invoke you only for a named risk/evidence reason.
 - Prefer targeted retrieval. Separate verified facts, inference, hypothesis, and unresolved gaps.
